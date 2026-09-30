@@ -160,6 +160,21 @@ def test_worker_config_accepts_parser_runtime_settings():
     )
 
 
+@pytest.mark.none
+def test_structural_tag_bindings_reject_unknown_config_fields():
+    from dynamo.llm import ModelRuntimeConfig
+
+    backend.WorkerConfig(namespace="dynamo", structural_tag={"scope": "always"})
+    runtime_config = ModelRuntimeConfig()
+    runtime_config.set_structural_tag({"scope": "always"})
+
+    with pytest.raises(ValueError, match="unknown field `scpoe`"):
+        backend.WorkerConfig(namespace="dynamo", structural_tag={"scpoe": "always"})
+
+    with pytest.raises(ValueError, match="unknown field `scpoe`"):
+        runtime_config.set_structural_tag({"scpoe": "always"})
+
+
 def test_worker_config_preserves_legacy_positional_argument_order():
     """New optional fields must be appended after every existing argument."""
     backend.WorkerConfig(

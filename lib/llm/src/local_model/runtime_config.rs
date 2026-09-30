@@ -101,7 +101,7 @@ pub enum StructuralTagReasoningBoundary {
 ///
 /// Presence enables structural tags; absence disables operator-controlled tags.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct StructuralTagConfig {
     pub scope: StructuralTagScope,
     pub schema: StructuralTagSchemaMode,
@@ -110,6 +110,28 @@ pub struct StructuralTagConfig {
     pub exclude_special_tokens: Option<bool>,
     pub reasoning_boundary: StructuralTagReasoningBoundary,
     pub tool_arguments_any_order: bool,
+}
+
+impl StructuralTagConfig {
+    pub fn from_value_strict(value: serde_json::Value) -> serde_json::Result<Self> {
+        const FIELDS: &[&str] = &[
+            "scope",
+            "schema",
+            "allow_tool_calls_with_structured_output",
+            "exclude_special_tokens",
+            "reasoning_boundary",
+            "tool_arguments_any_order",
+        ];
+
+        if let Some(object) = value.as_object() {
+            for field in object.keys() {
+                if !FIELDS.contains(&field.as_str()) {
+                    return Err(serde::de::Error::unknown_field(field, FIELDS));
+                }
+            }
+        }
+        serde_json::from_value(value)
+    }
 }
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
@@ -847,7 +869,7 @@ mod tests {
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
 
     #[test]
-    fn structural_tag_config_round_trips_and_rejects_unknown_fields() {
+    fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {
         assert_eq!(
             serde_json::from_value::<StructuralTagConfig>(serde_json::json!({})).unwrap(),
             StructuralTagConfig::default()
@@ -867,13 +889,21 @@ mod tests {
         };
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(
-            serde_json::from_value::<StructuralTagConfig>(value).unwrap(),
+            serde_json::from_value::<StructuralTagConfig>(value.clone()).unwrap(),
             config
         );
-        assert!(
-            serde_json::from_value::<StructuralTagConfig>(serde_json::json!({"unexpected": true}))
-                .is_err()
+        assert_eq!(
+            StructuralTagConfig::from_value_strict(value).unwrap(),
+            config
         );
+
+        let future_config = serde_json::json!({"future_option": true});
+        assert_eq!(
+            serde_json::from_value::<StructuralTagConfig>(future_config.clone()).unwrap(),
+            StructuralTagConfig::default()
+        );
+        let error = StructuralTagConfig::from_value_strict(future_config).unwrap_err();
+        assert!(error.to_string().contains("unknown field `future_option`"));
     }
 
     #[test]

@@ -489,10 +489,13 @@ impl WorkerConfig {
             _ => None,
         };
         let structural_tag = structural_tag
-            .map(|config| depythonize::<RsStructuralTagConfig>(config))
+            .map(|config| -> anyhow::Result<_> {
+                let value = depythonize(config)?;
+                Ok(RsStructuralTagConfig::from_value_strict(value)?)
+            })
             .transpose()
             .map_err(|error| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                pyo3::exceptions::PyValueError::new_err(format!(
                     "Invalid structural_tag config: {error}"
                 ))
             })?;
