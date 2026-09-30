@@ -1796,7 +1796,7 @@ mod tests {
                     let has_image = parts.iter().any(|p| {
                         matches!(
                             p,
-                            dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                            dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart::Multimodal(part) if part.kind == "image_url"
                         )
                     });
                     assert!(has_text, "text part missing");

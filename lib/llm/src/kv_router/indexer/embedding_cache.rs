@@ -45,7 +45,7 @@ pub fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<
                     keys.push(key.to_string());
                 }
             }
-            MultimodalData::UuidOnly(_) => {}
+            MultimodalData::UuidOnly(_) | MultimodalData::Json(_) => {}
         }
     }
     keys.sort();

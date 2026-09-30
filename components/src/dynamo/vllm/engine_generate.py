@@ -20,7 +20,22 @@ from .kv_hints import _apply_kv_hint
 
 VLLM_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
 VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY = "vllm_enable_tower_connector_lora"
+JSON_MULTIMODAL_CAPABILITY = "json_multimodal"
 DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
+
+
+def publish_json_multimodal_capability(
+    runtime_config: ModelRuntimeConfig,
+    model_input: ModelInput,
+    worker_type: WorkerType,
+    enable_multimodal: bool,
+) -> None:
+    if (
+        enable_multimodal
+        and model_input == ModelInput.Tokens
+        and worker_type == WorkerType.Aggregated
+    ):
+        runtime_config.set_engine_specific(JSON_MULTIMODAL_CAPABILITY, json.dumps(True))
 
 
 def publish_engine_generate_capability(

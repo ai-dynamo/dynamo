@@ -62,7 +62,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 aisimulate-core = { version = "=0.13.0-dev.202609270000000058", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "9.0.0" }
+dynamo-parsers = { version = "10.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
@@ -137,3 +137,11 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# Temporary source pins for the companion draft (frontend-crates PR #308).
+# Remove after its coordinated crate releases and regenerate registry locks.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "31e8a3cfe8b439921d822a4af9e120173a416f23" }
+dynamo-renderer = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "31e8a3cfe8b439921d822a4af9e120173a416f23" }
+dynamo-parsers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "31e8a3cfe8b439921d822a4af9e120173a416f23" }
+dynamo-tokenizers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "31e8a3cfe8b439921d822a4af9e120173a416f23" }

@@ -25,7 +25,7 @@ use dynamo_runtime::{
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
 use crate::protocols::common::{
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
-    preprocessor::TraceLink,
+    preprocessor::{MultimodalData, TraceLink},
 };
 
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
@@ -289,10 +289,13 @@ impl EncoderRouter {
     fn should_encode(request: &PreprocessedRequest) -> bool {
         !request.is_probe
             && request.encoder_result.is_none()
-            && request
-                .multi_modal_data
-                .as_ref()
-                .is_some_and(|media| media.values().any(|items| !items.is_empty()))
+            && request.multi_modal_data.as_ref().is_some_and(|media| {
+                media.values().any(|items| !items.is_empty())
+                    && !media
+                        .values()
+                        .flatten()
+                        .any(|item| matches!(item, MultimodalData::Json(_)))
+            })
     }
 
     async fn consume_encode_stream(
@@ -432,6 +435,17 @@ mod tests {
                 request.context(),
             ))
         }
+    }
+
+    #[test]
+    fn opaque_json_skips_the_encoder_even_when_mixed_with_media() {
+        let mut request = multimodal_request();
+        assert!(EncoderRouter::should_encode(&request));
+        request.multi_modal_data.as_mut().unwrap().insert(
+            "chemistry".into(),
+            vec![MultimodalData::Json(serde_json::json!({"atoms":["C"]}))],
+        );
+        assert!(!EncoderRouter::should_encode(&request));
     }
 
     fn multimodal_request() -> PreprocessedRequest {
