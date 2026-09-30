@@ -72,6 +72,7 @@ def _make_handler(stage_types=("diffusion",)):
             defaults.append(llm_default)
 
     engine_client = MagicMock()
+    engine_client.engine.od_config = SimpleNamespace(model_class_name=None)
     engine_client.default_sampling_params_list = defaults
     engine_client.engine.get_stage_metadata.side_effect = lambda i: SimpleNamespace(
         stage_type=stage_types[i]
@@ -1321,11 +1322,30 @@ def image_request_handler():
 
 class TestImageReferenceInputs:
     @pytest.mark.asyncio
-    async def test_references_reach_engine_and_do_not_leak(self, image_request_handler):
-        """Each request conditions on its own reference, including text-only recovery."""
+    @pytest.mark.parametrize(
+        "model_class_name, image_modality, edit_prompt",
+        [
+            (None, "image", "a teapot"),
+            ("QwenImageEditPipeline", "image", "a teapot"),
+            (
+                "BagelPipeline",
+                "img2img",
+                "<|fim_middle|><|im_start|>a teapot<|im_end|>",
+            ),
+            ("MingImagePipeline", "img2img", "a teapot"),
+        ],
+    )
+    async def test_references_reach_engine_and_do_not_leak(
+        self, image_request_handler, model_class_name, image_modality, edit_prompt
+    ):
         handler = image_request_handler
+        handler.engine_client.engine.od_config.model_class_name = model_class_name
         for index, color in enumerate(("red", "green", None)):
-            request = {"prompt": "a teapot", "size": "512x512"}
+            request = {
+                "prompt": "a teapot",
+                "size": "512x768",
+                "nvext": {"negative_prompt": "blurry"},
+            }
             if color is not None:
                 reference = Image.new("RGB", (8, 8), color=color)
                 with io.BytesIO() as buffer:
@@ -1341,14 +1361,23 @@ class TestImageReferenceInputs:
             ]
             assert chunks == []
             prompt = handler.engine_client.generate.call_args.kwargs["prompt"]
-            assert prompt["prompt"] == request["prompt"]
+            assert prompt["negative_prompt"] == "blurry"
+            processor_kwargs = {"target_h": 768, "target_w": 512}
             if color is None:
+                assert prompt["prompt"] == request["prompt"]
+                assert prompt["modalities"] == ["image"]
                 assert "multi_modal_data" not in prompt
             else:
-                images = prompt["multi_modal_data"]["image"]
+                assert prompt["prompt"] == edit_prompt
+                assert prompt["modalities"] == [image_modality]
+                assert set(prompt["multi_modal_data"]) == {image_modality}
+                images = prompt["multi_modal_data"][image_modality]
                 assert len(images) == 1
                 assert images[0].size == reference.size
                 assert images[0].tobytes() == reference.tobytes()
+                if image_modality == "img2img":
+                    processor_kwargs["modalities"] = ["img2img"]
+            assert prompt["mm_processor_kwargs"] == processor_kwargs
 
         assert handler.engine_client.generate.call_count == 3
         assert handler._image_loader.load_image.await_count == 2
@@ -1365,7 +1394,6 @@ class TestImageReferenceInputs:
     async def test_invalid_reference_rejected_before_generation(
         self, image_request_handler, reference
     ):
-        """Malformed references fail with a bounded client error before GPU work."""
         handler = image_request_handler
         request = {"prompt": "a teapot", "input_reference": reference}
 
@@ -1376,8 +1404,28 @@ class TestImageReferenceInputs:
         handler.engine_client.generate.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_oversized_reference_rejected_before_generation(
+        self, image_request_handler
+    ):
+        handler = image_request_handler
+        handler._image_loader = ImageLoader(max_bytes=1)
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (8, 8), color="red").save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode()
+        request = {
+            "prompt": "a teapot",
+            "input_reference": f"data:image/png;base64,{encoded}",
+        }
+
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert str(exc_info.value) == "Failed to load input_reference"
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_unsupported_reference_preserves_status(self, image_request_handler):
-        """The real loader's unsupported-media status survives request preparation."""
         handler = image_request_handler
         request = {
             "prompt": "a teapot",
@@ -1395,17 +1443,15 @@ class TestImageReferenceInputs:
     @pytest.mark.parametrize(
         "error",
         [
-            HttpStatusError(415, "Unsupported Media Type", "https://example.com/image"),
             HttpStatusError(503, "Service Unavailable", "https://example.com/image"),
             HttpConfigurationError("Untrusted configured egress proxy"),
             HttpError("fetch failed"),
         ],
-        ids=["unsupported-media", "origin-unavailable", "configuration", "fetch"],
+        ids=["origin-unavailable", "configuration", "fetch"],
     )
     async def test_reference_http_error_preserved_before_generation(
         self, image_request_handler, error
     ):
-        """Loader errors retain their HTTP status or server-failure classification."""
         handler = image_request_handler
         handler._image_loader.load_image.side_effect = error
         request = {

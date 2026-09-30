@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import base64
-import binascii
 import hashlib
 import logging
 import os
@@ -31,6 +29,7 @@ from ..http.url_validator import (
     UrlValidationPolicy,
     validate_media_url,
 )
+from .media_source import decode_data_uri
 from .shared_image_cache import SharedImageCache, SharedImageCacheStats
 
 logger = logging.getLogger(__name__)
@@ -159,8 +158,8 @@ class ImageLoader:
                 decoded images directly from frontend memory, bypassing standard
                 network transport. Defaults to False.
             url_policy: Policy for validating URLs. Defaults to UrlValidationPolicy.from_env().
-            max_bytes: Maximum remote image size in bytes. When omitted, resolve
-                DYN_MM_MAX_FILE_SIZE_MB for each request.
+            max_bytes: Maximum remote or inline image size in bytes. When omitted,
+                resolve DYN_MM_MAX_FILE_SIZE_MB for each request.
             session_scoped_cache: Include a caller-provided cache scope in local,
                 in-flight, and shared-cache keys. ``None`` (default) reads
                 DYN_MM_IMAGE_CACHE_SESSION_SCOPED (default off). When enabled,
@@ -397,19 +396,16 @@ class ImageLoader:
                     if not parsed_url.path.startswith("image/"):
                         raise ValueError("Data URL must be an image type")
 
-                    media_type, data = parsed_url.path.split(",", 1)
-                    if ";base64" not in media_type:
-                        raise ValueError("Data URL must be base64 encoded")
-
-                    try:
-                        image_bytes = base64.b64decode(data, validate=True)
-                    except binascii.Error as e:
-                        raise ValueError(f"Invalid base64 encoding: {e}") from e
+                    image_bytes = decode_data_uri(
+                        normalized_url, max_bytes=self._max_bytes()
+                    )
                     image_data = BytesIO(image_bytes)
                 return await self._open_image(image_data)
             except Image.UnidentifiedImageError as e:
                 logger.error(f"Unsupported image format decoding: '{image_url}'")
                 raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+            except UrlValidationError as e:
+                raise ValueError(f"Failed to decode image: {e}") from e
             except ValueError as e:
                 if "Unsupported image format" in str(e):
                     logger.error(f"Unsupported image format decoding: '{image_url}'")

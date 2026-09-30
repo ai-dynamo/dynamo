@@ -23,6 +23,7 @@ from fsspec.implementations.dirfs import DirFileSystem
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
+from vllm_omni.model_extras import build_image_to_image_prompt, get_model_class_name
 
 from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
@@ -799,8 +800,18 @@ class OmniHandler(BaseOmniHandler):
             height,
             width,
             negative_prompt=nvext.negative_prompt,
-            multi_modal_data={"image": [image]} if image is not None else None,
         )
+        if image is not None:
+            prompt.update(
+                build_image_to_image_prompt(
+                    model_class_name=get_model_class_name(self.engine_client),
+                    prompt=req.prompt,
+                    negative_prompt=nvext.negative_prompt,
+                    input_image=[image],
+                    height=height,
+                    width=width,
+                )
+            )
 
         sp = OmniDiffusionSamplingParams(
             height=height,

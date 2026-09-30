@@ -197,7 +197,7 @@ async def test_http_rejected_by_default() -> None:
 
 async def test_data_url_invalid_base64_normalized(loader: ImageLoader) -> None:
     """Malformed base64 data URL should raise ValueError."""
-    with pytest.raises(ValueError, match="Invalid base64"):
+    with pytest.raises(ValueError, match="Malformed base64"):
         await loader.load_image("data:image/png;base64,NOT_VALID!!!")
 
 
@@ -205,6 +205,38 @@ async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
     """data: URL with non-image media type should raise ValueError."""
     with pytest.raises(ValueError, match="Data URL must be an image type"):
         await loader.load_image("data:text/plain;base64,aGVsbG8=")
+
+
+async def test_data_url_accepts_exact_byte_limit() -> None:
+    loader = ImageLoader(max_bytes=len(PNG_BYTES))
+    encoded = base64.b64encode(PNG_BYTES).decode()
+
+    image = await loader.load_image(f"data:image/png;base64,{encoded}")
+
+    assert image.size == (2, 2)
+    assert image.getpixel((0, 0)) == (255, 0, 0)
+
+
+@pytest.mark.parametrize("limit_source", ["explicit", "environment"])
+async def test_data_url_rejects_oversized_input_before_decode(
+    limit_source: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    if limit_source == "explicit":
+        loader = ImageLoader(max_bytes=len(PNG_BYTES) - 1)
+        payload = PNG_BYTES
+    else:
+        loader = ImageLoader()
+        payload = PNG_BYTES + b"\0" * (1024 * 1024 + 1 - len(PNG_BYTES))
+    encoded = base64.b64encode(payload).decode()
+    reference = f"data:image/png;base64,{encoded}"
+
+    with patch("base64.b64decode", wraps=base64.b64decode) as decode:
+        with pytest.raises(ValueError, match="exceeds the maximum") as exc_info:
+            await loader.load_image(reference)
+
+    decode.assert_not_called()
+    assert reference not in str(exc_info.value)
 
 
 # --- HTTP error contract ---
@@ -636,7 +668,7 @@ async def test_malformed_data_url_batch_raises_value_error(
         await loader.load_image_batch([{URL_VARIANT_KEY: bad_url}])
 
     assert not isinstance(exc_info.value, UrlValidationError)
-    assert "Failed to decoding image" in str(exc_info.value)
+    assert "Failed to decode image" in str(exc_info.value)
 
 
 async def test_unexpected_decoder_error_not_wrapped_as_value_error(
