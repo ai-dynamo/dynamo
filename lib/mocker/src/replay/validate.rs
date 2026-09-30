@@ -92,6 +92,8 @@ pub(super) fn validate_offline_disagg_replay_args(
             config.decode_args.worker_type,
         );
     }
+    // TODO(aisimulate): validate per-role block geometry and reblock workload
+    // hashes/handoff metadata when prefill and decode use different sizes.
     // The adapter creates one workload/hash stream at the prefill block size
     // and shares it with the decode router. Unequal block sizes need reblocking.
     if config.prefill_args.block_size != config.decode_args.block_size {

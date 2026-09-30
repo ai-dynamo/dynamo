@@ -203,37 +203,22 @@ pub fn simulate_loaded_trace_with_router_mode_and_options_and_runtime_observers(
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
     trace.validate_for_trace_mode()?;
-    if trace.is_single_turn() {
-        crate::replay::offline::simulate_trace_workload_with_scaling_policy(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            num_workers,
-            router_mode,
-            false,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            scaling_policy,
-            telemetry,
-        )
-    } else {
-        crate::replay::offline::simulate_trace_workload_with_scaling_policy(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            num_workers,
-            router_mode,
-            true,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            scaling_policy,
-            telemetry,
-        )
-    }
+    let emit_session_metadata = !trace.is_single_turn();
+    crate::replay::offline::simulate_trace_workload_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        false,
+        emit_session_metadata,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+        telemetry,
+    )
 }
 
 /// Run an offline loaded trace with execution-local capture and determinism.
@@ -325,35 +310,21 @@ pub fn simulate_loaded_trace_disagg_with_router_mode_and_options_and_runtime_obs
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
     trace.validate_for_trace_mode()?;
-    if trace.is_single_turn() {
-        crate::replay::offline::simulate_trace_workload_disagg_with_scaling_policy(
-            config,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            router_mode,
-            false,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            scaling_policy,
-            telemetry,
-        )
-    } else {
-        crate::replay::offline::simulate_trace_workload_disagg_with_scaling_policy(
-            config,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            router_mode,
-            true,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            scaling_policy,
-            telemetry,
-        )
-    }
+    let emit_session_metadata = !trace.is_single_turn();
+    crate::replay::offline::simulate_trace_workload_disagg_with_scaling_policy(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        false,
+        emit_session_metadata,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+        telemetry,
+    )
 }
 
 /// Disaggregated counterpart to
@@ -581,10 +552,6 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
     let args = args.normalized()?;
     validate_offline_replay_args(&args)?;
     if is_agentic_trace_format(trace_format) {
-        anyhow::ensure!(
-            scaling_policy.is_none(),
-            "scaling_policy replay only supports standard Mooncake traces"
-        );
         let trace = load_agentic_trace_from_file(
             trace_path,
             trace_block_size,
@@ -602,6 +569,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
             max_sim_time_ms,
             agentic_lanes,
             sla,
+            scaling_policy,
             telemetry,
         );
     }
@@ -609,9 +577,6 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
         bail!(
             "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
         );
-    }
-    if trace_accumulates_session_deltas(trace_format) && scaling_policy.is_some() {
-        bail!("scaling_policy replay does not support mooncake-delta traces");
     }
     let trace = load_trace_from_file(
         trace_path,
@@ -637,19 +602,6 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
             scaling_policy,
             telemetry,
         )?
-    } else if trace_accumulates_session_deltas(trace_format) {
-        crate::replay::offline::simulate_trace_workload_accumulating_deltas(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            num_workers,
-            router_mode,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            telemetry,
-        )?
     } else {
         crate::replay::offline::simulate_trace_workload_with_scaling_policy(
             args,
@@ -658,6 +610,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
             trace,
             num_workers,
             router_mode,
+            trace_accumulates_session_deltas(trace_format),
             true,
             record_per_request,
             max_sim_time_ms,
@@ -756,10 +709,6 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observ
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config)?;
     if is_agentic_trace_format(trace_format) {
-        anyhow::ensure!(
-            scaling_policy.is_none(),
-            "scaling_policy replay does not support agentic traces"
-        );
         let trace = load_agentic_trace_from_file(
             trace_path,
             trace_block_size,
@@ -776,6 +725,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observ
             max_sim_time_ms,
             agentic_lanes,
             sla,
+            scaling_policy,
             telemetry,
         );
     }
@@ -783,9 +733,6 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observ
         bail!(
             "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
         );
-    }
-    if trace_accumulates_session_deltas(trace_format) {
-        bail!("mooncake-delta trace format is not supported for disaggregated replay");
     }
     let trace = load_trace_from_file(
         trace_path,
@@ -817,6 +764,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observ
             prefill_load_estimator,
             trace,
             router_mode,
+            trace_accumulates_session_deltas(trace_format),
             true,
             record_per_request,
             max_sim_time_ms,
@@ -1295,14 +1243,13 @@ pub fn simulate_concurrency_file_with_router_mode_and_format_and_runtime_observe
     } = observers;
     let args = args.normalized()?;
     validate_offline_replay_args(&args)?;
+    // TODO(aisimulate): enforce request-level max_in_flight for Workload inputs;
+    // agentic_lanes limits plays and is not a substitute for a request cap.
     if is_agentic_trace_format(trace_format) {
         bail!(
             "{} trace format is not supported with replay_concurrency",
             trace_format.as_str()
         );
-    }
-    if trace_accumulates_session_deltas(trace_format) && scaling_policy.is_some() {
-        bail!("scaling_policy replay does not support mooncake-delta traces");
     }
     let trace = load_trace_from_file(
         trace_path,
@@ -1311,36 +1258,21 @@ pub fn simulate_concurrency_file_with_router_mode_and_format_and_runtime_observe
         trace_shared_prefix_ratio,
         trace_num_prefix_groups,
     )?;
-    let report = if trace_accumulates_session_deltas(trace_format) {
-        crate::replay::offline::simulate_concurrency_workload_accumulating_deltas(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            max_in_flight,
-            num_workers,
-            router_mode,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            telemetry,
-        )?
-    } else {
-        crate::replay::offline::simulate_concurrency_workload_with_scaling_policy(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            max_in_flight,
-            num_workers,
-            router_mode,
-            record_per_request,
-            max_sim_time_ms,
-            sla,
-            scaling_policy,
-            telemetry,
-        )?
-    };
+    let report = crate::replay::offline::simulate_concurrency_workload_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        trace_accumulates_session_deltas(trace_format),
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+        telemetry,
+    )?;
     Ok(report)
 }
 
@@ -1428,14 +1360,13 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format_and_runtime_
     } = observers;
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config)?;
+    // TODO(aisimulate): enforce request-level max_in_flight for Workload inputs;
+    // agentic_lanes limits plays and is not a substitute for a request cap.
     if is_agentic_trace_format(trace_format) {
         bail!(
             "{} trace format is not supported with replay_concurrency",
             trace_format.as_str()
         );
-    }
-    if trace_accumulates_session_deltas(trace_format) {
-        bail!("mooncake-delta trace format is not supported for disaggregated replay");
     }
     let trace = load_trace_from_file(
         trace_path,
@@ -1451,6 +1382,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format_and_runtime_
         trace,
         max_in_flight,
         router_mode,
+        trace_accumulates_session_deltas(trace_format),
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -1889,6 +1821,7 @@ pub fn simulate_trace_workload_with_router_mode_and_options_and_runtime_observer
         trace,
         num_workers,
         router_mode,
+        false,
         true,
         record_per_request,
         max_sim_time_ms,
@@ -1968,6 +1901,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_o
         prefill_load_estimator,
         trace,
         router_mode,
+        false,
         true,
         record_per_request,
         max_sim_time_ms,
@@ -2140,6 +2074,7 @@ pub fn simulate_concurrency_workload_with_router_mode_and_options_and_runtime_ob
         max_in_flight,
         num_workers,
         router_mode,
+        false,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -2223,6 +2158,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options_and_run
         trace,
         max_in_flight,
         router_mode,
+        false,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -2274,6 +2210,43 @@ pub fn simulate_agentic_trace_workload_with_router_mode_and_telemetry(
     sla: SlaThresholds,
     telemetry: Option<super::ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
+    simulate_agentic_trace_workload_with_router_mode_and_runtime_observers(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
+        sla,
+        super::ReplayRuntimeObservers {
+            scaling_policy: None,
+            telemetry,
+        },
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_workload_with_router_mode_and_runtime_observers(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
     let args = args.normalized()?;
     validate_offline_replay_args(&args)?;
     crate::replay::offline::simulate_agentic_trace_workload(
@@ -2287,6 +2260,7 @@ pub fn simulate_agentic_trace_workload_with_router_mode_and_telemetry(
         max_sim_time_ms,
         agentic_lanes,
         sla,
+        scaling_policy,
         telemetry,
     )
 }
@@ -2331,6 +2305,41 @@ pub fn simulate_agentic_trace_workload_disagg_with_router_mode_and_telemetry(
     sla: SlaThresholds,
     telemetry: Option<super::ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
+    simulate_agentic_trace_workload_disagg_with_router_mode_and_runtime_observers(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
+        sla,
+        super::ReplayRuntimeObservers {
+            scaling_policy: None,
+            telemetry,
+        },
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_workload_disagg_with_router_mode_and_runtime_observers(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config)?;
     crate::replay::offline::simulate_agentic_trace_workload_disagg(
@@ -2343,6 +2352,7 @@ pub fn simulate_agentic_trace_workload_disagg_with_router_mode_and_telemetry(
         max_sim_time_ms,
         agentic_lanes,
         sla,
+        scaling_policy,
         telemetry,
     )
 }
