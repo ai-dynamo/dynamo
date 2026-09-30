@@ -553,16 +553,13 @@ fn convert_input_items_to_messages(
                         // render only `content`; putting refusal text inline
                         // preserves it across turns without requiring template
                         // awareness of a separate refusal field.
-                        let text = out_msg
-                            .content
-                            .iter()
-                            .map(|c| match c {
-                                InputOutputMessageContent::OutputText(t) => t.text.as_str(),
-                                InputOutputMessageContent::Refusal(r) => r.refusal.as_str(),
-                            })
-                            .collect::<Vec<_>>()
-                            .join("");
-                        pending.push_text(&text);
+                        pending.touched = true;
+                        for part in &out_msg.content {
+                            pending.push_text(match part {
+                                InputOutputMessageContent::OutputText(t) => &t.text,
+                                InputOutputMessageContent::Refusal(r) => &r.refusal,
+                            });
+                        }
                     }
                 },
                 Item::FunctionCall(fc) => {
@@ -674,15 +671,12 @@ fn convert_input_items_to_messages(
                     // completions has no multimodal assistant slot, so collapse
                     // any structured content to text — same as the strict
                     // `MessageItem::Output` path.
-                    ResponseRole::Assistant => {
-                        let text = match &easy.content {
-                            EasyInputContent::Text(t) => t.clone(),
-                            EasyInputContent::ContentList(parts) => {
-                                convert_input_content_to_text(parts)
-                            }
-                        };
-                        pending.push_text(&text);
-                    }
+                    ResponseRole::Assistant => match &easy.content {
+                        EasyInputContent::Text(t) => pending.push_text(t),
+                        EasyInputContent::ContentList(parts) => {
+                            pending.push_text(&convert_input_content_to_text(parts));
+                        }
+                    },
                 }
             }
             InputItem::ItemReference(_) => {
