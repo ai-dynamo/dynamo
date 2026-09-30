@@ -173,6 +173,21 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     return False
 
 
+def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build the final-chunk cache-hit report read by the KV router.
+
+    SGLang reports one ``cached_tokens`` count per request, with any HiCache
+    host hits folded in, so there is no per-tier split.
+    """
+    prompt_tokens = meta_info.get("prompt_tokens")
+    if prompt_tokens is None:
+        return {}
+    return {
+        "prompt_tokens": prompt_tokens,
+        "reused_tokens": meta_info.get("cached_tokens") or 0,
+    }
+
+
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     """Extract sampling options that SGLang accepts as sampling params."""
     params = {field: values.get(field) for field in _SAMPLING_OPTION_FIELDS}
@@ -902,6 +917,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 "sglang_response": public_response,
                             },
                         }
+                if isinstance(meta_info, dict) and meta_info.get("finish_reason"):
+                    # Native Generate is routed too; the frontend forwards only
+                    # sglang_response, so this sibling key stays router-only.
+                    kv_cache_hit = _kv_cache_hit_engine_data(meta_info)
+                    if kv_cache_hit:
+                        output = {
+                            **output,
+                            "engine_data": {
+                                **output["engine_data"],
+                                "kv_cache_hit": kv_cache_hit,
+                            },
+                        }
                 if not context.is_stopped():
                     yield output
 
@@ -1018,6 +1045,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     if prompt_payload is not None and metadata_uploader is None:
                         engine_data["prompt_logprobs"] = prompt_payload
+                    # Router-facing, so kept even when metadata is uploaded instead.
+                    kv_cache_hit = _kv_cache_hit_engine_data(meta_info)
+                    if kv_cache_hit:
+                        engine_data["kv_cache_hit"] = kv_cache_hit
                     input_tokens = meta_info.get("prompt_tokens")
                     completion_tokens = meta_info.get("completion_tokens")
                     cached_tokens = meta_info.get("cached_tokens")

@@ -27,6 +27,7 @@ from dynamo.sglang.protocol import (
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
+    _kv_cache_hit_engine_data,
     _native_payload_is_batched,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
@@ -1705,8 +1706,118 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
                 "completion_tokens": 3,
                 "total_tokens": 5,
             },
+            "engine_data": {"kv_cache_hit": {"prompt_tokens": 2, "reused_tokens": 0}},
         },
     ]
+
+
+@pytest.mark.parametrize("cached_tokens", [0, 3])
+def test_kv_cache_hit_engine_data_uses_cached_tokens(cached_tokens):
+    assert _kv_cache_hit_engine_data(
+        {"prompt_tokens": 4, "cached_tokens": cached_tokens}
+    ) == {"prompt_tokens": 4, "reused_tokens": cached_tokens}
+
+
+@pytest.mark.parametrize(
+    "meta_info", [{"prompt_tokens": 4}, {"prompt_tokens": 4, "cached_tokens": None}]
+)
+def test_kv_cache_hit_engine_data_defaults_missing_cached_tokens_to_zero(meta_info):
+    assert _kv_cache_hit_engine_data(meta_info) == {
+        "prompt_tokens": 4,
+        "reused_tokens": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "meta_info", [{}, {"cached_tokens": 3}, {"prompt_tokens": None, "cached_tokens": 3}]
+)
+def test_kv_cache_hit_engine_data_omits_missing_prompt_tokens(meta_info):
+    assert _kv_cache_hit_engine_data(meta_info) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upload_metadata", [False, True])
+async def test_process_token_stream_reports_kv_cache_hit_on_final_chunk_only(
+    tmp_path, upload_metadata
+):
+    handler = _new_decode_handler()
+    uploader = (
+        MetadataUploader(url=(tmp_path / "metadata/kv-hit").as_uri())
+        if upload_metadata
+        else None
+    )
+    final_meta_info = {
+        "id": "sglang-1",
+        "finish_reason": {"type": "stop"},
+        "prompt_tokens": 4,
+        "completion_tokens": 2,
+        "cached_tokens": 3,
+    }
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": {
+                            "id": "sglang-1",
+                            "finish_reason": None,
+                            "prompt_tokens": 4,
+                            "cached_tokens": 3,
+                        },
+                    },
+                    {"index": 0, "output_ids": [102], "meta_info": final_meta_info},
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert len(chunks) == 2
+    assert "kv_cache_hit" not in chunks[0].get("engine_data", {})
+    assert chunks[1]["engine_data"]["kv_cache_hit"] == {
+        "prompt_tokens": 4,
+        "reused_tokens": 3,
+    }
+    if upload_metadata:
+        assert final_meta_info == {}
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk():
+    responses = [
+        {"output_ids": [101], "meta_info": {"id": "request-1", "prompt_tokens": 4}},
+        {
+            "output_ids": [102],
+            "meta_info": {
+                "id": "request-1",
+                "finish_reason": {"type": "stop"},
+                "prompt_tokens": 4,
+                "cached_tokens": 3,
+            },
+        },
+    ]
+
+    chunks = await _collect(
+        _new_decode_handler()._process_native_generate_stream(
+            _stream(
+                [
+                    {"token_ids": [], "engine_data": {"sglang_response": response}}
+                    for response in responses
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks[0]["engine_data"] == {"sglang_response": responses[0]}
+    assert chunks[1]["engine_data"] == {
+        "sglang_response": responses[1],
+        "kv_cache_hit": {"prompt_tokens": 4, "reused_tokens": 3},
+    }
 
 
 @pytest.mark.asyncio
@@ -1839,7 +1950,9 @@ async def test_process_token_stream_uploads_large_metadata(tmp_path):
     assert "log_probs" not in chunk
     assert "top_logprobs" not in chunk
     assert "disaggregated_params" not in chunk
-    assert "engine_data" not in chunk
+    assert chunk["engine_data"] == {
+        "kv_cache_hit": {"prompt_tokens": 2, "reused_tokens": 0}
+    }
     uploaded_path = tmp_path / "metadata/rollout-7/choice_0.msgpack.zst"
 
     payload = _read_zstd_payload(uploaded_path)
