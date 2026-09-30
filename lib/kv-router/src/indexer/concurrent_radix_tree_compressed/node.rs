@@ -766,6 +766,8 @@ impl Node {
                     }
                 });
             } else if state.full_edge_workers.len() != input.active_count {
+                // Equal sizes are treated as equal sets, skipping the intersection. This
+                // accepts an overcount after head-first eviction; see README "Equal-size skip".
                 input.active.retain(|worker| {
                     if state.full_edge_workers.contains(worker) {
                         true
