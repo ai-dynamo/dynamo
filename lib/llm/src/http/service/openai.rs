@@ -5566,6 +5566,8 @@ async fn handler_audio_speech(
     // Option<String> model field; see below)
     check_ready(&state)?;
 
+    validate_request_fields_generic(&request, "audio speech")?;
+
     let returns_audio_bytes = request.data_source != Some(AudioDataSource::Url);
     let streams_audio_chunks = returns_audio_bytes
         && matches!(

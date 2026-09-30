@@ -5,6 +5,8 @@ use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
+use crate::engines::ValidateRequest;
+
 mod aggregator;
 mod nvext;
 
@@ -38,8 +40,10 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<String>,
 
-    /// Speed factor (0.25-4.0, default: 1.0)
+    /// Speed factor. The frontend rejects a value outside 0.25 to 4.0.
+    /// Absent means 1.0.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(range(min = 0.25, max = 4.0, message = "speed must be between 0.25 and 4.0"))]
     pub speed: Option<f64>,
 
     // Qwen3-TTS specific parameters (top-level, matching vLLM-Omni)
@@ -192,6 +196,14 @@ impl NvAudioSpeechResponse {
     }
 }
 
+impl ValidateRequest for NvCreateAudioSpeechRequest {
+    fn validate(&self) -> Result<(), anyhow::Error> {
+        // `Validate` and `ValidateRequest` share the method name, so the
+        // call names the trait.
+        Validate::validate(self).map_err(anyhow::Error::from)
+    }
+}
+
 /// Implements `NvExtProvider` for `NvCreateAudioSpeechRequest`.
 impl NvExtProvider for NvCreateAudioSpeechRequest {
     fn nvext(&self) -> Option<&NvExt> {
@@ -263,6 +275,39 @@ mod tests {
             message.contains("url") && message.contains("b64_json"),
             "expected the parse error to list the valid values; got: {message}"
         );
+    }
+
+    #[test]
+    fn audio_request_speed_in_range_passes_validation() {
+        // The bounds are inclusive, and an absent speed means 1.0.
+        for json in [
+            r#"{"input":"hi"}"#,
+            r#"{"input":"hi","speed":0.25}"#,
+            r#"{"input":"hi","speed":1.0}"#,
+            r#"{"input":"hi","speed":4.0}"#,
+        ] {
+            let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+            assert!(
+                ValidateRequest::validate(&req).is_ok(),
+                "expected {json} to pass validation"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_request_speed_out_of_range_fails_validation() {
+        for json in [
+            r#"{"input":"hi","speed":0.1}"#,
+            r#"{"input":"hi","speed":5.0}"#,
+        ] {
+            let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+            let err = ValidateRequest::validate(&req).unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("speed"),
+                "expected the error for {json} to name the field; got: {message}"
+            );
+        }
     }
 
     #[test]
