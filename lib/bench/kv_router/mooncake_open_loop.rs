@@ -444,7 +444,6 @@ enum QueryLaneFailure {
 struct QueryLaneResult {
     completions: Box<[QueryCompletion]>,
     written: usize,
-    drain_ns: u64,
     failure: QueryLaneFailure,
 }
 
@@ -513,7 +512,6 @@ async fn query_lane_worker<T: SyncIndexer>(
     QueryLaneResult {
         completions,
         written: consumed,
-        drain_ns: elapsed_ns(epoch),
         failure,
     }
 }
@@ -1114,9 +1112,6 @@ pub async fn run_open_loop<T: SyncIndexer>(
 
     let producer_stop_ns = clock.now_ns();
     let drain = observation.close_observed_producers();
-    let issuer_analysis =
-        aggregate_issuer_outputs(issuer_outputs, operation_count, producer_stop_ns);
-
     for lane in &lanes {
         lane.close();
     }
@@ -1131,15 +1126,13 @@ pub async fn run_open_loop<T: SyncIndexer>(
     let (sealed, query_results) = tokio::join!(seal_future, query_future);
     let sealed = sealed?;
     let query_results = query_results?;
-    let query_drain_ns = query_results
-        .iter()
-        .map(|result| result.drain_ns)
-        .max()
-        .unwrap_or(start_ns);
-    let observed_work_end_ns = query_drain_ns.max(sealed.latest_seal_ns());
     let snapshot = sealed.harvest().await?;
     KvIndexerInterface::flush(indexer.as_ref()).await;
-    let end_ns = observed_work_end_ns.max(clock.now_ns());
+    // Timing ends at the last completed operation. Closing lanes, sealing and
+    // harvesting completion buffers, and aggregating issue records are bookkeeping.
+    let end_ns = last_completion_ns(&query_results, &snapshot).unwrap_or(start_ns);
+    let issuer_analysis =
+        aggregate_issuer_outputs(issuer_outputs, operation_count, producer_stop_ns);
     let backend_timing_report = KvIndexerInterface::timing_report(indexer.as_ref());
 
     Ok(analyze_result(
@@ -1157,6 +1150,24 @@ pub async fn run_open_loop<T: SyncIndexer>(
         snapshot,
         backend_timing_report,
     ))
+}
+
+fn last_completion_ns(
+    query_results: &[QueryLaneResult],
+    snapshot: &dynamo_kv_router::indexer::ThreadPoolObservationSnapshot,
+) -> Option<u64> {
+    let last_query = query_results
+        .iter()
+        .flat_map(|lane| &lane.completions[..lane.written])
+        .map(|completion| completion.finished_ns)
+        .max();
+    let last_event = snapshot
+        .buffers
+        .iter()
+        .flat_map(|buffer| buffer.records())
+        .map(|completion| completion.finished_ns)
+        .max();
+    last_query.max(last_event)
 }
 
 #[allow(clippy::too_many_arguments)]

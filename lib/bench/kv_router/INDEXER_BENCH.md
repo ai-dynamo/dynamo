@@ -48,7 +48,9 @@ Inside timing:
   worker lookup and Flume queues.
 - Lookup service, event application, contention, required clock reads, and
   fixed-slot completion records.
-- Query drain and FIFO event-worker seal barriers.
+- Queue drain, ending at the last query or event completion. Closing lanes,
+  sealing and harvesting completion buffers, and aggregating issue records
+  happen after that timestamp.
 
 The logical denominator is Request + Stored + Removed + Cleared. The block
 denominator includes request hashes and hashes in both Stored and Removed
