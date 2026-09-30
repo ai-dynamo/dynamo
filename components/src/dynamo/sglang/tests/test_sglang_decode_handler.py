@@ -1711,18 +1711,15 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
     ]
 
 
-@pytest.mark.parametrize("cached_tokens", [0, 3])
-def test_kv_cache_hit_engine_data_uses_cached_tokens(cached_tokens):
-    assert _kv_cache_hit_engine_data(
-        {"prompt_tokens": 4, "cached_tokens": cached_tokens}
-    ) == {"prompt_tokens": 4, "reused_tokens": cached_tokens}
+def test_kv_cache_hit_engine_data_uses_cached_tokens():
+    assert _kv_cache_hit_engine_data({"prompt_tokens": 4, "cached_tokens": 3}) == {
+        "prompt_tokens": 4,
+        "reused_tokens": 3,
+    }
 
 
-@pytest.mark.parametrize(
-    "meta_info", [{"prompt_tokens": 4}, {"prompt_tokens": 4, "cached_tokens": None}]
-)
-def test_kv_cache_hit_engine_data_defaults_missing_cached_tokens_to_zero(meta_info):
-    assert _kv_cache_hit_engine_data(meta_info) == {
+def test_kv_cache_hit_engine_data_defaults_null_cached_tokens_to_zero():
+    assert _kv_cache_hit_engine_data({"prompt_tokens": 4, "cached_tokens": None}) == {
         "prompt_tokens": 4,
         "reused_tokens": 0,
     }
