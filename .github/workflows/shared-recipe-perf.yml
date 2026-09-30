@@ -61,7 +61,7 @@ jobs:
               container=perf
               multiplier=10
               results=1k_1.5k
-              resources=dgd,job,deployment,service,configmap,computedomain
+              resources=dgd,job,configmap,computedomain
               ;;
             deepseek-v4-pro-agg)
               dgd=dsv4-pro-agg
@@ -178,7 +178,6 @@ jobs:
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/prerequisites.yaml"
           if [[ "$RECIPE" == kimi-k25-agg ]]; then
-            "${k[@]}" wait deployment/kimi-k25-nats --for=condition=Available --timeout=120s
             until "${k[@]}" wait job/kimi-k25-model-download --for=condition=Complete --timeout=5s; do
               "${k[@]}" get job kimi-k25-model-download -o json |
                 jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null
@@ -241,9 +240,6 @@ jobs:
             "${k[@]}" logs "$job" --all-containers > "$ARTIFACTS/${job##*/}.log" 2>&1 || true
           done
           if [[ "$RECIPE" == kimi-k25-agg ]]; then
-            if [[ -n "$("${k[@]}" get deployment -l "$selector" -o name)" ]]; then
-              "${k[@]}" logs deployment/kimi-k25-nats > "$ARTIFACTS/nats.log" 2>&1 || true
-            fi
             pod_selector="$selector,job-name=$BENCHMARK"
             container=sidecar-for-cp
             directory=/shared-artifacts/results
