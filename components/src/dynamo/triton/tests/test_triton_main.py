@@ -10,6 +10,7 @@ import types
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import tritonclient.grpc.model_config_pb2 as mc
 
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.triton import main
@@ -26,7 +27,11 @@ pytestmark = [
 def patched_worker(monkeypatch):
     """Patch the worker's registration collaborators with mocks."""
     register_model = AsyncMock(name="register_model")
-    monkeypatch.setattr(main, "text_format", MagicMock(name="text_format"))
+    # Stub text_format but keep Parse() -> a real ModelConfig so downstream
+    # SerializeToString() yields bytes that _build_handler can parse.
+    text_format_mock = MagicMock(name="text_format")
+    text_format_mock.Parse.return_value = mc.ModelConfig()
+    monkeypatch.setattr(main, "text_format", text_format_mock)
     monkeypatch.setattr(main, "register_model", register_model)
     return types.SimpleNamespace(register_model=register_model)
 
