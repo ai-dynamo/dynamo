@@ -229,7 +229,7 @@ To pin the scope and schema, pass a JSON value to `--dyn-structural-tag`:
           - --dyn-tool-call-parser
           - qwen3_coder
           - --dyn-structural-tag
-          - '{"scope":"always","schema":"strict","allow_tool_calls_with_structured_output":true}'
+          - '{"scope":"always","schema":"strict"}'
 ```
 
 ## See Also

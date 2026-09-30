@@ -440,7 +440,7 @@ jobs:
       working-directory: ${{ matrix.dir }}
       env:
         DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: '1'
-      run: cargo test --locked -p dynamo-llm --lib preprocessor::structural_tag::tests::tool_choice_none_skips_ban_only_when_prompt_excludes_tools -- --exact
+      run: cargo test --locked --all-targets preprocessor::structural_tag::tests::tool_choice_none_skips_ban_only_when_prompt_excludes_tools -- --exact
     - name: Check isolated kv-router feature builds
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
