@@ -641,6 +641,7 @@ mod tests {
             metadata: Arc::new(RwLock::new(DiscoveryMetadata::new())),
             list_state: Arc::new(RwLock::new(HashMap::new())),
             event_tx: broadcast::channel(1).0,
+            daemon_state: watch::channel(DaemonState::Pending).1,
             kube_client: KubeClient::new(service, "default"),
             pod_info: PodInfo {
                 pod_name: "worker".into(),
