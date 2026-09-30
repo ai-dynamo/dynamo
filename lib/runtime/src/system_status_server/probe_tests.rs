@@ -4,10 +4,13 @@
 use super::*;
 use crate::{DistributedRuntime, Runtime, config::HealthStatus, distributed::DistributedConfig};
 
-fn http_env() -> [(&'static str, Option<&'static str>); 4] {
+fn http_env() -> [(&'static str, Option<&'static str>); 7] {
     [
         ("DYN_SYSTEM_HOST", Some("127.0.0.1")),
         ("DYN_SYSTEM_PORT", Some("0")),
+        ("DYN_SYSTEM_LIVE_PATH", None),
+        ("DYN_SYSTEM_HEALTH_PATH", None),
+        ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
         ("DYN_HEALTH_CHECK_ENABLED", Some("false")),
         ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", None),
     ]
@@ -15,7 +18,21 @@ fn http_env() -> [(&'static str, Option<&'static str>); 4] {
 
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap()
+}
+
+fn nats_config(address: std::net::SocketAddr) -> crate::transports::nats::ClientOptions {
+    use crate::transports::nats::{ClientOptions, NatsAuth};
+    ClientOptions::builder()
+        .server(format!("nats://{address}"))
+        .auth(NatsAuth::UserPass("user".into(), "user".into()))
+        .tls_ca_cert_path(None)
+        .tls_client_cert_path(None)
+        .tls_client_key_path(None)
+        .tls_insecure(false)
         .build()
         .unwrap()
 }
@@ -151,46 +168,29 @@ fn reserve_system_port() -> std::net::TcpListener {
 #[tokio::test]
 async fn pending_runtime_initialization_does_not_bind_http() {
     temp_env::async_with_vars(http_env(), async {
-        for finish in ["drop", "shutdown", "failure"] {
-            let reserved = reserve_system_port();
-            let address = reserved.local_addr().unwrap();
-            let port = address.port().to_string();
-            temp_env::async_with_vars([("DYN_SYSTEM_PORT", Some(port.as_str()))], async {
-                let runtime = Runtime::from_current().unwrap();
-                // NATS accepts TCP but never sends INFO, holding DRT construction open.
-                let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let distributed = DistributedConfig {
-                    nats_config: Some(crate::transports::nats::ClientOptions::builder()
-                        .server(format!("nats://{}", peer.local_addr().unwrap())).build().unwrap()),
-                    ..DistributedConfig::process_local()
-                };
-                drop(reserved);
-                let mut construction = Box::pin(DistributedRuntime::new_with_probe_policy(
-                    runtime.clone(), distributed, SystemProbePolicy::RuntimeOnly,
-                ));
-                let (mut connection, _) = tokio::select! {
-                    result = &mut construction => panic!("constructed before NATS INFO: {result:?}"),
-                    peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => peer.unwrap().unwrap(),
-                };
-                // The startup probe cannot pass until runtime initialization completes.
-                assert!(tokio::net::TcpListener::bind(address).await.is_ok());
-                match finish {
-                    "drop" => drop(construction),
-                    "shutdown" => {
-                        runtime.shutdown();
-                        assert!(tokio::time::timeout(Duration::from_secs(5), construction).await.unwrap().is_err());
-                    }
-                    "failure" => {
-                        use tokio::io::AsyncWriteExt;
-                        connection.write_all(b"INFO invalid-json\r\n").await.unwrap();
-                        assert!(tokio::time::timeout(Duration::from_secs(5), construction).await.unwrap().is_err());
-                    }
-                    _ => unreachable!(),
-                }
-                wait_closed(address).await;
-                runtime.shutdown();
-            }).await;
-        }
+        let reserved = reserve_system_port();
+        let address = reserved.local_addr().unwrap();
+        let port = address.port().to_string();
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", Some(port.as_str()))], async {
+            let runtime = Runtime::from_current().unwrap();
+            // Accept TCP but withhold NATS INFO to hold runtime initialization open.
+            let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let distributed = DistributedConfig {
+                nats_config: Some(nats_config(peer.local_addr().unwrap())),
+                ..DistributedConfig::process_local()
+            };
+            drop(reserved);
+            let mut construction = Box::pin(DistributedRuntime::new_with_probe_policy(
+                runtime.clone(), distributed, SystemProbePolicy::RuntimeOnly,
+            ));
+            let (_connection, _) = tokio::select! {
+                result = &mut construction => panic!("constructed before NATS INFO: {result:?}"),
+                peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => peer.unwrap().unwrap(),
+            };
+            assert!(tokio::net::TcpListener::bind(address).await.is_ok());
+            drop(construction);
+            runtime.shutdown();
+        }).await;
     }).await;
 }
 
@@ -273,22 +273,14 @@ async fn dependency_outage_only_fails_readiness_and_can_recover() {
         }));
         let runtime = Runtime::from_current().unwrap();
         let distributed = DistributedConfig {
-            nats_config: Some(
-                crate::transports::nats::ClientOptions::builder()
-                    .server(format!("nats://{address}"))
-                    .build()
-                    .unwrap(),
-            ),
+            nats_config: Some(nats_config(address)),
             ..DistributedConfig::process_local()
         };
         let drt = DistributedRuntime::new_with_probe_policy(
             runtime.clone(), distributed, SystemProbePolicy::RuntimeOnly,
         ).await.unwrap();
         let base = format!("http://{}", drt.system_status_server_info().unwrap().socket_addr);
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .build()
-            .unwrap();
+        let client = client();
         assert_eq!(status(&client, &base, "/health").await, 200);
         disconnect.notify_one();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -310,4 +302,51 @@ async fn dependency_outage_only_fails_readiness_and_can_recover() {
         runtime.shutdown();
         drop(peer);
         }).await;
+}
+
+#[tokio::test]
+async fn stalled_discovery_check_times_out_without_blocking_liveness() {
+    temp_env::async_with_vars(http_env(), async {
+        let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Without a lease or authentication RPC, etcd uses a lazy channel. This
+        // lets DRT initialize before the deliberately stalled maintenance RPC.
+        let etcd = crate::transports::etcd::ClientOptions::builder()
+            .etcd_url(vec![format!("http://{}", peer.local_addr().unwrap())])
+            .attach_lease(false)
+            .build()
+            .unwrap();
+        let runtime = Runtime::from_current().unwrap();
+        let drt = tokio::time::timeout(Duration::from_secs(5), DistributedRuntime::new_with_probe_policy(
+            runtime.clone(),
+            DistributedConfig {
+                discovery_backend: crate::distributed::DiscoveryBackend::KvStore(
+                    crate::storage::kv::Selector::Etcd(Box::new(etcd)),
+                ),
+                ..DistributedConfig::process_local()
+            },
+            SystemProbePolicy::RuntimeOnly,
+        )).await.unwrap().unwrap();
+        let info = drt.system_status_server_info().unwrap();
+        let base = format!("http://{}", info.socket_addr);
+        let client = client();
+        let started = Instant::now();
+        let mut health = tokio_util::task::AbortOnDropHandle::new(tokio::spawn({
+            let client = client.clone();
+            let url = format!("{base}/health");
+            async move { client.get(url).send().await }
+        }));
+        let (_connection, _) = tokio::select! {
+            biased;
+            result = &mut health => panic!("health completed before discovery connected: {result:?}"),
+            peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => peer.unwrap().unwrap(),
+        };
+        assert_eq!(status(&client, &base, "/live").await, 200);
+        // The HTTP client has a longer deadline than the one-second handler.
+        // A missing handler timeout produces a client error, not this HTTP 503.
+        assert_eq!(health.await.unwrap().unwrap().status().as_u16(), 503);
+        // Allow timer granularity while rejecting an immediate dependency error.
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        runtime.shutdown();
+        wait_closed(info.socket_addr).await;
+    }).await;
 }

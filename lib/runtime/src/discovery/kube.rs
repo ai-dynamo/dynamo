@@ -604,7 +604,20 @@ mod tests {
 
         let available = Arc::new(AtomicBool::new(false));
         let resource_available = available.clone();
-        let service = tower::service_fn(move |_request: Request<kube::client::Body>| {
+        let service = tower::service_fn(move |request: Request<kube::client::Body>| {
+            assert_eq!(request.method(), "GET");
+            assert_eq!(
+                request.uri().path(),
+                "/apis/nvidia.com/v1alpha1/namespaces/default/dynamoworkermetadatas"
+            );
+            assert!(
+                request
+                    .uri()
+                    .query()
+                    .unwrap()
+                    .split('&')
+                    .any(|part| part == "limit=1")
+            );
             let available = resource_available.load(Ordering::Acquire);
             async move {
                 let response = if available {

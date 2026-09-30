@@ -4,7 +4,6 @@
 """Exercise the Python-to-Rust launcher boundary without an inference engine."""
 
 import os
-import random
 import socket
 import subprocess
 import sys
@@ -13,6 +12,9 @@ import urllib.error
 import urllib.request
 
 import pytest
+
+from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import reserved_ports
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -47,22 +49,13 @@ def sidecar_env():
 @pytest.mark.parametrize("engine", ["vllm", "sglang", "trtllm"])
 @pytest.mark.timeout(40)
 def test_python_sidecar_probes_during_initialization(engine, sidecar_env, tmp_path):
-    # Regression: the Python launcher used to discover metadata before binding
-    # HTTP. A connected but silent engine must permit independent probes.
-    with socket.socket() as engine_listener, socket.socket() as reservation:
+    # All launchers must serve probes independently of engine initialization.
+    with socket.socket() as engine_listener, reserved_ports(1, 10000) as ports:
         engine_listener.bind(("127.0.0.1", 0))
         engine_listener.listen()
-        for _ in range(100):
-            port = random.randrange(10000, 32000)  # system port is currently i16
-            try:
-                reservation.bind(("127.0.0.1", port))
-                break
-            except OSError:
-                continue
-        else:
-            pytest.fail("no available system port")
+        engine_listener.settimeout(15)
+        port = ports[0]
         sidecar_env["DYN_SYSTEM_PORT"] = str(port)
-        reservation.close()
         args = [
             sys.executable,
             "-m",
@@ -74,76 +67,81 @@ def test_python_sidecar_probes_during_initialization(engine, sidecar_env, tmp_pa
         ]
         if engine == "trtllm":
             args.extend(["--model-path", "unused"])
-        log_path = tmp_path / "sidecar.log"
-        with log_path.open("w") as log:
-            child = subprocess.Popen(args, env=sidecar_env, stdout=log, stderr=log)
-        connection = None
-        try:
-            engine_listener.settimeout(15)
-            # Confirm the sidecar has connected at the TCP level but the
-            # engine sends nothing — gRPC handshake is not complete. Probes
-            # must answer independently of engine state.
+        with ManagedProcess(
+            command=args,
+            env=sidecar_env,
+            log_dir=str(tmp_path),
+            display_name=f"{engine}-sidecar",
+            terminate_all_matching_process_names=False,
+        ) as child:
+            # Accept TCP but withhold the gRPC handshake: bootstrap has started,
+            # and probes must work while it is still waiting for the engine.
             connection, _ = engine_listener.accept()
-            http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-            def wait_status(path, expected):
-                deadline = time.monotonic() + 15
-                while time.monotonic() < deadline:
-                    assert child.poll() is None, log_path.read_text()
-                    code = None
-                    try:
-                        with http.open(
-                            f"http://127.0.0.1:{port}/{path}", timeout=0.5
-                        ) as response:
-                            code = response.status
-                    except urllib.error.HTTPError as error:
-                        code = error.code
-                    except (OSError, urllib.error.URLError):
-                        pass
-                    if code == expected:
-                        return
-                    time.sleep(0.025)
-                pytest.fail(
-                    f"/{path} did not return {expected}: {log_path.read_text()}"
-                )
-
-            wait_status("live", 200)
-            wait_status("health", 200)
-        finally:
-            if connection is not None:
-                connection.close()
-            if child.poll() is None:
-                child.kill()
-                child.wait(timeout=5)
+            with connection:
+                http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                for path in ("live", "health"):
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        assert child.proc.poll() is None, child.read_logs()
+                        try:
+                            with http.open(
+                                f"http://127.0.0.1:{port}/{path}", timeout=0.5
+                            ) as response:
+                                if response.status == 200:
+                                    break
+                        except (OSError, urllib.error.URLError):
+                            pass
+                        time.sleep(0.025)
+                    else:
+                        pytest.fail(f"/{path} did not return 200: {child.read_logs()}")
 
 
 @pytest.mark.parametrize(
-    ("engine", "args", "exception", "discovery"),
+    ("engine", "args", "exception", "discovery", "message"),
     [
-        ("trtllm", ["--help"], "SystemExit", "invalid-backend"),
+        ("trtllm", ["--help"], "SystemExit", "invalid-backend", ""),
         (
             "trtllm",
             ["--model-path", "unused", "--context-length", "0"],
             "ValueError",
             "invalid-backend",
+            "context-length must be greater than zero",
         ),
-        ("trtllm", ["--model-path", "unused"], "RuntimeError", "invalid-backend"),
-        ("vllm", ["--grpc-startup-deadline-secs", "1"], "ValueError", "mem"),
+        (
+            "trtllm",
+            ["--model-path", "unused"],
+            "RuntimeError",
+            "invalid-backend",
+            "Unknown DYN_DISCOVERY_BACKEND value: 'invalid-backend'",
+        ),
+        (
+            "vllm",
+            ["--grpc-startup-deadline-secs", "1"],
+            "ValueError",
+            "mem",
+            r"(?i)vllm.*(?:connection pool|SERVING).*(?:startup deadline|within)",
+        ),
     ],
 )
+@pytest.mark.timeout(20)
 def test_python_sidecar_preserves_error_categories(
-    sidecar_env, engine, args, exception, discovery
+    sidecar_env, engine, args, exception, discovery, message
 ):
     # Regression: combining bootstrap and serving must preserve Python exception
     # types, and invalid local arguments must fail before dependency setup.
     sidecar_env["DYN_DISCOVERY_BACKEND"] = discovery
     script = """
+import re
 import sys
 from dynamo._core import backend
 try:
-    getattr(backend, f"_run_{sys.argv[1]}_sidecar")(sys.argv[3:])
+    getattr(backend, f"_run_{sys.argv[1]}_sidecar")(sys.argv[4:])
 except BaseException as error:
     assert type(error).__name__ == sys.argv[2], repr(error)
+    if isinstance(error, SystemExit):
+        assert error.code == 0, repr(error)
+    else:
+        assert re.search(sys.argv[3], str(error)), repr(error)
 else:
     raise AssertionError('launcher unexpectedly succeeded')
 """
@@ -157,6 +155,7 @@ else:
                 script,
                 engine,
                 exception,
+                message,
                 *args,
                 "--grpc-endpoint",
                 f"http://127.0.0.1:{engine_listener.getsockname()[1]}",

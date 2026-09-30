@@ -48,7 +48,9 @@ impl Drop for Sidecar {
 
 fn probe_port() -> u16 {
     // DYN_SYSTEM_PORT is currently an i16, so ephemeral OS ports can be too high.
-    (18000..32000)
+    let start = 18000 + (std::process::id() % 14000) as u16;
+    (start..32000)
+        .chain(18000..start)
         .find(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok())
         .expect("a free probe port")
 }
@@ -122,17 +124,23 @@ async fn terminate(child: &mut Sidecar) {
 
 #[tokio::test]
 async fn probes_work_before_engine_is_available() {
-    let blackhole = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let blackhole = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let unavailable_port = blackhole.local_addr().unwrap().port();
     let port = probe_port();
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .unwrap();
 
     // No engine: runtime readiness must pass without metadata or registration.
     let mut child = sidecar(port, unavailable_port);
+    let (_engine_connection, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(15), blackhole.accept())
+            .await
+            .expect("sidecar starts engine bootstrap")
+            .unwrap();
     wait_status(&mut child, &client, &format!("{base}/live"), 200).await;
     wait_status(&mut child, &client, &format!("{base}/health"), 200).await;
     wait_status(&mut child, &client, &format!("{base}/metrics"), 200).await;
