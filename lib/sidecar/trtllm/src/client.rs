@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use dynamo_backend_common::DynamoError;
+use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
     connection_timeout,
@@ -16,6 +16,23 @@ pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument, status
 
 use crate::proto as pb;
 use crate::proto::trtllm_service_client::TrtllmServiceClient;
+
+/// The frontend returns `message` to the client, so it takes only fixed request-validation text.
+pub(crate) fn invalid_request(message: &'static str) -> DynamoError {
+    invalid_request_with_detail(message, message)
+}
+
+/// Like `invalid_request`, but `detail` stays out of the HTTP response body.
+pub(crate) fn invalid_request_with_detail(
+    message: &'static str,
+    detail: impl Into<String>,
+) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+        .message(detail)
+        .public_message(message)
+        .build()
+}
 
 /// Deadline for the one-shot control RPCs issued at startup / on cancel, so a
 /// connected-but-unresponsive server cannot hang `start` or `abort`.

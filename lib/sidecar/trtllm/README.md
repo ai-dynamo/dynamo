@@ -26,11 +26,25 @@ registration, request conversion, transport, cancellation, and abort.
   structural tag), and logprobs
 - Streaming delta tokens with a terminal usage/finish summary
 - `Abort` on cancellation
+- Image input as base64 data URIs (for example `data:image/png;base64,...`) in
+  `image_url` content parts. The sidecar sends the image bytes to TensorRT-LLM
+  in request order, and TensorRT-LLM decodes and processes them.
 
 The initial protocol does **not** support disaggregated (prefill/decode)
-serving, multimodal input, LoRA, KV-aware routing, encode workers, beam search,
-or `n > 1`. Disaggregation is excluded because the `Generate` response contract
-carries no context-phase handoff.
+serving, image URLs that must be fetched (`http://`, `https://`), video or audio
+input, `mm_processor_kwargs` or image options in `media_io_kwargs`, media cache
+UUIDs, LoRA, KV-aware routing, encode workers, beam search, or `n > 1`.
+Disaggregation is excluded because the `Generate` response contract carries no
+context-phase handoff.
+
+TensorRT-LLM's gRPC service does not report whether the model accepts images,
+so the sidecar forwards them to any model. TensorRT-LLM fails an image request
+to a text-only model, or an image it cannot decode, with an internal error.
+
+For an image request, `usage.prompt_tokens` counts the prompt before image
+expansion: each image counts as its few placeholder tokens, not as the vision
+tokens that TensorRT-LLM processes. TensorRT-LLM's gRPC service reports this
+count.
 
 ## Run
 
