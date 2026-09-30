@@ -168,9 +168,16 @@ def _k8s_api():
     ns = open(f"{SA}/namespace").read()
     return f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods"
 
+def resolve_leader_ip():
+    # gethostbyname is IPv4-only; fall back to IPv6 for IPv6-only clusters.
+    try:
+        return socket.gethostbyname(host)
+    except socket.gaierror:
+        return socket.getaddrinfo(host, None, socket.AF_INET6, socket.SOCK_STREAM)[0][4][0]
+
 def leader_pod_is_healthy():
     try:
-        ip = socket.gethostbyname(host)
+        ip = resolve_leader_ip()
     except socket.gaierror:
         return False, "DNS resolution failed", None, None
     try:
