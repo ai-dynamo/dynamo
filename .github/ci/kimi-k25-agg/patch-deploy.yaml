@@ -12,6 +12,9 @@ spec:
     create: false
   services:
     Frontend:
+      extraPodMetadata:
+        annotations:
+          nvidia.com/disable-image-pull-secret-discovery: "true"
       volumeMounts:
       - name: shared-model-cache
         mountPoint: /opt/models
@@ -51,6 +54,9 @@ spec:
                   - key: nvidia.com/dynamo-graph-deployment-name
                     operator: Exists
     Worker:
+      extraPodMetadata:
+        annotations:
+          nvidia.com/disable-image-pull-secret-discovery: "true"
       volumeMounts:
       - name: shared-model-cache
         mountPoint: /opt/models
