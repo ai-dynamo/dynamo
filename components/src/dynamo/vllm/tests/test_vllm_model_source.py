@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Tests for resolving NGC sources before vLLM engine configuration."""
+
 import importlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -25,6 +27,7 @@ pytestmark = [
 async def test_ngc_is_resolved_before_offline_engine_args(
     monkeypatch, tmp_path, load_format
 ):
+    """Resolve NGC sources offline for native and ModelExpress weight loaders."""
     model = "ngc://example/team/model:1"
     fetch = AsyncMock(return_value=str(tmp_path))
     monkeypatch.setattr(vllm_args, "fetch_model", fetch)
@@ -48,6 +51,7 @@ async def test_ngc_is_resolved_before_offline_engine_args(
 
 @pytest.mark.asyncio
 async def test_ngc_preserves_explicit_served_names(monkeypatch, tmp_path):
+    """Keep the requested public model name and aliases after resolving NGC."""
     monkeypatch.setattr(vllm_args, "fetch_model", AsyncMock(return_value=str(tmp_path)))
 
     config = await vllm_args.parse_args_with_model_fetch(
@@ -67,6 +71,7 @@ async def test_ngc_preserves_explicit_served_names(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_hf_model_keeps_engine_and_registration_source(monkeypatch):
+    """Leave HF acquisition to the existing path and retain the repository ID."""
     model = "Qwen/Qwen3-0.6B"
     fetch = AsyncMock()
     monkeypatch.setattr(vllm_args, "fetch_model", fetch)

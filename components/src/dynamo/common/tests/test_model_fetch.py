@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Tests for identifying model sources that engines cannot resolve themselves."""
+
 import pytest
 
 from dynamo.common.model_fetch import needs_local_model_path
@@ -17,4 +19,5 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
     ],
 )
 def test_needs_local_model_path(model: str, expected: bool) -> None:
+    """Require a fetched directory for NGC URIs while preserving HF and local paths."""
     assert needs_local_model_path(model) is expected

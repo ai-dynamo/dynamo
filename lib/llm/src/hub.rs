@@ -74,6 +74,7 @@ fn get_cached_provider_model_path_in(
     cached_model_dir(model_name, model_dir, ignore_weights)
 }
 
+/// Return and log the cached directory only when it satisfies the requested download.
 fn cached_model_dir(model_name: &str, dir: PathBuf, ignore_weights: bool) -> Option<PathBuf> {
     if !has_required_model_files(&dir, ignore_weights) {
         return None;
@@ -82,6 +83,7 @@ fn cached_model_dir(model_name: &str, dir: PathBuf, ignore_weights: bool) -> Opt
     Some(dir)
 }
 
+/// Require model config and tokenizer files, plus weights unless explicitly skipped.
 fn has_required_model_files(dir: &Path, ignore_weights: bool) -> bool {
     let has = |filename: &str| dir.join(filename).exists();
 
@@ -237,7 +239,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     }
 }
 
-// Direct download using the ModelExpress client.
+/// Download directly through the selected ModelExpress provider into the configured cache.
 async fn mx_download_direct(
     model_name: &str,
     provider: MxModelProvider,
@@ -479,6 +481,7 @@ mod tests {
         .await;
     }
 
+    /// Route NGC URIs explicitly while preserving the default Hugging Face provider.
     #[test]
     fn provider_for_routes_ngc_uris_to_ngc() {
         assert_eq!(
@@ -507,6 +510,7 @@ mod tests {
         model_dir
     }
 
+    /// Distinguish metadata-only NGC caches from caches that can satisfy a full download.
     #[test]
     fn test_ngc_cached_path_requires_weights_for_full_download() {
         let temp = TempDir::new().unwrap();
@@ -530,10 +534,10 @@ mod tests {
         assert_eq!(lookup(false).as_deref(), Some(model_dir.as_path()));
     }
 
+    /// Reuse a complete NGC cache without contacting ModelExpress or NGC.
     #[serial_test::serial]
     #[tokio::test]
     async fn test_from_hf_ngc_cache_first() {
-        // A complete NGC cache must short-circuit before any ModelExpress or NGC call.
         let temp = TempDir::new().unwrap();
         let model_dir = build_ngc_cache(
             temp.path(),

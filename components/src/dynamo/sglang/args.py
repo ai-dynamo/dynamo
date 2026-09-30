@@ -194,6 +194,7 @@ def is_object_storage_path(model_path: str) -> bool:
 
 
 def should_fetch_model(args: Any, model_path: str) -> bool:
+    """Prefetch NGC and native-loader models, leaving HF P2P to ModelExpress."""
     if os.path.exists(model_path):
         return False
     if is_object_storage_path(model_path):

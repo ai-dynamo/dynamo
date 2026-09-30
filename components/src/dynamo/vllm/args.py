@@ -69,6 +69,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
 
     @property
     def model_source_path(self) -> str:
+        """Return the fetched NGC directory or the original HF/local model source."""
         return (
             self.engine_args.model if needs_local_model_path(self.model) else self.model
         )
@@ -96,7 +97,18 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
 
 async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
-    """Resolve NGC models before vLLM constructs and validates its engine args."""
+    """Parse worker arguments, resolving NGC sources before engine validation.
+
+    NGC weights are fetched even with the ModelExpress loader so its native
+    fallback can use the local directory. Hugging Face sources retain their
+    existing acquisition path, including ModelExpress P2P.
+
+    Args:
+        argv: Command-line arguments. ``None`` means ``sys.argv[1:]``.
+
+    Returns:
+        The validated configuration, retaining the original source in ``model``.
+    """
     dynamo_config, vllm_args = _parse_cli_args(argv)
     if needs_local_model_path(dynamo_config.model):
         vllm_args.model = await fetch_model(dynamo_config.model)
@@ -106,6 +118,7 @@ async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
 
 
 def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]:
+    """Split Dynamo and vLLM arguments while preserving the original model source."""
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
@@ -153,6 +166,7 @@ def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]
 
 
 def _build_config(dynamo_config: Config, vllm_args: argparse.Namespace) -> Config:
+    """Construct engine arguments and validate and reconcile both configurations."""
     enable_kv_cache_metadata_compat()
     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 
