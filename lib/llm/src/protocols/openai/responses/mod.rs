@@ -553,13 +553,16 @@ fn convert_input_items_to_messages(
                         // render only `content`; putting refusal text inline
                         // preserves it across turns without requiring template
                         // awareness of a separate refusal field.
-                        pending.touched = true;
-                        for part in &out_msg.content {
-                            pending.push_text(match part {
-                                InputOutputMessageContent::OutputText(t) => &t.text,
-                                InputOutputMessageContent::Refusal(r) => &r.refusal,
-                            });
-                        }
+                        let text = out_msg
+                            .content
+                            .iter()
+                            .map(|c| match c {
+                                InputOutputMessageContent::OutputText(t) => t.text.as_str(),
+                                InputOutputMessageContent::Refusal(r) => r.refusal.as_str(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
+                        pending.push_text(&text);
                     }
                 },
                 Item::FunctionCall(fc) => {
