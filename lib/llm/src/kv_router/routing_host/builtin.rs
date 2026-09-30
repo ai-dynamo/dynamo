@@ -373,7 +373,10 @@ impl RoutingHost {
             .flatten()
             .map(|trace| trace.as_ref().clone())
             .unwrap_or_else(|| LifecycleTrace::frontend_request_without_session(context_id));
-        let request_dispatch = DispatchSpan::new(lifecycle.start(LifecycleStage::RequestDispatch));
+        let request_dispatch = DispatchSpan {
+            span: lifecycle.start(LifecycleStage::RequestDispatch),
+            target: Default::default(),
+        };
         request_dispatch.span.record(
             "dynamo.dispatch.route",
             self.inner.router_mode().telemetry_label(),
@@ -425,10 +428,7 @@ impl RoutingHost {
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    request_dispatch
-                        .span
-                        .record("dynamo.dispatch.result", "failed");
-                    drop(request_dispatch);
+                    request_dispatch.finish("failed");
                     guard.abort().await;
                     return Err(error);
                 }
@@ -494,15 +494,11 @@ impl RoutingHost {
         let (metadata, target, final_occupancy, response_stream) = match dispatch_result {
             Ok(result) => result,
             Err(error) => {
-                request_dispatch.span.record(
-                    "dynamo.dispatch.result",
-                    if is_cancelled(&error) {
-                        "cancelled"
-                    } else {
-                        "failed"
-                    },
-                );
-                drop(request_dispatch);
+                request_dispatch.finish(if is_cancelled(&error) {
+                    "cancelled"
+                } else {
+                    "failed"
+                });
                 let expected_target =
                     target_constraint.unwrap_or_else(|| target_for_worker(initial_worker));
                 if self.session_affinity_mode == SessionAffinityMode::Hard
@@ -519,10 +515,7 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        request_dispatch
-            .span
-            .record("dynamo.dispatch.result", "accepted");
-        drop(request_dispatch);
+        request_dispatch.finish("accepted");
         guard.retarget_worker(target.worker_id);
         if let Some(telemetry) = device_aware_telemetry {
             let selection_survived_transport = target.worker_id == initial_worker;
@@ -563,41 +556,29 @@ impl RoutingHost {
     }
 }
 
-/// Owns the dispatch span and records the destination DP rank as it closes.
-/// A recorded span field cannot be cleared, so the rank is written once for
-/// the last attempted target: a retry to a worker without a DP rank must not
-/// inherit the previous target's rank. Recording on drop also covers a
-/// dispatch future dropped before it returns.
+/// Owns the dispatch span and records the last attempted target's DP rank as
+/// it closes, including when dispatch is dropped: a span field cannot be
+/// cleared, so a retry must not inherit the previous target's rank.
 struct DispatchSpan {
     span: tracing::Span,
-    target: std::sync::Mutex<Option<AffinityTarget>>,
+    target: parking_lot::Mutex<Option<AffinityTarget>>,
 }
 
 impl DispatchSpan {
-    fn new(span: tracing::Span) -> Self {
-        Self {
-            span,
-            target: std::sync::Mutex::new(None),
-        }
-    }
-
     fn record_target(&self, target: AffinityTarget) {
         self.span
             .record("dynamo.dispatch.destination.worker.id", target.worker_id);
-        *self
-            .target
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target);
+        *self.target.lock() = Some(target);
+    }
+
+    fn finish(self, result: &'static str) {
+        self.span.record("dynamo.dispatch.result", result);
     }
 }
 
 impl Drop for DispatchSpan {
     fn drop(&mut self) {
-        let target = *self
-            .target
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(dp_rank) = target.and_then(|target| target.dp_rank) {
+        if let Some(dp_rank) = self.target.get_mut().and_then(|target| target.dp_rank) {
             self.span
                 .record("dynamo.dispatch.destination.dp.rank", dp_rank as u64);
         }

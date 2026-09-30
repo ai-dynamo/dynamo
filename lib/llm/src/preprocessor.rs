@@ -7180,9 +7180,7 @@ impl
             )
             .instrument(preprocessing.span().clone())
             .await
-            .inspect_err(|error| {
-                preprocessing.finish(terminal_outcome_for_stage_error(error.as_ref()))
-            })?;
+            .inspect_err(|e| preprocessing.finish(terminal_outcome_for_stage_error(e.as_ref())))?;
         attach_request_context_metadata(&mut common_request, &context);
 
         preprocessing.checkpoint("tool_constraints");
@@ -7192,12 +7190,10 @@ impl
                 &mut common_request,
                 prompt_injected_reasoning,
             )
-            .inspect_err(|error| preprocessing.finish(terminal_outcome_for_stage_error(error)))?;
+            .inspect_err(|e| preprocessing.finish(terminal_outcome_for_stage_error(e)))?;
         let tool_processing_route = self
             .tool_processing_route(&request, &guided_tool_constraint)
-            .inspect_err(|error| {
-                preprocessing.finish(terminal_outcome_for_stage_error(error.as_ref()))
-            })?;
+            .inspect_err(|e| preprocessing.finish(terminal_outcome_for_stage_error(e.as_ref())))?;
         preprocessing.checkpoint("validate_choices");
         validate_legacy_jail_nvext_choice_count(
             request.inner.n.unwrap_or(1),
@@ -7207,9 +7203,7 @@ impl
                 .and_then(|nvext| nvext.extra_fields.as_deref()),
             tool_processing_route.uses_legacy_jail(),
         )
-        .inspect_err(|error| {
-            preprocessing.finish(terminal_outcome_for_stage_error(error.as_ref()))
-        })?;
+        .inspect_err(|e| preprocessing.finish(terminal_outcome_for_stage_error(e.as_ref())))?;
 
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::request_trace::build_request_end_trace_state(

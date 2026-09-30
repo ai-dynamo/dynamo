@@ -5,8 +5,6 @@
 //!
 //! Coarse runtime timing, causal parentage, request identity, and terminal outcomes.
 //! Engine-internal metrics and invariants are intentionally not instrumented here.
-//! Lifecycle attributes are deliberately bounded: core mode records stable identifiers
-//! and decision summaries, while investigation mode may add bounded detail.
 
 use std::sync::{
     Arc, OnceLock,
@@ -346,15 +344,6 @@ impl LifecycleTrace {
         self.enabled
     }
 
-    /// Investigation mode permits bounded, per-request decision detail.
-    pub fn is_investigation_mode(&self) -> bool {
-        self.enabled
-            && self
-                .identity
-                .as_ref()
-                .is_some_and(|identity| identity.mode == "investigation")
-    }
-
     /// Start the request root and return a recorder shared with all terminal paths.
     #[must_use]
     pub fn start_request(&self) -> LifecycleRequest {
@@ -386,7 +375,10 @@ impl LifecycleTrace {
     pub fn observe_stage(&self, stage: LifecycleStage) -> LifecycleStageObservation {
         LifecycleStageObservation {
             span: self.start(stage),
-            detailed: self.is_investigation_mode(),
+            detailed: self
+                .identity
+                .as_ref()
+                .is_some_and(|id| id.mode == "investigation"),
             outcome: None,
             checkpoint: None,
             events: matches!(stage, LifecycleStage::ResponseStreaming).then_some(0),
@@ -418,10 +410,8 @@ impl LifecycleTrace {
     }
 }
 
-/// Bounded frontend stage state. `abandoned` means dropped without an observed
-/// outcome, not necessarily client cancellation; consult the request terminal.
-/// Event counts describe SSE items yielded by the frontend, not tokens or client
-/// receipt. No per-event clock reads, allocations, or tracing calls are needed.
+/// Bounded frontend stage state, written once on drop. `abandoned` means dropped
+/// without an observed outcome; event counts are SSE items, not tokens.
 pub struct LifecycleStageObservation {
     span: Span,
     detailed: bool,

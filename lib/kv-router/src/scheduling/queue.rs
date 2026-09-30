@@ -23,9 +23,7 @@ use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::policy_queue::{
-    PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueMetadata, QueueSnapshot,
-};
+use super::policy_queue::{PolicyQueue, QueueLimitKind, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
@@ -1228,10 +1226,7 @@ impl<
         for entry in self.pending.drain() {
             let class_index = entry.class_index();
             let snapshot = entry.snapshot();
-            let queue_depth_out = self
-                .pending_count
-                .fetch_sub(1, AtomicOrdering::Relaxed)
-                .saturating_sub(1);
+            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
             self.pending_isl_tokens
                 .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
             let counters = &class_counters[class_index];
@@ -1246,7 +1241,7 @@ impl<
             let queued = entry.into_payload();
             finish_queue_span(
                 queued.lifecycle_span,
-                queue_depth_out,
+                self.pending_count.load(AtomicOrdering::Relaxed),
                 "failed",
                 Some("subscriber_shutdown"),
             );
@@ -1311,13 +1306,13 @@ impl<
         }
         tracing::trace!(policy_class = class.name, "ordering request");
         #[cfg(feature = "runtime-protocols")]
-        let lifecycle_trace = request
+        let lifecycle_span = request
             .mode
             .request_id()
-            .map(LifecycleTrace::frontend_request_without_session)
-            .unwrap_or_else(|| LifecycleTrace::new(false));
-        #[cfg(feature = "runtime-protocols")]
-        let lifecycle_span = lifecycle_trace.start(LifecycleStage::RouterQueue);
+            .map_or_else(tracing::Span::none, |id| {
+                LifecycleTrace::frontend_request_without_session(id)
+                    .start(LifecycleStage::RouterQueue)
+            });
         #[cfg(not(feature = "runtime-protocols"))]
         let lifecycle_span = tracing::Span::none();
         let queue_depth_in = self.pending_count.load(AtomicOrdering::Relaxed);
@@ -1506,7 +1501,11 @@ impl<
                     });
                 removed_ready_head |= class_head_removed;
                 for entry in removed {
-                    self.release_cancelled_queue_entry(entry);
+                    self.subtract_pending_counters(class_index, entry.snapshot());
+                    let depth = self.pending_count.load(AtomicOrdering::Relaxed);
+                    let span = entry.into_payload().lifecycle_span;
+                    let reason = Some("request_lifecycle_ended_before_admission");
+                    finish_queue_span(span, depth, "cancelled", reason);
                 }
             }
         }
@@ -1538,23 +1537,6 @@ impl<
         self.pending_isl_tokens
             .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.subtract_class_counters(class_index, snapshot);
-    }
-
-    fn release_cancelled_queue_entry(&self, entry: PolicyQueueEntry<QueuedRequest>) {
-        let class_index = entry.class_index();
-        let snapshot = entry.snapshot();
-        let queue_depth_out = self
-            .pending_count
-            .load(AtomicOrdering::Relaxed)
-            .saturating_sub(1);
-        self.subtract_pending_counters(class_index, snapshot);
-        let queued = entry.into_payload();
-        finish_queue_span(
-            queued.lifecycle_span,
-            queue_depth_out,
-            "cancelled",
-            Some("request_lifecycle_ended_before_admission"),
-        );
     }
 
     async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
@@ -1615,12 +1597,9 @@ impl<
                             .with_available_workers(available.as_deref()),
                     );
                     if blocked {
-                        queued
-                            .lifecycle_span
-                            .record("dynamo.router.queue.deferred", true);
-                        queued
-                            .lifecycle_span
-                            .record("dynamo.router.queue.reason", "prefill_capacity");
+                        let span = &queued.lifecycle_span;
+                        span.record("dynamo.router.queue.deferred", true);
+                        span.record("dynamo.router.queue.reason", "prefill_capacity");
                     }
                     !blocked
                 })
@@ -1731,13 +1710,13 @@ impl<
             .and_then(|provider| provider(request));
 
         #[cfg(feature = "runtime-protocols")]
-        let lifecycle_trace = request
+        let lifecycle_span = request
             .mode
             .request_id()
-            .map(LifecycleTrace::frontend_request_without_session)
-            .unwrap_or_else(|| LifecycleTrace::new(false));
-        #[cfg(feature = "runtime-protocols")]
-        let lifecycle_span = lifecycle_trace.start(LifecycleStage::RouterSelection);
+            .map_or_else(tracing::Span::none, |id| {
+                LifecycleTrace::frontend_request_without_session(id)
+                    .start(LifecycleStage::RouterSelection)
+            });
         #[cfg(not(feature = "runtime-protocols"))]
         let lifecycle_span = tracing::Span::none();
 

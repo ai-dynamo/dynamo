@@ -128,8 +128,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
     }
 }
 
-/// Host-owned accounting for the DP-rank candidate universe. These fields are
-/// policy-neutral and stay meaningful when a custom policy is installed.
+/// Policy-neutral, host-owned accounting for the DP-rank candidate universe.
 #[derive(Debug, Clone, Copy, Default)]
 struct CandidateFilterSummary {
     eligible: usize,
@@ -180,9 +179,8 @@ impl CandidateFilterSummary {
     }
 }
 
-/// Bounded decision evidence written to a lifecycle `router.selection` span.
-/// Core mode records a stable summary. Investigation mode also records at most
-/// four scored candidates and their available raw cache/load inputs.
+/// Bounded `router.selection` evidence; investigation mode adds up to four
+/// scored candidates with their raw cache/load inputs.
 struct RouterSelectionTelemetry {
     span: tracing::Span,
     include_candidate_details: bool,
@@ -192,38 +190,33 @@ struct RouterSelectionTelemetry {
 impl RouterSelectionTelemetry {
     fn record_candidate_envelope(&self, candidate_count: usize) {
         let filters = self.filters;
-        self.span
-            .record("dynamo.router.candidate.count", candidate_count as u64);
         // Composed policies can filter host-eligible workers before scoring.
         let policy_filtered = filters.eligible.saturating_sub(candidate_count);
-        self.span.record(
-            "dynamo.router.candidate.eligible.count",
-            candidate_count as u64,
-        );
-        self.span.record(
-            "dynamo.router.candidate.filtered.count",
-            (filters.filtered_count() + policy_filtered) as u64,
-        );
-        self.span.record(
-            "dynamo.router.candidate.filtered.not_allowed",
-            filters.not_allowed as u64,
-        );
-        self.span.record(
-            "dynamo.router.candidate.filtered.constraints",
-            filters.constraints as u64,
-        );
-        self.span.record(
-            "dynamo.router.candidate.filtered.overloaded",
-            filters.overloaded as u64,
-        );
-        self.span.record(
-            "dynamo.router.candidate.filtered.unavailable",
-            filters.unavailable as u64,
-        );
-        self.span.record(
-            "dynamo.router.candidate.filtered.policy",
-            policy_filtered as u64,
-        );
+        let filtered = filters.filtered_count() + policy_filtered;
+        for (field, value) in [
+            ("dynamo.router.candidate.count", candidate_count),
+            ("dynamo.router.candidate.eligible.count", candidate_count),
+            ("dynamo.router.candidate.filtered.count", filtered),
+            (
+                "dynamo.router.candidate.filtered.not_allowed",
+                filters.not_allowed,
+            ),
+            (
+                "dynamo.router.candidate.filtered.constraints",
+                filters.constraints,
+            ),
+            (
+                "dynamo.router.candidate.filtered.overloaded",
+                filters.overloaded,
+            ),
+            (
+                "dynamo.router.candidate.filtered.unavailable",
+                filters.unavailable,
+            ),
+            ("dynamo.router.candidate.filtered.policy", policy_filtered),
+        ] {
+            self.span.record(field, value as u64);
+        }
     }
 
     fn record_custom(
@@ -285,9 +278,8 @@ impl RouterSelectionTelemetry {
                 .position(|candidate| candidate.worker == selected.worker)
                 && !detailed.contains(&selected_row)
             {
-                detailed.pop();
-                detailed.push(selected_row);
-                detailed.sort_unstable_by(by_score);
+                // Ranked after every kept row, so replacing the last keeps order.
+                detailed[TOP_K - 1] = selected_row;
             }
             let details = detailed
                 .into_iter()

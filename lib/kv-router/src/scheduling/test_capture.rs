@@ -33,18 +33,18 @@ impl Capture {
 
     pub fn fields(&self, name: &str, request: &str) -> HashMap<String, String> {
         let spans = self.0.lock().unwrap();
-        let matches: Vec<_> = spans
-            .iter()
-            .filter(|(n, fields)| {
-                *n == name
-                    && fields
-                        .0
-                        .get("dynamo.request.id")
-                        .is_some_and(|id| id == request)
-            })
-            .collect();
-        assert_eq!(matches.len(), 1, "{name} for {request}");
-        matches[0].1.0.clone()
+        let mut matches = spans.iter().filter(|(n, fields)| {
+            *n == name
+                && fields
+                    .0
+                    .get("dynamo.request.id")
+                    .is_some_and(|id| id == request)
+        });
+        let (_, fields) = matches
+            .next()
+            .unwrap_or_else(|| panic!("no {name} for {request}"));
+        assert!(matches.next().is_none(), "multiple {name} for {request}");
+        fields.0.clone()
     }
 }
 

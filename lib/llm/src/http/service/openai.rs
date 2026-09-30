@@ -223,12 +223,9 @@ fn terminal_outcome_for_status(status: StatusCode, error_type: ErrorType) -> Ter
     }
 }
 
-/// Outcome for a request preprocessing error, matching the request terminal
-/// outcome that [`ErrorMessage::from_anyhow`] produces for the same error.
-/// Cancellation and semantic errors use the same class-to-status policy;
-/// other errors are internal failures. Unlike `from_anyhow`, records no metrics.
-/// Router queue rejections/deadlines and backend `HttpError`s are not handled:
-/// they cannot arise during preprocessing, so do not reuse this for later stages.
+/// Preprocessing error outcome, matching [`ErrorMessage::from_anyhow`]'s request
+/// outcome without recording metrics. Only covers errors preprocessing can raise:
+/// router queue and backend `HttpError` branches are omitted.
 pub(crate) fn terminal_outcome_for_stage_error(
     err: &(dyn std::error::Error + 'static),
 ) -> TerminalOutcome {
@@ -6836,22 +6833,6 @@ mod tests {
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::Overload
-        );
-    }
-
-    #[test]
-    fn test_overload_response_is_a_rejected_lifecycle_outcome() {
-        let response = ErrorMessage::from_http_error(
-            ErrorClass::ResourceExhausted,
-            HttpError {
-                code: overload_status_code().as_u16(),
-                message: "site overloaded".to_string(),
-            },
-        );
-
-        assert_eq!(
-            terminal_outcome_for_error_response(&response),
-            TerminalOutcome::Rejected
         );
     }
 

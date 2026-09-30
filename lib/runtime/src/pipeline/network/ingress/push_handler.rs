@@ -464,30 +464,6 @@ struct ResponsePlaneModes {
     advertised: ResponsePlaneMode,
 }
 
-/// Report a response-plane mismatch to the frontend before admission is
-/// recorded as accepted, so a refused request is never traced as admitted.
-async fn reject_response_plane_mismatch<P: ResponsePublisher>(
-    response_modes: ResponsePlaneModes,
-    publisher: &mut P,
-) -> Result<(), PipelineError> {
-    let ResponsePlaneModes {
-        configured: configured_mode,
-        advertised: advertised_mode,
-    } = response_modes;
-
-    if configured_mode != advertised_mode {
-        let message = format!(
-            "response plane mismatch: frontend requested {}, worker configured {}",
-            advertised_mode.name(),
-            configured_mode.name()
-        );
-        let _ = publisher.send_prologue(Some(message.clone())).await;
-        let _ = publisher.finish().await;
-        return Err(PipelineError::Generic(message));
-    }
-    Ok(())
-}
-
 /// Per-shape strategy for turning a raw payload into a typed engine
 /// request. Captures the wire-shape divergence between the unary
 /// (`HeaderAndData`) and bidirectional (`HeaderOnly` + dial-in for the
@@ -519,9 +495,8 @@ where
         &self,
         control_msg: RequestControlMessage,
         data: Option<Bytes>,
-        failure_outcome: &mut &'static str,
+        _failure_outcome: &mut &'static str,
     ) -> Result<ParsedRequest<SingleIn<T>>, PipelineError> {
-        let _ = failure_outcome;
         // The unary path carries the request body in the data half; a
         // header-only envelope means the sender used the bidirectional shape.
         let data = data.ok_or_else(|| {
@@ -703,12 +678,14 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressResponseEncoder<U> + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     async fn generate_and_publish<P>(
         &self,
         request: Req,
         payload_codec: RequestPlanePayloadCodec,
         start_time: Instant,
         response_modes: ResponsePlaneModes,
+        worker_admission: tracing::Span,
         lifecycle: &LifecycleTrace,
         mut publisher: P,
     ) -> Result<(), PipelineError>
@@ -716,8 +693,25 @@ where
         Self: IngressDispatch<Request = Req>,
         P: ResponsePublisher,
     {
-        // The caller rejects mismatched response planes before admission.
-        let configured_mode = response_modes.configured;
+        let ResponsePlaneModes {
+            configured: configured_mode,
+            advertised: advertised_mode,
+        } = response_modes;
+
+        if configured_mode != advertised_mode {
+            worker_admission.record("dynamo.worker.admission.result", "rejected");
+            let message = format!(
+                "response plane mismatch: frontend requested {}, worker configured {}",
+                advertised_mode.name(),
+                configured_mode.name()
+            );
+            let _ = publisher.send_prologue(Some(message.clone())).await;
+            let _ = publisher.finish().await;
+            return Err(PipelineError::Generic(message));
+        }
+        worker_admission.record("dynamo.worker.admission.result", "accepted");
+        drop(worker_admission);
+
         let request_context = request.context();
         tracing::trace!("calling generate");
         let worker_operation = lifecycle.start_worker_operation();
@@ -877,6 +871,9 @@ where
         // They must inherit handle_payload, not prolong worker.admission.
         let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
         worker_admission.record("dynamo.worker.admission.payload.bytes", payload_bytes);
+        let admission_result = |result: &'static str| {
+            worker_admission.record("dynamo.worker.admission.result", result);
+        };
         let mut failure_outcome = "rejected";
         let ParsedRequest {
             request,
@@ -886,9 +883,7 @@ where
         } = self
             .parse_and_build_request(control_msg, data, &mut failure_outcome)
             .await
-            .inspect_err(|_| {
-                worker_admission.record("dynamo.worker.admission.result", failure_outcome);
-            })?;
+            .inspect_err(|_| admission_result(failure_outcome))?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -898,14 +893,10 @@ where
 
         let advertised_mode =
             ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
-                .inspect_err(|_| {
-                    worker_admission.record("dynamo.worker.admission.result", "rejected");
-                })
+                .inspect_err(|_| admission_result("rejected"))
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
         let configured_mode = ResponsePlaneMode::configured()
-            .inspect_err(|_| {
-                worker_admission.record("dynamo.worker.admission.result", "failed");
-            })
+            .inspect_err(|_| admission_result("failed"))
             .map_err(|error| PipelineError::Generic(error.to_string()))?;
         let response_modes = ResponsePlaneModes {
             configured: configured_mode,
@@ -919,14 +910,14 @@ where
             ResponsePlaneMode::Tcp => {
                 worker_admission.record("dynamo.worker.admission.transport", "tcp");
                 tracing::trace!("creating tcp response stream");
-                let mut publisher = tcp::client::TcpClient::create_response_stream(
+                let publisher = tcp::client::TcpClient::create_response_stream(
                     request.context(),
                     response_connection_info,
                     cancellation_counter,
                 )
                 .await
                 .map_err(|error| {
-                    worker_admission.record("dynamo.worker.admission.result", "failed");
+                    admission_result("failed");
                     if let Some(metrics) = self.metrics() {
                         metrics
                             .error_counter
@@ -935,18 +926,12 @@ where
                     }
                     PipelineError::Generic(format!("Failed to create response stream: {error}"))
                 })?;
-                reject_response_plane_mismatch(response_modes, &mut publisher)
-                    .await
-                    .inspect_err(|_| {
-                        worker_admission.record("dynamo.worker.admission.result", "rejected");
-                    })?;
-                worker_admission.record("dynamo.worker.admission.result", "accepted");
-                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
                     response_modes,
+                    worker_admission,
                     &lifecycle,
                     publisher,
                 )
@@ -955,10 +940,10 @@ where
             ResponsePlaneMode::Quic => {
                 worker_admission.record("dynamo.worker.admission.transport", "quic");
                 tracing::trace!("creating QUIC response sender");
-                let response_pool = self.quic_response_client_pool().inspect_err(|_| {
-                    worker_admission.record("dynamo.worker.admission.result", "failed");
-                })?;
-                let mut publisher = response_pool
+                let response_pool = self
+                    .quic_response_client_pool()
+                    .inspect_err(|_| admission_result("failed"))?;
+                let publisher = response_pool
                     .sender_with_cancellation_metric(
                         request.context(),
                         response_connection_info,
@@ -966,7 +951,7 @@ where
                     )
                     .await
                     .map_err(|error| {
-                        worker_admission.record("dynamo.worker.admission.result", "failed");
+                        admission_result("failed");
                         if let Some(metrics) = self.metrics() {
                             metrics
                                 .error_counter
@@ -977,18 +962,12 @@ where
                             "Failed to create QUIC response stream: {error}"
                         ))
                     })?;
-                reject_response_plane_mismatch(response_modes, &mut publisher)
-                    .await
-                    .inspect_err(|_| {
-                        worker_admission.record("dynamo.worker.admission.result", "rejected");
-                    })?;
-                worker_admission.record("dynamo.worker.admission.result", "accepted");
-                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
                     response_modes,
+                    worker_admission,
                     &lifecycle,
                     publisher,
                 )
@@ -1215,8 +1194,7 @@ mod tests {
         // Configuration is process-scoped. Isolate this enabled-mode test from
         // other tests which may have initialized the disabled default already.
         const CHILD: &str = "DYNAMO_LIFECYCLE_ADMISSION_TEST_CHILD";
-        // The configured response plane is also process-scoped, so a QUIC
-        // worker receiving a TCP response stream needs its own child.
+        // The response plane is also process-scoped: QUIC needs its own child.
         if std::env::var_os(CHILD).is_none() {
             for response_plane in ["tcp", "quic"] {
                 let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1412,19 +1390,27 @@ mod tests {
             (ResponsePlaneMode::Tcp, ResponsePlaneMode::Quic),
             (ResponsePlaneMode::Quic, ResponsePlaneMode::Tcp),
         ] {
-            let mut publisher = MismatchPublisher::default();
+            let ingress = TestIngress::new();
+            let publisher = MismatchPublisher::default();
             let prologue = publisher.prologue.clone();
             let finished = publisher.finished.clone();
+            let lifecycle = LifecycleTrace::new(false);
 
-            let error = reject_response_plane_mismatch(
-                ResponsePlaneModes {
-                    configured,
-                    advertised,
-                },
-                &mut publisher,
-            )
-            .await
-            .expect_err("mismatched response planes must fail");
+            let error = ingress
+                .generate_and_publish(
+                    Context::new(serde_json::json!({})),
+                    RequestPlanePayloadCodec::Json,
+                    Instant::now(),
+                    ResponsePlaneModes {
+                        configured,
+                        advertised,
+                    },
+                    tracing::Span::none(),
+                    &lifecycle,
+                    publisher,
+                )
+                .await
+                .expect_err("mismatched response planes must fail");
 
             let expected = format!(
                 "response plane mismatch: frontend requested {}, worker configured {}",
