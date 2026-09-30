@@ -221,7 +221,11 @@ fn selection_weights(
             .router_config_override
             .as_ref()
             .and_then(|config| config.shared_cache_multiplier)
-            .unwrap_or(kv_router_config.shared_cache_multiplier),
+            .or(kv_router_config.shared_cache_multiplier)
+            .unwrap_or(match kv_router_config.shared_cache_type {
+                crate::config::SharedCacheType::None => 0.0,
+                crate::config::SharedCacheType::Hicache => 0.5,
+            }),
     }
 }
 
@@ -311,8 +315,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                     .saturating_sub(default_context.min_active_prefill_tokens)
                     as f64
                     / context.block_size as f64;
+                // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
+                // clamp so a worker at the load floor does not compute 0/0.
                 let normalized_prefill_load =
-                    excess_active_prefill_blocks / context.request_blocks as f64;
+                    excess_active_prefill_blocks / context.request_blocks.max(1) as f64;
                 1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
             } else {
                 1.0
@@ -685,6 +691,51 @@ mod tests {
     }
 
     #[test]
+    fn empty_prompt_routes_by_load() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        // Workers 0 and 1 sit on the prefill floor with decode backlog. Worker 2 is one
+        // prefill block above the floor with no decode backlog, so it must win.
+        let workers: HashMap<_, _> = (0..3)
+            .map(|id| (id, SimpleWorkerConfig::default()))
+            .collect();
+        let mut request = base_request(0);
+        request.worker_loads = (0..3)
+            .map(|id| {
+                let load = crate::sequences::WorkerLoadProjection {
+                    active_prefill_tokens: if id == 2 { 1616 } else { 1600 },
+                    active_decode_blocks: if id == 2 { 0 } else { 50 },
+                    ..Default::default()
+                };
+                (WorkerWithDpRank::from_worker_id(id), load)
+            })
+            .collect();
+
+        for overlap_score_credit_decay in [0.0, 1.0] {
+            let selector = DefaultWorkerSelector::new(
+                Some(KvRouterConfig {
+                    router_temperature: 0.0,
+                    overlap_score_credit_decay,
+                    ..Default::default()
+                }),
+                "test",
+            );
+            let result = selector
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
+                .unwrap();
+            assert_eq!(
+                result.worker.worker_id, 2,
+                "decay={overlap_score_credit_decay}"
+            );
+        }
+    }
+
+    #[test]
     fn test_default_selector_randomizes_zero_temperature_ties() {
         use crate::test_utils::SimpleWorkerConfig;
 
@@ -870,7 +921,7 @@ mod tests {
         let config = KvRouterConfig {
             overlap_score_credit: 1.0,
             prefill_load_scale: 1.0,
-            shared_cache_multiplier: 0.0,
+            shared_cache_multiplier: Some(0.0),
             router_temperature: 0.0,
             ..Default::default()
         };
@@ -1459,7 +1510,7 @@ mod tests {
 
         let config = KvRouterConfig {
             overlap_score_credit: 1.0,
-            shared_cache_multiplier: 0.5,
+            shared_cache_multiplier: Some(0.5),
             router_temperature: 0.0,
             ..Default::default()
         };

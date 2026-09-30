@@ -330,8 +330,8 @@ impl RequestLeaseManager {
         }
         self.inner.remove(record);
 
-        // Enqueue both subsystem commands before the first await. Cancellation of
-        // the finishing future therefore cannot strand either cleanup.
+        // Release the scheduler booking and start LRU cleanup before the first
+        // await. Cancellation of this future cannot strand either cleanup.
         let scheduler_ack = self
             .inner
             .scheduler("finished", &record.booking)

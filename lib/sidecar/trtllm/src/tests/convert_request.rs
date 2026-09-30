@@ -218,6 +218,21 @@ fn a_derived_budget_below_min_tokens_is_rejected() {
     );
 }
 
+/// The prefill worker must not judge the minimum: it applies to the decode
+/// worker's budget, and the two roles are paired without requiring equal
+/// context lengths. A window too small here says nothing about the window the
+/// decode worker will use.
+#[test]
+fn a_prefill_request_does_not_judge_a_minimum_against_its_own_window() {
+    let mut req = request();
+    req.stop_conditions.max_tokens = None;
+    req.stop_conditions.min_tokens = Some(64);
+    let window = req.token_ids.len() as u32 + 8;
+
+    build_generate_request(&req, "req", "model", limits(window), PREFILL)
+        .expect("only the decode worker's window governs the minimum");
+}
+
 /// The same request is served when the window leaves room for the minimum --
 /// the guard must reject the contradiction, not every request that has one.
 #[test]

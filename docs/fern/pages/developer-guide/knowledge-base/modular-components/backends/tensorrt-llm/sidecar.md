@@ -67,6 +67,7 @@ all three engine-specific executables, and a TensorRT-LLM image with the pinned
 OpenEngine bindings layered on — the release ships the servicer but not the
 bindings that it and the manifests' health probes import.
 
-Read the disaggregated manifest's header before applying it: it requests
-`rdma/ib` on both engines, which you drop if your fabric does not expose it. The
+Read the disaggregated manifest's header before applying it: it runs the engines
+over TCP/CUDA-IPC and requests no `rdma/ib`, which you add on a fabric that
+provides it. The
 [README](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/README.md#deploy-on-kubernetes) has the full walkthrough.

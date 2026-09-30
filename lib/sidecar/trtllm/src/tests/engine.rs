@@ -77,16 +77,7 @@ async fn cancellation_yields_a_cancelled_terminal() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
-/// Pins the non-deferring side of the dispatch guard in `engine.rs`.
-///
-/// `cancellation_yields_a_cancelled_terminal` stops the context *after* the
-/// stream exists, so it exercises the streaming loop rather than the dispatch.
-/// Nothing covered the aggregated case where the context is already stopped
-/// before `generate` runs, which is why replacing the guard's condition with a
-/// constant `false` -- deferring always -- left the suite green.
-///
-/// The second assertion is the one that fails if the condition is dropped: an
-/// already-cancelled aggregated request must never reach the engine.
+/// A request cancelled before dispatch must not reach the engine.
 #[tokio::test]
 async fn an_aggregated_request_cancelled_before_dispatch_never_reaches_the_engine() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
@@ -303,41 +294,47 @@ async fn start_without_a_context_length_fails() {
     );
 }
 
-/// A server that answers GetModelInfo but reports no context length is still
-/// loading, so the sidecar keeps asking until the operator's startup deadline
-/// and only then gives up.
+/// An engine that answers has finished loading, so an answer carrying no
+/// context length means it was started without `--max_seq_len` and will not
+/// change. Fail on the first answer rather than polling to the deadline and
+/// then blaming a slow load.
 #[tokio::test]
-async fn start_retries_until_the_deadline_when_the_server_reports_no_context_length() {
+async fn start_fails_at_once_when_the_server_answers_without_a_context_length() {
     let service = FakeTrtllm::default();
     service.empty_model_info.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
     let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
 
-    engine
+    let error = engine
         .start(0)
         .await
         .expect_err("a window is required to register");
     assert!(
-        server.service.model_info_calls.load(Ordering::SeqCst) > 1,
-        "a server that is still loading must be asked more than once"
+        error.to_string().contains("--max_seq_len"),
+        "the error must name the fix: {error}"
+    );
+    assert_eq!(
+        server.service.model_info_calls.load(Ordering::SeqCst),
+        1,
+        "an answer that cannot change must not be retried"
     );
 }
 
-/// Once the model finishes loading, the same retry loop picks up the context
-/// length -- the case the deadline exists to allow.
+/// The wait exists for an engine that is not serving yet: it keeps asking
+/// through transport failures and picks up the window once the engine answers.
 #[tokio::test]
-async fn start_waits_for_a_server_that_is_still_loading_its_model() {
+async fn start_waits_for_a_server_that_is_not_serving_yet() {
     let service = FakeTrtllm::default();
-    service.empty_model_info.store(true, Ordering::SeqCst);
+    service.unavailable_model_info.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let ready = Arc::clone(&server.service.empty_model_info);
+    let ready = Arc::clone(&server.service.unavailable_model_info);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(40)).await;
         ready.store(false, Ordering::SeqCst);
     });
     let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
 
-    let config = engine.start(0).await.expect("start once the model loads");
+    let config = engine.start(0).await.expect("start once the engine serves");
     assert_eq!(
         config.llm.expect("llm registration").context_length,
         Some(4096)

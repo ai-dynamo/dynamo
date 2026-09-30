@@ -174,10 +174,18 @@ impl LLMEngine for TrtllmSidecarEngine {
                 let reported = match client.model_limits(&model.source).await {
                     Ok(reported) => reported,
                     Err(error) => {
+                        // Tolerated because some OpenEngine servicer builds ship
+                        // without Control, which is what --context-length exists
+                        // for. UNIMPLEMENTED also fits an engine left on the
+                        // default --grpc-protocol smg, where Generate will fail
+                        // too -- name both so the log points at the real fix.
                         tracing::warn!(
                             %error,
                             configured_context_length = configured,
-                            "Control.GetModelInfo failed; using the configured --context-length"
+                            "Control.GetModelInfo failed; using the configured \
+                             --context-length. If this is UNIMPLEMENTED, the engine either \
+                             ships no Control service or was started without \
+                             --grpc-protocol openengine"
                         );
                         ModelLimits::default()
                     }
@@ -253,7 +261,6 @@ impl LLMEngine for TrtllmSidecarEngine {
             self.mode,
         )?;
         let mut state = ResponseState::new(&request, self.mode);
-        let cancel = self.cancel.clone();
         // A decode request that took a handoff has KV transferred into it, and
         // the transceiver releases those blocks when the engine finishes the
         // request -- not when the client goes away. Dropping the stream on
@@ -262,13 +269,13 @@ impl LLMEngine for TrtllmSidecarEngine {
         // that would let a cancelled request generate its whole budget with no
         // consumer. A decode-mode request without a handoff ran locally and
         // has nothing to strand.
-        let defer_request_cancellation = self.mode.is_decode() && request.prefill_result.is_some();
+        let needs_cancellation_deferral = self.mode.is_decode() && request.prefill_result.is_some();
         let stopped_ctx = ctx.inner_arc();
         // Hoisted: `stopped()` is an async-trait method, so re-creating it per
         // streamed chunk costs a boxed future and a waker registration on every
         // token.
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
-        let shutdown = cancel.clone();
+        let shutdown = self.cancel.clone();
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
 
         // The same deferral applies here, not just to the streaming loop below.
@@ -280,7 +287,7 @@ impl LLMEngine for TrtllmSidecarEngine {
         // exists to protect. Shutdown still wins -- the process is going away.
         let stream = tokio::select! {
             biased;
-            _ = &mut request_cancellation, if !defer_request_cancellation => None,
+            _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
             _ = &mut shutdown_cancellation => None,
             result = client.generate(proto_request) => Some(result?),
         };
@@ -290,11 +297,11 @@ impl LLMEngine for TrtllmSidecarEngine {
         };
 
         Ok(Box::pin(async_stream::stream! {
-            let mut transfer_settled = false;
+            let mut is_transfer_settled = false;
             loop {
                 tokio::select! {
                     biased;
-                    _ = &mut request_cancellation, if !defer_request_cancellation || transfer_settled => {
+                    _ = &mut request_cancellation, if !needs_cancellation_deferral || is_transfer_settled => {
                         yield Ok(cancelled(&state));
                         break;
                     }
@@ -306,7 +313,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                         match message {
                             Ok(Some(response)) => match state.convert(response) {
                                 Ok(Some(output)) => {
-                                    transfer_settled |= !output.token_ids.is_empty();
+                                    is_transfer_settled |= !output.token_ids.is_empty();
                                     let terminal = output.finish_reason.is_some();
                                     yield Ok(output);
                                     if terminal {

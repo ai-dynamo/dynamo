@@ -30,6 +30,7 @@ use crate::proto as pb;
 /// Most tests exercise aggregated serving; the disaggregation tests name their
 /// mode explicitly.
 const AGG: DisaggregationMode = DisaggregationMode::Aggregated;
+const PREFILL: DisaggregationMode = DisaggregationMode::Prefill;
 
 // The tests themselves live in `tests/`, grouped by the surface they cover;
 // this file holds only the fakes and fixtures they share.
@@ -57,6 +58,8 @@ struct FakeTrtllm {
     no_control: Arc<AtomicBool>,
     /// Simulates a server that answers GetModelInfo without a context length.
     empty_model_info: Arc<AtomicBool>,
+    /// Answers `UNAVAILABLE`, the shape of an engine that is not serving yet.
+    unavailable_model_info: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
 }
 
@@ -242,6 +245,9 @@ impl pb::control_server::Control for FakeTrtllm {
         self.model_info_calls.fetch_add(1, Ordering::SeqCst);
         if self.no_control.load(Ordering::SeqCst) {
             return Err(Status::unimplemented("Control is not implemented"));
+        }
+        if self.unavailable_model_info.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("not serving yet"));
         }
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),

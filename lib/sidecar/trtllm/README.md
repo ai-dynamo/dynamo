@@ -42,6 +42,7 @@ inside the request body.
 > `max_tokens` for requests that omit one) unless `--context-length` supplies it
 > instead. `Control.Abort` cancels an in-flight request; closing the `Generate`
 > stream also aborts it, so cancellation is covered either way.
+> Unclaimed prefill KV handoffs require separate cleanup; see [Known issues](#known-issues).
 >
 > `Control`'s LoRA RPCs (`LoadLora`, `UnloadLora`, `ListLoras`) and KV-event
 > RPCs (`GetKvEventSources`, `SubscribeKvEvents`) return `UNIMPLEMENTED`: the
@@ -87,14 +88,22 @@ Error: Failed to import OpenEngine support: No module named 'openengine'.
 # 768a93c7b44e, the revision `proto/` was generated from. The protobuf package
 # is additionally pinned by gencode version -- a gencode newer than the image's
 # protobuf runtime fails at import -- so raise it only with the image's
-# protobuf.
+# protobuf. The `-pyi` package is pinned because the protobuf wheel requires it
+# with no upper bound and the name is unregistered on PyPI, which under
+# `--extra-index-url` would let anyone claiming it there run code here.
 python -m pip install --extra-index-url https://buf.build/gen/python \
   "openengine-openengine-grpc-python==1.78.1.1.20260730172104+768a93c7b44e" \
-  "openengine-openengine-protocolbuffers-python==33.5.0.1.20260730172104+768a93c7b44e"
+  "openengine-openengine-protocolbuffers-python==33.5.0.1.20260730172104+768a93c7b44e" \
+  "openengine-openengine-protocolbuffers-pyi==36.2.0.1.20260730172104+768a93c7b44e"
 
 python -m tensorrt_llm.commands.serve <model> \
-  --grpc --grpc-protocol openengine --host 127.0.0.1 --port 50051
+  --grpc --grpc-protocol openengine --host 127.0.0.1 --port 50051 \
+  --max_seq_len 4096
 ```
+
+Without `--max_seq_len` the servicer leaves `max_context_length` unset. The
+sidecar below passes `--context-length`, so it starts either way; with neither
+setting it fails on the engine's first answer, naming both fixes.
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
 loopback or a private interface. Remote access requires network controls or a
@@ -105,16 +114,20 @@ Start the Dynamo worker:
 ```bash
 dynamo-trtllm-sidecar \
   --grpc-endpoint 127.0.0.1:50051 \
-  --model-path <model>
+  --model-path <model> \
+  --context-length 4096
 ```
 
 The context length comes from `--context-length` (or `TRTLLM_CONTEXT_LENGTH`)
 when supplied, and from `Control.GetModelInfo` otherwise; a disagreement is
 logged at WARN and the configured value wins. Supply it whenever the engine was
 started without `--max_seq_len`, because TensorRT-LLM then leaves
-`max_context_length` unset. With neither source the sidecar retries until
-`--grpc-startup-deadline-secs` and then exits, rather than registering a worker
-that would reject every request omitting `max_tokens`.
+`max_context_length` unset. With neither source the sidecar fails as soon as the
+engine answers, rather than registering a worker that would reject every request
+omitting `max_tokens`. It does not wait out `--grpc-startup-deadline-secs` for
+that case: the engine binds its gRPC port only once the model has loaded, so an
+engine that answers is not going to start reporting a window. That deadline
+covers an engine that is not up yet, where only transport failures are retried.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
@@ -167,12 +180,19 @@ The handoff JSON mirrors `KvSessionRef` field-for-field (`session_id`,
 `transfer_backend`, `endpoints`, `dp_rank`, `attributes`) and is never
 interpreted between the two workers. See `src/disagg.rs`.
 
+## Known issues
+
+In disaggregated serving, decode-side validation can reject a request after prefill has produced a KV handoff, for example when `min_tokens` cannot fit in the decode context window. This rejection happens before the decode `Generate` RPC, so no decode request or KV transfer starts. The unclaimed prefill blocks remain reserved until the engine transfer timeout (60 seconds in the engine version pinned in [Run](#run)), which can delay subsequent valid requests when KV cache capacity is exhausted.
+
+Tracked in [#15404: abort abandoned prefill KV sessions after decode rejection](https://github.com/ai-dynamo/dynamo/issues/15404). The intended fix requires coordinated TensorRT-LLM and sidecar support for `Control.Abort(kv_session)`, with the engine releasing blocks only after transfers can no longer access them. That engine version returns `UNIMPLEMENTED` for session abort; aborting the completed prefill request by request ID does not release its pending handoff. Until that follow-up is delivered, cleanup relies on the engine transfer timeout.
+
 ## Deploy on Kubernetes
 
 `deploy/agg.yaml` runs a frontend and one worker pod serving `Qwen/Qwen3-0.6B`
 on one GPU. `deploy/disagg.yaml` runs prefill and decode as separate worker
-pods. Read the disaggregated manifest's header before applying it: it requests
-`rdma/ib` on both engines, which you drop if your fabric does not expose it.
+pods. Read the disaggregated manifest's header before applying it: it runs the
+engines over TCP/CUDA-IPC and requests no `rdma/ib`, which you add on a fabric
+that provides it.
 
 You need a cluster on **v1.29+** (or v1.28 with the `SidecarContainers` gate)
 with the Dynamo operator and a GPU node — the engine runs as a native sidecar —

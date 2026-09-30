@@ -90,6 +90,21 @@ const testCases = [
     desc: 'trtllm script triggers only trtllm'
   },
   {
+    file: 'examples/backends/tokenspeed/tests/test_validate_disagg.py',
+    expect: { core: true },
+    desc: 'TokenSpeed validator tests trigger the runtime test lane'
+  },
+  {
+    file: 'examples/backends/tokenspeed/launch_disagg.sh',
+    expect: { core: true },
+    desc: 'TokenSpeed example code triggers runtime validation'
+  },
+  {
+    file: 'examples/backends/tokenspeed/README.md',
+    expect: { core: false },
+    desc: 'TokenSpeed documentation alone avoids runtime builds'
+  },
+  {
     file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
     expect: { core: false, examples: true },
     desc: 'recipe matrix dotfile triggers recipe check without core'

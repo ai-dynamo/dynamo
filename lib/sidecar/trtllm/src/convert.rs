@@ -43,6 +43,12 @@ pub(crate) fn build_generate_request(
 
     // A prefill worker only needs the context phase; TensorRT-LLM still requires
     // a positive budget, and one token is what the context phase produces.
+    // No minimum check here: the minimum applies to the decode worker's budget,
+    // and discovery pairs the two roles without requiring equal context lengths
+    // (`discovery/model_manager.rs`). This worker's own window can neither
+    // prove the request impossible nor prove it servable, so checking it would
+    // reject requests a wider decode window would serve. Releasing the handoff
+    // when decode does reject is the sound fix and belongs on that side.
     let max_tokens = if mode.is_prefill() {
         1
     } else {
@@ -174,10 +180,20 @@ fn max_tokens(
         Some(cap) => remaining.min(cap),
         None => remaining,
     };
-    // Both the cap and the `.max(1)` floor can land under an explicit minimum.
-    // Sending `min_tokens` above `max_tokens` is a request no engine can honour,
-    // and TensorRT-LLM does not cross-validate the pair, so say which two values
-    // conflict instead of letting it resolve them silently.
+    reject_impossible_minimum(request, derived, context_length, prompt_len)?;
+    Ok(derived)
+}
+
+/// Both the output cap and the `.max(1)` floor can land under an explicit
+/// minimum. Sending `min_tokens` above `max_tokens` is a request no engine can
+/// honour, and TensorRT-LLM does not cross-validate the pair, so say which two
+/// values conflict instead of letting it resolve them silently.
+fn reject_impossible_minimum(
+    request: &PreprocessedRequest,
+    derived: u32,
+    context_length: u32,
+    prompt_len: u32,
+) -> Result<(), DynamoError> {
     if let Some(min_tokens) = request.stop_conditions.min_tokens
         && min_tokens > derived
     {
@@ -186,7 +202,7 @@ fn max_tokens(
              the {context_length}-token window already holds a {prompt_len}-token prompt"
         )));
     }
-    Ok(derived)
+    Ok(())
 }
 
 fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
@@ -830,10 +846,12 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
              sidecar's --disaggregation-mode matches how its engine was started)"
         )),
         // The handoff named a context worker this engine could not reach or
-        // whose session is gone. Deliberately not migratable: a retry would
-        // replay the same dead handoff and fail identically on the next worker.
-        // Recovering properly means re-running prefill, which the frontend
-        // cannot be asked for from here.
+        // whose session is gone. Migration is linked above the prefill router
+        // (`entrypoint/input/common.rs:501-505`), so a retry would re-run
+        // prefill and get a fresh handoff rather than replay this one -- this
+        // is recoverable in principle. Kept non-migratable for now because the
+        // common cause is a transceiver both engines lack, where retrying
+        // across every worker buries the one error that names the fix.
         pb::ErrorCode::KvSessionNotFound | pb::ErrorCode::KvTransferFailed => {
             client::engine_error(format!(
                 "{message} (the prefill handoff could not be resolved: check that both engines \

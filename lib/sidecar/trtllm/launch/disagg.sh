@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Disaggregated serving through two TensorRT-LLM OpenEngine gRPC servers (2 GPUs).
+# Disaggregated serving through two TensorRT-LLM OpenEngine gRPC servers (2 workers).
 #
 # Run this where `TRTLLM_PYTHON` has TensorRT-LLM installed --
 # `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000` or newer, the
@@ -116,7 +116,7 @@ build_trtllm_override_args_with_mem \
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 
-print_launch_banner "Launching TensorRT-LLM OpenEngine-gRPC Sidecar (Disaggregated, 2 GPUs)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching TensorRT-LLM OpenEngine-gRPC Sidecar (Disaggregated, 2 workers)" "$MODEL" "$HTTP_PORT" \
     "Prefill:     GPU ${TRTLLM_PREFILL_GPU}, gRPC ${TRTLLM_HOST}:${TRTLLM_PREFILL_GRPC_PORT}" \
     "Decode:      GPU ${TRTLLM_DECODE_GPU}, gRPC ${TRTLLM_HOST}:${TRTLLM_DECODE_GRPC_PORT}" \
     "KV transfer: ${TRTLLM_CACHE_TRANSCEIVER_BACKEND} cache transceiver" \
