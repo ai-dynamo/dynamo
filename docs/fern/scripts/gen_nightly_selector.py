@@ -19,6 +19,10 @@ Data sources (all authoritative and anonymous):
     pypi.nvidia.com ``ai-dynamo`` index. A night whose wheel was skipped or
     garbage-collected keeps its container command and drops its wheel command,
     so a dead install line is never emitted.
+  * the Release Artifacts ledger -- the same wheel indexes, and nothing else. A
+    row is one nightly whose required wheels all published, so the ledger names
+    the newest installable nightly -- the same version the selectors' ``latest``
+    rows resolve -- and the two views cannot drift apart.
 
 Stable and source-build entries are NOT generated here; they stay in
 ``components/releases.data.ts``, which remains the source of truth for released
@@ -65,7 +69,20 @@ NIGHTLY_VERSIONS_BACK = 3
 NIGHTLY_LEDGER_BUILDS = 3
 # Dated tags to walk back through when hunting for those versions.
 MAX_TAGS = 120
-NIGHTLY_PACKAGES = ["ai-dynamo", "ai-dynamo-runtime", "kvbm"]
+# Packages a ledger row must have published before the row is written. These are
+# the wheels its install commands resolve: ai-dynamo pins ai-dynamo-runtime to
+# the same version, so a night missing either one is not installable and must not
+# be advertised.
+NIGHTLY_LEDGER_REQUIRED_PACKAGES = ["ai-dynamo", "ai-dynamo-runtime"]
+# Packages the ledger advertises when that night published them. Not required:
+# kvbm left the nightly train with its v1.6.0 removal, and a package that stops
+# publishing must drop out of the Packages column rather than freeze the ledger.
+NIGHTLY_LEDGER_OPTIONAL_PACKAGES = ["kvbm"]
+# Every package the ledger can advertise, the required ones first.
+NIGHTLY_PACKAGES = [
+    *NIGHTLY_LEDGER_REQUIRED_PACKAGES,
+    *NIGHTLY_LEDGER_OPTIONAL_PACKAGES,
+]
 
 TIMEOUT = 30
 # Endpoint-unreachable failures degrade gracefully (skip the backend); anything
@@ -220,13 +237,21 @@ def published_wheels(package: str) -> set[str] | None:
 
 
 def published_nightly_packages() -> dict[str, set[str]] | None:
-    """Published dev versions for every package that a ledger row advertises."""
+    """Published dev versions per ledger package; ``None`` when a required one fails.
+
+    A required package missing from the index would leave every ledger row
+    unverifiable, so that fails the run. An optional package drops out of the
+    Packages column instead: kvbm left the nightly train in v1.6.0, and its index
+    going away must not stop every docs publish.
+    """
     published: dict[str, set[str]] = {}
-    for package in NIGHTLY_PACKAGES:
+    for package in NIGHTLY_LEDGER_REQUIRED_PACKAGES:
         versions = published_wheels(package)
         if versions is None:
             return None
         published[package] = versions
+    for package in NIGHTLY_LEDGER_OPTIONAL_PACKAGES:
+        published[package] = published_wheels(package) or set()
     return published
 
 
@@ -251,22 +276,52 @@ def wheel_date(version: str) -> str:
     return version.partition(".dev")[2]
 
 
+def version_key(version: str) -> tuple[str, tuple[int, int, int]]:
+    """Order dev versions by night first, then by base version."""
+    base, _, yyyymmdd = version.partition(".dev")
+    major, minor, patch = (int(part) for part in base.split("."))
+    return (yyyymmdd, (major, minor, patch))
+
+
 def newest_published(published: set[str]) -> str | None:
-    """The newest ``ai-dynamo`` dev wheel on PyPI, independent of any NGC tag."""
+    """The newest installable dev wheel, independent of any NGC tag."""
     if not published:
         return None
-
-    def key(version: str) -> tuple[str, tuple[int, int, int]]:
-        base, _, yyyymmdd = version.partition(".dev")
-        major, minor, patch = (int(part) for part in base.split("."))
-        return (yyyymmdd, (major, minor, patch))
-
-    return max(published, key=key)
+    return max(published, key=version_key)
 
 
 def ledger_version_published(version: str, published: dict[str, set[str]]) -> bool:
-    """Whether every package advertised by a ledger row published ``version``."""
-    return all(version in published[package] for package in NIGHTLY_PACKAGES)
+    """Whether every required wheel for ``version`` is on the index.
+
+    A ledger row and a wheel command make the same claim, so this is also the
+    installability rule: ``ai-dynamo`` pins ``ai-dynamo-runtime`` to the exact
+    version, and a night missing either wheel offers nothing to install.
+    """
+    return all(
+        version in published[package] for package in NIGHTLY_LEDGER_REQUIRED_PACKAGES
+    )
+
+
+def installable_wheels(published: dict[str, set[str]]) -> set[str]:
+    """Versions that pass ``ledger_version_published``, i.e. that pip can resolve.
+
+    Both the selector rows and the ledger rows resolve their wheel commands from
+    this one set, which is what keeps their newest nightly the same version.
+    ``ai-dynamo`` is the package the selector pins, and a version it never
+    published is not installable whatever its companions did.
+    """
+    return {
+        version
+        for version in published["ai-dynamo"]
+        if ledger_version_published(version, published)
+    }
+
+
+def ledger_packages_published(
+    version: str, published: dict[str, set[str]]
+) -> list[str]:
+    """The advertised packages that published ``version``, required ones first."""
+    return [package for package in NIGHTLY_PACKAGES if version in published[package]]
 
 
 # --------------------------------------------------------------------------- #
@@ -291,26 +346,45 @@ class NightlyBackendBuild:
 
 @dataclass(frozen=True)
 class NightlyBuild:
-    """One Release Artifacts ledger row, sourced from a dated nightly tag."""
+    """One Release Artifacts ledger row: a nightly whose wheels all published."""
 
     version: str
     date: str
     packages: list[str]
 
 
-def build(
-    published: dict[str, set[str]],
-) -> tuple[list[NightlyBackendBuild], list[NightlyBuild]]:
-    dynamo_wheels = published["ai-dynamo"]
+def build_ledger(
+    wheels: set[str], published: dict[str, set[str]]
+) -> list[NightlyBuild]:
+    """The ``NIGHTLY_LEDGER_BUILDS`` newest nights of the installable wheel train.
+
+    ``wheels`` is ``installable_wheels()``: the same set the selectors' latest
+    rows pick their command from, so the two views lead with the same version and
+    the drift #14940 reports cannot recur. ``published`` is here for the Packages
+    column, which names the packages that actually published that night.
+    """
+    ledger: list[NightlyBuild] = []
+    for version in sorted(wheels, key=version_key, reverse=True):
+        ledger.append(
+            NightlyBuild(
+                version=version,
+                date=pretty_date(wheel_date(version)),
+                packages=ledger_packages_published(version, published),
+            )
+        )
+        if len(ledger) == NIGHTLY_LEDGER_BUILDS:
+            break
+    return ledger
+
+
+def build(published: set[str]) -> list[NightlyBackendBuild]:
     rows: list[NightlyBackendBuild] = []
-    tags_by_backend: dict[str, dict[str, str]] = {}
 
     for fw in FRAMEWORKS:
         tags = dated_tags(fw.image)
         if not tags:
             warn(f"{fw.backend}: no dated nightly tags found; skipping")
             continue
-        tags_by_backend[fw.backend] = dict(tags)
 
         # Group nightly tags by the backend version each shipped, newest first,
         # so a version's whole run is available when picking a representative.
@@ -355,9 +429,9 @@ def build(
                 # than the container commit, and no pin moved since. Otherwise use
                 # this version's own run, whose commits were read.
                 yyyymmdd, sha = nights[0]
-                wheel = newest_published(dynamo_wheels)
+                wheel = newest_published(published)
                 if not wheel or wheel_date(wheel) < yyyymmdd or pins_moved_since(sha):
-                    wheel = run_wheel(nights, dynamo_wheels)
+                    wheel = run_wheel(nights, published)
             else:
                 # Pinned rows describe one immutable build, so the wheel has to
                 # come from the exact commit the container tag names. Fall back to
@@ -365,7 +439,7 @@ def build(
                 # container tag, when none of its nights published a wheel.
                 chosen = None
                 for yyyymmdd, sha in nights:
-                    wheel = wheel_for(yyyymmdd, sha, dynamo_wheels)
+                    wheel = wheel_for(yyyymmdd, sha, published)
                     if wheel:
                         chosen = (yyyymmdd, sha, wheel)
                         break
@@ -383,35 +457,11 @@ def build(
                 )
             )
 
-    # A ledger row describes the package train, not one backend selector row.
-    # Require every runtime repository to publish the same dated tag before
-    # showing it; otherwise the existing package list would overstate what
-    # shipped. A ledger row names every package in NIGHTLY_PACKAGES, so require
-    # every one at the exact resolved version before writing it.
-    common_dates = (
-        set.intersection(*(set(tags) for tags in tags_by_backend.values()))
-        if len(tags_by_backend) == len(FRAMEWORKS)
-        else set()
-    )
-    ledger: list[NightlyBuild] = []
-    for yyyymmdd in sorted(common_dates, reverse=True):
-        shas = {tags_by_backend[fw.backend][yyyymmdd] for fw in FRAMEWORKS}
-        if len(shas) != 1:
-            continue
-        sha = shas.pop()
-        version = wheel_for(yyyymmdd, sha, dynamo_wheels)
-        if version and ledger_version_published(version, published):
-            ledger.append(
-                NightlyBuild(
-                    version=version,
-                    date=pretty_date(yyyymmdd),
-                    packages=list(NIGHTLY_PACKAGES),
-                )
-            )
-        if len(ledger) == NIGHTLY_LEDGER_BUILDS:
-            break
-
-    return rows, ledger
+    # The ledger is not assembled here. It describes the wheel train, not one
+    # backend selector row, and every runtime repository carrying a dated tag
+    # that night says nothing about which wheels exist. build_ledger() reads the
+    # same installable wheel set the rows above take their commands from.
+    return rows
 
 
 def as_ts(rows: list[NightlyBackendBuild], ledger: list[NightlyBuild]) -> str:
@@ -470,7 +520,7 @@ def as_ts(rows: list[NightlyBackendBuild], ledger: list[NightlyBuild]) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stdout", action="store_true", help="print instead of write")
     parser.add_argument(
@@ -484,17 +534,17 @@ def main() -> int:
         default=OUT,
         help="destination module (default: the source tree copy)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     rows: list[NightlyBackendBuild] = []
     ledger: list[NightlyBuild] = []
     if args.offline:
         # Local previews and the composition replay only need the module to
-        # exist so the component import resolves; the selector renders its
-        # unavailable state from an empty list.
+        # exist so the component import resolves; the selector and the ledger
+        # render their unavailable state from an empty list.
         warn("offline: writing an empty module, nightly rows omitted")
     else:
-        # Both guards protect the same invariant: the publish job syncs whatever
+        # These guards protect the same invariant: the publish job syncs whatever
         # this writes, so a module that resolved nothing would replace the live
         # selector's rows with nothing. Fail and leave the published copy alone.
         published = published_nightly_packages()
@@ -505,17 +555,22 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        rows, ledger = build(published)
+        # One installable wheel set feeds both views, so their newest nightly is
+        # the same version by construction. NGC tags are not consulted: a
+        # backend's tag list going missing must not cost the ledger a row.
+        wheels = installable_wheels(published)
+        rows = build(wheels)
         if not rows:
             print(
                 "error: no nightly data resolved; refusing to write an empty module",
                 file=sys.stderr,
             )
             return 1
+        ledger = build_ledger(wheels, published)
         if len(ledger) < NIGHTLY_LEDGER_BUILDS:
             print(
-                "error: fewer than three complete nightly ledger rows resolved; "
-                "refusing to replace the published ledger",
+                f"error: fewer than {NIGHTLY_LEDGER_BUILDS} complete nightly ledger "
+                "rows resolved; refusing to replace the published ledger",
                 file=sys.stderr,
             )
             return 1
