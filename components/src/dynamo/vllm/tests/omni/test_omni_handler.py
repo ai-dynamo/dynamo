@@ -1256,7 +1256,6 @@ class TestImageGenerationSizeValidation:
 
 @pytest.fixture
 def image_request_handler():
-    """Exercise request preparation with real image decoding and a mocked engine."""
     handler = _make_handler()
     handler.config.output_modalities = ["image"]
     handler._image_loader = ImageLoader()
@@ -1414,6 +1413,38 @@ class TestImageReferenceInputs:
                 pass
 
         assert exc_info.value is error
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["https", "data"])
+    async def test_truncated_reference_preserves_loader_error_contract(
+        self, image_request_handler, source
+    ):
+        handler = image_request_handler
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (64, 64), color="red").save(buffer, format="JPEG")
+            truncated = buffer.getvalue()[:-20]
+        reference = "https://8.8.8.8/reference.jpg"
+        expected_error = OSError
+        if source == "data":
+            reference = "data:image/jpeg;base64," + base64.b64encode(truncated).decode()
+            expected_error = HttpStatusError
+
+        with patch(
+            "dynamo.common.multimodal.image_loader.fetch_bytes",
+            new=AsyncMock(return_value=truncated),
+        ) as fetch:
+            with pytest.raises(expected_error) as exc_info:
+                async for _ in handler._generate_openai_mode(
+                    {"prompt": "a teapot", "input_reference": reference}, None, "req-1"
+                ):
+                    pass
+
+        if source == "data":
+            assert exc_info.value.status == 400
+            fetch.assert_not_awaited()
+        else:
+            fetch.assert_awaited_once()
         handler.engine_client.generate.assert_not_called()
 
     @pytest.mark.asyncio

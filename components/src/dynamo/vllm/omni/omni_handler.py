@@ -618,7 +618,7 @@ class OmniHandler(BaseOmniHandler):
                     image = await self._image_loader.load_image(
                         parsed_request.input_reference
                     )
-                except (OSError, ValueError, PIL.Image.DecompressionBombError) as e:
+                except (ValueError, PIL.Image.DecompressionBombError) as e:
                     # Keep URLs and inline image data out of the client error.
                     raise ValueError("Failed to load input_reference") from e
             return self._engine_inputs_from_image(
