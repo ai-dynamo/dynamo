@@ -854,7 +854,7 @@ from dynamo.common.multimodal import ImageLoader
 ImageLoader(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None, session_scoped_cache: bool | None = None)
 ```
 
-[`components/src/dynamo/common/multimodal/image_loader.py#L110`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L110)
+[`components/src/dynamo/common/multimodal/image_loader.py#L137`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L137)
 
 **Public methods**
 
@@ -895,7 +895,7 @@ DYN_MM_IMAGE_CACHE_SESSION_SCOPED (default off). When enabled,
 HTTP loads without a scope bypass all image caches.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L113)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L140)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image">load_image</h4>
 
@@ -903,9 +903,9 @@ HTTP loads without a scope bypass all image caches.
 load_image(image_url: str, *, cache_scope: str | None = None) -> Image.Image
 ```
 
-No summary available.
+Load and decode one media URL through the validated image cache.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L334)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L359)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image-batch">load_image_batch</h4>
 
@@ -948,7 +948,7 @@ DYN_MM_IMAGE_CACHE_SESSION_SCOPED is enabled.
 - `ValueError` — If enable_frontend_decoding=True but nixl_connector is None
 - `ValueError` — If a UUID-only slot is received without opting in
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L426)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L453)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
