@@ -87,6 +87,24 @@ impl WorkerSelectionContext<'_> {
         (self.worker_capacity)(worker.worker_id)
     }
 
+    /// Return `worker`'s modeled prefill backlog in milliseconds: a derived estimate of the time
+    /// its active prefills still need, from the host's prefill-load model predictions. It excludes
+    /// this request's own prefill.
+    ///
+    /// None unless a component of this policy declares [`WorkerInputs::PREFILL_TIME`], and None
+    /// for a worker when the host runs without a prefill-load model
+    /// (`router_prefill_load_model: ais`), a prediction failed, or any active prefill on the
+    /// worker is unmodeled. Values synced from router replicas are anchored at receive time, not
+    /// at the producer's time.
+    ///
+    /// [`WorkerInputs::PREFILL_TIME`]: super::WorkerInputs::PREFILL_TIME
+    pub fn modeled_prefill_backlog_ms(&self, worker: WorkerWithDpRank) -> Option<u64> {
+        self.request
+            .modeled_prefill_backlog_ms
+            .get(&worker)
+            .copied()
+    }
+
     /// Return the policy class requested for this request: the caller's value, replaced by a
     /// request classifier's override. This is the requested name; a profile with class
     /// families may still resolve it to a family member for queueing.

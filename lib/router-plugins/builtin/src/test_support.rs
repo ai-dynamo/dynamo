@@ -40,6 +40,7 @@ pub(crate) struct Worker {
     pub(crate) active_prefill_tokens: usize,
     pub(crate) decode_blocks: usize,
     pub(crate) total_kv_blocks: Option<u64>,
+    pub(crate) modeled_backlog_ms: Option<u64>,
 }
 
 impl Worker {
@@ -59,6 +60,10 @@ impl Worker {
     }
     pub(crate) fn prefill(mut self, active_prefill_tokens: usize) -> Self {
         self.active_prefill_tokens = active_prefill_tokens;
+        self
+    }
+    pub(crate) fn modeled(mut self, backlog_ms: u64) -> Self {
+        self.modeled_backlog_ms = Some(backlog_ms);
         self
     }
     pub(crate) fn decode(mut self, decode_blocks: usize, total_kv_blocks: u64) -> Self {
@@ -96,6 +101,7 @@ pub(crate) fn request(prompt_blocks: usize, prefix: u64) -> SchedulingRequest {
         retain_kv_transfer_chain: false,
         shared_cache_hits: None,
         worker_loads: Default::default(),
+        modeled_prefill_backlog_ms: Default::default(),
         resp_tx: None,
     }
 }
@@ -122,6 +128,9 @@ pub(crate) fn select(
                 ..Default::default()
             },
         );
+        if let Some(backlog_ms) = worker.modeled_backlog_ms {
+            request.modeled_prefill_backlog_ms.insert(rank, backlog_ms);
+        }
     }
     let configs: HashMap<u64, TestWorker> = workers
         .iter()

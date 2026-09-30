@@ -218,6 +218,7 @@ fn fixture_with_preferred_taints(
         retain_kv_transfer_chain: false,
         shared_cache_hits: None,
         worker_loads,
+        modeled_prefill_backlog_ms: Default::default(),
         resp_tx: None,
     };
 

@@ -509,6 +509,7 @@ mod test_support {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
+            modeled_prefill_backlog_ms: Default::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,

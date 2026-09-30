@@ -141,6 +141,9 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    /// Request each worker's modeled prefill backlog, read through
+    /// [`WorkerSelectionContext::modeled_prefill_backlog_ms`](super::WorkerSelectionContext::modeled_prefill_backlog_ms).
+    pub const PREFILL_TIME: Self = Self(1 << 3);
     /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
     #[cfg(any(test, feature = "bench"))]
