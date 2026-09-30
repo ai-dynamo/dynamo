@@ -52,23 +52,29 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ##### Environment variable order in newly created DGDs
 
-**Change:** For DGDs created by Dynamo Operator 1.6.0 or later, the operator preserves environment
-variable order and duplicate names when it combines operator defaults, DGD-level `spec.env`, and
-component `podTemplate` environment variables. Operator-provided variables precede user-provided
-variables, including variables added by an inference backend. Previously, the operator sorted the
-combined list alphabetically and collapsed entries with the same name.
+**Change:** For DGDs whose `nvidia.com/dynamo-operator-origin-version` annotation is 1.6.0 or later,
+the operator preserves environment variable order and duplicate names. The rendered order is
+operator-provided defaults, then DGD-level `spec.env`, then component
+`podTemplate.spec.containers[*].env`. Operator-provided variables, including component,
+infrastructure/transport, KV-transfer, and inference-backend variables, precede user-provided
+variables. Previously, the operator sorted the combined list alphabetically and collapsed entries
+with the same name.
 
-Kubernetes expands `$(NAME)` references from earlier to later entries. The new behavior lets user
-variables reference operator-provided variables and lets a later user entry override an
-operator-provided value with the same name.
+Kubernetes resolves a `$(NAME)` reference only against entries defined earlier in the list. The
+reference uses the value in effect at that position; a later duplicate does not change an already
+expanded value. This lets user variables reference operator-provided variables and lets a later
+user entry override an operator-provided value with the same name.
 
 **Affected:** Newly created DGDs whose environment lists depend on alphabetical sorting or contain
-duplicate names. A DGD that declares a reference before its source can render a different value than
-it did under the previous sorting behavior.
+duplicate names. If the referenced variable is not defined earlier, Kubernetes leaves the reference
+literal. For example, `MODEL_PATH` remains `$(MODEL_ROOT)/model` if `MODEL_ROOT` appears later.
 
 **Action:** Review `spec.env` and each `podTemplate.spec.containers[*].env` list. Declare a source
 variable before variables that reference it, and remove unintended duplicate names. Keep an
-intentional override after the value it replaces. For example:
+intentional override after the value it replaces. A component variable can therefore override a
+DGD-level variable, but a DGD-level variable cannot reference a component variable. Intentional
+duplicates remain visible as two entries in the rendered Pod; the API server might warn that the
+later definition `hides previous definition`. This is expected, and the later value wins. For example:
 
 ```yaml
 spec:
@@ -86,10 +92,12 @@ spec:
                   value: $(MODEL_ROOT)/model
 ```
 
-**Existing deployments:** DGDs created before Dynamo Operator 1.6.0 retain the legacy sorted and
-de-duplicated output. An operator-only upgrade does not reorder their rendered environment lists or
-roll their workloads for this change. Deleting and recreating a DGD under 1.6.0 or later opts it into
-the new behavior.
+**Existing deployments:** DGDs created by an operator older than 1.6.0, or without the origin
+annotation, retain the legacy sorted and de-duplicated output. An operator-only upgrade does not
+reorder their rendered environment lists or roll their workloads for this change. Deleting and
+recreating a DGD under 1.6.0 or later opts it into the new behavior and causes workload downtime.
+To preserve availability, create a new DGD under a different name and migrate traffic before
+deleting the old DGD.
 
 ### v1.5.0
 
