@@ -50,13 +50,46 @@ use super::codec::{Codec, MsgpackCodec};
 use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
+use crate::transports::zmq::ipv6_option_for;
+
+fn bind_tmq_socket<T>(builder: SocketBuilder<T>, endpoint: &str) -> Result<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder
+        .set_ipv6(ipv6_option_for(endpoint)?)
+        .bind(endpoint)
+        .map_err(Into::into)
+}
+
+fn connect_tmq_socket<T>(builder: SocketBuilder<T>, endpoint: &str) -> Result<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder
+        .set_ipv6(ipv6_option_for(endpoint)?)
+        .connect(endpoint)
+        .map_err(Into::into)
+}
+
+fn connect_zmq_socket(socket: &impl AsZmqSocket, endpoint: &str) -> Result<()> {
+    let ipv6 = ipv6_option_for(endpoint)?;
+    let socket = socket.get_socket();
+    // ZMQ snapshots this option per connection; keep hostname resolution on IPv4.
+    socket
+        .set_ipv6(ipv6)
+        .with_context(|| format!("Failed to set ZMQ_IPV6 for {endpoint}"))?;
+    socket
+        .connect(endpoint)
+        .with_context(|| format!("Failed to connect ZMQ socket to {endpoint}"))?;
+    Ok(())
+}
 
 fn configure_publish_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
 where
     T: tmq::FromZmqSocket<T>,
 {
     builder
-        .set_ipv6(true)
         .set_sndhwm(ZMQ_SNDHWM)
         .set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
 }
@@ -75,10 +108,7 @@ fn configure_subscribe_builder_with_hwm<T>(
 where
     T: tmq::FromZmqSocket<T>,
 {
-    builder
-        .set_ipv6(true)
-        .set_rcvhwm(rcvhwm)
-        .set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+    builder.set_rcvhwm(rcvhwm).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
 }
 
 /// Keeps a received ZMQ message alive for as long as any derived `Bytes` exists.
@@ -113,7 +143,7 @@ impl ZmqPubTransport {
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).bind(&bind_endpoint)?;
+        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &bind_endpoint)?;
         let actual_endpoint = socket
             .get_socket()
             .get_last_endpoint()
@@ -143,7 +173,7 @@ impl ZmqPubTransport {
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).connect(xsub_endpoint)?;
+        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), xsub_endpoint)?;
 
         tracing::info!(
             endpoint = %xsub_endpoint,
@@ -166,10 +196,10 @@ impl ZmqPubTransport {
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).connect(first_endpoint)?;
+        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), first_endpoint)?;
 
         for endpoint in endpoints {
-            socket.get_socket().connect(endpoint)?;
+            connect_zmq_socket(&socket, endpoint)?;
             tracing::debug!(endpoint = %endpoint, "ZMQ PUB connected to broker XSUB");
         }
 
@@ -342,11 +372,11 @@ impl ZmqSubTransport {
     fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
         anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
         let ctx = shared_zmq_context();
-        Ok(
-            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm)
-                .connect(endpoint)?
-                .subscribe(topic.as_bytes())?,
-        )
+        Ok(connect_tmq_socket(
+            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm),
+            endpoint,
+        )?
+        .subscribe(topic.as_bytes())?)
     }
 
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
@@ -410,7 +440,7 @@ impl ZmqSubTransport {
         let endpoint_count = endpoints.len();
         let socket = Self::connect_socket(first_endpoint, topic)?;
         for endpoint in endpoint_iter {
-            socket.get_socket().connect(endpoint)?;
+            connect_zmq_socket(&socket, endpoint)?;
         }
 
         tracing::info!(
@@ -470,12 +500,12 @@ impl ZmqSubTransport {
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_subscribe_builder(subscribe(&ctx))
-            .connect(first_endpoint)?
-            .subscribe(topic.as_bytes())?;
+        let socket =
+            connect_tmq_socket(configure_subscribe_builder(subscribe(&ctx)), first_endpoint)?
+                .subscribe(topic.as_bytes())?;
 
         for endpoint in endpoints_iter {
-            socket.get_socket().connect(endpoint)?;
+            connect_zmq_socket(&socket, endpoint)?;
             tracing::debug!(endpoint = %endpoint, "ZMQ SUB connected to endpoint");
         }
 
@@ -619,6 +649,31 @@ mod tests {
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use tokio::time::{Duration, timeout};
 
+    #[tokio::test]
+    async fn unbracketed_ipv6_endpoints_fail_before_connecting() {
+        let error = ZmqSubTransport::connect_broker("tcp://::1:5555", "topic")
+            .await
+            .err()
+            .expect("unbracketed IPv6 endpoint should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("IPv6 addresses must be bracketed"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_additional_connection_names_endpoint() {
+        let endpoint = format!("inproc://dynamo-zmq-connect-context-{}", std::process::id());
+        let socket = ZmqSubTransport::connect_socket(&endpoint, "topic").unwrap();
+        let error = connect_zmq_socket(&socket, "tcp://missing-port").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("tcp://missing-port"),
+            "{error:#}"
+        );
+    }
+
     async fn send_raw(publisher: &ZmqPubTransport, frames: Vec<Vec<u8>>) {
         publisher
             .socket
@@ -669,6 +724,7 @@ mod tests {
         let (publisher, _actual_endpoint) = ZmqPubTransport::bind(&endpoint, topic)
             .await
             .expect("Failed to create publisher");
+        assert!(endpoint.starts_with("tcp://127.0.0.1:"));
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -860,6 +916,134 @@ mod tests {
             codec.decode_envelope(&wire.payload).unwrap().payload,
             sentinel.payload
         );
+    }
+
+    fn encoded_event(topic: &str, publisher_id: u64, sequence: u64) -> Bytes {
+        MsgpackCodec
+            .encode_envelope(&EventEnvelope {
+                publisher_id,
+                sequence,
+                published_at: 1,
+                topic: topic.to_string(),
+                payload: Bytes::from_static(b"test"),
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn broker_hostname_connections_reach_ipv4_peers() {
+        let topic = "broker-hostname";
+        let ctx = shared_zmq_context();
+        let mut broker_sub = subscribe(&ctx)
+            .set_ipv6(false)
+            .bind("tcp://127.0.0.1:*")
+            .unwrap()
+            .subscribe(topic.as_bytes())
+            .unwrap();
+        let xsub_endpoint = broker_sub
+            .get_socket()
+            .get_last_endpoint()
+            .unwrap()
+            .unwrap()
+            .replace("127.0.0.1", "localhost");
+        let publisher = ZmqPubTransport::connect(&xsub_endpoint, topic)
+            .await
+            .unwrap();
+        // Some hosts have no IPv6 localhost entry; still verify the DNS family.
+        assert!(
+            !publisher
+                .socket
+                .lock()
+                .await
+                .get_socket()
+                .is_ipv6()
+                .unwrap()
+        );
+        let (broker_pub, xpub_endpoint) = ZmqPubTransport::bind("tcp://127.0.0.1:0", topic)
+            .await
+            .unwrap();
+        let subscriber = ZmqSubTransport::connect_broker(
+            &xpub_endpoint.replace("127.0.0.1", "localhost"),
+            topic,
+        )
+        .await
+        .unwrap();
+        let mut stream = subscriber.subscribe(topic).await.unwrap();
+        let encoded = encoded_event(topic, 101, 1);
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                publisher.publish(topic, encoded.clone()).await.unwrap();
+                if let Ok(frames) = timeout(Duration::from_millis(25), broker_sub.next()).await {
+                    broker_pub
+                        .socket
+                        .lock()
+                        .await
+                        .send(frames.unwrap().unwrap())
+                        .await
+                        .unwrap();
+                }
+                if let Ok(event) = timeout(Duration::from_millis(25), stream.next()).await {
+                    assert_eq!(event.unwrap().unwrap(), encoded);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("hostname connections should deliver through IPv4-only peers");
+    }
+
+    #[rstest::rstest]
+    #[case("tcp://127.0.0.1:0", "tcp://[::1]:0")]
+    #[case("tcp://[::1]:0", "tcp://127.0.0.1:0")]
+    #[tokio::test]
+    async fn multiple_sub_connections_support_mixed_families(
+        #[case] endpoint_a: &str,
+        #[case] endpoint_b: &str,
+    ) {
+        if let Err(error) = std::net::TcpListener::bind("[::1]:0") {
+            eprintln!("Skipping mixed IPv4/IPv6 subscriber test: {error}");
+            return;
+        }
+        let topic = "mixed-subscriber";
+        let (publisher_a, endpoint_a) = ZmqPubTransport::bind(endpoint_a, topic).await.unwrap();
+        let (publisher_b, endpoint_b) = ZmqPubTransport::bind(endpoint_b, topic).await.unwrap();
+        let endpoints = [
+            endpoint_a.replace("127.0.0.1", "localhost"),
+            endpoint_b.replace("127.0.0.1", "localhost"),
+        ];
+        let mut direct = ZmqSubTransport::connect_single_consumer_multiple(&endpoints, topic)
+            .await
+            .unwrap();
+        let broker = ZmqSubTransport::connect_broker_multiple(&endpoints, topic)
+            .await
+            .unwrap();
+        let mut broadcast = broker.subscribe(topic).await.unwrap();
+        let encoded_a = encoded_event(topic, 101, 1);
+        let encoded_b = encoded_event(topic, 202, 1);
+        let codec = MsgpackCodec;
+        let mut direct_seen = std::collections::HashSet::new();
+        let mut broadcast_seen = std::collections::HashSet::new();
+        timeout(Duration::from_secs(5), async {
+            while direct_seen.len() < 2 || broadcast_seen.len() < 2 {
+                publisher_a.publish(topic, encoded_a.clone()).await.unwrap();
+                publisher_b.publish(topic, encoded_b.clone()).await.unwrap();
+                if let Ok(Some(Ok(message))) =
+                    timeout(Duration::from_millis(25), direct.next()).await
+                {
+                    direct_seen.insert(message.publisher_id);
+                }
+                if let Ok(Some(Ok(message))) =
+                    timeout(Duration::from_millis(25), broadcast.next()).await
+                {
+                    broadcast_seen.insert(codec.decode_envelope(&message).unwrap().publisher_id);
+                }
+            }
+        })
+        .await
+        .expect("both publishers should reach both subscriber APIs");
+        assert_eq!(direct_seen, std::collections::HashSet::from([101, 202]));
+        assert_eq!(broadcast_seen, direct_seen);
     }
 
     #[tokio::test]
