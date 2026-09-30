@@ -4,6 +4,8 @@
 package dynamo
 
 import (
+	"slices"
+	"sort"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -15,6 +17,112 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
+
+func TestNativeSidecarEnvironmentOrderByOrigin(t *testing.T) {
+	for _, origin := range []string{"1.6.0", "1.5.0", ""} {
+		t.Run("origin="+origin, func(t *testing.T) {
+			t.Log("Configure graph, engine, runtime, and frontend dependencies with duplicate overrides")
+			graphEnv := []corev1.EnvVar{{Name: "Z_GRAPH", Value: "graph"}, {Name: "A_GRAPH", Value: "$(Z_GRAPH)"}}
+			engineEnv := []corev1.EnvVar{
+				{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
+				{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
+			}
+			runtimeEnv := []corev1.EnvVar{
+				{Name: "A_SYSTEM", Value: "$(NATS_SERVER)/$(NATS_TLS_CA_CERT_PATH)"},
+				{Name: "NATS_SERVER", Value: "nats://user:4222"},
+				{Name: "Z_RUNTIME", Value: "runtime"},
+				{Name: "A_RUNTIME", Value: "$(Z_RUNTIME)"},
+				{Name: "A_POLICY", Value: "$(DYN_KV_TRANSFER_ENFORCEMENT)"},
+				{Name: commonconsts.EnvKvTransferEnforcement, Value: "preferred"},
+			}
+			frontendEnv := []corev1.EnvVar{
+				{Name: "A_SYSTEM", Value: "$(NATS_SERVER)/$(NATS_TLS_CA_CERT_PATH)"},
+				{Name: "NATS_SERVER", Value: "nats://frontend:4222"},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm", Env: graphEnv,
+					Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey: "topology.example/zone", Domain: "zone", Enforcement: "required",
+					}},
+				},
+			}
+			if origin != "" {
+				dgd.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}
+			}
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, FrontendSidecar: ptr.To("frontend"),
+				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "engine:latest", Env: engineEnv},
+							{Name: "frontend", Image: "frontend:1.6.0", Env: frontendEnv},
+						},
+						InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Env: runtimeEnv}},
+					},
+				},
+			}
+			if origin == "1.6.0" {
+				component.PodTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = "1.5.0"
+			}
+			dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{component}
+			original := dgd.DeepCopy()
+			config := &configv1alpha1.OperatorConfiguration{Infrastructure: configv1alpha1.InfrastructureConfiguration{
+				NATSAddress: "nats://system:4222", NATSTLSCAPath: "/certs/ca.crt",
+			}}
+
+			t.Log("Render directly and through a materialized DCD using the authoritative graph origin")
+			pod, err := GeneratePodSpecForComponent(&component, BackendFrameworkVLLM, nil, dgd, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			require.NoError(t, err)
+			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			require.Len(t, children, 1)
+			pods := []*corev1.PodSpec{pod}
+			for _, child := range children {
+				childPod, err := GenerateBasePodSpec(&child.Spec.DynamoComponentDeploymentSharedSpec, BackendFrameworkVLLM, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+				require.NoError(t, err)
+				pods = append(pods, childPod)
+			}
+			require.Equal(t, original, dgd)
+
+			t.Log("Verify exact engine order, runtime and frontend suffixes, and cache isolation")
+			for _, rendered := range pods {
+				engine, runtime, frontend := rendered.Containers[0], rendered.InitContainers[0], rendered.Containers[1]
+				require.Contains(t, engine.VolumeMounts, corev1.VolumeMount{Name: "cache", MountPath: "/cache"})
+				require.NotContains(t, runtime.VolumeMounts, corev1.VolumeMount{Name: "cache", MountPath: "/cache"})
+				require.NotContains(t, envVarsToMap(runtime.Env), "VLLM_CACHE_ROOT")
+				require.Equal(t, "required", envVarsToMap(runtime.Env)[commonconsts.EnvKvTransferEnforcement])
+				if origin == "1.6.0" {
+					require.Equal(t, slices.Concat([]corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: "/cache"}}, graphEnv, engineEnv), engine.Env)
+					// Policy fields remain authoritative; other duplicate names survive.
+					wantRuntimeSuffix := slices.Concat(graphEnv, runtimeEnv[:len(runtimeEnv)-1])
+					require.Equal(t, wantRuntimeSuffix, runtime.Env[len(runtime.Env)-len(wantRuntimeSuffix):])
+					require.Equal(t, frontendEnv, frontend.Env[len(frontend.Env)-len(frontendEnv):])
+					for _, container := range []corev1.Container{runtime, frontend} {
+						require.Equal(t, []corev1.EnvVar{
+							{Name: "NATS_TLS_CA_CERT_PATH", Value: "/certs/ca.crt"},
+							{Name: "NATS_SERVER", Value: "nats://system:4222"},
+						}, container.Env[:2])
+					}
+				} else {
+					require.Equal(t, []corev1.EnvVar{
+						{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
+						{Name: "A_GRAPH", Value: "$(Z_GRAPH)"},
+						{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
+						{Name: "Z_GRAPH", Value: "graph"},
+					}, engine.Env)
+					for _, container := range []corev1.Container{runtime, frontend} {
+						require.True(t, sort.SliceIsSorted(container.Env, func(i, j int) bool { return container.Env[i].Name < container.Env[j].Name }))
+						require.Len(t, envVarsToMap(container.Env), len(container.Env), "legacy env must have unique names")
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestNativeSidecarRendering(t *testing.T) {
 	for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeWorker, v1beta1.ComponentTypePrefill, v1beta1.ComponentTypeDecode} {
@@ -200,4 +308,48 @@ func (r *nativeSidecarSecretsRetriever) GetSecrets(namespace, image string) ([]s
 		return []string{"runtime-pull-secret"}, nil
 	}
 	return nil, nil
+}
+
+func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
+	for _, origin := range []string{"1.6.0", "1.5.0", ""} {
+		t.Run("origin="+origin, func(t *testing.T) {
+			t.Log("Configure a combined worker that references and overrides the cache default")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "runtime:1.6.0",
+						Env: []corev1.EnvVar{
+							{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
+							{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
+						},
+					}}},
+				},
+			}
+
+			t.Log("Render the full backend path and check cache injection relative to user entries")
+			pod, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, nil, "test", "test", RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			require.NoError(t, err)
+			var cacheEnv []corev1.EnvVar
+			for _, env := range pod.Containers[0].Env {
+				if env.Name == "A_CACHE" || env.Name == "VLLM_CACHE_ROOT" {
+					cacheEnv = append(cacheEnv, env)
+				}
+			}
+			if origin == "1.6.0" {
+				require.Equal(t, []corev1.EnvVar{
+					{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
+					{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
+					{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
+				}, cacheEnv)
+			} else {
+				require.Equal(t, []corev1.EnvVar{
+					{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
+					{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
+				}, cacheEnv)
+			}
+		})
+	}
 }
