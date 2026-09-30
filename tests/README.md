@@ -212,7 +212,7 @@ Markers differ by engine:
 - **`requested_trtllm_vram_gib(N)`** — max VRAM in GiB for non-text workloads (video/image diffusion). Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args` JSON. Note: diffusion models don't use KV cache, so this parameter may have no effect — `profiled_vram_gib` alone is sufficient for scheduler budget tracking.
 - TRT-LLM requires JSON merging for `--override-engine-args`, handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args`).
 
-`--max-vram-gib=N` deselects tests whose `profiled_vram_gib` exceeds N. Tests without a VRAM marker are also deselected (unknown VRAM = unsafe for parallel). To add a test to the pool, profile it with `tests/utils/profile_pytest.py` (see [GPU VRAM Profiler](#gpu-vram-profiler-profile_pytestpy)).
+`--max-vram-gib=N` deselects tests whose `profiled_vram_gib` exceeds N, and tests not marked `gpu_1`. Tests without a VRAM marker are also deselected (unknown VRAM = unsafe for parallel). To add a `gpu_1` test to the pool, profile it with `tests/utils/profile_pytest.py` (see [GPU VRAM Profiler](#gpu-vram-profiler-profile_pytestpy)).
 
 ### GPU-Parallel Execution
 
@@ -239,7 +239,7 @@ python3 -m pytest --max-vram-gib=48 -n auto -sv -m "gpu_1 and vllm and not night
 python3 -m pytest --max-vram-gib=48 -n auto -m "gpu_1 and sglang" tests/serve/test_sglang.py
 
 # Tests that still need profiling
-python3 -m pytest --dry-run -m "(gpu_1 or gpu_2) and not profiled_vram_gib" tests/serve/
+python3 -m pytest --dry-run -m "gpu_1 and not profiled_vram_gib" tests/serve/
 ```
 
 Example output (6 SGLang tests, RTX 6000 Ada 48 GiB):
@@ -411,7 +411,7 @@ pytest -m "sglang and e2e and gpu_1" -v --tb=short
 pytest -m "trtllm and e2e and gpu_1" -v --tb=short
 
 # GPU-parallel (VRAM-aware scheduling, ~2x faster on 48 GiB GPU)
-# Only tests with profiled_vram_gib markers are selected; -n auto calculates
+# Only gpu_1 tests with profiled_vram_gib markers are selected; -n auto calculates
 # concurrent slots from GPU VRAM / smallest test. See "GPU-Parallel Execution" below.
 python3 -m pytest --max-vram-gib=48 -n auto -m "gpu_1 and sglang" tests/serve/test_sglang.py -v
 python3 -m pytest --max-vram-gib=48 -n auto -m "gpu_1 and vllm" tests/serve/test_vllm.py -v
