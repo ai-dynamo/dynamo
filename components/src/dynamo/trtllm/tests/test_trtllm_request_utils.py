@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from dynamo.trtllm.utils.request_utils import (
@@ -126,26 +127,55 @@ def test_hidden_stop_tokens_keep_engine_stopping_enabled() -> None:
 
 INT32_MIN = -(2**31)
 INT32_MAX = 2**31 - 1
+PRIORITY_LIMIT = 2**22
+PRIORITY_STEP = 2**-24
+
+
+def _as_trtllm_float(priority: int) -> np.float32:
+    """TRT-LLM stores request priority as a C++ float."""
+    return np.float32(dynamo_priority_to_trtllm(priority))
 
 
 def test_dynamo_priority_zero_maps_to_trtllm_default():
     assert dynamo_priority_to_trtllm(0) == 0.5
 
 
-def test_dynamo_priority_mapping_is_monotonic_and_open_interval():
-    priorities = [INT32_MIN, -100, -10, -1, 0, 1, 10, 100, INT32_MAX]
-    mapped = [dynamo_priority_to_trtllm(p) for p in priorities]
-    assert mapped == sorted(mapped)
-    assert len(set(mapped)) == len(mapped)
-    assert all(0.0 < value < 1.0 for value in mapped)
+@pytest.mark.parametrize(
+    "priorities",
+    [
+        range(-1000, 1001),
+        range(PRIORITY_LIMIT - 1000, PRIORITY_LIMIT + 1),
+        range(-PRIORITY_LIMIT, -PRIORITY_LIMIT + 1001),
+    ],
+)
+def test_dynamo_priority_mapping_is_strict_in_float32(priorities):
+    mapped = [_as_trtllm_float(p) for p in priorities]
+    assert all(a < b for a, b in zip(mapped, mapped[1:]))
+    assert all(
+        value == dynamo_priority_to_trtllm(p) for p, value in zip(priorities, mapped)
+    )
+
+
+@pytest.mark.parametrize(
+    ("priority", "expected"),
+    [
+        (INT32_MAX, 0.75),
+        (PRIORITY_LIMIT + 1, 0.75),
+        (INT32_MIN, 0.25),
+        (-PRIORITY_LIMIT - 1, 0.25),
+    ],
+)
+def test_dynamo_priority_saturates_below_health_check(priority, expected):
+    assert _as_trtllm_float(priority) == expected
+    assert _as_trtllm_float(priority) < np.float32(1.0)
 
 
 @pytest.mark.parametrize(
     ("request_body", "expected"),
     [
         ({"priority": 1.0, "routing": {"priority": -5}}, 1.0),
-        ({"routing": {"priority": 1}}, 0.75),
-        ({"routing": {"priority": -1}}, 0.25),
+        ({"routing": {"priority": 1}}, 0.5 + PRIORITY_STEP),
+        ({"routing": {"priority": -1}}, 0.5 - PRIORITY_STEP),
         ({"routing": {"priority": None}}, 0.5),
         ({"routing": None}, 0.5),
         ({}, 0.5),

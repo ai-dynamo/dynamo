@@ -4,6 +4,11 @@
 from collections.abc import Mapping
 from typing import Any, Optional
 
+# One step is one float32 ulp in [0.5, 1.0), so every clamped priority maps to
+# a distinct float32 inside [0.25, 0.75].
+_TRTLLM_PRIORITY_SCALE = 1 << 24
+_TRTLLM_PRIORITY_LIMIT = 1 << 22
+
 
 def normalize_top_k_for_trtllm(top_k: int) -> int:
     """Translate Dynamo's disabled top-k sentinel to TRT-LLM's sentinel."""
@@ -13,14 +18,16 @@ def normalize_top_k_for_trtllm(top_k: int) -> int:
 def dynamo_priority_to_trtllm(priority: int) -> float:
     """Map a Dynamo request priority onto TRT-LLM's scheduling priority scale.
 
-    Dynamo priorities are unbounded integers where higher means more important
-    and 0 is the default. TRT-LLM priorities are floats in [0.0, 1.0] where
-    higher means more important and 0.5 is the default. The mapping is
-    monotonic, sends 0 to 0.5, and never reaches 0.0 or 1.0 for an int32, so
-    health checks at 1.0 always sort ahead of user traffic.
+    Dynamo priorities are integers where higher means more important and 0 is
+    the default. TRT-LLM stores priority as a float32 in [0.0, 1.0] where
+    higher means more important and 0.5 is the default. The mapping is linear
+    in steps of one float32 ulp, so priorities within +/-2**22 stay exactly
+    representable and strictly ordered; larger magnitudes saturate. Results
+    lie in [0.25, 0.75], so health checks at 1.0 always sort ahead of user
+    traffic.
     """
-    priority = int(priority)
-    return 0.5 + 0.5 * priority / (abs(priority) + 1)
+    priority = max(-_TRTLLM_PRIORITY_LIMIT, min(_TRTLLM_PRIORITY_LIMIT, int(priority)))
+    return 0.5 + priority / _TRTLLM_PRIORITY_SCALE
 
 
 def request_trtllm_priority(request: Mapping[str, Any], default: float) -> float:

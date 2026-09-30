@@ -942,7 +942,7 @@ class TestGenerateLocally:
 
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
-        assert kwargs["priority"] == 0.75
+        assert kwargs["priority"] == 0.5 + 2**-24
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
