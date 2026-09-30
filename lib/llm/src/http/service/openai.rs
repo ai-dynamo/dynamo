@@ -3936,16 +3936,18 @@ pub fn validate_chat_completion_stream_options(
     Ok(())
 }
 
-/// Validates a chat completion request and returns an error response if validation fails.
+/// Validates a request and maps a failure to an OpenAI-compatible error response.
 ///
-/// This function calls the `validate` method implemented for `NvCreateChatCompletionRequest`.
-/// If validation fails, it maps the error into an OpenAI-compatible error response.
-pub fn validate_chat_completion_fields_generic(
-    request: &NvCreateChatCompletionRequest,
+/// `request_kind` names the request kind in the message of a backend
+/// `InvalidArgument` error, for example "chat completion". Every other validation failure
+/// becomes a 400 with the [`VALIDATION_PREFIX`] message.
+fn validate_request_fields_generic<R: ValidateRequest>(
+    request: &R,
+    request_kind: &str,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
         if find_invalid_argument_in_chain(e.as_ref()).is_some() {
-            return ErrorMessage::from_anyhow(e, "Invalid chat completion request");
+            return ErrorMessage::from_anyhow(e, &format!("Invalid {request_kind} request"));
         }
         ErrorMessage::from_http_error(
             ErrorClass::InvalidRequest,
@@ -3955,6 +3957,13 @@ pub fn validate_chat_completion_fields_generic(
             },
         )
     })
+}
+
+/// Validates a chat completion request and returns an error response if validation fails.
+pub fn validate_chat_completion_fields_generic(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    validate_request_fields_generic(request, "chat completion")
 }
 
 /// Validates that stream_options is only used when stream=true for completions (NVBug 5662680)
@@ -3977,24 +3986,10 @@ pub fn validate_completion_stream_options(
 }
 
 /// Validates a completion request and returns an error response if validation fails.
-///
-/// This function calls the `validate` method implemented for `NvCreateCompletionRequest`.
-/// If validation fails, it maps the error into an OpenAI-compatible error response.
 pub fn validate_completion_fields_generic(
     request: &NvCreateCompletionRequest,
 ) -> Result<(), ErrorResponse> {
-    request.validate().map_err(|e| {
-        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
-            return ErrorMessage::from_anyhow(e, "Invalid completion request");
-        }
-        ErrorMessage::from_http_error(
-            ErrorClass::InvalidRequest,
-            HttpError {
-                code: 400,
-                message: VALIDATION_PREFIX.to_string() + &e.to_string(),
-            },
-        )
-    })
+    validate_request_fields_generic(request, "completion")
 }
 
 /// OpenAI Responses input-token counting handler.
