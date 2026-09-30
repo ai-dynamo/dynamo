@@ -238,7 +238,6 @@ STUB_MODULES = [
     "vllm.utils.system_utils",
     "vllm.v1",
     "vllm.v1.core",
-    "vllm.v1.core.kv_cache_manager",
     "vllm.v1.core.kv_cache_utils",
     "vllm.v1.core.single_type_kv_cache_manager",
     "vllm.v1.core.sched",

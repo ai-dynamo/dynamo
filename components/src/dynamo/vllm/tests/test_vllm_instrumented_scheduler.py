@@ -29,7 +29,6 @@ import torch
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import CUDAGraphMode  # noqa: E402
 from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -7537,6 +7536,11 @@ def test_real_seed_measured_tail_is_independent_of_request_history(monkeypatch):
 @pytest.fixture
 def realseed_prefix_cache(monkeypatch):
     """Real vLLM request hashes/cache metadata; no model or KV tensors."""
+    # Not a module-level import: tests/report_pytest_markers.py collects this file
+    # with vLLM stubbed, and a stub for this module would satisfy the vLLM probe
+    # in test_vllm_kv_cache_metadata_compat.py.
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+
     monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test-root"), raising=False)
 
     def build(point, *, drop=0, seq=0):
