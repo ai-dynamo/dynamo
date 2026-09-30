@@ -25,7 +25,6 @@ from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
-from dynamo.common.http import HttpError
 from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
@@ -617,7 +616,7 @@ class OmniHandler(BaseOmniHandler):
                     image = await self._image_loader.load_image(
                         parsed_request.input_reference
                     )
-                except (HttpError, OSError, ValueError) as e:
+                except (OSError, ValueError) as e:
                     # Keep URLs and inline image data out of the client error.
                     raise ValueError("Failed to load input_reference") from e
             return self._engine_inputs_from_image(parsed_request, image=image)
