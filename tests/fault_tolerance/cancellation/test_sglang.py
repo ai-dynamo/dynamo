@@ -523,7 +523,7 @@ def test_request_cancellation_sglang_prefill_cancel(
                 # The prefill leg must actually be aborted, not merely detached.
                 poll_for_pattern(
                     process=prefill_worker,
-                    pattern="Calling SGLang abort_request",
+                    pattern="Aborted Request ID",
                     log_offset=prefill_log_offset,
                     match_type="contains",
                     max_wait_ms=15000,
@@ -543,8 +543,8 @@ def test_request_cancellation_sglang_prefill_cancel(
                 poll_for_any_pattern(
                     process=decode_worker,
                     patterns=[
-                        "Calling SGLang abort_request",
-                        "Client gone before submission",
+                        "Aborted Request ID",
+                        "Cancellation or shutdown signal received",
                     ],
                     max_wait_ms=15000,
                     poll_interval_ms=50,
