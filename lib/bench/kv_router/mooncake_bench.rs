@@ -349,10 +349,15 @@ async fn run_backend<T: dynamo_kv_router::indexer::SyncIndexer>(
     trial: mooncake_open_loop::PreparedOpenLoopTrial,
     open_config: OpenLoopConfig,
 ) -> anyhow::Result<OpenLoopResult> {
+    let coordinator_cpus = open_config.backend_cpus.clone();
     if let Some(cpu) = open_config.query_issuer_cpu {
         pin_current_thread_to_cpus(&[cpu])?;
     }
-    run_open_loop(backend_name, indexer, trial, open_config).await
+    let result = run_open_loop(backend_name, indexer, trial, open_config).await;
+    // Restore the coordinator mask. Otherwise blocking-pool threads spawned while the
+    // next sweep or compare cell generates events inherit the single query-issuer CPU.
+    pin_current_thread_to_cpus(&coordinator_cpus)?;
+    result
 }
 
 fn print_open_loop_result(result: &OpenLoopResult) {
