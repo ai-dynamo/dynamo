@@ -2362,6 +2362,9 @@ var dgdPropagatedAnnotationKeys = []string{
 // defaults, while the immutable DGD origin remains controller-authoritative.
 func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	podTemplate := ensurePodTemplate(component)
+
+	// Replace any component value with the authoritative DGD origin, including absence.
+	delete(podTemplate.Annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
 	if origin, exists := dgdAnnotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
 		podTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
 	}

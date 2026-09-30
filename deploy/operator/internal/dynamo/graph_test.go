@@ -1668,20 +1668,6 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 	}
 }
 
-func TestMergeEnvsPreservesOrder(t *testing.T) {
-	system := []corev1.EnvVar{
-		{Name: "Z_SYSTEM", Value: "system"},
-		{Name: "SHARED", Value: "system"},
-	}
-	user := []corev1.EnvVar{
-		{Name: "Z_BASE", Value: "expected"},
-		{Name: "A_DERIVED", Value: "$(Z_BASE)"},
-		{Name: "SHARED", Value: "user"},
-	}
-
-	require.Equal(t, append(slices.Clone(system), user...), MergeEnvs(system, user))
-}
-
 func TestMergeEnvsForOrigin(t *testing.T) {
 	system := []corev1.EnvVar{
 		{Name: "Z_SYSTEM", Value: "system"},
@@ -1881,57 +1867,90 @@ func TestGenerateBasePodSpecBackendEnvironmentOrderByOrigin(t *testing.T) {
 	})
 }
 
-func TestGeneratePodSpecForComponentUsesDGDOriginForEnvironmentOrder(t *testing.T) {
+func TestGeneratePodSpecForComponentUsesOnlyDGDOriginForEnvironmentOrder(t *testing.T) {
 	dgdEnvironment := corev1.EnvVar{Name: "Z_DGD", Value: "source"}
 	componentEnvironment := corev1.EnvVar{Name: "A_COMPONENT", Value: "$(Z_DGD)"}
-	dynamoDeployment := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-deployment",
-			Namespace: "default",
-			Annotations: map[string]string{
-				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
-			},
+	tests := []struct {
+		name            string
+		dgdOrigin       string
+		componentOrigin string
+		want            []corev1.EnvVar
+	}{
+		{
+			name:            "newer DGD origin overrides older component origin",
+			dgdOrigin:       "1.6.0",
+			componentOrigin: "1.5.0",
+			want:            []corev1.EnvVar{dgdEnvironment, componentEnvironment},
 		},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Env: []corev1.EnvVar{dgdEnvironment},
+		{
+			name:            "older DGD origin overrides newer component origin",
+			dgdOrigin:       "1.5.0",
+			componentOrigin: "1.6.0",
+			want:            []corev1.EnvVar{componentEnvironment, dgdEnvironment},
 		},
-	}
-	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: "worker",
-		ComponentType: v1beta1.ComponentTypeWorker,
-		PodTemplate: &corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
-			}},
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{
-				Name:  commonconsts.MainContainerName,
-				Image: "example/engine:1.6.0",
-				Env:   []corev1.EnvVar{componentEnvironment},
-			}}},
+		{
+			name:            "missing DGD origin removes newer component origin",
+			componentOrigin: "1.6.0",
+			want:            []corev1.EnvVar{componentEnvironment, dgdEnvironment},
 		},
 	}
 
-	t.Log("render a component whose pod template conflicts with the DGD origin")
-	podSpec, err := GeneratePodSpecForComponent(
-		component,
-		BackendFrameworkNoop,
-		&mockSecretsRetriever{},
-		dynamoDeployment,
-		RoleMain,
-		1,
-		&configv1alpha1.OperatorConfiguration{},
-		commonconsts.MultinodeDeploymentTypeGrove,
-		"worker",
-		nil,
-		staticContainerGPUCount(0),
-	)
-	require.NoError(t, err)
-	require.Len(t, podSpec.Containers, 1)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dynamoDeployment := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deployment",
+					Namespace: "default",
+				},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Env: []corev1.EnvVar{dgdEnvironment},
+				},
+			}
+			if tt.dgdOrigin != "" {
+				dynamoDeployment.Annotations = map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.dgdOrigin,
+				}
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.componentOrigin,
+					}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name:  commonconsts.MainContainerName,
+						Image: "example/engine:1.6.0",
+						Env:   []corev1.EnvVar{componentEnvironment},
+					}}},
+				},
+			}
 
-	t.Log("verify every merge uses the DGD's ordered-composition gate")
-	wantSuffix := []corev1.EnvVar{dgdEnvironment, componentEnvironment}
-	environment := podSpec.Containers[0].Env
-	require.Equal(t, wantSuffix, environment[len(environment)-len(wantSuffix):])
+			podSpec, err := GeneratePodSpecForComponent(
+				component,
+				BackendFrameworkNoop,
+				&mockSecretsRetriever{},
+				dynamoDeployment,
+				RoleMain,
+				1,
+				&configv1alpha1.OperatorConfiguration{},
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"worker",
+				nil,
+				staticContainerGPUCount(0),
+			)
+			require.NoError(t, err)
+			require.Len(t, podSpec.Containers, 1)
+
+			var environment []corev1.EnvVar
+			for _, variable := range podSpec.Containers[0].Env {
+				if variable.Name == dgdEnvironment.Name || variable.Name == componentEnvironment.Name {
+					environment = append(environment, variable)
+				}
+			}
+			require.Equal(t, tt.want, environment)
+		})
+	}
 }
 
 func TestAddTransportTLSEnvVars(t *testing.T) {
@@ -10409,6 +10428,14 @@ func TestPropagateDGDAnnotations(t *testing.T) {
 			expectedAnnotation: map[string]string{
 				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 			},
+		},
+		{
+			name:           "missing DGD origin removes service origin",
+			dgdAnnotations: nil,
+			serviceAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+			},
+			expectedAnnotation: nil,
 		},
 		{
 			name: "unrelated DGD annotations are not propagated",
