@@ -11,7 +11,8 @@ use crate::scheduling::SchedulingRequest;
 pub struct WorkerSelectionContext<'a> {
     pub(crate) request: &'a SchedulingRequest,
     /// Looks up a worker's runtime config, so rows carry no capacity a policy may never read.
-    pub(crate) worker_capacity: &'a dyn Fn(WorkerId) -> Option<WorkerCapacityInput>,
+    /// `Sync` keeps the context shareable across threads that score candidates in parallel.
+    pub(crate) worker_capacity: &'a (dyn Fn(WorkerId) -> Option<WorkerCapacityInput> + Sync),
     pub(crate) request_blocks: u64,
     pub(crate) block_size: u32,
     pub(crate) track_prefill_tokens: bool,
@@ -50,9 +51,11 @@ impl WorkerSelectionContext<'_> {
     /// Entry `i` identifies prompt blocks `0..=i`, so two requests share their first `i + 1`
     /// blocks exactly when their entry `i` is equal. LoRA adapters, cache namespaces, and
     /// multimodal content hash into separate domains. These are the host's active-sequence
-    /// tracking hashes; do not compare them with engine KV-event hashes. None when the host
+    /// tracking hashes; do not compare them with engine KV-event hashes. None when the frontend
     /// does not track active blocks, as in disaggregated prefill pools. When the host does not
     /// assume KV reuse, as in disaggregated decode pools, every entry is unique to the request.
+    /// The standalone selection service always tracks active blocks, and passes the caller's
+    /// precomputed sequence hashes through unchecked for hash-only requests.
     pub fn prefix_hashes(&self) -> Option<&[u64]> {
         self.request.token_seq.as_deref()
     }
@@ -89,7 +92,8 @@ impl WorkerSelectionContext<'_> {
 
     /// Return the policy class requested for this request: the caller's value, replaced by a
     /// request classifier's override. This is the requested name; a profile with class
-    /// families may still resolve it to a family member for queueing.
+    /// families may still resolve it to a family member for queueing. A caller's value is not
+    /// validated against the profile, so treat it as untrusted input.
     pub fn policy_class(&self) -> Option<&str> {
         self.request.policy_class.as_deref()
     }
@@ -107,5 +111,16 @@ impl WorkerSelectionContext<'_> {
     /// Return the request-level router temperature override, if present.
     pub fn router_temperature_override(&self) -> Option<f64> {
         self.router_temperature_override
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkerSelectionContext;
+
+    #[test]
+    fn context_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<WorkerSelectionContext<'static>>();
     }
 }
