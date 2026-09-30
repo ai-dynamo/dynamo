@@ -35,8 +35,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, StreamErrorSignal, create_connection_monitor, monitor_for_disconnects,
-        monitor_for_disconnects_with_activity, monitor_for_disconnects_with_error_signal,
+        ConnectionHandle, StreamErrorSignal, create_http_connection_monitor,
+        monitor_for_disconnects, monitor_for_disconnects_with_activity,
+        monitor_for_disconnects_with_error_signal,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -858,7 +859,7 @@ async fn handler_completions(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context.clone(),
         Some(state.metrics_clone()),
         cancellation_labels,
@@ -2042,7 +2043,7 @@ async fn handler_chat_completions(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context.clone(),
         Some(state.metrics_clone()),
         cancellation_labels,
@@ -3339,7 +3340,7 @@ async fn handler_responses(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context.clone(),
         Some(state.metrics_clone()),
         cancellation_labels,
@@ -4499,7 +4500,7 @@ async fn videos(
         // [gluo TODO] revisit the cancellation handling here,
         // should be unified with chat_completions.
         let ctx = stream.context();
-        let (mut connection_handle, stream_handle) = create_connection_monitor(
+        let (mut connection_handle, stream_handle) = create_http_connection_monitor(
             ctx.clone(),
             Some(state.metrics_clone()),
             CancellationLabels {
@@ -4613,7 +4614,7 @@ async fn video_stream(
     // video_stream returns the streaming body directly (graceful handler exit).
     // The stream_handle is armed below and lives inside the monitored stream so that
     // a client disconnect (body drop) signals the engine context to cancel.
-    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+    let (mut connection_handle, mut stream_handle) = create_http_connection_monitor(
         ctx.clone(),
         Some(state.metrics_clone()),
         CancellationLabels {
@@ -4812,7 +4813,7 @@ async fn handler_audio_speech(
     check_model_serving_ready(&state, &model)?;
 
     let context = request.context();
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context,
         Some(state.metrics_clone()),
         CancellationLabels {

@@ -31,7 +31,7 @@ use tracing::Instrument;
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_activity,
+        ConnectionHandle, create_http_connection_monitor, monitor_for_disconnects_with_activity,
     },
     metrics::{
         CancellationLabels, Endpoint, ErrorType, InflightGuard,
@@ -334,7 +334,7 @@ async fn handler_anthropic_messages(
     let context = request.context();
 
     // Create connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context.clone(),
         Some(state.metrics_clone()),
         cancellation_labels,

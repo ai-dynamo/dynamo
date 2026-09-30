@@ -54,6 +54,12 @@ enum ClientDisconnectBehavior {
     Stop,
 }
 
+/// Read the client disconnect behavior, defaulting to kill when unset.
+/// Values are case-insensitive and may have surrounding whitespace.
+///
+/// # Panics
+///
+/// Panics if the value is neither `kill` nor `stop`, or is not valid Unicode.
 fn client_disconnect_behavior() -> ClientDisconnectBehavior {
     match std::env::var(CLIENT_DISCONNECT_BEHAVIOR_ENV) {
         Err(std::env::VarError::NotPresent) => ClientDisconnectBehavior::default(),
@@ -68,6 +74,7 @@ fn client_disconnect_behavior() -> ClientDisconnectBehavior {
     }
 }
 
+/// Kill the request or stop generation according to the disconnect behavior.
 fn cancel_for_client_disconnect(
     context: &dyn AsyncEngineContext,
     behavior: ClientDisconnectBehavior,
@@ -259,18 +266,52 @@ impl Drop for ConnectionHandle {
     }
 }
 
-/// Creates a pair of handles which will monitor for disconnects from the client.
+/// Create request and stream handles that kill backend work on unexpected closure.
 ///
-/// The first handle is armed and will issue a [`ConnectionStatus::ClosedUnexpectedly`] signal when dropped.
-/// The second handle is disarmed and will issue a [`ConnectionStatus::ClosedGracefully`] signal when dropped.
-///
-/// The handles are returned in the order of the first being armed and the second being disarmed.
+/// This entry point is used by gRPC and ignores HTTP disconnect configuration.
+/// The request handle starts armed; the stream handle starts disabled.
 pub async fn create_connection_monitor(
     engine_context: Arc<dyn AsyncEngineContext>,
     metrics: Option<Arc<Metrics>>,
     cancellation_labels: CancellationLabels,
 ) -> (ConnectionHandle, ConnectionHandle) {
-    let disconnect_behavior = client_disconnect_behavior();
+    create_connection_monitor_with_behavior(
+        engine_context,
+        metrics,
+        cancellation_labels,
+        ClientDisconnectBehavior::Kill,
+    )
+    .await
+}
+
+/// Create request and stream handles using `DYN_HTTP_CLIENT_DISCONNECT_BEHAVIOR`.
+///
+/// The request handle starts armed; the stream handle starts disabled.
+///
+/// # Panics
+///
+/// Panics if the configured value is neither `kill` nor `stop`, or is not valid Unicode.
+pub(super) async fn create_http_connection_monitor(
+    engine_context: Arc<dyn AsyncEngineContext>,
+    metrics: Option<Arc<Metrics>>,
+    cancellation_labels: CancellationLabels,
+) -> (ConnectionHandle, ConnectionHandle) {
+    create_connection_monitor_with_behavior(
+        engine_context,
+        metrics,
+        cancellation_labels,
+        client_disconnect_behavior(),
+    )
+    .await
+}
+
+/// Spawn a disconnect monitor with an explicit cancellation behavior.
+async fn create_connection_monitor_with_behavior(
+    engine_context: Arc<dyn AsyncEngineContext>,
+    metrics: Option<Arc<Metrics>>,
+    cancellation_labels: CancellationLabels,
+    disconnect_behavior: ClientDisconnectBehavior,
+) -> (ConnectionHandle, ConnectionHandle) {
     // these oneshot channels monitor possible disconnects from the client in two different scopes:
     // - the local task (connection_handle)
     // - an optionally streaming response (stream_handle)
@@ -294,6 +335,7 @@ pub async fn create_connection_monitor(
     )
 }
 
+/// Monitor request and stream handles, recording and applying cancellation on unexpected closure.
 #[tracing::instrument(level = "trace", skip_all, fields(request_id = %engine_context.id()))]
 async fn connection_monitor(
     engine_context: Arc<dyn AsyncEngineContext>,
@@ -305,7 +347,7 @@ async fn connection_monitor(
 ) {
     match connection_rx.await {
         Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            // the client has disconnected, no need to gracefully cancel, just kill the context
+            // Cancel backend work according to the caller's disconnect policy.
             tracing::warn!("Connection closed unexpectedly; issuing cancellation");
             if let Some(metrics) = &metrics {
                 metrics.inc_client_disconnect();
@@ -631,6 +673,7 @@ mod tests {
             "test"
         }
         fn stop(&self) {}
+        /// Record a graceful generation stop so tests can distinguish it from a kill.
         fn stop_generating(&self) {
             self.stopped
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -640,6 +683,7 @@ mod tests {
                 self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         }
+        /// Return whether graceful generation cancellation has been requested.
         fn is_stopped(&self) -> bool {
             self.stopped.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -732,6 +776,7 @@ mod tests {
         );
     }
 
+    /// Verify that dropping a stream after its terminal error records a failure without cancellation.
     #[tokio::test]
     async fn signaled_error_drop_after_terminal_event_is_not_a_cancellation() {
         let model = "drop-after-response-failed";
@@ -889,6 +934,7 @@ mod tests {
         assert!(!context.is_killed());
     }
 
+    /// Verify the default kill behavior and whitespace-tolerant, case-insensitive parsing.
     #[test]
     #[serial_test::serial]
     fn client_disconnect_behavior_parses_supported_values() {
@@ -903,6 +949,7 @@ mod tests {
         });
     }
 
+    /// Verify that an unsupported disconnect behavior panics with the accepted values.
     #[test]
     #[serial_test::serial]
     #[should_panic(
@@ -916,15 +963,19 @@ mod tests {
         );
     }
 
+    /// Verify that dropping an armed stream in stop mode stops generation without killing it.
     #[tokio::test]
     #[serial_test::serial]
     async fn configured_stop_gracefully_cancels_on_stream_drop() {
         temp_env::async_with_vars([(CLIENT_DISCONNECT_BEHAVIOR_ENV, Some("stop"))], async {
             let context = Arc::new(MockContext::with_kill_tracking());
             let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
-            let (mut connection_handle, mut stream_handle) =
-                create_connection_monitor(engine_context, None, generate_cancellation_labels())
-                    .await;
+            let (mut connection_handle, mut stream_handle) = create_http_connection_monitor(
+                engine_context,
+                None,
+                generate_cancellation_labels(),
+            )
+            .await;
 
             connection_handle.disarm();
             stream_handle.arm();
@@ -938,6 +989,38 @@ mod tests {
             assert!(!context.is_killed());
         })
         .await;
+    }
+
+    /// Verify that gRPC's monitor kills on request or stream drop regardless of HTTP settings.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn grpc_disconnect_ignores_http_behavior() {
+        for value in ["stop", "invalid"] {
+            temp_env::async_with_vars([(CLIENT_DISCONNECT_BEHAVIOR_ENV, Some(value))], async {
+                for stream_disconnect in [false, true] {
+                    let context = Arc::new(MockContext::with_kill_tracking());
+                    let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+                    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+                        engine_context,
+                        None,
+                        generate_cancellation_labels(),
+                    )
+                    .await;
+
+                    if stream_disconnect {
+                        connection_handle.disarm();
+                        stream_handle.arm();
+                    }
+                    drop(connection_handle);
+                    drop(stream_handle);
+
+                    wait_for_kill(&context).await;
+                    assert!(context.is_killed());
+                    assert!(!context.is_stopped());
+                }
+            })
+            .await;
+        }
     }
 
     /// Zombie backend with hanging stream is terminated by inactivity timeout.
