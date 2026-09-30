@@ -84,7 +84,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	fixture.partitions[0].numChips = 8
 	fixture.partitions[0].devicesPerNode = 8
 	fixture.architecture = "polaris"
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	build := normalized.build
 	build.IOFPGACount = 2
 	build.IOFanoutFactor = 2

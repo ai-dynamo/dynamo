@@ -27,11 +27,7 @@ func normalizeRegistryFixtureBuild(ctx context.Context, registry ModelRegistry, 
 	if err != nil {
 		return nil, err
 	}
-	normalized, err := normalizeBuildSnapshot(snapshot)
-	if err != nil {
-		return nil, err
-	}
-	return normalized.build, nil
+	return snapshot.build, nil
 }
 
 type fakeModelServiceClient struct {
@@ -86,7 +82,7 @@ func (c *fakeModelServiceClient) ListModelFiles(
 	if c.list != nil {
 		return c.list, nil
 	}
-	return &modelpb.ModelFileList{}, nil
+	return &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}}}, nil
 }
 
 type fakeModelDownloadStream struct {

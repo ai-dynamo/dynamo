@@ -150,20 +150,19 @@ func TestPropSyncProjection(t *testing.T) {
 			t.Log("Project each geometry once and reject unsupported workloads")
 			buildDir := writeCompilerFixture(t, fixture)
 			snapshot := acquireTestSnapshot(t, buildDir)
-			normalized, err := normalizeBuildSnapshot(snapshot)
-			var projections []*ModelProjection
-			if err == nil {
-				projections, err = appendModelProjections(nil, ModelProjectionInput{
-					Pipeline: pipeline, Models: []string{"default"}, BuildSnapshot: normalized,
-				})
-			}
+			normalized := snapshot
+			before := *snapshot.build
+			before.Partitions = slices.Clone(snapshot.build.Partitions)
+			projections, err := appendModelProjections(nil, ModelProjectionInput{
+				Pipeline: pipeline, Models: []string{"default"}, BuildSnapshot: normalized,
+			})
 			if test.wantError != "" {
 				require.ErrorContains(t, err, test.wantError)
 				return
 			}
 			require.NoError(t, err)
 			projection := projections[0]
-			require.Equal(t, normalizeTestSnapshot(t, snapshot).build, normalized.build)
+			require.Equal(t, before, *normalized.build)
 			original := normalized.build.Partitions
 
 			if test.physicalNodes == 0 {

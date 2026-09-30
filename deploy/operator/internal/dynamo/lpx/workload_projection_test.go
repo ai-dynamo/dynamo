@@ -16,8 +16,8 @@ func TestWorkloadDigestIsIndependentOfBuildLocator(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Acquire equal compiler contents under distinct local build paths")
-	first := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
-	second := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+	first := acquireTestSnapshot(t, writeV2CompilerFixture(t))
+	second := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	require.NotEqual(t, first.build.Path, second.build.Path)
 	require.Equal(t, first.contentID, second.contentID)
 
