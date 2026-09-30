@@ -19,9 +19,8 @@ from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
-    # NOTE: these tests do not actually require a GPU, but the workflow validation
-    # `.github/workflows/container-validation-backends.yml` does not make use of
-    # the `gpu_0` marker.
+    # NOTE: these tests use no GPU, but importing tensorrt_llm needs one, and the
+    # gpu_0 stage also runs on GPU-less runners.
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
 ]
