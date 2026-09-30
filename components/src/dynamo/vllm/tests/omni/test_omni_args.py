@@ -33,6 +33,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     # Building the vLLM argument parser resolves a device; on an accelerator-less
     # host that raises unless a platform is pinned first.
