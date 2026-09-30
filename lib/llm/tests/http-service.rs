@@ -3583,7 +3583,6 @@ mod stream_options {
             Error,
         > for CompletionEngine
     {
-        /// Captures stream options and supplies fixed token usage for HTTP assertions.
         async fn generate(
             &self,
             request: SingleIn<NvCreateCompletionRequest>,
@@ -3602,7 +3601,6 @@ mod stream_options {
         }
     }
 
-    /// Checks options at engine dispatch and usage in the HTTP response for both endpoints.
     #[tokio::test]
     async fn normalizes_options_only_for_nonstreaming_requests() {
         const ENV: [(&str, Option<&str>); 2] = [
