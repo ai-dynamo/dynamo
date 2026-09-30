@@ -26,9 +26,6 @@ patches:
     name: kimi-k25-trtllm-aggregate
   patch: |-
     - op: add
-      path: /spec/envs/-
-      value: {name: NATS_SERVER, value: "nats://dynamo-nightly-nats.dynamo-system.svc.cluster.local:4222"}
-    - op: add
       path: /spec/services/Worker/extraPodSpec/mainContainer/env/-
       value: {name: NCCL_SOCKET_IFNAME, value: eth0}
     - op: add
