@@ -342,7 +342,7 @@ async fn stalled_discovery_check_times_out_without_blocking_liveness() {
         let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         // Without a lease or authentication RPC, etcd uses a lazy channel. This
         // lets DRT initialize before the deliberately stalled maintenance RPC.
-        let etcd = crate::transports::etcd::ClientOptions::builder()
+        let etcd = crate::transports::etcd::Client::builder()
             .etcd_url(vec![format!("http://{}", peer.local_addr().unwrap())])
             .attach_lease(false)
             .build()
@@ -443,7 +443,7 @@ async fn etcd_readiness_requires_an_elected_leader() {
                 }
             }
         }));
-        let etcd = crate::transports::etcd::ClientOptions::builder()
+        let etcd = crate::transports::etcd::Client::builder()
             .etcd_url(vec![format!("http://{address}")])
             .attach_lease(false)
             .build()
