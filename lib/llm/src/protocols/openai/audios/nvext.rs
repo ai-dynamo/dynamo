@@ -30,36 +30,6 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub frontend_accepts_audio_chunks: Option<bool>,
 
-    /// Language: Auto, Chinese, English, Japanese, Korean, German, French, etc.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub language: Option<String>,
-
-    /// Task type: CustomVoice, VoiceDesign, or Base
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub task_type: Option<String>,
-
-    /// Maximum number of tokens to generate (default: 2048)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub max_new_tokens: Option<i32>,
-
-    /// Reference audio URL or base64 data (for voice cloning)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub ref_audio: Option<String>,
-
-    /// Reference transcript (for voice cloning)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub ref_text: Option<String>,
-
-    /// Random seed for reproducibility
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub seed: Option<i64>,
-
     /// Classifier-free guidance scale (Audex only, hence an extension rather
     /// than a top-level OpenAI field). Unset or 1.0 decodes unguided; higher
     /// values follow the prompt more closely. Declared here because serde drops
