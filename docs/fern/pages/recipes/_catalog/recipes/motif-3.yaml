@@ -41,5 +41,5 @@ related_benchmarks: []
 maintainer: null
 gaps:
 - maintainer unknown
-- image is currently staged rather than published through the standard Dynamo image path
+- public image vllm-runtime:1.5.0-motif-3-dev.1 is pending NGC publication and is referenced by tag, not digest
 - published performance is a synthetic-acceptance proxy; no real-MTP chat-trace result yet

@@ -56,7 +56,7 @@ kubectl apply -f recipes/motif-3/vllm/agg-b200-chat/base/deploy.yaml -n "${NAMES
 kubectl get dgd motif3-agg-b200 -n "${NAMESPACE}" -w
 ```
 
-The base manifest has no cluster-specific scheduling. To add node selectors, tolerations, or image-pull secrets for your cluster, use the [Kustomization](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/agg-b200-chat/kustomize) described in the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/README.md).
+The base manifest has no cluster-specific scheduling. To add node selectors or tolerations for your cluster, use the [Kustomization](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/agg-b200-chat/kustomize) described in the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/README.md).
 
 ## Smoke Test
 
@@ -110,7 +110,7 @@ Under the synthetic proxy, the run meets user output throughput P50 ≥ 50 token
 
 ## Notes
 
-- The recipe uses a pinned digest, but the current image is a staged artifact and requires a cluster image-pull configuration.
+- The recipe uses the public `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1` image; no image-pull secret is required.
 - The model image carries Motif-specific vLLM compatibility code. Do not replace its vLLM package with an unrelated nightly wheel.
 
 ## Source
