@@ -186,6 +186,18 @@ class TensorRTLLMEngine:
             return {}
         return get_capacity()
 
+    def abort(self, request_id: str) -> None:
+        """Abort an in-flight request or an unclaimed KV session."""
+        if not self._llm:
+            return
+        try:
+            if hasattr(self._llm, "abort"):
+                self._llm.abort(request_id)
+            else:
+                logger.debug("TensorRT-LLM LLM object does not support abort()")
+        except Exception as e:
+            logger.debug("TensorRT-LLM abort failed for request %s: %s", request_id, e)
+
     @staticmethod
     def _prune_engine_args_for_autodeploy(engine_args) -> None:
         """Remove entries from `self.engine_args` that the autodeploy backend does not support."""
