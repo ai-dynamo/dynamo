@@ -139,7 +139,7 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
     assert "aic-forward-pass" not in features
     assert dependencies["aisimulate-core"] == {
-        "version": "=0.13.0-dev.202609270000000058",
+        "version": "=0.13.0-dev.202609300000000061",
         "optional": True,
         "features": ["python"],
     }
