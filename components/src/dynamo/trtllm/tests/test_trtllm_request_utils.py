@@ -7,7 +7,9 @@ import pytest
 
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
+    dynamo_priority_to_trtllm,
     request_cache_salt,
+    request_trtllm_priority,
     stored_event_cache_salt,
 )
 
@@ -120,3 +122,34 @@ def test_hidden_stop_tokens_keep_engine_stopping_enabled() -> None:
     assert sampling_params.ignore_eos is False
     assert sampling_params.min_tokens == 2
     assert set(sampling_params.stop_token_ids) == {100, 300}
+
+
+INT32_MIN = -(2**31)
+INT32_MAX = 2**31 - 1
+
+
+def test_dynamo_priority_zero_maps_to_trtllm_default():
+    assert dynamo_priority_to_trtllm(0) == 0.5
+
+
+def test_dynamo_priority_mapping_is_monotonic_and_open_interval():
+    priorities = [INT32_MIN, -100, -10, -1, 0, 1, 10, 100, INT32_MAX]
+    mapped = [dynamo_priority_to_trtllm(p) for p in priorities]
+    assert mapped == sorted(mapped)
+    assert len(set(mapped)) == len(mapped)
+    assert all(0.0 < value < 1.0 for value in mapped)
+
+
+@pytest.mark.parametrize(
+    ("request_body", "expected"),
+    [
+        ({"priority": 1.0, "routing": {"priority": -5}}, 1.0),
+        ({"routing": {"priority": 1}}, 0.75),
+        ({"routing": {"priority": -1}}, 0.25),
+        ({"routing": {"priority": None}}, 0.5),
+        ({"routing": None}, 0.5),
+        ({}, 0.5),
+    ],
+)
+def test_request_trtllm_priority(request_body, expected):
+    assert request_trtllm_priority(request_body, default=0.5) == expected

@@ -10,6 +10,35 @@ def normalize_top_k_for_trtllm(top_k: int) -> int:
     return 0 if top_k == -1 else top_k
 
 
+def dynamo_priority_to_trtllm(priority: int) -> float:
+    """Map a Dynamo request priority onto TRT-LLM's scheduling priority scale.
+
+    Dynamo priorities are unbounded integers where higher means more important
+    and 0 is the default. TRT-LLM priorities are floats in [0.0, 1.0] where
+    higher means more important and 0.5 is the default. The mapping is
+    monotonic, sends 0 to 0.5, and never reaches 0.0 or 1.0 for an int32, so
+    health checks at 1.0 always sort ahead of user traffic.
+    """
+    priority = int(priority)
+    return 0.5 + 0.5 * priority / (abs(priority) + 1)
+
+
+def request_trtllm_priority(request: Mapping[str, Any], default: float) -> float:
+    """Return the TRT-LLM scheduling priority for a Dynamo request.
+
+    A top-level ``priority`` is already on the TRT-LLM scale (internal callers
+    such as health checks set it). Otherwise ``routing.priority`` carries the
+    user-facing ``nvext.agent_hints.priority``.
+    """
+    if "priority" in request:
+        return request["priority"]
+    routing = request.get("routing") or {}
+    priority = routing.get("priority")
+    if priority is None:
+        return default
+    return dynamo_priority_to_trtllm(priority)
+
+
 def request_cache_salt(request: Mapping[str, Any]) -> Optional[str]:
     """Return the first non-empty cache_salt, preferring routing hints."""
     routing = request.get("routing") or {}
