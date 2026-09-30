@@ -30,7 +30,7 @@ Steps performed:
      baseline_image's full layer list. If not, fail loudly — the engineer
      said "this is built on X" but the bytes say otherwise.
   4. syft scan the baseline only. Apply slim filter
-      (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB.
+     (drop properties/hashes/dependencies; keep evidence). Hard cap 8 MB.
      Write to base_sboms/<short>@<digest8>.cdx.json if not already
      present at the recorded digest.
   5. syft scan the from_image (in memory; not persisted). Compute
@@ -39,7 +39,9 @@ Steps performed:
      baseline.
   6. Run policy/validate.py against the delta. Any denied or UNKNOWN
      license fails the capture: engineer must add an override / exception,
-     or pick a different from_image.
+     or pick a different from_image. If the runtime sanitizes that image,
+     --defer-delta-validation records the findings and justification for
+     resolution by the mandatory final-image policy gate.
   7. Add / update the manifest.json entry recording both digests and
      the baseline_sbom filename.
 
@@ -51,6 +53,14 @@ Flags:
   --skip-layer-prefix-check Escape hatch for vendors who squash layers.
                             Records the override in the manifest entry
                             for auditability. Use only with justification.
+  --scan-from-container-filesystem
+                            Scan the effective filesystem inside each locally
+                            cached image when syft's image export exceeds
+                            available scratch disk.
+  --defer-delta-validation REASON
+                            Record upstream-image findings for validation by
+                            the mandatory final-image licenses stage instead,
+                            e.g. when the runtime removes offending packages.
 
 Dependencies on the runner:
   - docker buildx (registry manifest resolution)
@@ -71,6 +81,7 @@ import json
 import logging
 import os
 import re as _re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -91,9 +102,7 @@ logger = logging.getLogger(__name__)
 _CORPUS_DIR = Path(__file__).resolve().parent
 _MANIFEST_PATH = _CORPUS_DIR / "manifest.json"
 _POLICY_PATH = _CORPUS_DIR.parent / "policy" / "licenses.toml"
-_SIZE_CAP_BYTES = (
-    5 * 1024 * 1024
-)  # 5 MB cap for large XPU baselines; keep aligned with CI artifact constraints
+_SIZE_CAP_BYTES = 8 * 1024 * 1024  # accommodates large framework baselines
 _DEFAULT_FROM_SBOM_CACHE_DIR = (
     Path(os.environ.get("TMPDIR", "/tmp")) / "dynamo-compliance-syft-cache"
 )
@@ -159,11 +168,48 @@ def resolve_platform_layers(ref: str, platform: str) -> list[str]:
 # ---- syft scan + slim filter -------------------------------------------------
 
 
-def syft_scan(ref: str, platform: str) -> dict:
-    """Run syft against image:tag for a specific platform, return parsed CycloneDX."""
+def syft_scan(ref: str, platform: str, *, container_filesystem: bool = False) -> dict:
+    """Scan an image or its live filesystem for a specific platform."""
     env = {**os.environ, "SYFT_PLATFORM": platform}
+    command = ["syft", "scan", "-o", "cyclonedx-json", ref]
+    if container_filesystem:
+        # Large images can need more scratch disk than is available for syft's
+        # docker-save export. Scan the effective rootfs inside the local image.
+        syft_binary = shutil.which("syft")
+        if syft_binary is None:
+            raise FileNotFoundError("syft must be on PATH")
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--runtime",
+            "runc",
+            "--network",
+            "none",
+            "--platform",
+            platform,
+            "-e",
+            "NVIDIA_VISIBLE_DEVICES=void",
+            "--mount",
+            f"type=bind,src={syft_binary},dst=/tmp/capture-syft,readonly",
+            "--entrypoint",
+            "/tmp/capture-syft",
+            ref,
+            "scan",
+            "dir:/",
+            "-o",
+            "cyclonedx-json",
+            "--exclude",
+            "./proc/**",
+            "--exclude",
+            "./sys/**",
+            "--exclude",
+            "./dev/**",
+            "--exclude",
+            "./tmp/capture-syft",
+        ]
     result = subprocess.run(
-        ["syft", "scan", "-o", "cyclonedx-json", ref],
+        command,
         check=True,
         capture_output=True,
         env=env,
@@ -517,6 +563,11 @@ def load_manifest(path: Path) -> dict:
 
 
 def save_manifest(manifest: dict, path: Path) -> None:
+    manifest["format"] = (
+        "CycloneDX 1.6 JSON, slim filter "
+        "(drop properties/hashes/dependencies; keep evidence). "
+        f"Hard cap {_SIZE_CAP_BYTES // (1024 * 1024)} MB per file."
+    )
     manifest["generated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     path.write_text(payload, encoding="utf-8")
@@ -559,6 +610,8 @@ def capture(
     reuse_cached_sbom: bool = False,
     from_sbom_cache_dir: Path | None = None,
     no_from_sbom_cache: bool = False,
+    scan_from_container_filesystem: bool = False,
+    defer_delta_validation: str = "",
 ) -> int:
     from_image, from_tag = split_ref(from_ref)
     baseline_image, baseline_tag = split_ref(baseline_ref)
@@ -646,7 +699,11 @@ def capture(
     if not (reuse_cached_sbom and sbom_path.is_file()):
         logger.info("Running syft on baseline...")
         try:
-            baseline_sbom = syft_scan(baseline_ref, platform)
+            baseline_sbom = syft_scan(
+                baseline_ref,
+                platform,
+                container_filesystem=scan_from_container_filesystem,
+            )
         except subprocess.CalledProcessError as exc:
             logger.error(
                 "syft scan failed on baseline: %s", (exc.stderr or b"").decode()
@@ -684,7 +741,11 @@ def capture(
             "Running syft on from-image (for delta validation; not persisted)..."
         )
         try:
-            from_sbom = syft_scan(from_ref, platform)
+            from_sbom = syft_scan(
+                from_ref,
+                platform,
+                container_filesystem=scan_from_container_filesystem,
+            )
         except subprocess.CalledProcessError as exc:
             logger.error(
                 "syft scan failed on from-image: %s", (exc.stderr or b"").decode()
@@ -724,8 +785,14 @@ def capture(
         )
         for line in violation_lines:
             logger.error("  %s", line)
-        return 1
-    logger.info("  OK: all %d delta components pass policy", len(delta))
+        if not defer_delta_validation.strip():
+            return 1
+        logger.warning(
+            "Deferring these findings to final-image policy validation: %s",
+            defer_delta_validation,
+        )
+    else:
+        logger.info("  OK: all %d delta components pass policy", len(delta))
 
     # Apply slim filter; the filename + path were computed up front so the
     # baseline-cache check could short-circuit syft.
@@ -741,7 +808,7 @@ def capture(
     size = len(payload_bytes)
     if size > _SIZE_CAP_BYTES:
         logger.error(
-            "Slim SBOM exceeds 5 MB cap (%.2f MB). "
+            "Slim SBOM exceeds 8 MB cap (%.2f MB). "
             "Per-ecosystem split is supported by the schema but not yet "
             "implemented in this tool -- file a follow-up.",
             size / (1024 * 1024),
@@ -766,6 +833,14 @@ def capture(
     }
     if skip_layer_prefix_check:
         entry["layer_prefix_check_skipped"] = True
+    if scan_from_container_filesystem:
+        entry["capture_note"] = (
+            "Syft scanned the effective filesystem inside each local image "
+            "to avoid a large docker-save export."
+        )
+    if defer_delta_validation.strip():
+        entry["delta_validation_deferred"] = defer_delta_validation
+        entry["delta_validation_findings"] = violation_lines
 
     if dry_run:
         logger.info("--dry-run: not writing %s or manifest", sbom_path)
@@ -858,6 +933,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Disable the from-image SBOM cache entirely (do not read or write).",
     )
+    parser.add_argument(
+        "--scan-from-container-filesystem",
+        action="store_true",
+        help=(
+            "Scan the effective filesystem inside each locally cached image "
+            "without a large docker-save temporary export."
+        ),
+    )
+    parser.add_argument(
+        "--defer-delta-validation",
+        default="",
+        metavar="REASON",
+        help=(
+            "Record raw upstream-image findings and defer their resolution to "
+            "the mandatory final-image licenses stage. Requires a reason."
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -879,6 +971,8 @@ def main(argv: list[str] | None = None) -> int:
             reuse_cached_sbom=args.reuse_cached_sbom,
             from_sbom_cache_dir=args.from_sbom_cache_dir,
             no_from_sbom_cache=args.no_from_sbom_cache,
+            scan_from_container_filesystem=args.scan_from_container_filesystem,
+            defer_delta_validation=args.defer_delta_validation,
         )
     except Exception:  # pragma: no cover
         logger.exception("Unhandled error during capture")

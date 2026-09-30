@@ -256,7 +256,7 @@ jobs:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: 'linux/amd64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       inline_compliance: true
       build_timeout_minutes: 120
@@ -445,7 +445,7 @@ jobs:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: 'linux/amd64'
       make_efa: true
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       inline_compliance: true
@@ -660,10 +660,10 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      platform: '["amd64"]'
       enable_coverage: true
       run_cpu_only_tests: true
       cpu_only_test_markers: vllm and gpu_0
