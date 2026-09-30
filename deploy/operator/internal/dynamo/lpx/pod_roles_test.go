@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func TestAgentSchedulingPreservesAuthoredResources(t *testing.T) {
+func TestAgentSchedulingUsesManifestDeviceCountAndPreservesAuthoredResources(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Construct a mixed-resource PodSpec spanning every container resource location")
@@ -62,28 +62,37 @@ func TestAgentSchedulingPreservesAuthoredResources(t *testing.T) {
 		},
 	}
 
-	t.Log("Preserve unrelated resources for each family, including initially absent resource maps")
+	t.Log("Vary the supplied device count independently of family selection, including initially absent resource maps")
 	tests := []struct {
 		name             string
 		family           BuildFamily
+		devicesPerNode   int
 		emptyResources   bool
 		expectedResource corev1.ResourceName
 		expectedQuantity resource.Quantity
 	}{
 		{
-			name: "XT", family: BuildFamilyXT,
+			name: "XT", family: BuildFamilyXT, devicesPerNode: 8,
 			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("8"),
 		},
 		{
-			name: "HX", family: BuildFamilyHX,
+			name: "HX", family: BuildFamilyHX, devicesPerNode: 16,
 			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("16"),
 		},
 		{
-			name: "XT absent resource maps", family: BuildFamilyXT, emptyResources: true,
+			name: "XT supplied count", family: BuildFamilyXT, devicesPerNode: 4,
+			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("4"),
+		},
+		{
+			name: "HX supplied count", family: BuildFamilyHX, devicesPerNode: 32,
+			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("32"),
+		},
+		{
+			name: "XT absent resource maps", family: BuildFamilyXT, devicesPerNode: 8, emptyResources: true,
 			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("8"),
 		},
 		{
-			name: "HX absent resource maps", family: BuildFamilyHX, emptyResources: true,
+			name: "HX absent resource maps", family: BuildFamilyHX, devicesPerNode: 16, emptyResources: true,
 			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("16"),
 		},
 	}
@@ -103,8 +112,8 @@ func TestAgentSchedulingPreservesAuthoredResources(t *testing.T) {
 			want.Containers[1].Resources.Requests[test.expectedResource] = test.expectedQuantity
 			want.Containers[1].Resources.Limits[test.expectedResource] = test.expectedQuantity
 
-			t.Log("Bind the family device and retain placement and every other authored resource")
-			configureAgentScheduling(agent, test.family)
+			t.Log("Bind the supplied count and retain placement and every other authored resource")
+			configureAgentScheduling(agent, test.family, test.devicesPerNode)
 			require.Empty(t, cmp.Diff(want, agent))
 		})
 	}

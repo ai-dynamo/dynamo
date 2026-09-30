@@ -163,7 +163,7 @@ func RenderNodeLocal(
 			if stage == conductorStage && conductor != nil {
 				conductorSpec = &conductor.Spec.PodSpec
 			}
-			if err := configureLPURolePods(&template.Spec, conductorSpec, workload, configMap.Name, allocation); err != nil {
+			if err := configureLPURolePods(&template.Spec, conductorSpec, projection, configMap.Name, allocation); err != nil {
 				return nil, fmt.Errorf("stage %s: %w", stage, err)
 			}
 		}
@@ -249,15 +249,19 @@ func RenderNodeLocal(
 }
 
 // configureLPURolePods consumes fresh, independently owned Agent and conductor
-// specs. Agent and workload are nonnil; nil conductor means no emitted launcher.
-func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, workload *Workload, configMapName, allocation string) error {
-	if err := withLPUConfigVolume(agentPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
+// specs. Agent and projection are nonnil, and projection has validated partitions;
+// nil conductor means no emitted launcher.
+func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, projection *ModelProjection, configMapName, allocation string) error {
+	// Use this component's manifest geometry for its Agent resources and configuration mount.
+	family := projection.configuredBuild.Family
+	if err := withLPUConfigVolume(agentPodSpec, configMapName, family == BuildFamilyXT); err != nil {
 		return err
 	}
-	configureAgentScheduling(agentPodSpec, workload.BuildFamily())
+	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].DevicesPerNode)
+
 	// Placement is already resolved; shape only the actual conductor's LPX-owned fields.
 	if conductorPodSpec != nil {
-		if err := withLPUConfigVolume(conductorPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
+		if err := withLPUConfigVolume(conductorPodSpec, configMapName, family == BuildFamilyXT); err != nil {
 			return err
 		}
 		configureNodeLocalConductorRuntime(conductorPodSpec, allocation)

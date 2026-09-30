@@ -120,6 +120,7 @@ func collapseSelectedPropSyncChain(chain []int, partitions []BuildPartition) (Bu
 		SourcePartitionID: root.SourcePartitionID,
 		PartPath:          root.PartPath,
 		Topology:          topology,
+		DevicesPerNode:    root.DevicesPerNode,
 		runtimeNodeCount:  totalNodeCount,
 	}, nil
 }

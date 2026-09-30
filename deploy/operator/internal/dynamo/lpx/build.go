@@ -12,8 +12,6 @@ import (
 	"strings"
 )
 
-const lpuChipsPerNode = 8
-
 // BuildCompilationMode records the compiler-authored execution mode in a normalized build.
 type BuildCompilationMode string
 
@@ -67,10 +65,12 @@ type BuildPartition struct {
 	PartPath string
 	// Topology is the scheduler-facing node shape for this partition.
 	Topology Topology
+	// DevicesPerNode is the positive number of LPU devices per node declared by the manifest.
+	DevicesPerNode int
 	// HXExtent is the scheduler-facing four-dimensional HX allocation.
 	HXExtent []int64
 
-	// runtimeNodeCount overrides the node count derived from Topology after
+	// runtimeNodeCount overrides the node count derived from manifest geometry after
 	// selected prop-sync partitions are collapsed for the LPU runtime. Sub-host
 	// partitions still occupy one scheduler endpoint each, so their combined
 	// chip count alone cannot recover the number of scheduled Agent pods.
@@ -78,13 +78,14 @@ type BuildPartition struct {
 }
 
 // effectiveNodeCount returns the number of Agent endpoints assigned to the
-// partition. Source partitions derive it from topology; collapsed runtime
+// partition. Source partitions derive it from manifest geometry; collapsed runtime
 // partitions preserve the sum of their physical scheduler endpoints.
+// The partition must have validated chip and device counts.
 func (p BuildPartition) effectiveNodeCount() int {
 	if p.runtimeNodeCount > 0 {
 		return p.runtimeNodeCount
 	}
-	return p.Topology.Replicas()
+	return max(1, p.Topology.ChipCount/p.DevicesPerNode)
 }
 
 // buildRuntimePath resolves a snapshot reference to its runtime filesystem path.

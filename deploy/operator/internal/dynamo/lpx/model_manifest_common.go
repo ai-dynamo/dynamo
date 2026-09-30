@@ -38,11 +38,8 @@ func classifyManifestPartitions(filename string, partitions []BuildPartition, pa
 		}
 		seen[partition.SourcePartitionID] = struct{}{}
 
-		// Retain both deployment geometries during the mandatory artifact traversal.
-		nodes := partition.Topology.Replicas()
-		if len(partition.HXExtent) == 4 {
-			nodes = int(partition.HXExtent[1] * partition.HXExtent[2] * partition.HXExtent[3])
-		}
+		// Retain both deployment geometries using each partition's manifest device count.
+		nodes := partition.effectiveNodeCount()
 		packagedNodes += nodes
 		if partition.SourcePartitionID == 0 {
 			partitionZeroNodes += nodes
@@ -65,12 +62,9 @@ func buildXTPartition(subject, value string, raw manifestcapnpv2.LpuPartitionArt
 		return BuildPartition{}, fmt.Errorf("parsing %s topology %q: %w", subject, value, err)
 	}
 
-	// Reject nonpositive chip counts and nonintegral multi-node XT topologies.
+	// Reject nonpositive chip counts before comparing manifest geometry.
 	if topology.ChipCount <= 0 {
 		return BuildPartition{}, fmt.Errorf("%s topology has invalid chip count %d", subject, topology.ChipCount)
-	}
-	if topology.ChipCount%lpuChipsPerNode != 0 && topology.ChipCount > lpuChipsPerNode {
-		return BuildPartition{}, fmt.Errorf("%s topology has %d chips, not divisible by %d LPU devices per node", subject, topology.ChipCount, lpuChipsPerNode)
 	}
 
 	// Require the manifest's chip count and device count to agree with XT geometry.
@@ -85,10 +79,12 @@ func buildXTPartition(subject, value string, raw manifestcapnpv2.LpuPartitionArt
 	if err != nil {
 		return BuildPartition{}, err
 	}
-	if devicesPerNode != lpuChipsPerNode {
-		return BuildPartition{}, fmt.Errorf("%s devicesPerNode %d, want %d for LPU device version 2", subject, devicesPerNode, lpuChipsPerNode)
+
+	// Multi-node partitions must fill whole nodes at the declared device density.
+	if numChips > devicesPerNode && numChips%devicesPerNode != 0 {
+		return BuildPartition{}, fmt.Errorf("%s topology has %d chips, not divisible by %d LPU devices per node", subject, numChips, devicesPerNode)
 	}
-	return BuildPartition{Topology: topology}, nil
+	return BuildPartition{Topology: topology, DevicesPerNode: devicesPerNode}, nil
 }
 
 func buildHXPartition(subject, value string, raw manifestcapnpv2.LpuPartitionArtifact) (BuildPartition, bool, error) {
@@ -97,7 +93,12 @@ func buildHXPartition(subject, value string, raw manifestcapnpv2.LpuPartitionArt
 	if topology == "" {
 		return BuildPartition{}, false, fmt.Errorf("V3 %s topology must not be empty", subject)
 	}
-	partition := BuildPartition{Topology: Topology{Raw: topology, ChipCount: int(raw.NumChips())}}
+
+	// Retain device density alongside the HX extent validated below.
+	partition := BuildPartition{
+		Topology:       Topology{Raw: topology, ChipCount: int(raw.NumChips())},
+		DevicesPerNode: int(raw.DevicesPerNode()),
+	}
 	if !raw.HasTopologyMetadata() {
 		// The caller selects metadata-less HX only for the 16-chip, 16-device case.
 		partition.HXExtent = []int64{16, 1, 1, 1}

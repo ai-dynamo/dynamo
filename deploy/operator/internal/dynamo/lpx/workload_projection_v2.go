@@ -52,15 +52,16 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	agentReplicas := 0
 	for index, partition := range partitions {
 		compilerID := uint32(partition.SourcePartitionID)
-		shape, endpoints, shapeErr := xtShape(partition.Topology.ChipCount)
+		shape, shapeErr := xtShape(partition)
 		if shapeErr != nil {
 			return nil, fmt.Errorf("V2 compiler partition %d: %w", compilerID, shapeErr)
 		}
-		agentReplicas += int(endpoints)
+		endpoints := partition.effectiveNodeCount()
+		agentReplicas += endpoints
 		for modelIndex := range transcripts {
 			transcripts[modelIndex].uint32Field("compiler-partition-id", compilerID)
 			transcripts[modelIndex].uint32Field("model-partition-id", uint32(index))
-			transcripts[modelIndex].intField("endpoint-count", endpoints)
+			transcripts[modelIndex].intField("endpoint-count", int64(endpoints))
 			transcripts[modelIndex].field("xt-shape", []byte(shape))
 		}
 	}
@@ -127,17 +128,23 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	return dst, nil
 }
 
-func xtShape(chipCount int) (lpxv1alpha1.Xt8888PartitionShape, int64, error) {
+func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {
+	// XT8888 scheduler shapes require eight physical devices per host.
+	if partition.DevicesPerNode != 8 {
+		return "", fmt.Errorf("devicesPerNode %d, want 8 for XT8888 scheduler shapes", partition.DevicesPerNode)
+	}
+
 	// Reserve one whole physical host for compiler partitions that use fewer than eight chips.
+	chipCount := partition.Topology.ChipCount
 	if chipCount > 0 && chipCount < 8 {
-		return lpxv1alpha1.Xt8888PartitionShapeC8, 1, nil
+		return lpxv1alpha1.Xt8888PartitionShapeC8, nil
 	}
 
 	// Reject partial and unregistered whole-host shapes before deriving their LPX names.
 	if chipCount < 8 || chipCount%8 != 0 || (chipCount > 64 && chipCount != 96 && chipCount != 128) {
-		return "", 0, fmt.Errorf("chip count %d is not a registered XT8888 partition shape", chipCount)
+		return "", fmt.Errorf("chip count %d is not a registered XT8888 partition shape", chipCount)
 	}
-	return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chipCount)), int64(chipCount / 8), nil
+	return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chipCount)), nil
 }
 
 // v2Connectors requires a normalized nonnil build and a nonempty contiguous

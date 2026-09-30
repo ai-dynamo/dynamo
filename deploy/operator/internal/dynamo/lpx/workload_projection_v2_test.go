@@ -64,6 +64,44 @@ func TestProjectModelV2ValidatesPhysicalPartitionsInOrder(t *testing.T) {
 	require.EqualError(t, err, "V2 compiler partition 1: chip count 9 is not a registered XT8888 partition shape")
 }
 
+func TestProjectModelV2RejectsUnsupportedDeviceDensity(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Define internally consistent manifest geometries unsupported by XT8888 hosts")
+	tests := []struct {
+		name           string
+		devicesPerNode uint32
+		numNodes       uint32
+	}{
+		{name: "four devices per node", devicesPerNode: 4, numNodes: 4},
+		{name: "sixteen devices per node", devicesPerNode: 16, numNodes: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Normalize the manifest using its declared device density")
+			fixture := newV2CompilerFixture()
+			fixture.numLPUNodes = test.numNodes
+			for index := range fixture.partitions {
+				fixture.partitions[index].topology = registryTestTopology
+				fixture.partitions[index].numChips = 8
+				fixture.partitions[index].devicesPerNode = test.devicesPerNode
+			}
+			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+			require.Equal(t, BuildFamilyXT, normalized.build.Family)
+			require.EqualValues(t, test.devicesPerNode, normalized.build.Partitions[0].DevicesPerNode)
+
+			t.Log("Reject unsupported hardware at scheduler projection before producing a request")
+			projections, err := appendModelProjections(nil, ModelProjectionInput{
+				Pipeline: PipelineSingle, Models: []string{"default"}, BuildSnapshot: normalized,
+			})
+			require.ErrorContains(t, err, fmt.Sprintf("devicesPerNode %d, want 8 for XT8888 scheduler shapes", test.devicesPerNode))
+			require.Empty(t, projections)
+		})
+	}
+}
+
 func TestXTShape(t *testing.T) {
 	t.Log("Check every registered shape and every integer gap through the largest shape")
 	registeredShapes := map[int]lpxv1alpha1.Xt8888PartitionShape{
@@ -77,19 +115,18 @@ func TestXTShape(t *testing.T) {
 		roundedChipCount := max(chipCount, 8)
 		wantShape, registered := registeredShapes[roundedChipCount]
 		registered = registered && chipCount > 0
-		shape, endpoints, err := xtShape(chipCount)
+		shape, err := xtShape(BuildPartition{Topology: Topology{ChipCount: chipCount}, DevicesPerNode: 8})
 		if !registered {
 			require.Error(t, err, chipCount)
 			continue
 		}
 		require.NoError(t, err, chipCount)
 		require.Equal(t, wantShape, shape, chipCount)
-		require.Equal(t, int64(roundedChipCount/8), endpoints, chipCount)
 	}
 
 	t.Log("Reject integer extremes without indexing outside the registry")
 	for _, chipCount := range []int{math.MinInt, math.MaxInt} {
-		_, _, err := xtShape(chipCount)
+		_, err := xtShape(BuildPartition{Topology: Topology{ChipCount: chipCount}, DevicesPerNode: 8})
 		require.Error(t, err, chipCount)
 	}
 }
@@ -339,6 +376,7 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	require.Equal(t, "0", data["partition_node_offsets"])
 	require.Equal(t, 2, projection.configuredBuild.Partitions[0].effectiveNodeCount())
 	require.Equal(t, 4, projection.configuredBuild.Partitions[0].Topology.ChipCount)
+	require.Equal(t, 8, projection.configuredBuild.Partitions[0].DevicesPerNode)
 }
 
 func TestBuildRejectsInvalidRuntimeSelectedPropSyncChain(t *testing.T) {

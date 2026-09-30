@@ -29,12 +29,6 @@ type Topology struct {
 	compatibilityKey string
 }
 
-// Replicas returns the number of replicas (ChipCount / 8, one per node, floor of 1).
-// The receiver must be non-nil and is not mutated.
-func (t *Topology) Replicas() int {
-	return max(1, t.ChipCount/lpuChipsPerNode)
-}
-
 // compatibleWith reports whether two topologies share the V2 prop-sync compatibility identity.
 func (t Topology) compatibleWith(other Topology) bool {
 	return t.compatibilityKey == other.compatibilityKey
