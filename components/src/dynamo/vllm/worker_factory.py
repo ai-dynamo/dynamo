@@ -29,6 +29,7 @@ from dynamo.common.utils.prometheus import (
     register_embedding_cache_metrics,
     register_image_loader_metrics,
 )
+from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, Endpoint
 
@@ -37,6 +38,7 @@ from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .dp_topology import get_dp_range_for_worker
+from .embedding_worker_processes import EmbeddingEngineCleanupResource
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
@@ -677,7 +679,9 @@ class _DecodeWorkerLifecycle:
         try:
             self.cleanup()
         except Exception:
-            if original_error is None:
+            if original_error is None or isinstance(
+                original_error, asyncio.CancelledError
+            ):
                 raise
             logger.exception(
                 "Failed to clean up decode worker after an earlier failure"
@@ -708,6 +712,7 @@ class WorkerFactory:
         setup_metrics_collection_fn: SetupMetricsCollectionFn,
         setup_kv_state_attachment_owner_fn: SetupKvStateAttachmentOwnerFn | None = None,
         state_agent_lifecycle: StateAgentLifecycle | None = None,
+        shutdown: WorkerShutdown | None = None,
     ):
         self.setup_vllm_engine = setup_vllm_engine_fn
         self.setup_kv_event_publisher = setup_kv_event_publisher_fn
@@ -716,6 +721,7 @@ class WorkerFactory:
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
         self.state_agent_lifecycle = state_agent_lifecycle or StateAgentLifecycle()
+        self.shutdown = shutdown
 
     async def _setup_kv_routing(
         self,
@@ -897,8 +903,11 @@ class WorkerFactory:
             model_name,
         )
         try:
-            await generate_endpoint.serve_bidirectional_endpoint(
+            await serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=self.shutdown,
+                bidirectional=True,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
             )
@@ -906,8 +915,11 @@ class WorkerFactory:
             logger.error("Realtime worker failed: %s", exc)
             raise
         finally:
-            if prometheus_temp_dir is not None:
-                prometheus_temp_dir.cleanup()
+            try:
+                engine_client.shutdown(timeout=vllm_config.shutdown_timeout)
+            finally:
+                if prometheus_temp_dir is not None:
+                    prometheus_temp_dir.cleanup()
 
     async def _create_multimodal_encode_worker(
         self,
@@ -958,8 +970,11 @@ class WorkerFactory:
 
         try:
             await asyncio.gather(
-                generate_endpoint.serve_endpoint(
-                    handler.generate, metrics_labels=[("model", config.model)]
+                serve_endpoint(
+                    generate_endpoint,
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                    shutdown=self.shutdown,
                 ),
             )
         except Exception as e:
@@ -1034,6 +1049,12 @@ class WorkerFactory:
             engine_cleanup_resource,
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        if self.shutdown is not None and isinstance(
+            engine_cleanup_resource, EmbeddingEngineCleanupResource
+        ):
+            group = engine_cleanup_resource.process_group
+            self.shutdown.notify_children = group.begin_shutdown
+            self.shutdown.wait_for_children = group.wait_for_shutdown
 
         handler = EmbeddingWorkerHandler(
             runtime=runtime,
@@ -1050,8 +1071,10 @@ class WorkerFactory:
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
             await asyncio.gather(
-                generate_endpoint.serve_endpoint(
+                serve_endpoint(
+                    generate_endpoint,
                     handler.generate,
+                    shutdown=self.shutdown,
                     metrics_labels=[("model", config.model)],
                     health_check_payload=embedding_health_check_payload,
                 ),
@@ -1077,19 +1100,28 @@ class WorkerFactory:
             logger.error(f"Failed to serve embedding worker endpoint: {e}")
             raise
         finally:
-            handler.cleanup()
             # Attached multi-client AsyncLLMs do not own EngineCore. Close all
             # clients first, then let the parent cleanup resource terminate
             # child endpoints and finally the shared EngineCore.
             try:
-                engine_client.shutdown()
-            except Exception:
-                logger.exception("Failed to shut down embedding AsyncLLM client")
-            if engine_cleanup_resource is not None:
+                handler.cleanup()
+            finally:
                 try:
-                    engine_cleanup_resource.cleanup()
-                except Exception:
-                    logger.exception("Failed to clean up embedding engine resources")
+                    engine_client.shutdown()
+                finally:
+                    if engine_cleanup_resource is not None:
+                        if (
+                            isinstance(
+                                engine_cleanup_resource, EmbeddingEngineCleanupResource
+                            )
+                            and self.shutdown is not None
+                            and self.shutdown.started
+                        ):
+                            engine_cleanup_resource.cleanup(
+                                timeout=self.shutdown.cleanup_remaining() / 2
+                            )
+                        else:
+                            engine_cleanup_resource.cleanup()
 
     async def _create_classify_worker(
         self,
@@ -1137,8 +1169,10 @@ class WorkerFactory:
         logger.info("Starting to serve the classify worker endpoint...")
         try:
             await asyncio.gather(
-                generate_endpoint.serve_endpoint(
+                serve_endpoint(
+                    generate_endpoint,
                     handler.generate,
+                    shutdown=self.shutdown,
                     metrics_labels=[("model", config.model)],
                     health_check_payload=classify_health_check_payload,
                 ),
@@ -1157,7 +1191,10 @@ class WorkerFactory:
             logger.error(f"Failed to serve classify worker endpoint: {e}")
             raise
         finally:
-            handler.cleanup()
+            try:
+                handler.cleanup()
+            finally:
+                engine_client.shutdown(timeout=vllm_config.shutdown_timeout)
 
     def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
         """Create + register per-engine failover metrics (shadow mode only).
@@ -1487,26 +1524,34 @@ class WorkerFactory:
             serve_tasks = [
                 # for decode, we want to transfer the in-flight requests to other decode engines,
                 # because waiting them to finish can take a long time for long OSLs
-                generate_endpoint.serve_endpoint(
+                serve_endpoint(
+                    generate_endpoint,
                     handler.generate,  # type: ignore
+                    shutdown=self.shutdown,
                     graceful_shutdown=True,
                     metrics_labels=model_metrics_labels,
                     health_check_payload=health_check_payload,
                 ),
-                clear_endpoint.serve_endpoint(
+                serve_endpoint(
+                    clear_endpoint,
                     handler.clear_kv_blocks,
+                    shutdown=self.shutdown,
                     metrics_labels=model_metrics_labels,
                 ),
-                perf_endpoint.serve_endpoint(
+                serve_endpoint(
+                    perf_endpoint,
                     handler.get_perf_metrics,
+                    shutdown=self.shutdown,
                     metrics_labels=model_metrics_labels,
                 ),
             ]
 
             if rl_endpoint is not None:
                 serve_tasks.append(
-                    rl_endpoint.serve_endpoint(
+                    serve_endpoint(
+                        rl_endpoint,
                         handler.rl_dispatch,
+                        shutdown=self.shutdown,
                         metrics_labels=model_metrics_labels,
                     )
                 )
@@ -1514,16 +1559,22 @@ class WorkerFactory:
             if lora_enabled:
                 serve_tasks.extend(
                     [
-                        load_lora_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            load_lora_endpoint,
                             handler.load_lora,
+                            shutdown=self.shutdown,
                             metrics_labels=model_metrics_labels,
                         ),
-                        unload_lora_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            unload_lora_endpoint,
                             handler.unload_lora,
+                            shutdown=self.shutdown,
                             metrics_labels=model_metrics_labels,
                         ),
-                        list_loras_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            list_loras_endpoint,
                             handler.list_loras,
+                            shutdown=self.shutdown,
                             metrics_labels=model_metrics_labels,
                         ),
                     ]
@@ -1543,17 +1594,18 @@ class WorkerFactory:
         shutdown_endpoints: list,
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
-        try:
-            await self._run_prefill_worker(
-                runtime,
-                config,
-                shutdown_event,
-                shutdown_endpoints,
-                snapshot_engine,
-            )
-        except BaseException:
-            await self.state_agent_lifecycle.close()
-            raise
+        with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            try:
+                await self._run_prefill_worker(
+                    runtime,
+                    config,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    snapshot_engine,
+                    lifecycle=lifecycle,
+                )
+            finally:
+                await self.state_agent_lifecycle.close()
 
     async def _run_prefill_worker(
         self,
@@ -1562,6 +1614,8 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+        *,
+        lifecycle: _DecodeWorkerLifecycle,
     ) -> None:
         """
         Instantiate and serve
@@ -1620,6 +1674,8 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = vllm_config
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         _, dp_size = get_dp_range_for_worker(vllm_config)
@@ -1648,6 +1704,7 @@ class WorkerFactory:
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -1767,41 +1824,55 @@ class WorkerFactory:
         try:
             logger.debug("Starting serve_endpoint for prefill worker")
             serve_tasks = [
-                generate_endpoint.serve_endpoint(
+                serve_endpoint(
+                    generate_endpoint,
                     handler.generate,  # type: ignore
+                    shutdown=self.shutdown,
                     graceful_shutdown=True,
                     metrics_labels=prefill_metrics_labels,
                     health_check_payload=health_check_payload,
                 ),
-                clear_endpoint.serve_endpoint(
+                serve_endpoint(
+                    clear_endpoint,
                     handler.clear_kv_blocks,  # type: ignore
+                    shutdown=self.shutdown,
                     metrics_labels=prefill_metrics_labels,
                 ),
-                perf_endpoint.serve_endpoint(
+                serve_endpoint(
+                    perf_endpoint,
                     handler.get_perf_metrics,
+                    shutdown=self.shutdown,
                     metrics_labels=prefill_metrics_labels,
                 ),
             ]
             if rl_endpoint is not None:
                 serve_tasks.append(
-                    rl_endpoint.serve_endpoint(
+                    serve_endpoint(
+                        rl_endpoint,
                         handler.rl_dispatch,
+                        shutdown=self.shutdown,
                         metrics_labels=prefill_metrics_labels,
                     )
                 )
             if lora_enabled:
                 serve_tasks.extend(
                     [
-                        load_lora_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            load_lora_endpoint,
                             handler.load_lora,
+                            shutdown=self.shutdown,
                             metrics_labels=prefill_metrics_labels,
                         ),
-                        unload_lora_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            unload_lora_endpoint,
                             handler.unload_lora,
+                            shutdown=self.shutdown,
                             metrics_labels=prefill_metrics_labels,
                         ),
-                        list_loras_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            list_loras_endpoint,
                             handler.list_loras,
+                            shutdown=self.shutdown,
                             metrics_labels=prefill_metrics_labels,
                         ),
                     ]
@@ -1811,10 +1882,6 @@ class WorkerFactory:
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
             raise
-        finally:
-            logger.debug("Cleaning up prefill worker")
-            await self.state_agent_lifecycle.close()
-            handler.cleanup()
 
     async def _maybe_get_encode_worker_client(
         self, runtime: DistributedRuntime, config: Config

@@ -17,7 +17,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -40,8 +40,6 @@ _GRACEFUL_SHUTDOWN_PATH = Path(__file__).parent.parent / "graceful_shutdown.py"
 _dynamo_stub = types.ModuleType("dynamo")
 _dynamo_core_stub = types.ModuleType("dynamo._core")
 _dynamo_core_stub.DistributedRuntime = object
-sys.modules.setdefault("dynamo", _dynamo_stub)
-sys.modules.setdefault("dynamo._core", _dynamo_core_stub)
 
 
 def _load_graceful_shutdown():
@@ -50,7 +48,16 @@ def _load_graceful_shutdown():
         _GRACEFUL_SHUTDOWN_PATH,
     )
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    stubs = {
+        name: module
+        for name, module in (
+            ("dynamo", _dynamo_stub),
+            ("dynamo._core", _dynamo_core_stub),
+        )
+        if name not in sys.modules
+    }
+    with patch.dict(sys.modules, stubs):
+        spec.loader.exec_module(mod)
     return mod
 
 

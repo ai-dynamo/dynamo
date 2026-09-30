@@ -115,6 +115,7 @@ class TensorRTLLMEngine:
                 self._llm.shutdown()
             except Exception as e:
                 logging.error(f"Error during shutdown: {e}")
+                raise
             finally:
                 self._llm = None
 

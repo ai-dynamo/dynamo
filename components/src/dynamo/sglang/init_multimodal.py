@@ -11,6 +11,7 @@ from dynamo import prometheus_names
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.prometheus import register_embedding_cache_metrics
+from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import (
     ModelInput,
     ModelType,
@@ -39,6 +40,7 @@ async def init_multimodal_encode_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize multimodal encode worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -85,8 +87,10 @@ async def init_multimodal_encode_worker(
     register_model_taint_route(runtime, generate_endpoint)
     try:
         _ = await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 graceful_shutdown=True,
                 metrics_labels=[
                     (prometheus_names.labels.MODEL, server_args.served_model_name),
@@ -131,6 +135,7 @@ async def init_multimodal_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize multimodal worker component.
 
@@ -181,8 +186,10 @@ async def init_multimodal_worker(
     register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 metrics_labels=[("model", server_args.served_model_name)],
                 graceful_shutdown=True,
                 health_check_payload=health_check_payload,
@@ -214,6 +221,7 @@ async def init_multimodal_prefill_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize multimodal prefill worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -237,8 +245,10 @@ async def init_multimodal_prefill_worker(
     # topology card so the serving-readiness gate counts it.
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 graceful_shutdown=True,
                 metrics_labels=[("model", server_args.served_model_name)],
                 health_check_payload=health_check_payload,
