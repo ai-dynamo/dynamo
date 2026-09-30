@@ -57,10 +57,8 @@ jobs:
             kimi-k25-agg)
               dgd=kimi-k25-agg-kv-eagle
               worker=agg
-              benchmark=aiperf-synthetic
+              benchmark=kimi-k25-agg-kv-eagle-bench
               container=perf
-              multiplier=10
-              results=1k_1.5k
               resources=dgd,job,configmap,computedomain
               ;;
             deepseek-v4-pro-agg)
@@ -68,8 +66,6 @@ jobs:
               worker=worker
               benchmark=dsv4-bench
               container=bench
-              multiplier=3
-              results=.
               resources=dgd,job,computedomain
               ;;
             *) echo "Unsupported recipe: $RECIPE" >&2; exit 1 ;;
@@ -80,8 +76,6 @@ jobs:
             echo "WORKER=$worker"
             echo "BENCHMARK=$benchmark"
             echo "PERF_CONTAINER=$container"
-            echo "REQUEST_MULTIPLIER=$multiplier"
-            echo "RESULTS_SUBDIR=$results"
             echo "RESOURCE_KINDS=$resources"
             echo "ARTIFACTS=$RUNNER_TEMP/$RUN_KEY-artifacts"
             echo "REGISTRY_AUTH_FILE=$RUNNER_TEMP/$RUN_KEY-registry-auth.json"
@@ -115,7 +109,10 @@ jobs:
             (.spec.template.spec.containers[].envFrom[]? | select(.secretRef.name == "hf-token-secret").secretRef.name) = strenv(HF_SECRET) |
             (.spec.template.spec.containers[].env[]? | select(.name == "HF_TOKEN").valueFrom.secretKeyRef.name) = strenv(HF_SECRET) |
             (.spec.template.spec.containers[].env[]? | select(.name == "ARTIFACT_ROOT").value) = "/opt/models/perf/" + strenv(RUN_KEY))' "$ARTIFACTS/rendered.yaml"
-          if [[ "$RECIPE" == deepseek-v4-pro-agg ]]; then
+          if [[ "$RECIPE" == kimi-k25-agg ]]; then
+            yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
+              (.spec.template.spec.containers[].env[] | select(.name == "ROOT_ARTIFACT_DIR").value) = "/model-cache/perf/" + strenv(RUN_KEY))' "$ARTIFACTS/rendered.yaml"
+          elif [[ "$RECIPE" == deepseek-v4-pro-agg ]]; then
             yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
               .spec.template.spec.containers[0].command[2] = strenv(PERF_CLEANUP) + "\n" + .spec.template.spec.containers[0].command[2])' "$ARTIFACTS/rendered.yaml"
           fi
@@ -199,14 +196,7 @@ jobs:
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/perf.yaml"
           while true; do
-            if [[ "$RECIPE" == kimi-k25-agg ]]; then
-              # The artifact sidecar remains alive after the perf container exits.
-              exit_code=$("${k[@]}" get pods -l "ci-run=$RUN_KEY,job-name=$BENCHMARK" -o json |
-                jq -r '[.items[].status.containerStatuses[]? | select(.name == "perf").state.terminated.exitCode][0] // empty')
-              if [[ -n "$exit_code" ]]; then
-                exit "$exit_code"
-              fi
-            elif "${k[@]}" wait "job/$BENCHMARK" --for=condition=Complete --timeout=5s; then
+            if "${k[@]}" wait "job/$BENCHMARK" --for=condition=Complete --timeout=5s; then
               break
             fi
             "${k[@]}" get job "$BENCHMARK" -o json |
@@ -231,17 +221,11 @@ jobs:
           for job in $("${k[@]}" get job -l "$selector" -o name); do
             "${k[@]}" logs "$job" --all-containers > "$ARTIFACTS/${job##*/}.log" 2>&1 || true
           done
-          if [[ "$RECIPE" == kimi-k25-agg ]]; then
-            pod_selector="$selector,job-name=$BENCHMARK"
-            container=sidecar-for-cp
-            directory=/shared-artifacts/results
-          else
-            pod_selector="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component-type=frontend"
-            container=main
-            directory="/opt/models/perf/$RUN_KEY"
-            if [[ -z "$("${k[@]}" get dgd -l "$selector" -o name)" ]]; then
-              exit 0
-            fi
+          pod_selector="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component-type=frontend"
+          container=main
+          directory="/opt/models/perf/$RUN_KEY"
+          if [[ -z "$("${k[@]}" get dgd -l "$selector" -o name)" ]]; then
+            exit 0
           fi
           pod=$("${k[@]}" get pods -l "$pod_selector" -o json |
             jq -r 'first(.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")) | .metadata.name // empty')
@@ -254,11 +238,19 @@ jobs:
         if: ${{ success() && !inputs.preflight_only }}
         timeout-minutes: 5
         run: |
+          if [[ "$RECIPE" == kimi-k25-agg ]]; then
+            shopt -s nullglob
+            profiles=("$ARTIFACTS"/perf/*/*_trace_c1_*/profile_export_aiperf.json)
+            (( ${#profiles[@]} == 1 ))
+            jq -e '.request_count.avg > 0 and (.error_request_count.avg // 0) == 0 and
+              .output_sequence_length.avg > 0 and .was_cancelled != true' "${profiles[0]}"
+            exit 0
+          fi
           concurrencies=$(yq -er '.spec.template.spec.containers[] | select(.name == strenv(PERF_CONTAINER)).env[] | select(.name == "CONCURRENCIES").value' "$ARTIFACTS/perf.yaml")
           for concurrency in $concurrencies; do
-            jq -e --argjson requests "$((concurrency * REQUEST_MULTIPLIER))" '
+            jq -e --argjson requests "$((concurrency * 3))" '
               .request_count.avg == $requests and (.error_request_count.avg // 0) == 0 and
-              .output_sequence_length.avg > 0' "$ARTIFACTS/perf/$RESULTS_SUBDIR/c$concurrency/profile_export_aiperf.json"
+              .output_sequence_length.avg > 0' "$ARTIFACTS/perf/c$concurrency/profile_export_aiperf.json"
           done
       - name: Clean up recipe resources
         if: ${{ always() && steps.prepare.outcome == 'success' }}

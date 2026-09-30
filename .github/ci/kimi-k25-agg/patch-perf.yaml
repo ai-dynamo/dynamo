@@ -4,7 +4,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: aiperf-synthetic
+  name: kimi-k25-agg-kv-eagle-bench
 spec:
   activeDeadlineSeconds: 900
   template:
@@ -20,24 +20,10 @@ spec:
       containers:
       - name: perf
         env:
-        - name: ENDPOINT
-          value: kimi-k25-agg-kv-eagle-frontend:8000
-        - name: TARGET_MODEL
-          value: nvidia/Kimi-K2.5-NVFP4
-        - name: TOKENIZER
-          value: nvidia/Kimi-K2.5-NVFP4
-        - name: SCENARIO
-          value: 1k_1.5k
         - name: CONCURRENCIES
           value: "1"
-        - name: ISL
-          value: "1000"
-        - name: OSL
-          value: "1500"
-        - name: WARMUP_MULTIPLIER
-          value: "1"
-        - name: REQUEST_MULTIPLIER
-          value: "10"
+        - name: BENCHMARK_DURATION
+          value: "60"
       volumes:
       - name: model-cache
         persistentVolumeClaim:

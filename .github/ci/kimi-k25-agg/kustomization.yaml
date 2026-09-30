@@ -9,7 +9,7 @@ commonLabels:
 resources:
 - ../../../recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml
 - ../../../recipes/kimi-k2.5/model-cache/compute-domain.yaml
-- perf.yaml
+- ../../../recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml
 patches:
 - path: patch-deploy.yaml
 - path: patch-perf.yaml
