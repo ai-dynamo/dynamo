@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use crate::config::{KvRouterConfig, RouterConfigOverride};
+use crate::config::KvRouterConfig;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
     DpRank, SharedCacheHits, StorageTier, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -23,8 +23,8 @@ pub struct CacheHitEstimates {
 #[derive(Debug, Clone, Default)]
 pub struct OverlapSignals {
     pub tier_overlap_blocks: TierOverlapBlocks,
-    pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-    pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+    pub effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+    pub effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 impl OverlapSignals {
@@ -141,14 +141,13 @@ impl<'a> OverlapAnalysis<'a> {
             cache_hit_estimates_from_tiered_matches(self.config, self.block_size, self.tiered);
         OverlapSignals {
             tier_overlap_blocks: tier_overlap_blocks_from_tiered_matches(self.tiered),
-            effective_overlap_blocks: estimates.effective_overlap_blocks.into_iter().collect(),
-            effective_cached_tokens: estimates.cached_tokens.into_iter().collect(),
+            effective_overlap_blocks: estimates.effective_overlap_blocks,
+            effective_cached_tokens: estimates.cached_tokens,
         }
     }
 
     pub fn scores_response(
         &self,
-        config_override: Option<&RouterConfigOverride>,
         num_blocks: usize,
         expected_workers: impl IntoIterator<Item = WorkerWithDpRank>,
         shared_cache_enabled: bool,
@@ -156,8 +155,6 @@ impl<'a> OverlapAnalysis<'a> {
         shared_cache_error: Option<String>,
     ) -> OverlapScoresResponse {
         build_overlap_scores_response(
-            self.config,
-            config_override,
             self.tiered,
             self.block_size,
             num_blocks,
@@ -179,7 +176,6 @@ pub struct WorkerOverlapScore {
     pub host_pinned_extension_blocks: usize,
     pub disk_extension_blocks: usize,
     pub shared_beyond_device_blocks: Option<u32>,
-    pub router_credit_blocks: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -271,10 +267,7 @@ pub fn tier_overlap_blocks_from_tiered_matches(
     tier_overlap_blocks
 }
 
-#[expect(clippy::too_many_arguments)]
 pub fn build_overlap_scores_response(
-    config: &KvRouterConfig,
-    config_override: Option<&RouterConfigOverride>,
     tiered: &TieredMatchDetails,
     block_size: u32,
     num_blocks: usize,
@@ -292,12 +285,6 @@ pub fn build_overlap_scores_response(
     let host = tiered.lower_tier.get(&StorageTier::HostPinned);
     let disk = tiered.lower_tier.get(&StorageTier::Disk);
     let external = tiered.lower_tier.get(&StorageTier::External);
-    let overlap_score_credit = config_override
-        .and_then(|cfg| cfg.overlap_score_credit)
-        .unwrap_or(config.overlap_score_credit);
-    let shared_cache_multiplier = config_override
-        .and_then(|cfg| cfg.shared_cache_multiplier)
-        .unwrap_or(config.shared_cache_multiplier);
 
     let mut workers: Vec<_> = all_workers
         .into_iter()
@@ -325,12 +312,6 @@ pub fn build_overlap_scores_response(
             let disk_blocks = host_pinned_blocks + disk_extension_blocks;
             let shared_beyond_device_blocks =
                 shared_cache_hits.map(|hits| hits.hits_beyond(device_blocks as u32));
-            let shared_credit_blocks =
-                shared_beyond_device_blocks.unwrap_or(0) as f64 * shared_cache_multiplier;
-            let router_credit_blocks = overlap_score_credit * device_blocks as f64
-                + config.host_cache_hit_weight * host_pinned_extension_blocks as f64
-                + config.disk_cache_hit_weight * disk_extension_blocks as f64
-                + shared_credit_blocks;
 
             WorkerOverlapScore {
                 worker_id: worker.worker_id,
@@ -341,7 +322,6 @@ pub fn build_overlap_scores_response(
                 host_pinned_extension_blocks,
                 disk_extension_blocks,
                 shared_beyond_device_blocks,
-                router_credit_blocks,
             }
         })
         .collect();
@@ -434,8 +414,37 @@ mod tests {
         assert_eq!(tiers.disk[&worker], 9);
     }
 
+    /// Default tier weights; `worker_2` has lower-tier hits but no device row.
     #[test]
-    fn score_response_uses_explicit_block_count_and_shared_credit() {
+    fn weighted_cache_hit_estimates_include_lower_tiers() {
+        let worker_1 = WorkerWithDpRank::new(1, 0);
+        let worker_2 = WorkerWithDpRank::new(2, 0);
+        let mut device = OverlapScores::new();
+        device.scores.insert(worker_1, 2);
+        let mut host = LowerTierMatchDetails::default();
+        host.hits.insert(worker_1, 1);
+        host.hits.insert(worker_2, 1);
+        let mut disk = LowerTierMatchDetails::default();
+        disk.hits.insert(worker_1, 2);
+        let tiered = TieredMatchDetails {
+            device: MatchDetails {
+                overlap_scores: device,
+                ..Default::default()
+            },
+            lower_tier: HashMap::from([(StorageTier::HostPinned, host), (StorageTier::Disk, disk)]),
+        };
+
+        let estimates =
+            cache_hit_estimates_from_tiered_matches(&KvRouterConfig::default(), 16, &tiered);
+
+        assert_eq!(estimates.effective_overlap_blocks[&worker_1], 3.25);
+        assert_eq!(estimates.cached_tokens[&worker_1], 52);
+        assert_eq!(estimates.effective_overlap_blocks[&worker_2], 0.75);
+        assert_eq!(estimates.cached_tokens[&worker_2], 12);
+    }
+
+    #[test]
+    fn score_response_uses_explicit_block_count_and_raw_shared_hits() {
         let warm = WorkerWithDpRank::new(7, 1);
         let idle = WorkerWithDpRank::new(3, 0);
         let mut device = OverlapScores::new();
@@ -454,24 +463,11 @@ mod tests {
                 (StorageTier::External, external),
             ]),
         };
-        let config = KvRouterConfig {
-            overlap_score_credit: 0.5,
-            host_cache_hit_weight: 0.25,
-            disk_cache_hit_weight: 0.1,
-            shared_cache_multiplier: 0.5,
-            ..Default::default()
-        };
         #[allow(clippy::single_range_in_vec_init)]
         let shared = SharedCacheHits::from_ranges(vec![0..4]);
 
-        let response = OverlapAnalysis::new(&config, 16, &tiered).scores_response(
-            None,
-            9,
-            [warm, idle],
-            true,
-            Some(&shared),
-            None,
-        );
+        let response =
+            build_overlap_scores_response(&tiered, 16, 9, [warm, idle], true, Some(&shared), None);
 
         assert_eq!(response.num_blocks, 9);
         assert_eq!(response.workers[0].worker_id, idle.worker_id);
@@ -480,7 +476,6 @@ mod tests {
         assert_eq!(warm_score.host_pinned_blocks, 3);
         assert_eq!(warm_score.disk_blocks, 5);
         assert_eq!(warm_score.shared_beyond_device_blocks, Some(2));
-        assert!((warm_score.router_credit_blocks - 2.45).abs() < f64::EPSILON);
         assert!(response.shared_cache.enabled);
         assert_eq!(response.shared_cache.total_hit_blocks, 4);
     }

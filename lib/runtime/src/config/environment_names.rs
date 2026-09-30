@@ -109,6 +109,18 @@ pub mod logging {
     }
 }
 
+/// Request-lifecycle tracing environment variables.
+pub mod lifecycle_tracing {
+    /// Enable the native request-lifecycle OpenTelemetry span convention.
+    ///
+    /// This is independent from `DYN_LOG`: lifecycle spans are exported through
+    /// the OpenTelemetry tracing layer only.
+    pub const DYN_LIFECYCLE_TRACE_ENABLED: &str = "DYN_LIFECYCLE_TRACE_ENABLED";
+
+    /// Lifecycle detail mode. Defaults to `core`.
+    pub const DYN_LIFECYCLE_TRACE_MODE: &str = "DYN_LIFECYCLE_TRACE_MODE";
+}
+
 /// Runtime configuration environment variables
 ///
 /// These control the Tokio runtime, system health/metrics server, and worker behavior
@@ -233,11 +245,17 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
-    /// ETCD lease TTL in seconds (default: 10)
+    /// ETCD lease TTL in seconds (default: 30)
     pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
 
     /// Maximum time in seconds to retry the initial ETCD connection (default: 120)
     pub const ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
+    /// HTTP/2 keepalive ping interval in seconds for the ETCD channel (default: 15, 0 disables)
+    pub const ETCD_KEEPALIVE_INTERVAL_SECONDS: &str = "ETCD_KEEPALIVE_INTERVAL_SECONDS";
+
+    /// Seconds to wait for a keepalive ping ack before the ETCD channel is closed (default: 10)
+    pub const ETCD_KEEPALIVE_TIMEOUT_SECONDS: &str = "ETCD_KEEPALIVE_TIMEOUT_SECONDS";
 
     /// ETCD authentication environment variables
     pub mod auth {
@@ -355,6 +373,9 @@ pub mod llm {
 
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
+
+    /// Listen backlog of the frontend HTTP/HTTPS socket (default 4096).
+    pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
 
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
@@ -798,6 +819,15 @@ pub mod request_plane {
 
     /// Buffer size above which the TCP decoder shrinks an empty buffer, in bytes.
     pub const DYN_TCP_SHRINK_MESSAGE_SIZE: &str = "DYN_TCP_SHRINK_MESSAGE_SIZE";
+
+    /// Host or interface for the TCP request-plane server.
+    /// The server resolves the value once at startup. A loopback fallback
+    /// persists until restart, and an enumeration error fails server startup.
+    pub const DYN_TCP_RPC_HOST: &str = "DYN_TCP_RPC_HOST";
+
+    /// Port for the TCP request-plane server.
+    /// If unset, the OS assigns a free ephemeral port.
+    pub const DYN_TCP_RPC_PORT: &str = "DYN_TCP_RPC_PORT";
 }
 
 /// Response plane transport configuration.
@@ -813,10 +843,17 @@ pub mod tcp_response_stream {
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
-    /// IP address or exact interface shared by the TCP request callback and QUIC response
-    /// listeners.
-    /// Unspecified addresses are rejected.
-    /// If unset, the server auto-detects a routable local IP.
+    /// Host or interface for the TCP response stream server and QUIC response listener.
+    ///
+    /// Accepts IPv4 and IPv6 literals, bracketed IPv6 literals, IPv4 or IPv6
+    /// wildcards, and interface names. Interface aliases such as `eth0:1` are
+    /// also accepted. If unset, the server selects the first usable
+    /// non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
+    /// loopback. A wildcard uses a reachable address in its requested family.
+    /// If only the other family has a usable non-loopback address, the server
+    /// switches the bind wildcard to that family. The server resolves the value
+    /// once at startup. A loopback fallback persists until restart, and an
+    /// enumeration error fails server startup.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 
     /// TCP request-plane TLS configuration
@@ -1034,6 +1071,8 @@ mod tests {
             etcd::ETCD_ENDPOINTS,
             etcd::ETCD_LEASE_TTL,
             etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+            etcd::ETCD_KEEPALIVE_INTERVAL_SECONDS,
+            etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,
@@ -1054,6 +1093,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
@@ -1142,6 +1182,8 @@ mod tests {
             response_plane::DYN_RESPONSE_PLANE,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
+            request_plane::DYN_TCP_RPC_HOST,
+            request_plane::DYN_TCP_RPC_PORT,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,

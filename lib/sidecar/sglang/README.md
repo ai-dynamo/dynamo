@@ -28,11 +28,9 @@ follow-up.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is provided through the environment.
 
-Native Dynamo `/generate` requests are forwarded opaquely to SGLang's HTTP
-endpoint using the gRPC host and the HTTP port returned by `GetServerInfo`.
-The sidecar advertises this capability only after the HTTP health probe passes
-and discovery confirms `--incremental-streaming-output`; otherwise it continues
-serving the native gRPC path without advertising `/generate`.
+Start SGLang with `--incremental-streaming-output`. The sidecar's gRPC streaming path expects each response to contain only new tokens; cumulative output would duplicate tokens and inflate completion-token counts. The sidecar checks `GetServerInfo` during discovery and rejects startup unless `incremental_streaming_output` is explicitly `true`. Unlike the in-process Python worker, the sidecar cannot set launch options on an already-running engine.
+
+Native Dynamo `/generate` requests are forwarded opaquely to SGLang's HTTP endpoint using the gRPC host and the HTTP port returned by `GetServerInfo`. The sidecar advertises this capability only after HTTP discovery and its health probe succeed; otherwise it continues serving the native gRPC path without advertising `/generate`.
 
 The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
 

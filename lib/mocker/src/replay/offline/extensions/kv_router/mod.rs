@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
@@ -22,10 +23,9 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
-    SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    scheduling::TierOverlapBlocks,
+    ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
+    SessionContext, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    WorkerLoadProjection, WorkerSelectionInput, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -1152,7 +1152,7 @@ mod tests {
     fn router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_track_prefill_tokens: true,
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             ..KvRouterConfig::default()
         }
     }
@@ -1191,6 +1191,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             preferred_dp_rank: None,
+            preferred_prefill_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
@@ -1204,6 +1205,7 @@ mod tests {
         let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         let mut request = request(1, 7);
         request.replay_context = Some(ReplayRequestContext {
+            agentic: None,
             authored_id: "length-only".into(),
             session_id: None,
             turn_index: None,

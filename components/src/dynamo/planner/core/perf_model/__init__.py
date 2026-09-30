@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dynamo.planner.core.perf_model.agg import AggRegressionModel
-from dynamo.planner.core.perf_model.aic_adapter import (
+from dynamo.planner.core.perf_model.ais_adapter import (
     PlannerEngineCapacity,
     PlannerEnginePerfModel,
 )

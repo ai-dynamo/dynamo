@@ -11,6 +11,9 @@ use crate::config::environment_names::runtime::system as env_system;
 use crate::logging::make_system_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::traits::DistributedRuntimeProvider;
+use crate::utils::ip_resolver::{
+    DefaultIpResolver, IpResolutionError, IpResolver, resolve_advertise_ip_for_bind,
+};
 use axum::{
     Router,
     body::Bytes,
@@ -23,6 +26,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -32,12 +36,12 @@ use tower_http::trace::TraceLayer;
 /// System status server information containing socket address and handle
 #[derive(Debug)]
 pub struct SystemStatusServerInfo {
-    pub socket_addr: std::net::SocketAddr,
+    pub socket_addr: SocketAddr,
     pub handle: Option<Arc<JoinHandle<()>>>,
 }
 
 impl SystemStatusServerInfo {
-    pub fn new(socket_addr: std::net::SocketAddr, handle: Option<JoinHandle<()>>) -> Self {
+    pub fn new(socket_addr: SocketAddr, handle: Option<JoinHandle<()>>) -> Self {
         Self {
             socket_addr,
             handle: handle.map(Arc::new),
@@ -55,6 +59,37 @@ impl SystemStatusServerInfo {
     pub fn port(&self) -> u16 {
         self.socket_addr.port()
     }
+
+    /// Return an address that is served by the bound socket.
+    ///
+    /// A wildcard bind is replaced with a usable address from the same address
+    /// family. If interface enumeration fails, the same-family loopback is
+    /// used so IPv4 and IPv6 are never combined.
+    pub fn advertised_socket_addr(&self) -> SocketAddr {
+        match advertised_socket_addr(self.socket_addr, &DefaultIpResolver) {
+            Ok(address) => address,
+            Err(error) => {
+                let fallback = match self.socket_addr.ip() {
+                    IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                };
+                tracing::warn!(
+                    %error,
+                    %fallback,
+                    "Failed to resolve the system status advertisement address; using loopback"
+                );
+                SocketAddr::new(fallback, self.socket_addr.port())
+            }
+        }
+    }
+}
+
+fn advertised_socket_addr<R: IpResolver>(
+    bound: SocketAddr,
+    resolver: &R,
+) -> Result<SocketAddr, IpResolutionError> {
+    let advertise_ip = resolve_advertise_ip_for_bind(bound.ip(), resolver)?;
+    Ok(SocketAddr::new(advertise_ip, bound.port()))
 }
 
 impl Clone for SystemStatusServerInfo {
@@ -710,7 +745,22 @@ async fn engine_route_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::ip_resolver::test_support::StubResolver;
     use tokio::time::Duration;
+
+    #[test]
+    fn advertised_address_stays_in_the_bound_family() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![
+            ("lo", "127.0.0.1".parse().unwrap()),
+            ("eth0", "2001:db8::20".parse().unwrap()),
+        ];
+
+        let advertised = advertised_socket_addr("0.0.0.0:8080".parse().unwrap(), &resolver)
+            .expect("wildcard advertisement should resolve");
+
+        assert_eq!(advertised, "127.0.0.1:8080".parse().unwrap());
+    }
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]

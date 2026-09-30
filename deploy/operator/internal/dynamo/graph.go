@@ -24,6 +24,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1750,7 +1751,7 @@ func GenerateBasePodSpec(
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
 	if !shouldDisableImagePullSecret && secretsRetriever != nil {
 		imagePullSecrets := []corev1.LocalObjectReference{}
-		for _, ctr := range podSpec.Containers {
+		for _, ctr := range slices.Concat(podSpec.Containers, podSpec.InitContainers) {
 			if ctr.Image != "" {
 				imagePullSecrets = controller_common.AppendUniqueImagePullSecrets(imagePullSecrets, resolveImagePullSecrets(secretsRetriever, namespace, ctr.Image))
 			}
@@ -2176,8 +2177,8 @@ func applyDGDTemplateDefaults(
 		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy, groveClusterTopologyDomains)
 	}
 
+	propagateDGDSpecMetadata(dynamoDeployment, component)
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
-	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
 }
 
 func shouldApplyKvTransferPolicyToWorkerComponent(
@@ -2320,10 +2321,21 @@ func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1beta
 	}
 }
 
-// propagateDGDSpecMetadata merges DGD spec-level annotations and labels into
-// the component as a low-priority base. Service-level values take precedence.
-func propagateDGDSpecMetadata(annotations, labels map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
+// propagateDGDSpecMetadata materializes graph and preserved v1alpha1 service
+// metadata into the component with explicit pod-template metadata taking precedence.
+func propagateDGDSpecMetadata(dgd *v1beta1.DynamoGraphDeployment, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	podTemplate := ensurePodTemplate(component)
+
+	// Recover service metadata stored only in the alpha compatibility payload.
+	var serviceAnnotations, serviceLabels map[string]string
+	if alphaComponent := getDGDAlphaComponent(dgd, component.ComponentName); alphaComponent != nil {
+		serviceAnnotations = alphaComponent.Annotations
+		serviceLabels = alphaComponent.Labels
+	}
+
+	// Compose graph < alpha service < explicit pod-template precedence.
+	annotations := mergeLowPriorityMetadata(maps.Clone(serviceAnnotations), dgd.Spec.Annotations)
+	labels := mergeLowPriorityMetadata(maps.Clone(serviceLabels), dgd.Spec.Labels)
 	podTemplate.Annotations = mergeLowPriorityMetadata(podTemplate.Annotations, annotations)
 	podTemplate.Labels = mergeLowPriorityMetadata(podTemplate.Labels, labels)
 }
