@@ -19,7 +19,9 @@ pytestmark = [
 ]
 
 
-def test_audio_request_wire_shape_and_defaults():
+def test_audio_request_wire_shape_adds_no_defaults():
+    # The model carries the fields the client sent and nothing else. The
+    # handlers own the defaults for `response_format` and `speed`.
     request = NvCreateAudioSpeechRequest(
         input="hello",
         model="qwen-tts",
@@ -34,11 +36,17 @@ def test_audio_request_wire_shape_and_defaults():
         "model": "qwen-tts",
         "voice": "vivian",
         "data_source": "b64_json",
-        "response_format": "wav",
-        "speed": 1.0,
         "task_type": "CustomVoice",
         "language": "English",
     }
+
+
+def test_audio_request_task_type_is_free_text():
+    # The shared protocol does not know one model's task vocabulary. The
+    # handler for the model validates the value.
+    request = NvCreateAudioSpeechRequest(input="hello", task_type="Banana")
+
+    assert request.task_type == "Banana"
 
 
 @pytest.mark.parametrize("speed", [0.1, 5.0])
