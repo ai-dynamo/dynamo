@@ -39,6 +39,13 @@ patches:
     - op: add
       path: /spec/services/Frontend/extraPodSpec/mainContainer/env/-
       value: {name: HF_HOME, value: /opt/models}
+    # Spread MPI ranks across both GPU pods and keep each pod's ranks contiguous.
+    - op: add
+      path: /spec/services/agg/extraPodSpec/mainContainer/env/-
+      value: {name: PRTE_MCA_rmaps_default_mapping_policy, value: "node:oversubscribe"}
+    - op: add
+      path: /spec/services/agg/extraPodSpec/mainContainer/env/-
+      value: {name: PRTE_MCA_rmaps_default_ranking_policy, value: slot}
     - op: replace
       path: /spec/services/agg/extraPodSpec/resourceClaims/0/resourceClaimTemplateName
       value: kimi-k25-compute-domain-channel
