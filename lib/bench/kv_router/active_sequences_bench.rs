@@ -182,7 +182,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             args.common.sweep_min_ms,
             args.common.sweep_max_ms,
             args.common.sweep_steps,
-        );
+        )?;
         for duration_ms in durations.into_iter().rev() {
             println!("\n=== Active Sequences sweep: benchmark_duration_ms={duration_ms} ===");
             run_cell(&args, duration_ms, Some(duration_ms)).await?;

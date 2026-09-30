@@ -32,9 +32,6 @@ const PRE_RUN_QUIESCENCE_MS: u64 = 0;
 /// Indexer backend selection and its backend-specific parameters.
 #[derive(Subcommand, Debug, Clone)]
 enum IndexerArgs {
-    /// Single-threaded radix tree indexer.
-    RadixTree {},
-
     /// Position-based nested map indexer with jump search.
     NestedMap {
         /// Number of positions to skip during jump search before scanning back.
@@ -52,31 +49,11 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
-
-    /// Branch-sharded CRTC: N independent CRTC shards routed by a bounded
-    /// prefix trie with structural anchors for depth-boundary suffixes.
-    /// find_matches touches at most one shard (no scatter-gather).
-    BranchShardedCrtc {
-        /// Number of independent CRTC shards.
-        #[clap(long, default_value = "2")]
-        num_shards: usize,
-
-        /// Number of OS event-worker threads per shard.
-        #[clap(long, default_value = "4")]
-        num_event_workers_per_shard: usize,
-
-        /// Maximum routing-trie depth before dispatching suffixes to one shard.
-        /// K=2 is the recommended default: depth=1 often produces too few
-        /// distinct branches, while depth=2 exposes more branch diversity.
-        #[clap(long, default_value = "2")]
-        prefix_depth: usize,
-    },
 }
 
 impl IndexerArgs {
     fn to_config(&self) -> MooncakeIndexerConfig {
         match self {
-            IndexerArgs::RadixTree {} => MooncakeIndexerConfig::radix_tree(),
             IndexerArgs::NestedMap {
                 jump_size,
                 num_event_workers,
@@ -84,15 +61,6 @@ impl IndexerArgs {
             IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
                 MooncakeIndexerConfig::concurrent_radix_tree_compressed(*num_event_workers)
             }
-            IndexerArgs::BranchShardedCrtc {
-                num_shards,
-                num_event_workers_per_shard,
-                prefix_depth,
-            } => MooncakeIndexerConfig::branch_sharded_crtc(
-                *num_shards,
-                *num_event_workers_per_shard,
-                *prefix_depth,
-            ),
         }
     }
 }
@@ -165,15 +133,19 @@ struct Args {
     #[clap(long, default_value = "1")]
     benchmark_runs: usize,
 
-    /// Indexer backend to benchmark (defaults to radix-tree if not specified).
+    /// Indexer backend to benchmark. Defaults to concurrent-radix-tree-compressed
+    /// with `--num-event-workers` event threads.
     #[clap(subcommand)]
     indexer: Option<IndexerArgs>,
 }
 
 impl Args {
-    /// Return the indexer config, falling back to RadixTree if none was specified.
     fn get_indexer(&self) -> IndexerArgs {
-        self.indexer.clone().unwrap_or(IndexerArgs::RadixTree {})
+        self.indexer
+            .clone()
+            .unwrap_or(IndexerArgs::ConcurrentRadixTreeCompressed {
+                num_event_workers: self.num_event_workers,
+            })
     }
 }
 
@@ -495,7 +467,7 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
         args.common.sweep_min_ms,
         args.common.sweep_max_ms,
         args.common.sweep_steps,
-    );
+    )?;
 
     for name in indexer_names {
         let config = indexer_config(args, name)?;
