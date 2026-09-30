@@ -188,10 +188,10 @@ impl KubeDiscoveryClient {
 #[async_trait]
 impl Discovery for KubeDiscoveryClient {
     async fn check_connection(&self) -> Result<()> {
-        // `list` reads the daemon's cache and cannot detect an API outage.
-        // Read the collection with discovery's existing list permissions. An
-        // empty collection is healthy before registration, but a missing CRD
-        // or namespace must remain an error (get_opt would suppress NotFound).
+        // Check Kubernetes API connectivity and permission to list DynamoWorkerMetadata.
+        // Request metadata for at most one object to keep the response small.
+        // An empty collection is valid before registration; API errors propagate.
+        // This does not verify discovery watch health or local cache synchronization.
         let api: Api<DynamoWorkerMetadata> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
         api.list_metadata(&ListParams::default().limit(1)).await?;
