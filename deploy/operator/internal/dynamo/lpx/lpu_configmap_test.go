@@ -54,20 +54,19 @@ func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testin
 	t.Parallel()
 
 	t.Log("Construct an XT Single projection with two physical runtime partitions")
-	projection := &ModelProjection{
-		model:    "default",
+	projection := &Model{name: "default", component: &component{
 		pipeline: PipelineSingle,
 		configuredBuild: Build{
-			family: BuildFamilyXT,
+			family: xtFamily,
 			partitions: []buildPartition{
 				{sourcePartitionID: 7, partPath: "part-7", numChips: 16, devicesPerNode: 8},
 				{sourcePartitionID: 9, partPath: "part-9", numChips: 8, devicesPerNode: 8},
 			},
 		},
-	}
+	}}
 
 	t.Log("Project the four placement and artifact columns for the XT Single runtime")
-	data := resolvedPartitionData([]*ModelProjection{projection})
+	data := resolvedPartitionData([]*Model{projection})
 
 	t.Log("Verify omitted model columns never enter the final map and retained bytes remain exact")
 	require.Equal(t, map[string]string{

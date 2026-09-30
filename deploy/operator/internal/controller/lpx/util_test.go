@@ -392,7 +392,7 @@ func TestScalePodCliqueScalingGroup(t *testing.T) {
 	}
 }
 
-func TestScalePodCliques(t *testing.T) {
+func TestScaleConductorPodCliques(t *testing.T) {
 	conflict := errors.New("scale conflict")
 	for _, tc := range []struct {
 		name        string
@@ -407,14 +407,16 @@ func TestScalePodCliques(t *testing.T) {
 		{name: "partial scale failure", replicas: 3, failOnWrite: 2, wantWrites: 2, wantApplied: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Supply already-owned cliques under a two-replica group")
+			t.Log("Supply already-owned conductor cliques under a two-replica group")
+			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
 			pcsg := &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "test"},
+				ObjectMeta: metav1.ObjectMeta{Name: desired.workload.ScalingGroup(), Namespace: "test"},
 				Spec:       grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2},
 			}
 			pclqs := make(map[string]*grovev1alpha1.PodClique)
 			want := make(map[string]*grovev1alpha1.PodClique)
-			for _, name := range []string{"workload-0-worker", "workload-1-worker"} {
+			for _, name := range []string{desired.workload.ConductorCliqueName(0), desired.workload.ConductorCliqueName(1)} {
 				pclq := &grovev1alpha1.PodClique{
 					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: pcsg.Namespace, ResourceVersion: "7", Generation: 1},
 					Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
@@ -441,7 +443,7 @@ func TestScalePodCliques(t *testing.T) {
 			})
 
 			t.Log("Report successful writes, including partial progress, without mutating observations")
-			changed, err := scalePodCliques(t.Context(), cl, pcsg, pclqs, "worker", tc.replicas)
+			changed, err := scaleConductorPodCliques(t.Context(), cl, pcsg, pclqs, desired.workload, tc.replicas)
 			if tc.failOnWrite > 0 {
 				require.ErrorIs(t, err, conflict)
 			} else {

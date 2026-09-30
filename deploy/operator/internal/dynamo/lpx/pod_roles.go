@@ -13,9 +13,6 @@ import (
 )
 
 const (
-	v2LPUResourceName corev1.ResourceName = "lpu.nvidia.com/lpu"
-	v3LPUResourceName corev1.ResourceName = "nvidia.com/lpu"
-
 	allocationEnvVar = "LPX_ALLOCATION"
 )
 
@@ -23,15 +20,9 @@ const (
 // devicesPerNode is the positive device count from the manifest.
 func configureAgentScheduling(
 	agent *corev1.PodSpec,
-	targetFamily BuildFamily,
+	targetFamily *family,
 	devicesPerNode int,
 ) {
-	// Model projection has already restricted the target family to XT or HX.
-	name := v2LPUResourceName
-	if targetFamily == BuildFamilyHX {
-		name = v3LPUResourceName
-	}
-
 	// Bind the manifest's device count on main while preserving all other authored resources.
 	container := common.FindContainerByName(agent.Containers, commonconsts.MainContainerName)
 	amount := *resource.NewQuantity(int64(devicesPerNode), resource.DecimalSI)
@@ -41,5 +32,5 @@ func configureAgentScheduling(
 	if container.Resources.Limits == nil {
 		container.Resources.Limits = make(corev1.ResourceList)
 	}
-	container.Resources.Requests[name], container.Resources.Limits[name] = amount, amount
+	container.Resources.Requests[targetFamily.lpuResource], container.Resources.Limits[targetFamily.lpuResource] = amount, amount
 }

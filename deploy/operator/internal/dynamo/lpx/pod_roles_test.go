@@ -19,11 +19,11 @@ func TestAgentSchedulingUsesManifestDeviceCountAndPreservesAuthoredResources(t *
 
 	t.Log("Construct a mixed-resource PodSpec spanning every container resource location")
 	lpuResources := corev1.ResourceList{
-		v2LPUResourceName: resource.MustParse("8"),
+		xtFamily.lpuResource:                          resource.MustParse("8"),
 		corev1.ResourceName("lpu.nvidia.com/devices"): resource.MustParse("1"),
-		v3LPUResourceName:                     resource.MustParse("16"),
-		corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
-		corev1.ResourceCPU:                    resource.MustParse("2"),
+		hxFamily.lpuResource:                          resource.MustParse("16"),
+		corev1.ResourceName("nvidia.com/gpu"):         resource.MustParse("1"),
+		corev1.ResourceCPU:                            resource.MustParse("2"),
 	}
 	base := corev1.PodSpec{
 		Affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
@@ -65,23 +65,23 @@ func TestAgentSchedulingUsesManifestDeviceCountAndPreservesAuthoredResources(t *
 	t.Log("Vary the supplied device count independently of family selection, including initially absent resource maps")
 	tests := []struct {
 		name             string
-		family           BuildFamily
+		family           *family
 		devicesPerNode   int
 		emptyResources   bool
 		expectedResource corev1.ResourceName
 		expectedQuantity resource.Quantity
 	}{
 		{
-			name: "XT supplied count", family: BuildFamilyXT, devicesPerNode: 4,
-			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("4"),
+			name: "XT supplied count", family: xtFamily, devicesPerNode: 4,
+			expectedResource: xtFamily.lpuResource, expectedQuantity: resource.MustParse("4"),
 		},
 		{
-			name: "HX supplied count", family: BuildFamilyHX, devicesPerNode: 32,
-			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("32"),
+			name: "HX supplied count", family: hxFamily, devicesPerNode: 32,
+			expectedResource: hxFamily.lpuResource, expectedQuantity: resource.MustParse("32"),
 		},
 		{
-			name: "absent resource maps", family: BuildFamilyHX, devicesPerNode: 16, emptyResources: true,
-			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("16"),
+			name: "absent resource maps", family: hxFamily, devicesPerNode: 16, emptyResources: true,
+			expectedResource: hxFamily.lpuResource, expectedQuantity: resource.MustParse("16"),
 		},
 	}
 	for _, test := range tests {

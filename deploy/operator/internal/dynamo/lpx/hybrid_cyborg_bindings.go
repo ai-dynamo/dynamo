@@ -13,13 +13,13 @@ import (
 )
 
 // renderCyborgConfigMap renders the XT hybrid Agent endpoints.
-// The workload and plan must be non-nil, validated, and describe the selected hybrid model.
-// The workload and plan are not mutated. The caller assigns the returned ConfigMap's namespace.
-func (w *Workload) renderCyborgConfigMap(plan *MaterializationPlan) (*corev1.ConfigMap, string, error) {
-	build := &w.modelProjections[0].configuredBuild
+// The workload must be non-nil, named, and describe the selected hybrid model.
+// The workload is not mutated. The caller assigns the returned ConfigMap's namespace.
+func (w *Workload) renderCyborgConfigMap() (*corev1.ConfigMap, string, error) {
+	build := &w.models[0].component.configuredBuild
 
 	// Cyborg supplies the PCS prefix; startup supplies this workload's Grove index.
-	serverPrefix := plan.ScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
+	serverPrefix := w.scalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + w.models[0].agentTemplate + "-"
 	servers := make([]string, len(build.partitions))
 	offset := 0
 	for index, partition := range build.partitions {
@@ -27,7 +27,7 @@ func (w *Workload) renderCyborgConfigMap(plan *MaterializationPlan) (*corev1.Con
 		offset += partition.effectiveNodeCount()
 	}
 
-	return renderRuntimeConfigMap(plan.ResourcePrefix+"-decode", map[string]string{
+	return renderRuntimeConfigMap(w.resourcePrefix+"-decode", map[string]string{
 		"lpu_servers": strings.Join(servers, "\n"),
 	})
 }

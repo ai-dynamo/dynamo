@@ -25,127 +25,91 @@ import (
 // admission metadata and transport overhead.
 const MaxRenderedPodCliqueSetBytes = 1 << 20
 
-// RenderInput contains the fresh stage templates and runtime settings consumed by rendering.
-type RenderInput struct {
-	// MinAvailable is the minimum number of complete workload replicas in the gang.
-	MinAvailable *int32
-	// Stages contains an independently merged LPU template for every projected stage.
-	Stages map[string]corev1.PodTemplateSpec
-	// Conductor supplies a fresh, independently merged template for the shared LPU
-	// conductor. Required for non-hybrid pipelines; hybrid pipelines leave it nil
-	// and supply their independently rendered Cyborg clique below.
-	Conductor *corev1.PodTemplateSpec
-	// Cyborg supplies the GPU clique for hybrid pipelines; nil for LPU-only workloads.
-	Cyborg *grovev1alpha1.PodCliqueTemplateSpec
-}
-
-// WorkloadTemplates contains only the templates and resources contributed by one workload.
-type WorkloadTemplates struct {
-	Cliques      []*grovev1alpha1.PodCliqueTemplateSpec
-	ScalingGroup grovev1alpha1.PodCliqueScalingGroupConfig
-	Resources    []client.Object
-}
-
-// RenderNodeLocal renders a workload without constructing a PCS. workload
-// and plan must be non-nil and are read without mutation. The function may mutate
-// the reference-backed templates in input; callers must pass fresh owned values.
-// The caller assigns namespaces to the returned resources.
+// Render appends the workload's cliques and scaling group to pcs and returns its
+// runtime resources. agents holds each component's Dynamo-defaulted Agent template;
+// conductor is the Dynamo-defaulted conductor template: the Nova conductor for
+// LPU-only pipelines and the Cyborg worker for hybrid pipelines. pcs is modified only
+// when rendering succeeds; the workload is read without mutation. The function may
+// mutate the reference-backed templates; callers must pass fresh owned values. The
+// caller assigns namespaces to the returned resources.
 //
 //nolint:gocyclo // Rendering is one transactional validation-and-materialization pass.
-func RenderNodeLocal(
-	workload *Workload,
-	plan *MaterializationPlan,
-	input RenderInput,
-) (*WorkloadTemplates, error) {
-	projections := workload.modelProjections
+func (w *Workload) Render(
+	pcs *grovev1alpha1.PodCliqueSet,
+	agents map[string]corev1.PodTemplateSpec,
+	conductor corev1.PodTemplateSpec,
+) ([]client.Object, error) {
+	models := w.models
+	hybrid := w.Pipeline() == PipelineHybrid
+	workloadDigest := w.Digest().String()
+	agentTemplateNames := make([]string, 0, len(models))
+	for _, model := range models {
+		agentTemplateNames = append(agentTemplateNames, model.agentTemplate)
+	}
 
-	// Keep the hybrid GPU clique before the workload's LPU roles.
-	hybrid := projections[0].pipeline == PipelineHybrid
-	rendered := &WorkloadTemplates{}
-	cyborg := input.Cyborg
+	// Nova's conductor owns model storage; hybrid Agents and Cyborg share the serving Agent's mount.
+	storageTemplate := conductor
 	if hybrid {
-		rendered.Cliques = append(rendered.Cliques, cyborg)
-	}
-
-	workloadDigest := workload.Digest().String()
-	agentTemplateNames := make([]string, 0, len(plan.Agents))
-	for _, agent := range plan.Agents {
-		agentTemplateNames = append(agentTemplateNames, agent.TemplateName)
-	}
-	conductorTemplateName := plan.ConductorTemplate
-	allocation := strings.Join(agentTemplateNames, ":")
-
-	// The serving component owns conductor metadata and storage independently of model order.
-	conductorStage := workload.ServingComponentName()
-	conductorTemplate := input.Conductor
-	storageTemplate := input.Stages[conductorStage]
-	if !hybrid {
-		if conductorTemplate == nil {
-			return nil, fmt.Errorf("LPX rendering requires an explicit conductor template")
-		}
-		storageTemplate = *conductorTemplate
+		storageTemplate = agents[w.name]
 	}
 	modelStoragePath, err := lpuModelStoragePath(storageTemplate.Spec)
 	if err != nil {
 		return nil, err
 	}
-	configMap, configHash, err := renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
+	configMap, configHash, err := renderRuntimeConfigMap(w.resourcePrefix+"-lpu", resolvedPartitionData(models))
 	if err != nil {
 		return nil, err
 	}
-	v2HybridRuntime := projections[0].configuredBuild.family == BuildFamilyXT &&
-		projections[0].pipeline == PipelineHybrid
 
 	// Render the optional Cyborg config and construct final resource order once.
 	var (
 		cyborgConfigMap  *corev1.ConfigMap
 		cyborgConfigHash string
 	)
-	rendered.Resources = []client.Object{configMap}
-	if v2HybridRuntime {
-		cyborgConfigMap, cyborgConfigHash, err = workload.renderCyborgConfigMap(plan)
+	resources := []client.Object{configMap}
+	if hybrid && models[0].component.configuredBuild.family.cyborgServerConfig {
+		cyborgConfigMap, cyborgConfigHash, err = w.renderCyborgConfigMap()
 		if err != nil {
 			return nil, err
 		}
 		// Preserve the legacy graph order: Cyborg config first, LPU config last.
-		rendered.Resources = []client.Object{cyborgConfigMap, configMap}
+		resources = []client.Object{cyborgConfigMap, configMap}
 	}
 
-	// Consume the independently rendered conductor without copying Agent startup or placement.
-	var conductor *grovev1alpha1.PodCliqueTemplateSpec
-	if conductorTemplateName != "" {
-		container := common.FindContainerByName(conductorTemplate.Spec.Containers, commonconsts.MainContainerName)
-		if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
+	// The conductor starts after every Agent and precedes them in the clique list.
+	conductorClique := &grovev1alpha1.PodCliqueTemplateSpec{
+		Name:   w.conductorTemplate,
+		Labels: conductor.Labels,
+		Spec: grovev1alpha1.PodCliqueSpec{
+			RoleName:     w.conductorTemplate,
+			PodSpec:      conductor.Spec,
+			Replicas:     w.conductorReplicas,
+			MinAvailable: ptr.To(int32(1)),
+			StartsAfter:  slices.Clone(agentTemplateNames),
+		},
+	}
+	cliques := []*grovev1alpha1.PodCliqueTemplateSpec{conductorClique}
+	if !hybrid {
+		container := common.FindContainerByName(conductorClique.Spec.PodSpec.Containers, commonconsts.MainContainerName)
+		if err := applyModelPaths(container, models, modelStoragePath); err != nil {
 			return nil, err
 		}
-		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
-		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
-		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
-			Name:        conductorTemplateName,
-			Labels:      conductorTemplate.Labels,
-			Annotations: annotations,
-			Spec: grovev1alpha1.PodCliqueSpec{
-				RoleName:     conductorTemplateName,
-				PodSpec:      conductorTemplate.Spec,
-				Replicas:     1,
-				MinAvailable: ptr.To(int32(1)),
-				StartsAfter:  agentTemplateNames,
-			},
-		}
-		rendered.Cliques = append(rendered.Cliques, conductor)
+		conductorClique.Annotations = roleAnnotations(conductor.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
+		conductorClique.Annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
 	}
 
-	// Canonical projections keep each component together; consume its last Agent instance.
+	// Canonical models keep each component together; consume its last Agent instance.
+	allocation := strings.Join(agentTemplateNames, ":")
 	var template corev1.PodTemplateSpec
-	for index, projection := range projections {
-		stage := projection.stage
-		if index == 0 || stage != projections[index-1].stage {
-			template = input.Stages[stage]
+	for index, model := range models {
+		stage := model.component.name
+		if index == 0 || stage != models[index-1].component.name {
+			template = agents[stage]
 
 			// Publish the model path before template-owned hybrid Agent bindings.
 			if hybrid {
 				container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
-				if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
+				if err := applyModelPaths(container, models, modelStoragePath); err != nil {
 					return nil, fmt.Errorf("stage %s: %w", stage, err)
 				}
 			} else {
@@ -158,31 +122,30 @@ func RenderNodeLocal(
 				}
 			}
 			var conductorSpec *corev1.PodSpec
-			if stage == conductorStage && conductor != nil {
-				conductorSpec = &conductor.Spec.PodSpec
+			if stage == w.name && !hybrid {
+				conductorSpec = &conductorClique.Spec.PodSpec
 			}
-			if err := configureLPURolePods(&template.Spec, conductorSpec, projection, configMap.Name, allocation); err != nil {
+			if err := configureLPURolePods(&template.Spec, conductorSpec, model, configMap.Name, allocation); err != nil {
 				return nil, fmt.Errorf("stage %s: %w", stage, err)
 			}
 		}
 		podSpec := template.Spec
-		if index+1 < len(projections) && stage == projections[index+1].stage {
+		if index+1 < len(models) && stage == models[index+1].component.name {
 			podSpec = *podSpec.DeepCopy()
 		}
 
-		annotations := roleAnnotations(maps.Clone(template.Annotations), lpxv1alpha1.PodRoleAgent, projection.Digest().String())
+		annotations := roleAnnotations(maps.Clone(template.Annotations), lpxv1alpha1.PodRoleAgent, model.Digest().String())
 		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
-		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
-		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
-		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
-		agent := plan.Agents[index]
-		replicas := int32(agent.Replicas)
-		rendered.Cliques = append(rendered.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
-			Name:        agent.TemplateName,
+		annotations[lpxv1alpha1.PodModelAnnotation] = model.name
+		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = model.CompilerSnapshotDigest()
+		annotations[WorkloadModeAnnotation] = string(model.component.configuredBuild.family.workloadMode(model.component.pipeline))
+		replicas := int32(model.component.agentReplicas)
+		cliques = append(cliques, &grovev1alpha1.PodCliqueTemplateSpec{
+			Name:        model.agentTemplate,
 			Labels:      maps.Clone(template.Labels),
 			Annotations: annotations,
 			Spec: grovev1alpha1.PodCliqueSpec{
-				RoleName:     agent.TemplateName,
+				RoleName:     model.agentTemplate,
 				PodSpec:      podSpec,
 				Replicas:     replicas,
 				MinAvailable: ptr.To(replicas),
@@ -190,75 +153,69 @@ func RenderNodeLocal(
 		})
 	}
 
-	selectedTemplateNames := agentTemplateNames
-	if conductorTemplateName != "" {
-		selectedTemplateNames = append([]string{conductorTemplateName}, selectedTemplateNames...)
-	}
-
+	// Nova's conductor leads the scaling group; Cyborg workers follow their Agents.
+	members := append([]string{w.conductorTemplate}, agentTemplateNames...)
 	if hybrid {
-		// Bound GPU hostnames using the rendered width of the last workload replica.
-		if err := plan.validatePodHostname("Cyborg", plan.CyborgTemplate, int(cyborg.Spec.Replicas)-1); err != nil {
-			return nil, err
-		}
+		members = append(slices.Clone(agentTemplateNames), w.conductorTemplate)
 
 		// Bind the authored HX Cyborg configuration mount to the generated ConfigMap.
-		container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
+		container := common.FindContainerByName(conductorClique.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 		if cyborgConfigMap == nil && slices.ContainsFunc(container.VolumeMounts,
 			func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName }) {
-			if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, configMap.Name, true); err != nil {
+			if err := withLPUConfigVolume(&conductorClique.Spec.PodSpec, configMap.Name, true); err != nil {
 				return nil, err
 			}
 		}
-		if err := configureHybridCyborg(
-			cyborg,
-			projections[0],
-			workloadDigest,
-			modelStoragePath,
-			agentTemplateNames,
-			cyborgConfigMap,
-			cyborgConfigHash,
-		); err != nil {
+		conductorClique.Annotations = conductor.Annotations
+		if err := configureHybridCyborg(conductorClique, models[0], workloadDigest, modelStoragePath, cyborgConfigMap, cyborgConfigHash); err != nil {
 			return nil, err
 		}
-
-		cyborg.Spec.MinAvailable = ptr.To(int32(1))
 	}
 
 	// Each workload contributes its own scaling group to the shared PCS.
-	members := selectedTemplateNames
-	if hybrid {
-		members = append(members, plan.CyborgTemplate)
-	}
-	rendered.ScalingGroup = grovev1alpha1.PodCliqueScalingGroupConfig{
-		Name:         plan.ScalingGroupTemplate,
+	scalingGroup := grovev1alpha1.PodCliqueScalingGroupConfig{
+		Name:         w.scalingGroupTemplate,
 		CliqueNames:  members,
 		Annotations:  map[string]string{WorkloadDigestAnnotation: workloadDigest},
-		Replicas:     ptr.To(ptr.Deref(input.MinAvailable, 1)),
-		MinAvailable: ptr.To(ptr.Deref(input.MinAvailable, 1)),
+		Replicas:     ptr.To(w.minAvailable),
+		MinAvailable: ptr.To(w.minAvailable),
 	}
 
-	// Keep every LPX role in one backend gang, including the KAI fallback roles.
-	for _, clique := range rendered.Cliques {
+	// Keep every LPX role in one backend gang; discovery selects only the conductor.
+	for _, clique := range cliques {
 		clique.Spec.PodSpec.SchedulerName = v1alpha1.LPXSchedulerName
+		delete(clique.Labels, ServingLabel)
+		if clique.Name == w.conductorTemplate {
+			if clique.Labels == nil {
+				clique.Labels = make(map[string]string)
+			}
+			clique.Labels[ServingLabel] = commonconsts.KubeLabelValueTrue
+		} else {
+			delete(clique.Labels, commonconsts.KubeLabelDynamoDiscoveryEnabled)
+			delete(clique.Labels, commonconsts.KubeLabelDynamoDiscoveryBackend)
+			delete(clique.Labels, commonconsts.KubeLabelDynamoBaseModelHash)
+		}
 	}
 
-	return rendered, nil
+	pcs.Spec.Template.Cliques = append(pcs.Spec.Template.Cliques, cliques...)
+	pcs.Spec.Template.PodCliqueScalingGroupConfigs = append(pcs.Spec.Template.PodCliqueScalingGroupConfigs, scalingGroup)
+	return resources, nil
 }
 
 // configureLPURolePods consumes fresh, independently owned Agent and conductor
 // specs. Agent and projection are nonnil, and projection has validated partitions;
 // nil conductor means no emitted launcher.
-func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, projection *ModelProjection, configMapName, allocation string) error {
+func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, model *Model, configMapName, allocation string) error {
 	// Use this component's manifest geometry for its Agent resources and configuration mount.
-	family := projection.configuredBuild.family
-	if err := withLPUConfigVolume(agentPodSpec, configMapName, family == BuildFamilyXT); err != nil {
+	buildFamily := model.component.configuredBuild.family
+	if err := withLPUConfigVolume(agentPodSpec, configMapName, buildFamily.configOverrides); err != nil {
 		return err
 	}
-	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].devicesPerNode)
+	configureAgentScheduling(agentPodSpec, buildFamily, model.component.configuredBuild.partitions[0].devicesPerNode)
 
 	// Placement is already resolved; shape only the actual conductor's LPX-owned fields.
 	if conductorPodSpec != nil {
-		if err := withLPUConfigVolume(conductorPodSpec, configMapName, family == BuildFamilyXT); err != nil {
+		if err := withLPUConfigVolume(conductorPodSpec, configMapName, buildFamily.configOverrides); err != nil {
 			return err
 		}
 		configureNodeLocalConductorRuntime(conductorPodSpec, allocation)

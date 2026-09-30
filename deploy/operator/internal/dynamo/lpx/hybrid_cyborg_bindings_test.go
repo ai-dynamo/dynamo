@@ -17,38 +17,22 @@ import (
 func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Build a hybrid V2 workload with two uncollapsed runtime partitions")
+	t.Log("Build a hybrid XT workload with two uncollapsed runtime partitions")
 	fixture := newV2CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
 	fixture.selectedPropSyncChains = nil
 	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline:        PipelineHybrid,
-		Models:          []string{"default"},
-		RuntimeBuildRef: "model-build",
-		Build:           snapshot,
-	})
-	require.NoError(t, err)
-	projection := projectionBatch[0]
-	projection.stage = testRenderComponentName
-	workload := &Workload{
-		modelProjections:     []*ModelProjection{projection},
-		scalingGroupReplicas: 1,
-	}
+	projection := projectTestModel(t, snapshot, PipelineHybrid)
 
 	t.Log("Render the generated Agent endpoints")
-	plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
-	require.NoError(t, err)
-	initial, _, err := workload.renderCyborgConfigMap(plan)
+	initial, _, err := newTestWorkload(t, []*Model{projection}, 1, "test-dgd").renderCyborgConfigMap()
 	require.NoError(t, err)
 
 	t.Log("Verify every workload replica addresses only its own Agents")
 	for _, replicas := range []int32{1, 2, 10, 12} {
 		t.Run(strconv.Itoa(int(replicas)), func(t *testing.T) {
-			workload.scalingGroupReplicas = replicas
-			scaledPlan, err := workload.PlanNodeLocalMaterialization("test-dgd")
-			require.NoError(t, err)
-			configMap, _, err := workload.renderCyborgConfigMap(scaledPlan)
+			workload := newTestWorkload(t, []*Model{projection}, replicas, "test-dgd")
+			configMap, _, err := workload.renderCyborgConfigMap()
 			require.NoError(t, err)
 			require.Equal(t, initial, configMap)
 			require.True(t, *configMap.Immutable)
@@ -57,10 +41,10 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 			require.Len(t, configMap.Data, 1)
 
 			t.Log("Resolve Cyborg server addresses to the last workload replica's actual Agent hostnames")
-			lastReplica := scaledPlan.ForReplica(replicas - 1)
+			lastAgents := workload.cliqueName(projection.agentTemplate, replicas-1)
 			servers := strings.Split(strings.ReplaceAll(configMap.Data["lpu_servers"], "${GROVE_PCSG_INDEX}", strconv.Itoa(int(replicas-1))), "\n")
 			for index, offset := range []int{0, 2} {
-				require.Equal(t, lastReplica.Agents[0].CliqueName+"-"+strconv.Itoa(offset), "test-dgd-0-"+servers[index])
+				require.Equal(t, lastAgents+"-"+strconv.Itoa(offset), "test-dgd-0-"+servers[index])
 			}
 		})
 	}
@@ -96,18 +80,15 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 				fixture.partitions[index].id = uint32(index)
 			}
 			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-			projection := projectTestBuild(t, snapshot, PipelineHybrid)
-			projection.stage = testRenderComponentName
+			projection := projectTestModel(t, snapshot, PipelineHybrid)
 
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")
-			workload := &Workload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
-			plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
+			workload := newTestWorkload(t, []*Model{projection}, 1, "test-dgd")
+			require.Len(t, projection.requestSpec().Partitions, test.partitions)
+			require.Equal(t, 2*test.partitions, projection.component.agentReplicas)
+			configMap, _, err := workload.renderCyborgConfigMap()
 			require.NoError(t, err)
-			require.Len(t, projection.RequestSpec(plan, "agents").Partitions, test.partitions)
-			require.Equal(t, 2*test.partitions, projection.agentReplicas)
-			configMap, _, err := workload.renderCyborgConfigMap(plan)
-			require.NoError(t, err)
-			prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
+			prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + projection.agentTemplate + "-"
 			servers := make([]string, len(test.wantOffsets))
 			for index, offset := range test.wantOffsets {
 				servers[index] = prefix + strconv.Itoa(offset)

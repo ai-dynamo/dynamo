@@ -14,18 +14,15 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
 
-const v2ProjectionVersion = "v2-xt-node-local/v1"
-
 // projectV2Component derives the XT component shared by every model and writes
 // its model-independent digest fields.
-func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (ModelProjection, error) {
-	source := intent.Build
+func projectV2Component(source *Build, pipeline Pipeline, fields digestTranscript) (*component, error) {
 	configured := *source
 
 	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
-	if intent.Pipeline != PipelineHybrid {
+	if pipeline != PipelineHybrid {
 		if err := configured.consumeRuntimeSelectedPropSyncChain(); err != nil {
-			return ModelProjection{}, fmt.Errorf("resolving configured V2 build: %w", err)
+			return nil, fmt.Errorf("resolving configured XT build: %w", err)
 		}
 
 		// Omit host-only embeddings by retaining a view of the immutable source partitions.
@@ -35,18 +32,19 @@ func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (M
 		}
 	}
 
-	// Bind the V2 workload and runtime contract into projection identity before partition validation.
+	// Bind the XT workload and runtime contract into projection identity before partition validation.
 	fields.field("input-embeddings-on-gpu", []byte{1})
-	bindHybridRuntimeIO(fields, intent.Pipeline, configured.ioFPGACount, configured.ioFanoutFactor)
+	bindHybridRuntimeIO(fields, pipeline, configured.ioFPGACount, configured.ioFanoutFactor)
 
 	// Bind validated physical partitions into projection identity while counting runtime endpoints.
 	partitions := configured.partitions
+	partitionRequests := make([]lpxv1alpha1.PartitionRequest, len(partitions))
 	agentReplicas := 0
 	for index, partition := range partitions {
 		compilerID := uint32(partition.sourcePartitionID)
 		shape, err := xtShape(partition)
 		if err != nil {
-			return ModelProjection{}, fmt.Errorf("V2 compiler partition %d: %w", compilerID, err)
+			return nil, fmt.Errorf("V2 compiler partition %d: %w", compilerID, err)
 		}
 		endpoints := partition.effectiveNodeCount()
 		agentReplicas += endpoints
@@ -54,13 +52,15 @@ func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (M
 		fields.uint32Field("model-partition-id", uint32(index))
 		fields.intField("endpoint-count", int64(endpoints))
 		fields.field("xt-shape", []byte(shape))
+		partitionRequests[index] = newPartitionRequest(index, partition)
+		partitionRequests[index].XtShape = &shape
 	}
 	connectors, err := v2Connectors(source, partitions)
 	if err != nil {
-		return ModelProjection{}, err
+		return nil, err
 	}
 	// Preserve physical scheduler partitions while collapsing selected chains only in LPU runtime state.
-	if intent.Pipeline == PipelineHybrid && len(configured.selectedPropSyncChains) != 0 {
+	if pipeline == PipelineHybrid && len(configured.selectedPropSyncChains) != 0 {
 		runtimeChainByRoot := make(map[int][]int, len(configured.selectedPropSyncChains))
 		for _, chain := range configured.selectedPropSyncChains {
 			runtimeChainByRoot[chain[0]] = chain
@@ -89,10 +89,10 @@ func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (M
 	allocationMetadata := json.RawMessage(`{}`)
 	fields.field("allocation-metadata", allocationMetadata)
 
-	return ModelProjection{
+	return &component{
 		configuredBuild:    configured,
 		allocationMetadata: allocationMetadata,
-		partitions:         partitions,
+		partitionRequests:  partitionRequests,
 		connectors:         connectors,
 		agentReplicas:      agentReplicas,
 	}, nil

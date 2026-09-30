@@ -39,23 +39,12 @@ func TestComponentGroups(t *testing.T) {
 
 			t.Log("Group every LPX member by its conductor without mutating the graph")
 			before := dgd.DeepCopy()
-			require.Equal(t, test.want, ComponentGroups(dgd))
+			require.Equal(t, test.want, componentGroups(dgd))
 			require.Equal(t, before, dgd)
 
 			t.Log("Reordering authored components preserves group identity and membership")
 			slices.Reverse(dgd.Spec.Components)
-			require.Equal(t, test.want, ComponentGroups(dgd))
+			require.Equal(t, test.want, componentGroups(dgd))
 		})
 	}
-}
-
-// singleGroupComponents reads the one admitted workload in a test fixture.
-func singleGroupComponents(t *testing.T, dgd *dynamov1beta1.DynamoGraphDeployment) []string {
-	t.Helper()
-	groups := ComponentGroups(dgd)
-	require.Len(t, groups, 1)
-	for _, components := range groups {
-		return components
-	}
-	return nil
 }

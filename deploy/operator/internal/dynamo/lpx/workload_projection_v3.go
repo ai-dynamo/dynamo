@@ -8,45 +8,44 @@ package lpx
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
 
-const (
-	v3CompilerEnvelopeSchema = "dynamo.lpx.v3-capnp/v1"
-	v3ProjectionVersion      = "v3-hx-capnp/v1"
-	v3LPUDevice              = "lpu"
-)
-
 // projectV3Component derives the HX component shared by every model and writes
 // its model-independent digest fields.
-func projectV3Component(intent ModelProjectionInput, fields digestTranscript) (ModelProjection, error) {
-	configured := *intent.Build
-	allocationMetadata, connectors, err := projectV3PropSync(configured.partitions, configured.selectedPropSyncChains, intent.Pipeline)
+func projectV3Component(source *Build, pipeline Pipeline, fields digestTranscript) (*component, error) {
+	configured := *source
+	allocationMetadata, connectors, err := projectV3PropSync(configured.partitions, configured.selectedPropSyncChains, pipeline)
 	if err != nil {
-		return ModelProjection{}, err
+		return nil, err
 	}
 	// Selected chains are represented by the allocation metadata and connectors.
 	configured.selectedPropSyncChains = nil
 
 	// Count runtime endpoints while binding ordered partitions into projection identity.
 	// Manifest validation guarantees numChips/devicesPerNode equals the HX extent's node count.
-	fields.field("v3-envelope-schema", []byte(v3CompilerEnvelopeSchema))
+	partitionRequests := make([]lpxv1alpha1.PartitionRequest, len(configured.partitions))
+	fields.field("v3-envelope-schema", []byte("dynamo.lpx.v3-capnp/v1"))
 	agentReplicas := 0
 	for index, partition := range configured.partitions {
+		extent := slices.Clone(partition.hxExtent)
+		partitionRequests[index] = newPartitionRequest(index, partition)
+		partitionRequests[index].Extent = &extent
 		agentReplicas += partition.effectiveNodeCount()
 		fields.intField("ordered-compiler-id-index", int64(index))
 		fields.uint32Field("ordered-compiler-id", uint32(partition.sourcePartitionID))
 	}
 	fields.field("allocation-metadata", allocationMetadata)
 	// Bind the Cyborg runtime contract into hybrid projection identity.
-	bindHybridRuntimeIO(fields, intent.Pipeline, configured.ioFPGACount, configured.ioFanoutFactor)
+	bindHybridRuntimeIO(fields, pipeline, configured.ioFPGACount, configured.ioFanoutFactor)
 
-	return ModelProjection{
+	return &component{
 		configuredBuild:    configured,
 		allocationMetadata: allocationMetadata,
-		partitions:         configured.partitions,
+		partitionRequests:  partitionRequests,
 		connectors:         connectors,
 		agentReplicas:      agentReplicas,
 	}, nil
@@ -65,13 +64,13 @@ func projectV3PropSync(
 		return nil, nil, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
 	}
 
-	// Project each physical partition into the V3 allocation metadata envelope.
+	// Project each physical partition into the HX allocation metadata envelope.
 	partitionInfo := make(map[string]any, len(partitions)+1)
 	partitionInfo["num_partitions"] = len(partitions)
 	for _, partition := range partitions {
 		compilerID := uint32(partition.sourcePartitionID)
 		partitionInfo[strconv.FormatUint(uint64(compilerID), 10)] = map[string]any{
-			"device":     v3LPUDevice,
+			"device":     "lpu",
 			"allocation": partition.hxExtent,
 		}
 	}

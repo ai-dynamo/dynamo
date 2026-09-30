@@ -72,16 +72,16 @@ func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 				count = 3
 				names = []string{"LPX_DRAFT_MODEL_PATH", "LPX_TARGET_MODEL_PATH"}
 			}
-			projections := make([]*ModelProjection, count)
+			projections := make([]*Model, count)
 			for index := range projections {
 				buildID := fmt.Sprintf("model-%d", index)
 				path := "gs://registry/" + buildID
 				if test.local {
 					path = "file:///operator-cache/" + buildID
 				}
-				projections[index] = &ModelProjection{
+				projections[index] = &Model{component: &component{
 					pipeline: test.pipeline, runtimeBuildRef: buildID, configuredBuild: Build{path: path},
-				}
+				}}
 			}
 			want := []corev1.EnvVar{}
 			for index, name := range names {
@@ -129,11 +129,11 @@ func TestModelPathsRejectInvalidReferences(t *testing.T) {
 	} {
 		t.Run(string(test.pipeline)+"/"+test.name, func(t *testing.T) {
 			t.Log("Keep the target reference invalid after a valid speculative draft")
-			projections := []*ModelProjection{{pipeline: test.pipeline, configuredBuild: Build{path: "gs://registry/model"}}}
+			projections := []*Model{{component: &component{pipeline: test.pipeline, configuredBuild: Build{path: "gs://registry/model"}}}}
 			if test.pipeline == PipelineSpecDecode {
-				projections = append(projections, &ModelProjection{pipeline: test.pipeline})
+				projections = append(projections, &Model{component: &component{pipeline: test.pipeline}})
 			}
-			projections[len(projections)-1].configuredBuild.path = "gs://registry/../outside"
+			projections[len(projections)-1].component.configuredBuild.path = "gs://registry/../outside"
 			container := corev1.Container{Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}}}
 			before := container.DeepCopy()
 

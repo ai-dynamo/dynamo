@@ -82,15 +82,32 @@ func acquireTestSnapshot(t *testing.T, buildDir string) *Build {
 	return snapshot
 }
 
-func projectTestBuild(t *testing.T, snapshot *Build, pipeline Pipeline) *ModelProjection {
+// resolveTestWorkload resolves the fixture's sole workload inside PodCliqueSet "test-pcs".
+func resolveTestWorkload(t *testing.T, dgd *v1beta1.DynamoGraphDeployment, registry ModelRegistry) (*Workload, error) {
 	t.Helper()
+	workloads, err := ResolveWorkloads(t.Context(), dgd, "test-pcs", registry)
+	if err != nil {
+		return nil, err
+	}
+	require.Len(t, workloads, 1)
+	return workloads[0], nil
+}
 
-	t.Log("Project the caller-owned normalized build for the selected pipeline")
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: pipeline, Models: []string{"default"}, Build: snapshot,
-	})
+// newTestWorkload names models as a sole workload inside PodCliqueSet pcsName.
+func newTestWorkload(t *testing.T, models []*Model, replicas int32, pcsName string) *Workload {
+	t.Helper()
+	workload := &Workload{name: models[len(models)-1].component.name, models: models, scalingGroupReplicas: replicas, minAvailable: 1}
+	require.NoError(t, workload.nameResources(pcsName, ""))
+	return workload
+}
+
+// projectTestModel projects the snapshot's default model for pipeline from the
+// "model-build" registry reference.
+func projectTestModel(t *testing.T, snapshot *Build, pipeline Pipeline) *Model {
+	t.Helper()
+	models, err := projectComponent(testRenderComponentName, "model-build", snapshot, pipeline, []string{"default"})
 	require.NoError(t, err)
-	return projectionBatch[0]
+	return models[0]
 }
 
 func writeV2CompilerFixture(t *testing.T) string {

@@ -22,85 +22,64 @@ const (
 	maxLPXPartitions             = 256
 )
 
-// appendModelProjections appends one component's immutable model projections to
-// the caller-owned destination, which may be nil. Existing elements are unchanged.
-// intent.Build is a normalized, non-nil build; Models is nonempty
-// and Pipeline is selected by the validated resolver. Source inputs are not mutated;
-// discard error results.
-func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
+// projectComponent projects one DGD component's normalized, non-nil build into
+// its models, in the order of the nonempty models list. The build is not mutated.
+func projectComponent(name, runtimeBuildRef string, source *Build, pipeline Pipeline, models []string) ([]*Model, error) {
 	// family projections record their model-independent digest fields once.
-	var (
-		fields            bytes.Buffer
-		component         ModelProjection
-		projectionVersion string
-		err               error
-	)
-	switch intent.Build.family {
-	case BuildFamilyXT:
-		projectionVersion = v2ProjectionVersion
-		component, err = projectV2Component(intent, digestTranscript{&fields})
-	case BuildFamilyHX:
-		projectionVersion = v3ProjectionVersion
-		component, err = projectV3Component(intent, digestTranscript{&fields})
-	default:
-		return nil, fmt.Errorf("unsupported LPX target family %q", intent.Build.family)
-	}
+	var fields bytes.Buffer
+	projected, err := source.family.project(source, pipeline, digestTranscript{&fields})
 	if err != nil {
 		return nil, err
 	}
 	// Bound the component's physical build before runtime expansion and request publication.
-	if len(component.partitions) < 1 || len(component.partitions) > maxLPXPartitions {
-		return nil, fmt.Errorf("LPX projection has %d partitions, limit is 1..%d", len(component.partitions), maxLPXPartitions)
+	if len(projected.partitionRequests) < 1 || len(projected.partitionRequests) > maxLPXPartitions {
+		return nil, fmt.Errorf("LPX projection has %d partitions, limit is 1..%d", len(projected.partitionRequests), maxLPXPartitions)
 	}
 
 	// Publish distinct logical identities backed by the component's immutable configuration.
-	component.compilerSnapshotDigest = intent.Build.contentID
-	component.runtimeBuildRef = intent.RuntimeBuildRef
-	component.pipeline = intent.Pipeline
-	for _, model := range intent.Models {
-		projection := component
-		projection.model = model
-		projection.digest = modelProjectionDigest(intent, projectionVersion, model, fields.Bytes())
-		dst = append(dst, &projection)
+	projected.name, projected.runtimeBuildRef, projected.pipeline = name, runtimeBuildRef, pipeline
+	result := make([]*Model, len(models))
+	for index, model := range models {
+		result[index] = &Model{name: model, digest: modelProjectionDigest(projected, model, fields.Bytes()), component: projected}
 	}
-	return dst, nil
+	return result, nil
 }
 
-func workloadSetDigest(projections []*ModelProjection) (WorkloadDigest, error) {
-	first := projections[0]
-	if len(projections) == 1 {
+func workloadSetDigest(models []*Model) (WorkloadDigest, error) {
+	first := models[0]
+	if len(models) == 1 {
 		return first.digest, nil
 	}
 	hash := sha256.New()
 	transcript := digestTranscript{hash}
 	transcript.field("schema", []byte(workloadSetDigestVersion))
-	for _, projection := range projections {
-		if projection.configuredBuild.family != first.configuredBuild.family {
+	for _, model := range models {
+		if model.component.configuredBuild.family != first.component.configuredBuild.family {
 			return WorkloadDigest{}, fmt.Errorf(
 				"LPX model projections have mixed target families %q and %q",
-				first.configuredBuild.family,
-				projection.configuredBuild.family,
+				first.component.configuredBuild.family.target,
+				model.component.configuredBuild.family.target,
 			)
 		}
-		transcript.field("model", []byte(projection.model))
-		transcript.field("compilation-digest", projection.digest[:])
+		transcript.field("model", []byte(model.name))
+		transcript.field("compilation-digest", model.digest[:])
 	}
 	return sumDigest(hash), nil
 }
 
 // modelProjectionDigest hashes one logical model's identity header followed by
 // its component's model-independent fields.
-func modelProjectionDigest(intent ModelProjectionInput, projectionVersion, model string, fields []byte) WorkloadDigest {
+func modelProjectionDigest(projected *component, model string, fields []byte) WorkloadDigest {
 	hash := sha256.New()
 	transcript := digestTranscript{hash}
 	transcript.field("schema", []byte(modelProjectionDigestVersion))
-	transcript.field("lowerer", []byte(projectionVersion))
+	transcript.field("lowerer", []byte(projected.configuredBuild.family.projectionVersion))
 	// Ref is an acquisition locator, not build content. In particular, a
 	// file-backed snapshot's ref contains its absolute checkout path.
-	transcript.field("build-content-id", []byte(intent.Build.contentID))
+	transcript.field("build-content-id", []byte(projected.configuredBuild.contentID))
 	// Bind the family and pipeline directly; the pipeline already determines runtime mode.
-	transcript.field("family", []byte(intent.Build.family))
-	transcript.field("pipeline", []byte(intent.Pipeline))
+	transcript.field("family", []byte(projected.configuredBuild.family.target))
+	transcript.field("pipeline", []byte(projected.pipeline))
 	transcript.field("model", []byte(model))
 	_, _ = hash.Write(fields)
 	return sumDigest(hash)

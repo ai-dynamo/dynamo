@@ -355,7 +355,7 @@ func TestExpiredPipelineRequestsRetrySiblingDeletion(t *testing.T) {
 	requests, err := r.getPipelineRequests(ctx, pcs)
 	require.NoError(t, err)
 	pcsgs, err := getPodCliqueScalingGroups(ctx, r.Client, pcs)
-	pcsg := pcsgs[desired.plan.LPXScalingGroup]
+	pcsg := pcsgs[desired.workload.ScalingGroup()]
 	require.NoError(t, err)
 	require.Greater(t, len(requests), 1)
 	expired := getTestPipelineRequest(t, ctx, r.Client, child.Namespace, desired.requests[0].Name)

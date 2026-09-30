@@ -344,7 +344,7 @@ func TestManifestPartitionFamilyOrdering(t *testing.T) {
 	}
 	family, _, _, err := classifyManifestPartitions(hx, false)
 	require.NoError(t, err)
-	require.Equal(t, BuildFamilyHX, family)
+	require.Equal(t, hxFamily, family)
 	require.Equal(t, []int{7, 3}, []int{hx[0].sourcePartitionID, hx[1].sourcePartitionID})
 
 	t.Log("Classify XT partitions while sorting by source partition identity")
@@ -354,7 +354,7 @@ func TestManifestPartitionFamilyOrdering(t *testing.T) {
 	}
 	family, _, _, err = classifyManifestPartitions(xt, false)
 	require.NoError(t, err)
-	require.Equal(t, BuildFamilyXT, family)
+	require.Equal(t, xtFamily, family)
 	require.Equal(t, []int{3, 7}, []int{xt[0].sourcePartitionID, xt[1].sourcePartitionID})
 }
 

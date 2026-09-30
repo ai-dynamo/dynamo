@@ -51,7 +51,7 @@ func TestResolveWorkloadClassifiesSnapshotFailures(t *testing.T) {
 			registry, err := NewModelRegistry(registryDir, nil)
 			require.NoError(t, err)
 			dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build"))
-			workload, err := ResolveWorkload(t.Context(), dgd, []string{"LPX"}, registry)
+			workload, err := resolveTestWorkload(t, dgd, registry)
 
 			t.Log("Preserve failure classification without returning a partial workload")
 			require.Nil(t, workload)
@@ -78,22 +78,19 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 
 	t.Log("Resolve an LPU-only workload without selecting the conventional decode")
 	hxSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
-	hx, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticModelRegistry{"build": hxSnapshot})
+	hx, err := resolveTestWorkload(t, dgd, staticModelRegistry{"build": hxSnapshot})
 	require.NoError(t, err)
 	require.Equal(t, PipelineSingle, hx.Pipeline())
-	require.Equal(t, BuildFamilyHX, hx.modelProjections[0].configuredBuild.family)
-	require.Equal(t, lpxv1alpha1.WorkloadModeV3HxLPUOnly, hx.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents").WorkloadMode)
-	require.Equal(t, "LPX", hx.ServingComponentName())
-	plan, err := hx.PlanNodeLocalMaterialization("test-pcs")
-	require.NoError(t, err)
-	require.Equal(t, "test-pcs-0-lpx", plan.LPXScalingGroup)
-	require.Equal(t, "cond", plan.ConductorTemplate)
-	require.Empty(t, plan.CyborgTemplate)
+	require.Equal(t, hxFamily, hx.models[0].component.configuredBuild.family)
+	require.Equal(t, lpxv1alpha1.WorkloadModeV3HxLPUOnly, hx.models[0].requestSpec().WorkloadMode)
+	require.Equal(t, "LPX", hx.Name())
+	require.Equal(t, "test-pcs-0-lpx", hx.ScalingGroup())
+	require.Equal(t, "cond", hx.ConductorTemplate())
 
 	t.Log("Scale Nova workloads without changing their model or workload digest")
 	for _, replicas := range []int32{2, 10, 12, 123} {
 		dgd.Spec.Components[0].Replicas = ptr.To(replicas)
-		scaled, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticModelRegistry{"build": hxSnapshot})
+		scaled, err := resolveTestWorkload(t, dgd, staticModelRegistry{"build": hxSnapshot})
 		require.NoError(t, err)
 		require.Equal(t, hx.Digest(), scaled.Digest())
 		require.Equal(t, replicas, scaled.scalingGroupReplicas)
@@ -107,11 +104,11 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
 	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	source := staticModelRegistry{"build": snapshot}
-	_, err = ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
+	_, err = resolveTestWorkload(t, dgd, source)
 	require.ErrorContains(t, err, "requires a declared resourceClaim or a positive nvidia.com/gpu request")
 	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	conductor.PodTemplate = testLPXPodTemplate("cyborg-runtime")
-	_, err = ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
+	_, err = resolveTestWorkload(t, dgd, source)
 	require.ErrorContains(t, err, "requires a declared resourceClaim or a positive nvidia.com/gpu request")
 
 	t.Log("Validate claim consumption by the Cyborg main container")
@@ -151,7 +148,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 			before := candidate.DeepCopy()
 
 			t.Log("Require scalar GPUs or a claim consumed by main without rewriting the template")
-			_, err := ResolveWorkload(t.Context(), candidate, singleGroupComponents(t, candidate), source)
+			_, err := resolveTestWorkload(t, candidate, source)
 			if test.wantErr {
 				require.ErrorContains(t, err, "conductor main container requires a declared resourceClaim")
 			} else {
@@ -167,43 +164,38 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
 
 	t.Log("Project two complete hybrid replicas")
-	xt, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
+	xt, err := resolveTestWorkload(t, dgd, source)
 	require.NoError(t, err)
 	require.Equal(t, PipelineHybrid, xt.Pipeline())
-	require.Equal(t, BuildFamilyXT, xt.modelProjections[0].configuredBuild.family)
-	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, xt.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents").WorkloadMode)
-	require.Len(t, xt.modelProjections[0].configuredBuild.partitions, 2)
-	plan, err = xt.PlanNodeLocalMaterialization("test-pcs")
-	require.NoError(t, err)
-	require.Equal(t, "cond", plan.CyborgTemplate)
-	require.EqualValues(t, 2, plan.Replicas)
-	replica := plan.ForReplica(1)
-	require.NotEqual(t, plan.ForReplica(0).Agents[0].CliqueName, replica.Agents[0].CliqueName)
+	require.Equal(t, xtFamily, xt.models[0].component.configuredBuild.family)
+	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, xt.models[0].requestSpec().WorkloadMode)
+	require.Len(t, xt.models[0].component.configuredBuild.partitions, 2)
+	require.Equal(t, "cond", xt.ConductorTemplate())
+	require.EqualValues(t, 2, xt.scalingGroupReplicas)
+	first, second := xt.RequestSpec(xt.models[0], 0), xt.RequestSpec(xt.models[0], 1)
+	require.NotEqual(t, first.NodeLocal.AgentPodCliqueRef, second.NodeLocal.AgentPodCliqueRef)
+	require.NotEqual(t, first.CyborgPodCliqueRef, second.CyborgPodCliqueRef)
 
 	t.Log("A scheduling deadline does not change hybrid launch")
 	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(30))}
-	scheduled, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
+	scheduled, err := resolveTestWorkload(t, dgd, source)
 	require.NoError(t, err)
 	require.Equal(t, xt, scheduled)
-	scheduledPlan, err := scheduled.PlanNodeLocalMaterialization("test-pcs")
-	require.NoError(t, err)
-	require.Equal(t, plan, scheduledPlan)
-	require.Empty(t, scheduledPlan.ConductorTemplate)
 }
 
-func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
+func TestResolveWorkloadSpecDecodeXTAndHX(t *testing.T) {
 	t.Log("Define revision-specific SpecDecode compiler snapshots")
 	tests := []struct {
 		name     string
-		family   BuildFamily
+		family   *family
 		wantMode lpxv1alpha1.WorkloadMode
 	}{
 		{
-			name: "v2", family: BuildFamilyXT,
+			name: "XT", family: xtFamily,
 			wantMode: lpxv1alpha1.WorkloadModeV2LPUOnly,
 		},
 		{
-			name: "v3", family: BuildFamilyHX,
+			name: "HX", family: hxFamily,
 			wantMode: lpxv1alpha1.WorkloadModeV3HxLPUOnly,
 		},
 	}
@@ -212,7 +204,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Acquire the selected family fixtures: shared XT build or distinct HX snapshots")
 			var draftSnapshot, targetSnapshot *Build
-			if test.family == BuildFamilyHX {
+			if test.family == hxFamily {
 				draftSnapshot = acquireTestSnapshot(t, writeV3CompilerFixture(t))
 				targetSnapshot = acquireTestSnapshot(t, writeV3CompilerFixture(t))
 			} else {
@@ -227,7 +219,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			)
 			dgd.Spec.Components[1].Replicas = ptr.To(int32(2))
 			compiledAgentCount := int32(1)
-			if test.family == BuildFamilyXT {
+			if test.family == xtFamily {
 				compiledAgentCount = 4
 			}
 			dgd.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(compiledAgentCount)
@@ -238,70 +230,60 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 
 			t.Log("Project the selected SpecDecode workload")
 			before := dgd.DeepCopy()
-			selected, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
+			selected, err := resolveTestWorkload(t, dgd, source)
 
 			t.Log("Project the selected family, workload mode, and pipeline")
 			require.NoError(t, err)
 			require.Equal(t, before, dgd, "canonical ordering must not rewrite the authored target-first list")
-			require.Equal(t, test.family, selected.modelProjections[0].configuredBuild.family)
-			require.Equal(t, test.wantMode, selected.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents").WorkloadMode)
+			require.Equal(t, test.family, selected.models[0].component.configuredBuild.family)
+			require.Equal(t, test.wantMode, selected.models[0].requestSpec().WorkloadMode)
 			require.Equal(t, PipelineSpecDecode, selected.Pipeline())
-			require.Equal(t, "lpx", selected.ServingComponentName())
+			require.Equal(t, "lpx", selected.Name())
 
 			t.Log("Expand draft fanout while preserving model and template identity order")
-			projections := selected.ModelProjections()
+			projections := selected.Models()
 			require.Len(t, projections, 3)
 			require.Equal(
 				t,
 				[]string{"draft0", "draft1", "target"},
-				[]string{projections[0].Model(), projections[1].Model(), projections[2].Model()},
+				[]string{projections[0].Name(), projections[1].Name(), projections[2].Name()},
 			)
-			plan, err := selected.PlanNodeLocalMaterialization("test-pcs")
-			require.NoError(t, err)
-			require.EqualValues(t, 1, plan.Replicas, "draft fanout must not become the shared scaling-group axis")
-			require.Equal(t, "small", projections[0].stage)
-			require.Equal(t, "lpx", projections[2].stage)
+			require.EqualValues(t, 1, selected.scalingGroupReplicas, "draft fanout must not become the shared scaling-group axis")
+			require.Equal(t, "small", projections[0].component.name)
+			require.Equal(t, "lpx", projections[2].component.name)
 			require.Equal(
 				t,
 				[]string{"agt0", "agt1", "agt2"},
-				[]string{
-					plan.Agents[0].TemplateName,
-					plan.Agents[1].TemplateName,
-					plan.Agents[2].TemplateName,
-				},
+				[]string{projections[0].agentTemplate, projections[1].agentTemplate, projections[2].agentTemplate},
 				"template identities follow canonical stage and draft-instance order",
 			)
 
 			t.Log("Reordering authored components does not change build identities or resources")
 			reordered := dgd.DeepCopy()
 			slices.Reverse(reordered.Spec.Components)
-			members := singleGroupComponents(t, reordered)
-			slices.Reverse(members)
-			reselected, err := ResolveWorkload(t.Context(), reordered, members, source)
+			reselected, err := resolveTestWorkload(t, reordered, source)
 			require.NoError(t, err)
-			require.Equal(t, selected.Digest(), reselected.Digest())
-			reorderedPlan, err := reselected.PlanNodeLocalMaterialization("test-pcs")
-			require.NoError(t, err)
-			require.Equal(t, plan, reorderedPlan)
+			require.Equal(t, selected, reselected)
 			require.Equal(t, []string{"small", "lpx"}, reselected.ComponentNames())
 
 			t.Log("Agent replica assertions count one compiled model instance, not draft fanout")
 			invalidCount := dgd.DeepCopy()
 			invalidCount.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(compiledAgentCount * 2)
-			_, err = ResolveWorkload(t.Context(), invalidCount, singleGroupComponents(t, invalidCount), source)
+			_, err = resolveTestWorkload(t, invalidCount, source)
 			require.ErrorContains(t, err, "must match the compiled count")
 
 			t.Log("Derive an aggregate digest and reject mixed-family aggregation")
 			require.NotEqual(t, WorkloadDigest{}, selected.Digest())
 			require.NotEqual(t, projections[0].Digest(), selected.Digest())
-			mixedFamily := *projections[2]
-			mixedFamily.configuredBuild.family = BuildFamily("other")
-			_, err = workloadSetDigest([]*ModelProjection{projections[0], &mixedFamily})
+			mixedComponent := *projections[2].component
+			mixedComponent.configuredBuild.family = &family{target: "other"}
+			mixedFamily := &Model{name: projections[2].name, component: &mixedComponent}
+			_, err = workloadSetDigest([]*Model{projections[0], mixedFamily})
 			require.ErrorContains(t, err, "mixed target families")
 
 			t.Log("Preserve compiled placement without repeating runtime-derived model settings")
 			for _, projection := range projections {
-				require.EqualValues(t, compiledAgentCount, projection.agentReplicas)
+				require.EqualValues(t, compiledAgentCount, projection.component.agentReplicas)
 			}
 
 			for _, expansion := range []struct {
@@ -323,11 +305,11 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 					if expansion.count > 1 {
 						draft.Replicas = ptr.To(expansion.count)
 					}
-					expanded, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
+					expanded, err := resolveTestWorkload(t, dgd, source)
 					require.NoError(t, err)
 					models := make([]string, 0, len(expansion.models))
-					for _, projection := range expanded.ModelProjections() {
-						models = append(models, projection.Model())
+					for _, projection := range expanded.Models() {
+						models = append(models, projection.Name())
 					}
 
 					t.Log("Preserve the expected logical model ordering")
@@ -335,18 +317,18 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 				})
 			}
 
-			if test.family == BuildFamilyHX {
+			if test.family == hxFamily {
 				t.Log("Project separate draft and target roles from the same immutable HX build")
 				draft := &dgd.Spec.Components[1]
 				draft.Replicas = nil
 				draft.LPX.BuildID = "target-build"
-				shared, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
+				shared, err := resolveTestWorkload(t, dgd, source)
 				require.NoError(t, err)
-				projections := shared.ModelProjections()
+				projections := shared.Models()
 				require.Len(t, projections, 2)
-				require.Equal(t, []string{"draft0", "target"}, []string{projections[0].Model(), projections[1].Model()})
-				require.Equal(t, "target-build", projections[0].runtimeBuildRef)
-				require.Equal(t, "target-build", projections[1].runtimeBuildRef)
+				require.Equal(t, []string{"draft0", "target"}, []string{projections[0].Name(), projections[1].Name()})
+				require.Equal(t, "target-build", projections[0].component.runtimeBuildRef)
+				require.Equal(t, "target-build", projections[1].component.runtimeBuildRef)
 				require.NotEqual(t, projections[0].Digest(), projections[1].Digest())
 			}
 		})
@@ -369,23 +351,26 @@ func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 	snapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	before := dgd.DeepCopy()
 
-	t.Log("Resolve each group using only its own build, replicas and component identity")
-	groups := ComponentGroups(dgd)
+	t.Log("Resolve each group from its own build, replicas and component identity, named within the shared PCS")
+	source := staticModelRegistry{"first-build": snapshot, "second-build": snapshot}
+	workloads, err := ResolveWorkloads(t.Context(), dgd, "pcs", source)
+	require.NoError(t, err)
+	require.Len(t, workloads, 2)
 	for index, name := range []string{"first", "second"} {
-		workload, err := ResolveWorkload(t.Context(), dgd, groups[name], staticModelRegistry{name + "-build": snapshot})
-		require.NoError(t, err)
+		workload := workloads[index]
 		require.Equal(t, PipelineSingle, workload.Pipeline())
-		require.Equal(t, name, workload.ServingComponentName())
+		require.Equal(t, name, workload.Name())
 		require.Equal(t, []string{name}, workload.ComponentNames())
-		plan, err := workload.PlanNodeLocalMaterialization("pcs")
-		require.NoError(t, err)
-		require.EqualValues(t, index+2, plan.Replicas)
+		require.EqualValues(t, index+2, workload.scalingGroupReplicas)
+		require.Equal(t, "pcs-0-"+name, workload.ScalingGroup())
+		require.Equal(t, "pcs-"+name, workload.ResourcePrefix())
+		require.Equal(t, name+"-cond", workload.ConductorTemplate())
 	}
 	require.Equal(t, before, dgd)
 
 	t.Log("Require a singleton conductor independently of component replica counts")
 	conductor := dgd.GetComponentByName("second").ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	conductor.Replicas = ptr.To(int32(2))
-	_, err := ResolveWorkload(t.Context(), dgd, groups["second"], staticModelRegistry{"second-build": snapshot})
+	_, err = ResolveWorkloads(t.Context(), dgd, "pcs", source)
 	require.ErrorContains(t, err, `component "second" conductor replicas must be one`)
 }

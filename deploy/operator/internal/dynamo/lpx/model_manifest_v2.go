@@ -236,8 +236,8 @@ func addLPUArtifactsFromManifestV2(
 		return fmt.Errorf("%s artifacts contain no LPU partitions", gbuildManifestV2CapnpFile)
 	}
 	partialSelection := artifacts.HasPartSelect()
-	family, packagedNodes, partitionZeroNodes, err := classifyManifestPartitions(partitions, partialSelection)
-	if err == nil && family == BuildFamilyXT {
+	buildFamily, packagedNodes, partitionZeroNodes, err := classifyManifestPartitions(partitions, partialSelection)
+	if err == nil && buildFamily == xtFamily {
 		err = validateManifestV2PartSelect(artifacts, partitions)
 	}
 	if err != nil {
@@ -246,7 +246,7 @@ func addLPUArtifactsFromManifestV2(
 
 	// Publish the artifact projection before validating the complete deployment geometry.
 	build.partitions = partitions
-	build.family = family
+	build.family = buildFamily
 
 	want, err := positiveManifestUInt32ToInt(
 		fmt.Sprintf("%s deployment.numLpuNodes", gbuildManifestV2CapnpFile),
@@ -365,24 +365,24 @@ func runtimeTokenEmbeddingsPathFromManifestV2(artifacts manifestcapnpv2.Artifact
 	)
 }
 
-func classifyManifestPartitions(partitions []buildPartition, partSelect bool) (BuildFamily, int, int, error) {
-	family := BuildFamilyXT
+func classifyManifestPartitions(partitions []buildPartition, partSelect bool) (*family, int, int, error) {
+	buildFamily := xtFamily
 	packagedNodes, partitionZeroNodes := 0, 0
 	seen := make(map[int]struct{}, len(partitions))
 	for _, partition := range partitions {
-		partitionFamily := BuildFamilyXT
+		partitionFamily := xtFamily
 		if len(partition.hxExtent) != 0 {
-			partitionFamily = BuildFamilyHX
+			partitionFamily = hxFamily
 		}
-		if len(seen) != 0 && family != partitionFamily {
-			return "", 0, 0, fmt.Errorf("%s mixes XT and HX LPU partitions", gbuildManifestV2CapnpFile)
+		if len(seen) != 0 && buildFamily != partitionFamily {
+			return nil, 0, 0, fmt.Errorf("%s mixes XT and HX LPU partitions", gbuildManifestV2CapnpFile)
 		}
-		family = partitionFamily
+		buildFamily = partitionFamily
 		if _, duplicate := seen[partition.sourcePartitionID]; duplicate {
-			if family == BuildFamilyHX {
-				return "", 0, 0, fmt.Errorf("V3 %s repeats LPU partition ID %d", gbuildManifestV2CapnpFile, partition.sourcePartitionID)
+			if buildFamily == hxFamily {
+				return nil, 0, 0, fmt.Errorf("V3 %s repeats LPU partition ID %d", gbuildManifestV2CapnpFile, partition.sourcePartitionID)
 			}
-			return "", 0, 0, fmt.Errorf("%s has duplicate LPU partition id %d", gbuildManifestV2CapnpFile, partition.sourcePartitionID)
+			return nil, 0, 0, fmt.Errorf("%s has duplicate LPU partition id %d", gbuildManifestV2CapnpFile, partition.sourcePartitionID)
 		}
 		seen[partition.sourcePartitionID] = struct{}{}
 
@@ -393,14 +393,14 @@ func classifyManifestPartitions(partitions []buildPartition, partSelect bool) (B
 			partitionZeroNodes += nodes
 		}
 	}
-	if family == BuildFamilyHX {
+	if buildFamily == hxFamily {
 		if partSelect {
-			return "", 0, 0, fmt.Errorf("V3 %s partSelect builds are not supported", gbuildManifestV2CapnpFile)
+			return nil, 0, 0, fmt.Errorf("V3 %s partSelect builds are not supported", gbuildManifestV2CapnpFile)
 		}
-		return family, packagedNodes, partitionZeroNodes, nil
+		return buildFamily, packagedNodes, partitionZeroNodes, nil
 	}
 	sort.Slice(partitions, func(i, j int) bool { return partitions[i].sourcePartitionID < partitions[j].sourcePartitionID })
-	return family, packagedNodes, partitionZeroNodes, nil
+	return buildFamily, packagedNodes, partitionZeroNodes, nil
 }
 
 func buildXTPartition(subject string, raw manifestcapnpv2.LpuPartitionArtifact) (buildPartition, error) {
@@ -500,7 +500,7 @@ func validateManifestPartitionNodeCount(
 	if build.supportsCPUEmbeddings && build.standaloneTokenEmbeddings {
 		hostEmbeddingNodes -= partitionZeroNodes
 	}
-	if build.family == BuildFamilyHX {
+	if build.family == hxFamily {
 		if want == packagedNodes || (hxDoubleNodeCount && want == 2*packagedNodes) {
 			return nil
 		}

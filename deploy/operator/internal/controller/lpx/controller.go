@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -19,7 +18,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -200,13 +198,13 @@ func (r *graphReconciler) reconcileWorkloads(
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
 ) (result ctrl.Result, err error) {
 	// Resolve and render every workload before deleting the running PCS.
-	workloads, plans, err := r.resolveWorkloads(ctx, deployment, dgd)
+	workloads, err := lpx.ResolveWorkloads(ctx, dgd, dynamo.PCSNameForLPX(deployment), r.modelRegistry)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Share the rendered identities with capacity management and request publication.
-	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans)
+	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -219,10 +217,8 @@ func (r *graphReconciler) reconcileWorkloads(
 
 	// Resolve capacity and requests for the complete graph before any group is changed.
 	var (
-		groupNames = slices.Sorted(maps.Keys(workloads))
-
 		desiredRequests  = make(map[string]*lpxv1alpha1.LPUPipelineRequest)
-		explicitReplicas = make(map[string]*int32, len(plans))
+		explicitReplicas = make(map[string]*int32, len(workloads))
 		missingRequests  []*lpxv1alpha1.LPUPipelineRequest
 		expiredRequests  []*lpxv1alpha1.LPUPipelineRequest
 		deadlineAt       time.Time
@@ -230,21 +226,23 @@ func (r *graphReconciler) reconcileWorkloads(
 
 	// Prepare requests only after observing the PCS, in publication order.
 	if pcs != nil {
-		for _, groupName := range groupNames {
-			plan := plans[groupName]
-			workload := workloads[groupName]
-			pcsg := pcsgs[plan.LPXScalingGroup]
-			explicitReplicas[plan.LPXScalingGroup] = dgd.GetComponentByName(groupName).Replicas
+		for _, workload := range workloads {
+			pcsg := pcsgs[workload.ScalingGroup()]
+			explicit := dgd.GetComponentByName(workload.Name()).Replicas
+			explicitReplicas[workload.ScalingGroup()] = explicit
 
 			// External scalers own live capacity once Grove has created the groups.
-			if explicitReplicas[plan.LPXScalingGroup] == nil {
-				plan.Replicas = pcsg.Spec.Replicas
-				if err := plan.ValidateReplicaCount(); err != nil {
+			var replicas int32
+			if explicit != nil {
+				replicas = *explicit
+			} else {
+				replicas = pcsg.Spec.Replicas
+				if err := workload.ValidateReplicas(replicas); err != nil {
 					return ctrl.Result{}, err
 				}
 			}
 
-			desired, missing, intentChanged := resolvePipelineRequests(deployment, requests, workload, plan)
+			desired, missing, intentChanged := resolvePipelineRequests(deployment, requests, workload, replicas, len(workloads) > 1)
 
 			if intentChanged {
 				setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
@@ -256,9 +254,9 @@ func (r *graphReconciler) reconcileWorkloads(
 
 			// Expanded models use their source component's policy, not the conductor's.
 			secondsByModel := make(map[string]*int64)
-			for _, projection := range workload.ModelProjections() {
-				if scheduling := dgd.GetComponentByName(projection.ComponentName()).LPX.Scheduling; scheduling != nil {
-					secondsByModel[projection.Model()] = scheduling.AttemptDeadlineSeconds
+			for _, model := range workload.Models() {
+				if scheduling := dgd.GetComponentByName(model.Component()).LPX.Scheduling; scheduling != nil {
+					secondsByModel[model.Name()] = scheduling.AttemptDeadlineSeconds
 				}
 			}
 			expired, next := pipelineRequestDeadlines(desired, secondsByModel, deadlineAt)
@@ -336,13 +334,11 @@ func (r *graphReconciler) reconcileWorkloads(
 	}
 
 	// Scale-out proceeds after deleting old names, without waiting for Pods.
-	for _, groupName := range groupNames {
-		workload := workloads[groupName]
-		plan := plans[groupName]
-		pcsg := pcsgs[plan.LPXScalingGroup]
-		component := dgd.GetComponentByName(groupName)
+	for _, workload := range workloads {
+		pcsg := pcsgs[workload.ScalingGroup()]
+		component := dgd.GetComponentByName(workload.Name())
 
-		changed, err := r.reconcileWorkloadCapacity(ctx, component, pcsg, pclqs, workload, plan)
+		changed, err := r.reconcileWorkloadCapacity(ctx, component, pcsg, pclqs, workload)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -357,13 +353,13 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, r.reconcilePipelineRequests(ctx, deployment, pcs, missingRequests)
 	}
 
-	result = r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, pclqs, plans, desiredRequests)
+	result = r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, pclqs, workloads, desiredRequests)
 	// Old configmaps remain available until all workloads are Ready.
 	return result, r.deleteUnusedConfigMaps(ctx, deployment, resources)
 }
 
 // reconcileWorkloadCapacity applies explicit capacity and validates external Cyborg counts.
-// Component, pcsg, workload and plan are non-nil. Omitted replica counts are never written.
+// Component, pcsg and workload are non-nil. Omitted replica counts are never written.
 // The returned bool reports successful scale writes that require a fresh observation.
 func (r *graphReconciler) reconcileWorkloadCapacity(
 	ctx context.Context,
@@ -371,7 +367,6 @@ func (r *graphReconciler) reconcileWorkloadCapacity(
 	pcsg *grovev1alpha1.PodCliqueScalingGroup,
 	pclqs map[string]*grovev1alpha1.PodClique,
 	workload *lpx.Workload,
-	plan *lpx.MaterializationPlan,
 ) (bool, error) {
 	if replicas := component.Replicas; replicas != nil {
 		changed, err := scalePodCliqueScalingGroup(ctx, r, pcsg, *replicas)
@@ -380,17 +375,16 @@ func (r *graphReconciler) reconcileWorkloadCapacity(
 		}
 	}
 
-	if plan.CyborgTemplate == "" {
+	if workload.Pipeline() != lpx.PipelineHybrid {
 		return false, nil
 	}
 
 	if replicas := component.ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas; replicas != nil {
-		return scalePodCliques(ctx, r, pcsg, pclqs, plan.CyborgTemplate, *replicas)
+		return scaleConductorPodCliques(ctx, r, pcsg, pclqs, workload, *replicas)
 	}
 
 	for index := range pcsg.Spec.Replicas {
-		name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, plan.CyborgTemplate)
-		pclq := pclqs[name]
+		pclq := pclqs[workload.ConductorCliqueName(index)]
 		if pclq == nil {
 			continue
 		}
@@ -424,18 +418,14 @@ func (r *graphReconciler) reconcileReadiness(
 	pcs *grovev1alpha1.PodCliqueSet,
 	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
 	pclqs map[string]*grovev1alpha1.PodClique,
-	plans map[string]*lpx.MaterializationPlan,
+	workloads []*lpx.Workload,
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
 ) ctrl.Result {
 	readiness := dynamo.GroveReadiness{Ready: true}
 	deployment.Status.Components = make(map[string]v1alpha1.LPXComponentStatus)
 
-	componentGroups := lpx.ComponentGroups(dgd)
-
-	for _, groupName := range slices.Sorted(maps.Keys(plans)) {
-		plan := plans[groupName]
-
-		observed := dynamo.EvaluateLPXGroveReadiness(ctx, dgd, groupName, componentGroups[groupName], pcs, pcsgs[plan.LPXScalingGroup], pclqs)
+	for _, workload := range workloads {
+		observed := dynamo.EvaluateLPXGroveReadiness(ctx, dgd, workload.Name(), workload.ComponentNames(), pcs, pcsgs[workload.ScalingGroup()], pclqs)
 
 		state := v1beta1.DGDStatePending
 		if observed.Ready {
@@ -444,7 +434,7 @@ func (r *graphReconciler) reconcileReadiness(
 		conditions := []metav1.Condition{readyCondition(deployment.Generation, state, observed.Message)}
 		groupRequests := make(map[string]*lpxv1alpha1.LPUPipelineRequest)
 		for name, request := range requests {
-			if request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name == plan.LPXScalingGroup {
+			if request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name == workload.ScalingGroup() {
 				groupRequests[name] = request
 			}
 		}

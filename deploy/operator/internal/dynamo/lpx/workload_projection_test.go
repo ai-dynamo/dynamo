@@ -21,8 +21,8 @@ func TestWorkloadDigestIsIndependentOfBuildLocator(t *testing.T) {
 	require.Equal(t, first.contentID, second.contentID)
 
 	t.Log("Project either immutable snapshot through the same intent")
-	firstProjection := projectTestBuild(t, first, PipelineSingle)
-	secondProjection := projectTestBuild(t, second, PipelineSingle)
+	firstProjection := projectTestModel(t, first, PipelineSingle)
+	secondProjection := projectTestModel(t, second, PipelineSingle)
 
 	t.Log("Publish the canonical compiler snapshot identity independently of build locator")
 	require.Equal(t, first.contentID, firstProjection.CompilerSnapshotDigest())
@@ -32,7 +32,7 @@ func TestWorkloadDigestIsIndependentOfBuildLocator(t *testing.T) {
 	require.Equal(t, firstProjection.Digest(), secondProjection.Digest())
 
 	t.Log("Keep compiler identity separate from downstream workload projection identity")
-	specDecodeProjection := projectTestBuild(t, first, PipelineSpecDecode)
+	specDecodeProjection := projectTestModel(t, first, PipelineSpecDecode)
 	require.Equal(t, firstProjection.CompilerSnapshotDigest(), specDecodeProjection.CompilerSnapshotDigest())
 	require.NotEqual(t, firstProjection.Digest(), specDecodeProjection.Digest())
 }

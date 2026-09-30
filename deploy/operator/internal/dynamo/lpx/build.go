@@ -15,18 +15,11 @@ import (
 // compilationMode records the compiler-authored execution mode in a normalized build.
 type compilationMode string
 
-// BuildFamily identifies the physical LPU target family of a normalized build.
-type BuildFamily string
-
 const (
 	// compilationModeLPUOnly represents a build executed entirely on LPUs.
 	compilationModeLPUOnly compilationMode = "lpuOnly"
 	// compilationModeHybrid retains the model manifest's historical "lpx" value.
 	compilationModeHybrid compilationMode = "lpx"
-	// BuildFamilyXT identifies the XT8888 LPU target family.
-	BuildFamilyXT BuildFamily = "xt8888"
-	// BuildFamilyHX identifies the HX16x8x2x3 LPU target family.
-	BuildFamilyHX BuildFamily = "hx16x8x2x3"
 )
 
 // Build is the registry's source-independent view of an LPU build.
@@ -39,7 +32,7 @@ type Build struct {
 	// path is the absolute file or GCS reference of the build payload.
 	path string
 	// family is the physical LPU target family.
-	family BuildFamily
+	family *family
 	// compilationMode selects the compiler-authored LPU-only or hybrid artifact mode.
 	compilationMode compilationMode
 	// partitions contains the normalized physical compiler partitions.

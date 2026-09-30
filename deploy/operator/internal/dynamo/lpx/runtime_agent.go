@@ -33,20 +33,20 @@ func configureNodeLocalConductorRuntime(
 	conductor.Env = env
 }
 
-// applyModelPaths binds nonempty canonical projections into a fresh runtime container.
-func applyModelPaths(container *corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
+// applyModelPaths binds nonempty canonical models into a fresh runtime container.
+func applyModelPaths(container *corev1.Container, models []*Model, modelStoragePath string) error {
 	// Speculative decoding binds the first draft and final target; other workloads bind one model.
 	names := []string{"LPX_MODEL_PATH"}
-	if projections[0].pipeline == PipelineSpecDecode {
+	if models[0].component.pipeline == PipelineSpecDecode {
 		names = []string{"LPX_DRAFT_MODEL_PATH", "LPX_TARGET_MODEL_PATH"}
-		projections = []*ModelProjection{projections[0], projections[len(projections)-1]}
+		models = []*Model{models[0], models[len(models)-1]}
 	}
 
 	// Resolve all paths before publishing authoritative values ahead of authored references.
 	env := make([]corev1.EnvVar, 0, len(container.Env)+len(names))
 	for index, name := range names {
-		projection := projections[index]
-		path, err := buildRuntimePath(projection.configuredBuild.path, projection.runtimeBuildRef, modelStoragePath)
+		model := models[index]
+		path, err := buildRuntimePath(model.component.configuredBuild.path, model.component.runtimeBuildRef, modelStoragePath)
 		if err != nil {
 			return fmt.Errorf("resolve %s: %w", name, err)
 		}

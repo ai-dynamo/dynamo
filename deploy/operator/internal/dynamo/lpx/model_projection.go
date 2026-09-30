@@ -21,6 +21,8 @@ const (
 	WorkloadDigestAnnotation = "scheduling.lpu.nvidia.com/dynamo-workload-digest"
 	// WorkloadModeAnnotation records the projected LPX workload mode on rendered objects.
 	WorkloadModeAnnotation = "scheduling.lpu.nvidia.com/workload-mode"
+	// ServingLabel selects each workload's conductor Pods for its discovery Service.
+	ServingLabel = "lpx.nvidia.com/serving"
 )
 
 // WorkloadDigest is the SHA-256 identity of a projected LPX workload.
@@ -31,127 +33,109 @@ func (d WorkloadDigest) String() string {
 	return fmt.Sprintf("sha256:%x", d[:])
 }
 
-// ModelProjectionInput is the complete producer-owned input to one component's
-// immutable model projections. It excludes Grove materialization and scheduler output.
-type ModelProjectionInput struct {
-	// Pipeline selects the DGD pipeline shape being projected.
-	Pipeline Pipeline
-	// Models contains the validated, nonempty logical model identities in canonical order.
-	Models []string
-	// RuntimeBuildRef is the build reference projected into runtime configuration.
-	RuntimeBuildRef string
-	// Build is the validated, non-nil immutable build input.
-	Build *Build
-}
-
-// ModelProjection holds scheduler request inputs and runtime rendering state
-// derived for one model. Completed component data is shared read-only; only the
-// resolver assigns the stage before publishing the immutable projections.
-type ModelProjection struct {
-	digest                 WorkloadDigest
-	compilerSnapshotDigest string
-	runtimeBuildRef        string
-	model                  string
-	stage                  string
-	pipeline               Pipeline
-	configuredBuild        Build
-	allocationMetadata     json.RawMessage
-	// partitions retains immutable physical build evidence before runtime collapse.
-	partitions    []buildPartition
-	connectors    []lpxv1alpha1.PropSyncConnectorRequest
+// component is one DGD component's compiled LPU runtime, shared read-only by
+// the models it serves.
+type component struct {
+	// name is the DGD component that supplies the models.
+	name string
+	// runtimeBuildRef is the authored build ID, used to resolve runtime model paths.
+	runtimeBuildRef string
+	// pipeline is the runtime shape the build was projected for.
+	pipeline Pipeline
+	// configuredBuild is the runtime view of the build, including XT's trimmed or
+	// collapsed partitions.
+	configuredBuild    Build
+	allocationMetadata json.RawMessage
+	// partitionRequests are the physical scheduler partitions before runtime collapse.
+	partitionRequests []lpxv1alpha1.PartitionRequest
+	connectors        []lpxv1alpha1.PropSyncConnectorRequest
+	// agentReplicas is the number of Agent pods that serve each model.
 	agentReplicas int
 }
 
-// Digest returns the immutable projection digest. The receiver must be non-nil.
-func (p *ModelProjection) Digest() WorkloadDigest {
-	return p.digest
+// Model is one runtime model: default, draftN, or target. Each model has its own
+// Agent clique and one scheduler request per workload replica.
+type Model struct {
+	name      string
+	digest    WorkloadDigest
+	component *component
+	// agentTemplate is the model's Agent clique template, assigned with the workload's names.
+	agentTemplate string
 }
 
-// CompilerSnapshotDigest returns the immutable compiler snapshot identity.
-func (p *ModelProjection) CompilerSnapshotDigest() string {
-	return p.compilerSnapshotDigest
+// Name returns the logical model identity. The receiver must be non-nil.
+func (m *Model) Name() string {
+	return m.name
 }
 
-// Model returns the logical model identity. The receiver must be non-nil.
-func (p *ModelProjection) Model() string {
-	return p.model
+// Component returns the DGD component that supplies this model.
+func (m *Model) Component() string {
+	return m.component.name
 }
 
-// ComponentName returns the DGD component that supplies this model.
-func (p *ModelProjection) ComponentName() string {
-	return p.stage
+// Digest returns the immutable model digest. The receiver must be non-nil.
+func (m *Model) Digest() WorkloadDigest {
+	return m.digest
 }
 
-// RequestSpec returns a fresh node-local request for one Grove scaling-group
-// replica. The receiver and plan must be non-nil; neither input is mutated.
-func (p *ModelProjection) RequestSpec(
-	plan *MaterializationPlan,
-	agentPodCliqueName string,
-) lpxv1alpha1.LPUPipelineRequestSpec {
-	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, len(p.connectors))
-	for i := range p.connectors {
-		p.connectors[i].DeepCopyInto(&connectors[i])
-	}
-	partitions := make([]lpxv1alpha1.PartitionRequest, len(p.partitions))
-	mappings := make([]lpxv1alpha1.NodeLocalPartitionMapping, len(p.partitions))
-	for index, partition := range p.partitions {
-		partitionID := fmt.Sprintf("partition-%03d", index)
-		request := lpxv1alpha1.PartitionRequest{
-			ID:                  partitionID,
-			Ordinal:             int64(index),
-			CompilerPartitionID: int64(uint32(partition.sourcePartitionID)),
-		}
-		if p.configuredBuild.family == BuildFamilyXT {
-			shape, _ := xtShape(partition)
-			request.XtShape = &shape
-		}
-		if partition.hxExtent != nil {
-			extent := slices.Clone(partition.hxExtent)
-			request.Extent = &extent
-		}
-		partitions[index] = request
-		mappings[index] = lpxv1alpha1.NodeLocalPartitionMapping{
-			ModelPartitionID: int64(index),
-			PartitionID:      partitionID,
-		}
-	}
-	spec := lpxv1alpha1.LPUPipelineRequestSpec{
-		AllocationMetadata: runtime.RawExtension{Raw: slices.Clone(p.allocationMetadata)},
-		MaterializationTarget: lpxv1alpha1.MaterializationTarget{
-			PodCliqueSetReplicaIndex: 0,
-			PodCliqueScalingGroupRef: &lpxv1alpha1.PodCliqueScalingGroupReference{
-				Name: plan.LPXScalingGroup, ReplicaIndex: int64(plan.ReplicaIndex),
-			},
+// CompilerSnapshotDigest returns the immutable compiler manifest identity.
+func (m *Model) CompilerSnapshotDigest() string {
+	return m.component.configuredBuild.contentID
+}
+
+// RequestSpec returns a fresh node-local request for model in one scaling-group
+// replica. model must belong to w; neither is mutated.
+func (w *Workload) RequestSpec(model *Model, replica int32) lpxv1alpha1.LPUPipelineRequestSpec {
+	spec := model.requestSpec()
+	spec.MaterializationTarget = lpxv1alpha1.MaterializationTarget{
+		PodCliqueSetReplicaIndex: 0,
+		PodCliqueScalingGroupRef: &lpxv1alpha1.PodCliqueScalingGroupReference{
+			Name: w.scalingGroup, ReplicaIndex: int64(replica),
 		},
-		RepairPolicy:       &lpxv1alpha1.RepairPolicy{Mode: lpxv1alpha1.RepairPolicyModeSamePlacement},
-		PropSyncConnectors: connectors,
-		TargetFamily:       lpxv1alpha1.TargetFamily(p.configuredBuild.family),
-		WorkloadMode:       p.schedulerWorkloadMode(),
-		ExecutionBackend:   lpxv1alpha1.ExecutionBackendNodeLocal,
-		NodeLocal: &lpxv1alpha1.NodeLocalRequest{
-			AgentPodCliqueRef: lpxv1alpha1.PodCliqueReference{Name: agentPodCliqueName},
-			Model:             p.model,
-			PartitionMappings: mappings,
-		},
-		Partitions: partitions,
 	}
-	if plan.CyborgClique != "" {
-		spec.CyborgPodCliqueRef = &lpxv1alpha1.PodCliqueReference{Name: plan.CyborgClique}
+	spec.NodeLocal.AgentPodCliqueRef = lpxv1alpha1.PodCliqueReference{Name: w.cliqueName(model.agentTemplate, replica)}
+	if w.Pipeline() == PipelineHybrid {
+		spec.CyborgPodCliqueRef = &lpxv1alpha1.PodCliqueReference{Name: w.ConductorCliqueName(replica)}
 	}
 	return spec
 }
 
-// schedulerWorkloadMode translates the normalized build family and pipeline at the LPX wire boundary.
-func (p *ModelProjection) schedulerWorkloadMode() lpxv1alpha1.WorkloadMode {
-	// HX and XT have separate wire values for the same two runtime shapes.
-	if p.configuredBuild.family == BuildFamilyHX {
-		if p.pipeline == PipelineHybrid {
-			return lpxv1alpha1.WorkloadModeV3HxStrictHybrid
+// requestSpec returns a fresh request for the model's placement and runtime
+// contract, without its Grove materialization target.
+func (m *Model) requestSpec() lpxv1alpha1.LPUPipelineRequestSpec {
+	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, len(m.component.connectors))
+	for i := range m.component.connectors {
+		m.component.connectors[i].DeepCopyInto(&connectors[i])
+	}
+	partitions := make([]lpxv1alpha1.PartitionRequest, len(m.component.partitionRequests))
+	mappings := make([]lpxv1alpha1.NodeLocalPartitionMapping, len(m.component.partitionRequests))
+	for index := range m.component.partitionRequests {
+		m.component.partitionRequests[index].DeepCopyInto(&partitions[index])
+		mappings[index] = lpxv1alpha1.NodeLocalPartitionMapping{
+			ModelPartitionID: partitions[index].Ordinal,
+			PartitionID:      partitions[index].ID,
 		}
-		return lpxv1alpha1.WorkloadModeV3HxLPUOnly
 	}
-	if p.pipeline == PipelineHybrid {
-		return lpxv1alpha1.WorkloadModeV2StrictHybrid
+	return lpxv1alpha1.LPUPipelineRequestSpec{
+		AllocationMetadata: runtime.RawExtension{Raw: slices.Clone(m.component.allocationMetadata)},
+		RepairPolicy:       &lpxv1alpha1.RepairPolicy{Mode: lpxv1alpha1.RepairPolicyModeSamePlacement},
+		PropSyncConnectors: connectors,
+		TargetFamily:       m.component.configuredBuild.family.target,
+		WorkloadMode:       m.component.configuredBuild.family.workloadMode(m.component.pipeline),
+		ExecutionBackend:   lpxv1alpha1.ExecutionBackendNodeLocal,
+		NodeLocal: &lpxv1alpha1.NodeLocalRequest{
+			Model:             m.name,
+			PartitionMappings: mappings,
+		},
+		Partitions: partitions,
 	}
-	return lpxv1alpha1.WorkloadModeV2LPUOnly
+}
+
+// newPartitionRequest identifies a physical scheduler partition by its position in the build.
+func newPartitionRequest(index int, partition buildPartition) lpxv1alpha1.PartitionRequest {
+	return lpxv1alpha1.PartitionRequest{
+		ID:                  fmt.Sprintf("partition-%03d", index),
+		Ordinal:             int64(index),
+		CompilerPartitionID: int64(uint32(partition.sourcePartitionID)),
+	}
 }
