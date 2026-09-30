@@ -3597,6 +3597,7 @@ mod stream_options {
             anyhow::Error,
         > for CompletionEngine
     {
+        /// Records the dispatched request and returns a completion with fixed token usage.
         async fn generate(
             &self,
             request: SingleIn<NvCreateCompletionRequest>,
@@ -3615,6 +3616,8 @@ mod stream_options {
         }
     }
 
+    /// Checks both completion endpoints clear unary options, preserve streaming options,
+    /// and retain token usage in unary responses.
     #[tokio::test]
     async fn normalizes_options_only_for_nonstreaming_requests() {
         temp_env::async_with_vars([
