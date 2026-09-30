@@ -157,10 +157,11 @@ def _build_handler(
     triton_model_config_bytes: bytes,
 ):
     """Instantiate the request handler for the model's declared task."""
+    # Parsed once so both handlers read max_batch_size (and, for classify,
+    # tensor names) from the same source of truth even on the disk-fallback
+    # path in _read_model_config where model.config() comes back empty.
+    parsed_config = mc.ModelConfig.FromString(triton_model_config_bytes)
     if config.task == "classify":
-        # Classify handler needs the parsed config to auto-detect the sole
-        # BYTES input and FP32 output tensor names.
-        parsed_config = mc.ModelConfig.FromString(triton_model_config_bytes)
         return ClassifyWorkerHandler(
             server,
             model,
@@ -168,7 +169,7 @@ def _build_handler(
             classify_input_name=config.classify_input_name,
             classify_output_name=config.classify_output_name,
         )
-    return RequestHandler(server, model)
+    return RequestHandler(server, model, parsed_config)
 
 
 @dataclass

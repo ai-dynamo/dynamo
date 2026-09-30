@@ -37,9 +37,10 @@ def _make_config_proto(
     inputs: list[tuple[str, int]],
     outputs: list[tuple[str, int]],
     name: str = "mock-classifier",
+    max_batch_size: int = 8,
 ) -> mc.ModelConfig:
     """Build a minimal ModelConfig with the given input/output (name, dtype) pairs."""
-    config = mc.ModelConfig(name=name, max_batch_size=8)
+    config = mc.ModelConfig(name=name, max_batch_size=max_batch_size)
     for input_name, dtype in inputs:
         config.input.add(name=input_name, data_type=dtype, dims=[-1])
     for output_name, dtype in outputs:
@@ -144,6 +145,7 @@ def _make_handler(
     config = _make_config_proto(
         inputs=inputs or [("TEXT", mc.DataType.TYPE_STRING)],
         outputs=outputs or [("probs", mc.DataType.TYPE_FP32)],
+        max_batch_size=max_batch_size,
     )
     model = _MockModel(responses or [], max_batch_size=max_batch_size)
     handler = ClassifyWorkerHandler(
@@ -203,6 +205,57 @@ class TestInitAndResolve:
     def test_no_fp32_output_fails(self) -> None:
         with pytest.raises(ValueError, match="TYPE_FP32 output tensor"):
             _make_handler(outputs=[("classes", mc.DataType.TYPE_INT32)])
+
+    def test_explicit_input_name_unknown_raises(self) -> None:
+        with pytest.raises(ValueError, match="no TYPE_STRING input named 'MISSING'"):
+            _make_handler(classify_input_name="MISSING")
+
+    def test_explicit_input_name_wrong_dtype_raises(self) -> None:
+        # Operator points --classify-input-name at an existing input whose
+        # dtype is not TYPE_STRING; must fail at startup, not at request time.
+        with pytest.raises(ValueError, match="no TYPE_STRING input named 'tokens'"):
+            _make_handler(
+                inputs=[
+                    ("TEXT", mc.DataType.TYPE_STRING),
+                    ("tokens", mc.DataType.TYPE_INT64),
+                ],
+                classify_input_name="tokens",
+            )
+
+    def test_explicit_output_name_unknown_raises(self) -> None:
+        with pytest.raises(ValueError, match="no TYPE_FP32 output named 'MISSING'"):
+            _make_handler(classify_output_name="MISSING")
+
+    def test_explicit_output_name_wrong_dtype_raises(self) -> None:
+        with pytest.raises(ValueError, match="no TYPE_FP32 output named 'classes'"):
+            _make_handler(
+                outputs=[
+                    ("probs", mc.DataType.TYPE_FP32),
+                    ("classes", mc.DataType.TYPE_INT32),
+                ],
+                classify_output_name="classes",
+            )
+
+    def test_batched_reads_parsed_proto_not_runtime_config(self) -> None:
+        # Regression: the disk-fallback path in main.py._read_model_config
+        # leaves model.config() empty; batching must still come from the
+        # parsed protobuf so batchable classifiers get the [N, 1] shape.
+        class _EmptyRuntimeMockModel(_MockModel):
+            def config(self) -> dict[str, Any]:
+                return {}
+
+        config = _make_config_proto(
+            inputs=[("TEXT", mc.DataType.TYPE_STRING)],
+            outputs=[("probs", mc.DataType.TYPE_FP32)],
+            max_batch_size=8,
+        )
+        model = _EmptyRuntimeMockModel([])
+        handler = ClassifyWorkerHandler(
+            server=MagicMock(),
+            model=model,
+            triton_model_config=config,
+        )
+        assert handler._batched is True
 
 
 # ---------------------------------------------------------------------------

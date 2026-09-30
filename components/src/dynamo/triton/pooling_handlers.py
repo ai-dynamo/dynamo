@@ -75,11 +75,13 @@ class ClassifyWorkerHandler:
         self._server = server
         self._model = model
         self._config = triton_model_config
-        self._input_name = classify_input_name or self._resolve_input_name()
-        self._output_name = classify_output_name or self._resolve_output_name()
-        # Batching is fixed at load time; cache the batchable flag so we don't
-        # re-read the model config per request.
-        self._batched = model.config().get("max_batch_size", 0) > 0
+        self._input_name = self._resolve_input_name(classify_input_name)
+        self._output_name = self._resolve_output_name(classify_output_name)
+        # Read batching from the parsed proto (not model.config()) so the
+        # disk-fallback path in main.py._read_model_config still routes
+        # batchable classifiers through the [N, 1] BYTES shape when the
+        # runtime config is unavailable.
+        self._batched = self._config.max_batch_size > 0
         logger.info(
             "Classify worker for model '%s' initialized: input=%s, output=%s, batched=%s",
             model.name,
@@ -92,33 +94,56 @@ class ClassifyWorkerHandler:
     # Input / output tensor resolution
     # ------------------------------------------------------------------
 
-    def _resolve_input_name(self) -> str:
-        """Find the sole BYTES input in the model's ``config.pbtxt``.
+    def _resolve_input_name(self, override: Optional[str] = None) -> str:
+        """Find the sole BYTES input in the model's ``config.pbtxt``, or
+        validate the operator-supplied ``--classify-input-name`` override.
 
         A classify-shaped Triton model — leaf or ensemble — accepts one
         BYTES tensor of text and produces one FP32 tensor of probabilities.
-        Anything else needs the operator to disambiguate with
-        ``--classify-input-name``.
+        Anything else needs the operator to disambiguate with the override,
+        which is validated here so an unknown or wrong-dtype name fails at
+        startup instead of on the first request.
         """
-        names = [i.name for i in self._config.input if i.data_type == _TYPE_STRING]
-        if len(names) != 1:
+        string_inputs = [
+            i.name for i in self._config.input if i.data_type == _TYPE_STRING
+        ]
+        if override is not None:
+            if override not in string_inputs:
+                raise ValueError(
+                    f"Triton classify model '{self._model.name}' has no "
+                    f"TYPE_STRING input named '{override}'; TYPE_STRING "
+                    f"inputs: {string_inputs}."
+                )
+            return override
+        if len(string_inputs) != 1:
             raise ValueError(
-                f"Triton classify model '{self._model.name}' has {len(names)} "
-                "TYPE_STRING input tensor(s); expected exactly 1. Pass "
-                "--classify-input-name to disambiguate."
+                f"Triton classify model '{self._model.name}' has "
+                f"{len(string_inputs)} TYPE_STRING input tensor(s); expected "
+                "exactly 1. Pass --classify-input-name to disambiguate."
             )
-        return names[0]
+        return string_inputs[0]
 
-    def _resolve_output_name(self) -> str:
-        """Find the sole FP32 output in the model's ``config.pbtxt``."""
-        names = [o.name for o in self._config.output if o.data_type == _TYPE_FP32]
-        if len(names) != 1:
+    def _resolve_output_name(self, override: Optional[str] = None) -> str:
+        """Find the sole FP32 output in the model's ``config.pbtxt``, or
+        validate the operator-supplied ``--classify-output-name`` override."""
+        fp32_outputs = [
+            o.name for o in self._config.output if o.data_type == _TYPE_FP32
+        ]
+        if override is not None:
+            if override not in fp32_outputs:
+                raise ValueError(
+                    f"Triton classify model '{self._model.name}' has no "
+                    f"TYPE_FP32 output named '{override}'; TYPE_FP32 "
+                    f"outputs: {fp32_outputs}."
+                )
+            return override
+        if len(fp32_outputs) != 1:
             raise ValueError(
-                f"Triton classify model '{self._model.name}' has {len(names)} "
-                "TYPE_FP32 output tensor(s); expected exactly 1. Pass "
-                "--classify-output-name to disambiguate."
+                f"Triton classify model '{self._model.name}' has "
+                f"{len(fp32_outputs)} TYPE_FP32 output tensor(s); expected "
+                "exactly 1. Pass --classify-output-name to disambiguate."
             )
-        return names[0]
+        return fp32_outputs[0]
 
     # ------------------------------------------------------------------
     # Dispatch
