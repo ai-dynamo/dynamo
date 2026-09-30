@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Motif-3 NVFP4, aggregated TP2 serving with Dynamo MTP2 on 2x NVIDIA B200 GPUs.
 # The image contains the tested Motif vLLM/Dynamo compatibility shim.
 apiVersion: v1
 kind: ConfigMap
@@ -129,9 +128,6 @@ spec:
                   value: "1"
                 - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
                   value: "300"
-                # Keep the portable deployment on actual MTP verification.
-                # For a benchmark-only synthetic-AL trial, change this key to
-                # speculative-config-synthetic.
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
