@@ -7742,9 +7742,7 @@ mod extra_args_media_copy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::extensions::{
-        AGENT_CONTEXT_CONTEXT_KEY, AgentCompaction, AgentContext,
-    };
+    use crate::protocols::common::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext};
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{
@@ -10685,15 +10683,16 @@ mod tests {
     }
 
     #[test]
-    fn attach_agent_context_forwards_compaction() {
+    fn attach_agent_context_forwards_opaque_headers() {
         let agent_context = AgentContext {
             session_id: "codex-thread".to_string(),
             parent_session_id: None,
             session_final: None,
-            compaction: Some(AgentCompaction {
-                trigger: Some("manual".to_string()),
-                ..Default::default()
-            }),
+            agent_headers: std::collections::BTreeMap::from([(
+                "x-claude-code-future".into(),
+                vec!["unknown".into(), "second".into()],
+            )])
+            .into(),
             input_trigger: None,
         };
         let mut context = PipelineContext::new(());
@@ -10705,9 +10704,15 @@ mod tests {
         assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
         let wire = serde_json::to_value(&request).unwrap();
         assert_eq!(
-            wire["agent_context"]["compaction"]["trigger"],
-            serde_json::json!("manual")
+            wire["agent_context"]["agent_headers"]["x-claude-code-future"],
+            serde_json::json!(["unknown", "second"])
         );
+        let restored: AgentContext = serde_json::from_value(wire["agent_context"].clone()).unwrap();
+        assert_eq!(restored, agent_context);
+        assert!(std::sync::Arc::ptr_eq(
+            &request.agent_context.as_ref().unwrap().agent_headers,
+            &agent_context.agent_headers
+        ));
     }
 
     #[test]
@@ -10720,7 +10725,7 @@ mod tests {
             session_id: "agent-session".to_string(),
             parent_session_id: Some("agent-parent".to_string()),
             session_final: None,
-            compaction: None,
+            agent_headers: Default::default(),
             input_trigger: None,
         };
         let mut context = PipelineContext::new(());
