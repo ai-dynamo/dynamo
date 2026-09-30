@@ -18,6 +18,7 @@
 import asyncio
 import base64
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing
 from types import SimpleNamespace
 
@@ -106,22 +107,31 @@ async def _drive(handler, events):
     return [event async for event in handler.generate(request_stream(), Context())]
 
 
-def _handler(
-    service: _FakeAsrService, *, commit_padding_ms: int = 0
-) -> SpeechNimRealtimeTranscriptionHandler:
-    return SpeechNimRealtimeTranscriptionHandler(
-        asr_service=service,
-        model_name=MODEL,
-        nim_model="",
-        language_code="en-US",
-        commit_padding_ms=commit_padding_ms,
-        timeout_s=1.0,
-    )
+@pytest.fixture
+async def handler_factory():
+    handlers = []
+
+    def create(service, *, commit_padding_ms=0, max_concurrent_turns=32):
+        handler = SpeechNimRealtimeTranscriptionHandler(
+            asr_service=service,
+            model_name=MODEL,
+            nim_model="",
+            language_code="en-US",
+            commit_padding_ms=commit_padding_ms,
+            timeout_s=1.0,
+            max_concurrent_turns=max_concurrent_turns,
+        )
+        handlers.append(handler)
+        return handler
+
+    yield create
+    for handler in handlers:
+        await handler.close()
 
 
 @pytest.mark.timeout(5)
 @pytest.mark.parametrize("stop", ["task", "context", "timeout"])
-async def test_stalled_rpc_is_cancelled_on_disconnect_or_timeout(stop):
+async def test_stalled_rpc_is_cancelled_on_disconnect_or_timeout(stop, handler_factory):
     started = threading.Event()
     cancelled = threading.Event()
 
@@ -136,7 +146,7 @@ async def test_stalled_rpc_is_cancelled_on_disconnect_or_timeout(stop):
 
     service = _FakeAsrService()
     service.stub.StreamingRecognize = lambda *args, **kwargs: StalledCall()
-    handler = _handler(service)
+    handler = handler_factory(service)
     handler.timeout_s = 0.01
     turn = _AudioTurn()
     context = Context()
@@ -161,7 +171,7 @@ async def test_stalled_rpc_is_cancelled_on_disconnect_or_timeout(stop):
 
 
 @pytest.mark.timeout(5)
-async def test_context_stop_closes_uncommitted_turn_after_rpc_finishes():
+async def test_context_stop_closes_uncommitted_turn_after_rpc_finishes(handler_factory):
     loop = asyncio.get_running_loop()
     finished = asyncio.Event()
 
@@ -173,7 +183,7 @@ async def test_context_stop_closes_uncommitted_turn_after_rpc_finishes():
     service = _FakeAsrService()
     service.stub.StreamingRecognize = lambda *args, **kwargs: FinishedCall(())
     context, turn = Context(), _AudioTurn()
-    task = asyncio.create_task(_handler(service)._run_turn(turn, context))
+    task = asyncio.create_task(handler_factory(service)._run_turn(turn, context))
     try:
         await asyncio.wait_for(finished.wait(), 1)
         assert not task.done()
@@ -187,7 +197,7 @@ async def test_context_stop_closes_uncommitted_turn_after_rpc_finishes():
 
 
 @pytest.mark.timeout(5)
-async def test_context_stop_releases_backpressured_transcript_producer():
+async def test_context_stop_releases_backpressured_transcript_producer(handler_factory):
     blocked = asyncio.Event()
 
     class OutputQueue(asyncio.Queue):
@@ -202,7 +212,7 @@ async def test_context_stop_releases_backpressured_transcript_producer():
     context, turn = Context(), _AudioTurn()
     turn.events = OutputQueue(maxsize=1)
     turn.events.put_nowait({"type": "queued_delta"})
-    task = asyncio.create_task(_handler(service)._run_turn(turn, context))
+    task = asyncio.create_task(handler_factory(service)._run_turn(turn, context))
     try:
         await asyncio.wait_for(blocked.wait(), 1)
         context.stop_generating()
@@ -217,7 +227,7 @@ async def test_context_stop_releases_backpressured_transcript_producer():
 
 
 @pytest.mark.timeout(5)
-async def test_rpc_failure_before_commit_allows_next_turn():
+async def test_rpc_failure_before_commit_allows_next_turn(handler_factory):
     class FailedCall(_FakeCall):
         def __iter__(self):
             raise RuntimeError("backend unavailable")
@@ -244,7 +254,7 @@ async def test_rpc_failure_before_commit_allows_next_turn():
         "audio": base64.b64encode(b"\x00\x01" * 320).decode(),
     }
     async with aclosing(
-        _handler(service).generate(request_stream(), Context())
+        handler_factory(service).generate(request_stream(), Context())
     ) as responses:
         await requests.put({"type": "session.update", "session": _session()})
         await requests.put(append)
@@ -265,11 +275,11 @@ async def test_rpc_failure_before_commit_allows_next_turn():
     assert remaining[-1]["item_id"] != failure["item_id"]
 
 
-async def test_streams_pcm_and_emits_canonical_transcription_events():
+async def test_streams_pcm_and_emits_canonical_transcription_events(handler_factory):
     service = _FakeAsrService()
     pcm = b"\x00\x01" * 320
     result = await _drive(
-        _handler(service),
+        handler_factory(service),
         [
             {"type": "session.update", "session": _session()},
             {
@@ -295,13 +305,144 @@ async def test_streams_pcm_and_emits_canonical_transcription_events():
     assert config.language_code == "en-US"
 
 
-async def test_appends_configured_silence_before_closing_speech_nim_stream():
+@pytest.mark.parametrize(
+    "segments, expected_deltas",
+    [
+        ([("Hello there.", True)], ["Hello there."]),
+        ([("Hello", False), ("Hello there.", True)], ["Hello", " there."]),
+        (
+            [
+                ("Hello", False),
+                ("Hello there.", True),
+                ("How are", False),
+                ("How are you?", True),
+            ],
+            ["Hello", " there.", " How are", " you?"],
+        ),
+        (
+            [("Hello there.", True), ("How are you?", True)],
+            ["Hello there.", " How are you?"],
+        ),
+    ],
+)
+async def test_final_deltas_preserve_suffixes_and_segments(
+    segments, expected_deltas, handler_factory
+):
+    service = _FakeAsrService(
+        [_response(transcript, final=final) for transcript, final in segments]
+    )
+    result = await _drive(
+        handler_factory(service),
+        [
+            {"type": "session.update", "session": _session()},
+            {"type": "input_audio_buffer.append", "audio": "AAE="},
+            {"type": "input_audio_buffer.commit"},
+        ],
+    )
+
+    deltas = [event["delta"] for event in result if "delta" in event]
+    assert deltas == expected_deltas
+    assert "".join(deltas) == result[-1]["transcript"]
+
+
+@pytest.mark.timeout(5)
+async def test_asr_progresses_when_default_executor_is_full(handler_factory):
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    started, release = asyncio.Event(), threading.Event()
+
+    def occupy_default_executor():
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(timeout=2)
+
+    blocker = loop.run_in_executor(None, occupy_default_executor)
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        result = await asyncio.wait_for(
+            _drive(
+                handler_factory(_FakeAsrService(), max_concurrent_turns=1),
+                [
+                    {"type": "input_audio_buffer.append", "audio": "AAE="},
+                    {"type": "input_audio_buffer.commit"},
+                ],
+            ),
+            1,
+        )
+        assert result[-1]["transcript"] == "hello world"
+        assert not blocker.done()
+    finally:
+        release.set()
+        await blocker
+
+
+@pytest.mark.timeout(5)
+async def test_capacity_is_shared_and_held_until_cancelled_consumer_exits(
+    handler_factory,
+):
+    loop = asyncio.get_running_loop()
+    started, release, cancelled = asyncio.Event(), threading.Event(), threading.Event()
+
+    class StalledCall:
+        def __iter__(self):
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(timeout=2)
+            return iter(())
+
+        def cancel(self):
+            cancelled.set()
+
+    service = _FakeAsrService()
+    recognize = service.stub.StreamingRecognize
+    calls = []
+
+    def recognize_first_stalled(requests, *, metadata):
+        calls.append(None)
+        if len(calls) == 1:
+            return StalledCall()
+        return recognize(requests, metadata=metadata)
+
+    service.stub.StreamingRecognize = recognize_first_stalled
+    handler = handler_factory(service, max_concurrent_turns=1)
+    task = asyncio.create_task(handler._run_turn(_AudioTurn(), Context()))
+    events = [
+        {"type": "input_audio_buffer.append", "audio": "AAE="},
+        {"type": "input_audio_buffer.commit"},
+    ]
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        for cancel_first in (False, True):
+            if cancel_first:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                assert cancelled.is_set()
+            result = await asyncio.wait_for(_drive(handler, events), 1)
+            assert result[-1]["type"] == (
+                "conversation.item.input_audio_transcription.failed"
+            )
+            assert "capacity" in result[-1]["error"]["message"]
+            assert len(calls) == 1
+
+        release.set()
+        # Queue a barrier behind the real consumer, not its cancelled async waiter.
+        await asyncio.wrap_future(handler._executor.submit(lambda: None))
+        result = await asyncio.wait_for(_drive(handler, events), 1)
+        assert result[-1]["transcript"] == "hello world"
+        assert len(calls) == 2
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_appends_configured_silence_before_closing_speech_nim_stream(
+    handler_factory,
+):
     service = _FakeAsrService()
     pcm = b"\x00\x01" * 320
     padding_ms = 20
 
     result = await _drive(
-        _handler(service, commit_padding_ms=padding_ms),
+        handler_factory(service, commit_padding_ms=padding_ms),
         [
             {"type": "session.update", "session": _session()},
             {
@@ -317,7 +458,7 @@ async def test_appends_configured_silence_before_closing_speech_nim_stream():
     assert result[-1]["transcript"] == "hello world"
 
 
-async def test_does_not_append_revised_interim_hypothesis():
+async def test_does_not_append_revised_interim_hypothesis(handler_factory):
     service = _FakeAsrService(
         [
             _response("recognize", final=False),
@@ -329,7 +470,7 @@ async def test_does_not_append_revised_interim_hypothesis():
     pcm = b"\x00\x01" * 320
 
     result = await _drive(
-        _handler(service),
+        handler_factory(service),
         [
             {"type": "session.update", "session": _session()},
             {
@@ -362,9 +503,9 @@ async def test_does_not_append_revised_interim_hypothesis():
         ({"type": "input_audio_buffer.commit"}, "buffer is empty"),
     ],
 )
-async def test_invalid_audio_returns_recoverable_error(event, message):
+async def test_invalid_audio_returns_recoverable_error(event, message, handler_factory):
     result = await _drive(
-        _handler(_FakeAsrService()),
+        handler_factory(_FakeAsrService()),
         [{"type": "session.update", "session": _session()}, event],
     )
 
@@ -373,13 +514,13 @@ async def test_invalid_audio_returns_recoverable_error(event, message):
     assert message in errors[0]["error"]["message"]
 
 
-async def test_rejects_server_vad_without_starting_speech_nim():
+async def test_rejects_server_vad_without_starting_speech_nim(handler_factory):
     service = _FakeAsrService()
     session = _session()
     session["audio"]["input"]["turn_detection"] = {"type": "server_vad"}
 
     result = await _drive(
-        _handler(service),
+        handler_factory(service),
         [{"type": "session.update", "session": session}],
     )
 

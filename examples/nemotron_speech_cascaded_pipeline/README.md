@@ -111,8 +111,9 @@ utterances without a real-time wait.
 - A ReadWriteMany storage class for the shared model cache.
 
 The runtime must support realtime transcription, streaming `/v1/audio/speech`,
-and registering external audio models without Hugging Face downloads. The last
-requirement is introduced by this PR. For premerge validation, use branch-built
+and `register_model(skip_model_assets=True)` for external audio models. The last
+option is introduced by this PR and leaves ordinary audio registration unchanged.
+For premerge validation, use branch-built
 runtime images, including this branch's rebuilt Python bindings. Building only
 the adapter image below does not include that Rust registration fix. Use published
 images once a release includes all three capabilities.
@@ -292,6 +293,11 @@ The TTS adapter requires a Dynamo runtime with streaming
 `/v1/audio/speech` support. The realtime ASR adapter uses explicit client commits
 (`turn_detection: null`); it does not implement server-side voice activity
 detection (VAD).
+
+Each ASR worker admits up to 32 active turns across all clients, configurable
+with `--max-concurrent-turns`. Excess turns receive a transcription failure
+immediately rather than waiting for a consumer thread. The TTS adapter rejects
+unsupported cloning and generation controls instead of silently ignoring them.
 
 ## External Orchestration
 

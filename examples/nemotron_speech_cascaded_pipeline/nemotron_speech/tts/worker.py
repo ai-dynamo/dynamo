@@ -96,6 +96,7 @@ async def worker(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
         args.model_name,
         model_name=args.model_name,
         worker_type=WorkerType.Aggregated,
+        skip_model_assets=True,
     )
     logger.info(
         "Serving Magpie TTS model=%s endpoint=%s", args.model_name, endpoint_name

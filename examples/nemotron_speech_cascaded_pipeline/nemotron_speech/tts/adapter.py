@@ -24,9 +24,10 @@ import uuid
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 
+import grpc
 from riva.client import AudioEncoding
 
-from dynamo._core import Context
+from dynamo._core import Context, InvalidArgument
 from dynamo.common.protocols.audio_protocol import (
     AudioData,
     NvAudioSpeechResponse,
@@ -68,6 +69,15 @@ class SpeechNimAudioSpeechBackend:
             raise ValueError("Speech NIM TTS does not support the speed parameter")
         if request.instructions:
             raise ValueError("Speech NIM TTS does not support instructions")
+        for name, value in (
+            ("task_type", request.task_type),
+            ("ref_audio", request.ref_audio),
+            ("ref_text", request.ref_text),
+            ("max_new_tokens", request.max_new_tokens),
+            ("nvext.cfg_scale", request.nvext.cfg_scale if request.nvext else None),
+        ):
+            if value is not None:
+                raise ValueError(f"Speech NIM TTS does not support {name}")
 
     async def generate(
         self, request: NvCreateAudioSpeechRequest, context: Context
@@ -76,30 +86,37 @@ class SpeechNimAudioSpeechBackend:
         self._validate(request)
         response_id = f"speech_{uuid.uuid4().hex}"
         created = int(time.time())
-        # Starting the RPC is nonblocking; only reading its responses blocks.
-        call = self.tts_service.synthesize_online(
-            request.input,
-            voice_name=request.voice or self.voice,
-            language_code=request.language or self.language_code,
-            encoding=AudioEncoding.LINEAR_PCM,
-            sample_rate_hz=self.sample_rate_hz,
-        )
-        async with cancel_on_context_stop(context, call.cancel):
-            responses = iter(call)
-            while (
-                response := await asyncio.to_thread(next, responses, None)
-            ) is not None:
-                yield NvAudioSpeechResponse(
-                    id=response_id,
-                    model=self.model_name,
-                    created=created,
-                    data=[
-                        AudioData(
-                            output_format="pcm",
-                            b64_json=base64.b64encode(response.audio).decode(),
-                        )
-                    ],
-                )
+        try:
+            # Starting the RPC is nonblocking; only reading its responses blocks.
+            call = self.tts_service.synthesize_online(
+                request.input,
+                voice_name=request.voice or self.voice,
+                language_code=request.language or self.language_code,
+                encoding=AudioEncoding.LINEAR_PCM,
+                sample_rate_hz=self.sample_rate_hz,
+            )
+            async with cancel_on_context_stop(context, call.cancel):
+                responses = iter(call)
+                while (
+                    response := await asyncio.to_thread(next, responses, None)
+                ) is not None:
+                    yield NvAudioSpeechResponse(
+                        id=response_id,
+                        model=self.model_name,
+                        created=created,
+                        data=[
+                            AudioData(
+                                output_format="pcm",
+                                b64_json=base64.b64encode(response.audio).decode(),
+                            )
+                        ],
+                    )
+        except grpc.RpcError as exc:
+            if exc.code() == grpc.StatusCode.INVALID_ARGUMENT:
+                raise InvalidArgument(
+                    "Speech NIM rejected the synthesis parameters"
+                ) from exc
+            raise
 
     @dynamo_endpoint(NvCreateAudioSpeechRequest, NvAudioSpeechResponse)
     async def speech_endpoint(

@@ -20,6 +20,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 source "$SCRIPT_DIR/../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../common/launch_utils.sh"
 

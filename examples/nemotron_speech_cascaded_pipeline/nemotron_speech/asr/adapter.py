@@ -22,8 +22,10 @@ import base64
 import binascii
 import logging
 import queue
+import threading
 import uuid
 from collections.abc import AsyncGenerator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from riva.client import AudioEncoding, RecognitionConfig, StreamingRecognitionConfig
@@ -53,6 +55,7 @@ OPENAI_PCM_SAMPLE_RATE = 24_000
 PCM16_BYTES_PER_SAMPLE = 2
 MAX_AUDIO_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_UTTERANCE_SECONDS = 60
+DEFAULT_MAX_CONCURRENT_TURNS = 32
 
 
 def _append_only_delta(emitted: str, hypothesis: str) -> tuple[str, str]:
@@ -125,6 +128,7 @@ class SpeechNimRealtimeTranscriptionHandler:
         language_code: str,
         commit_padding_ms: int,
         timeout_s: float,
+        max_concurrent_turns: int = DEFAULT_MAX_CONCURRENT_TURNS,
     ) -> None:
         self.asr_service = asr_service
         self.model_name = model_name
@@ -134,6 +138,11 @@ class SpeechNimRealtimeTranscriptionHandler:
             raise ValueError("commit_padding_ms must be non-negative")
         self.commit_padding_ms = commit_padding_ms
         self.timeout_s = timeout_s
+        self._executor = ThreadPoolExecutor(max_workers=max_concurrent_turns)
+        self._slots = threading.BoundedSemaphore(max_concurrent_turns)
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._executor.shutdown, cancel_futures=True)
 
     def _streaming_config(self) -> StreamingRecognitionConfig:
         return StreamingRecognitionConfig(
@@ -166,22 +175,34 @@ class SpeechNimRealtimeTranscriptionHandler:
                 transcript = result.alternatives[0].transcript
                 if not transcript:
                     continue
-                if result.is_final:
-                    final_segments.append(transcript)
-                    emitted_interim = ""
-                    continue
+                starts_segment = not emitted_interim
                 emitted_interim, delta = _append_only_delta(emitted_interim, transcript)
                 if delta:
+                    if starts_segment and final_segments:
+                        delta = " " + delta
                     asyncio.run_coroutine_threadsafe(
                         turn.events.put(
                             input_audio_transcription_delta_event(turn.item_id, delta)
                         ),
                         loop,
                     ).result()
+                if result.is_final:
+                    final_segments.append(transcript)
+                    emitted_interim = ""
         return " ".join(final_segments) or emitted_interim
 
     async def _run_turn(self, turn: _AudioTurn, context: Context) -> None:
+        if not self._slots.acquire(blocking=False):
+            turn.close()
+            await turn.events.put(
+                input_audio_transcription_failed_event(
+                    turn.item_id, "ASR capacity exhausted; retry the turn later"
+                )
+            )
+            return
+
         responses = None
+        response_future = None
 
         def cancel() -> None:
             turn.close()
@@ -198,20 +219,26 @@ class SpeechNimRealtimeTranscriptionHandler:
                 streaming_request_generator(turn.chunks(), self._streaming_config()),
                 metadata=self.asr_service.auth.get_auth_metadata(),
             )
+            response_future = self._executor.submit(
+                self._transcribe,
+                turn,
+                asyncio.get_running_loop(),
+                responses,
+                context,
+            )
+            # Cancellation of the asyncio waiter must not admit another RPC
+            # until the blocking consumer has actually released its thread.
+            response_future.add_done_callback(lambda _: self._slots.release())
+
+            async def transcribe() -> str:
+                return await asyncio.wrap_future(response_future)
+
             # Observe backend failures while input is still open. A successful
             # result still waits for commit, which starts the completion deadline.
             async with cancel_on_context_stop(
                 context, cancel
             ), asyncio.TaskGroup() as tasks:
-                transcription_task = tasks.create_task(
-                    asyncio.to_thread(
-                        self._transcribe,
-                        turn,
-                        asyncio.get_running_loop(),
-                        responses,
-                        context,
-                    )
-                )
+                transcription_task = tasks.create_task(transcribe())
                 await turn.closed_event.wait()
                 transcript = await asyncio.wait_for(
                     transcription_task,
@@ -238,6 +265,8 @@ class SpeechNimRealtimeTranscriptionHandler:
                 )
         finally:
             cancel()
+            if response_future is None:
+                self._slots.release()
 
     def _validate_session(self, session: Any) -> str | None:
         if not isinstance(session, dict) or session.get("type") != "transcription":

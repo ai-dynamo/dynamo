@@ -35,7 +35,7 @@ from ..config import (
     resolve_dynamo_endpoint,
 )
 from ..riva import build_auth, wait_for_service_ready
-from .adapter import SpeechNimRealtimeTranscriptionHandler
+from .adapter import DEFAULT_MAX_CONCURRENT_TURNS, SpeechNimRealtimeTranscriptionHandler
 
 logger = logging.getLogger(__name__)
 configure_dynamo_logging(service_name="speech-asr")
@@ -73,6 +73,12 @@ def _parse_args() -> argparse.Namespace:
         help="Deadline for a committed transcription turn.",
     )
     parser.add_argument(
+        "--max-concurrent-turns",
+        type=int,
+        default=DEFAULT_MAX_CONCURRENT_TURNS,
+        help="Maximum active ASR RPCs across all clients; excess turns fail immediately.",
+    )
+    parser.add_argument(
         "--model-name",
         default=DEFAULT_MODEL_NAME,
         help="Model name exposed through /v1/realtime.",
@@ -92,17 +98,14 @@ async def worker(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
     asr_service = ASRService(build_auth(nim_connection_config_from_namespace(args)))
     await wait_for_service_ready(asr_service, args.nim_startup_timeout_s)
 
-    handler = RealtimeHandler(
-        {
-            "transcription": SpeechNimRealtimeTranscriptionHandler(
-                asr_service=asr_service,
-                model_name=args.model_name,
-                nim_model=args.nim_model,
-                language_code=args.language_code,
-                commit_padding_ms=args.commit_padding_ms,
-                timeout_s=args.timeout_s,
-            )
-        }
+    transcription_handler = SpeechNimRealtimeTranscriptionHandler(
+        asr_service=asr_service,
+        model_name=args.model_name,
+        nim_model=args.nim_model,
+        language_code=args.language_code,
+        commit_padding_ms=args.commit_padding_ms,
+        timeout_s=args.timeout_s,
+        max_concurrent_turns=args.max_concurrent_turns,
     )
     await register_model(
         ModelInput.Text,
@@ -117,7 +120,11 @@ async def worker(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
         args.model_name,
         endpoint_name,
     )
-    await endpoint.serve_bidirectional_endpoint(handler.generate)
+    try:
+        handler = RealtimeHandler({"transcription": transcription_handler})
+        await endpoint.serve_bidirectional_endpoint(handler.generate)
+    finally:
+        await transcription_handler.close()
 
 
 if __name__ == "__main__":

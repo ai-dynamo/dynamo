@@ -33,7 +33,7 @@ from nemotron_speech.riva import wait_for_service_ready  # noqa: E402
 from nemotron_speech.tts.adapter import SpeechNimAudioSpeechBackend  # noqa: E402
 from riva.client import AudioEncoding  # noqa: E402
 
-from dynamo._core import Context  # noqa: E402
+from dynamo._core import Context, InvalidArgument  # noqa: E402
 from dynamo.common.protocols.audio_protocol import (  # noqa: E402
     NvCreateAudioSpeechRequest,
 )
@@ -87,6 +87,7 @@ async def test_streams_each_speech_nim_response_as_pcm():
                 model=MODEL,
                 voice="Magpie-Multilingual.EN-US.Aria",
                 response_format="pcm",
+                nvext={"frontend_accepts_audio_chunks": True},
             ),
             Context(),
         )
@@ -114,6 +115,11 @@ async def test_streams_each_speech_nim_response_as_pcm():
         ({"response_format": "wav"}, "response_format='pcm'"),
         ({"speed": 1.5}, "speed parameter"),
         ({"instructions": "whisper"}, "instructions"),
+        ({"task_type": "Base"}, "task_type"),
+        ({"ref_audio": "data:audio/wav;base64,AAE="}, "ref_audio"),
+        ({"ref_text": "reference transcript"}, "ref_text"),
+        ({"max_new_tokens": 16}, "max_new_tokens"),
+        ({"nvext": {"cfg_scale": 1.5}}, "nvext.cfg_scale"),
     ],
 )
 async def test_rejects_unsupported_openai_parameters(update, message):
@@ -124,12 +130,12 @@ async def test_rejects_unsupported_openai_parameters(update, message):
         **update,
     }
 
+    service = _FakeTtsService([])
     with pytest.raises(ValueError, match=message):
         await anext(
-            _backend(_FakeTtsService([])).generate(
-                NvCreateAudioSpeechRequest(**request), Context()
-            )
+            _backend(service).generate(NvCreateAudioSpeechRequest(**request), Context())
         )
+    assert service.args is None
 
 
 @pytest.mark.parametrize("endpoint", [False, True])
@@ -153,12 +159,25 @@ async def test_closing_output_cancels_speech_nim_call(endpoint):
 
 
 @pytest.mark.parametrize("after_first_chunk", [False, True])
-async def test_rpc_failure_propagates_and_cancels_call(after_first_chunk):
+@pytest.mark.parametrize(
+    "status, expected_error",
+    [
+        (grpc.StatusCode.INVALID_ARGUMENT, InvalidArgument),
+        (grpc.StatusCode.UNAVAILABLE, grpc.RpcError),
+    ],
+)
+async def test_rpc_failure_propagates_and_cancels_call(
+    after_first_chunk, status, expected_error
+):
+    class RpcError(grpc.RpcError):
+        def code(self):
+            return status
+
     class FailedCall(_FakeCall):
         def __iter__(self):
             if after_first_chunk:
                 yield SimpleNamespace(audio=b"first")
-            raise grpc.RpcError("synthesis failed")
+            raise RpcError("synthesis failed")
 
     service = _FakeTtsService([])
     service.call = FailedCall([])
@@ -167,7 +186,7 @@ async def test_rpc_failure_propagates_and_cancels_call(after_first_chunk):
     )
     if after_first_chunk:
         await anext(output)
-    with pytest.raises(grpc.RpcError, match="synthesis failed"):
+    with pytest.raises(expected_error):
         await anext(output)
     assert service.call.cancelled
 
