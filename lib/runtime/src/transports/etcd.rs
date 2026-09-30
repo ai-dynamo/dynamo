@@ -72,6 +72,12 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    pub(crate) async fn check_connection(&self) -> Result<()> {
+        let status = self.connector.get_client().status().await?;
+        anyhow::ensure!(status.leader() != 0, "etcd has no elected leader");
+        Ok(())
+    }
+
     pub fn builder() -> ClientOptionsBuilder {
         ClientOptionsBuilder::default()
     }

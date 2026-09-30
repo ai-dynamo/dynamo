@@ -264,6 +264,14 @@ impl Default for Manager {
 }
 
 impl Manager {
+    pub(crate) async fn check_connection(&self) -> anyhow::Result<()> {
+        match self.0.as_ref() {
+            KeyValueStoreEnum::Etcd(store) => store.check_connection().await,
+            KeyValueStoreEnum::Nats(store) => store.check_connection(),
+            KeyValueStoreEnum::Memory(_) | KeyValueStoreEnum::File(_) => Ok(()),
+        }
+    }
+
     /// In-memory KeyValueStoreManager for testing
     pub fn memory() -> Self {
         Self::new(KeyValueStoreEnum::Memory(MemoryStore::new()))

@@ -199,6 +199,13 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
+    /// Validate configuration that does not require engine metadata or a runtime.
+    pub fn validate(&self) -> Result<(), DynamoError> {
+        validate_route_to_encoder(self)?;
+        resolve_model_type(self)?;
+        Ok(())
+    }
+
     /// Effective `enable_local_indexer`, accounting for disaggregation
     /// mode. Encode workers force this off because they don't
     /// host the in-process KV indexer endpoint and must not advertise it.
@@ -480,7 +487,7 @@ impl Worker {
     ///
     /// `engine.cleanup()` is guaranteed to run exactly once if
     /// `engine.start()` succeeded, regardless of which path led to shutdown.
-    pub async fn run(mut self, runtime: Runtime) -> Result<(), DynamoError> {
+    pub async fn run(self, runtime: Runtime) -> Result<(), DynamoError> {
         // Validate the worker config up front so misconfiguration surfaces
         // before any signal handlers, tokio tasks, or runtime construction.
         // The same validation is also reachable via `run_inner`, but doing
@@ -490,39 +497,30 @@ impl Worker {
         validate_model_input(self.config.model_input, &self.engine)?;
         validate_route_to_encoder(&self.config)?;
 
-        // Install the OS signal handlers synchronously, before spawning
-        // anything, so a SIGTERM delivered between this point and the
-        // task's first poll is captured by the kernel-side handler rather
-        // than the OS default (which would terminate the process abruptly).
-        // `Signal::recv` then drives the shared cancellation token.
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::Unknown),
-                    format!("install SIGTERM handler: {e}"),
-                )
-            })?;
-        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-            .map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::Unknown),
-                    format!("install SIGINT handler: {e}"),
-                )
-            })?;
+        let (shutdown_token, _signal_handle) = crate::run::shutdown_signal(runtime.clone())?;
+        self.run_with_shutdown(runtime, None, shutdown_token).await
+    }
 
-        // Single shared shutdown signal observed across all phases. The
-        // background task only flips the token; lifecycle transitions stay
-        // on this owned Worker instance.
-        let shutdown_token = CancellationToken::new();
-        let signal_token = shutdown_token.clone();
-        let signal_handle = tokio::spawn(async move {
-            tokio::select! {
-                _ = sigterm.recv() => tracing::info!("SIGTERM received"),
-                _ = sigint.recv() => tracing::info!("SIGINT received"),
-            }
-            signal_token.cancel();
-        });
+    /// Run using an already-connected runtime and caller-owned shutdown signal.
+    /// The caller installs signal handling before constructing the runtime/engine
+    /// and applies `WorkerConfig::runtime` overrides when constructing `drt`.
+    pub async fn run_with_drt(
+        self,
+        drt: DistributedRuntime,
+        shutdown_token: CancellationToken,
+    ) -> Result<(), DynamoError> {
+        validate_model_input(self.config.model_input, &self.engine)?;
+        self.config.validate()?;
+        self.run_with_shutdown(drt.runtime().clone(), Some(drt), shutdown_token)
+            .await
+    }
 
+    async fn run_with_shutdown(
+        mut self,
+        runtime: Runtime,
+        drt: Option<DistributedRuntime>,
+        shutdown_token: CancellationToken,
+    ) -> Result<(), DynamoError> {
         // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
         // once a signal arrives, the orchestrator + cleanup must finish
         // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds (plus the
@@ -531,12 +529,13 @@ impl Worker {
         // never hit this — the timer only starts after `shutdown_token`
         // is cancelled.
         let outcome = {
-            let inner_fut = self.run_inner(runtime, &shutdown_token);
+            let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
             tokio::pin!(inner_fut);
 
             tokio::select! {
                 result = &mut inner_fut => result,
                 _ = shutdown_token.cancelled() => {
+                    runtime.mark_shutting_down();
                     let timeout = graceful_shutdown_timeout();
                     let grace = grace_period_secs();
                     let deadline = shutdown_deadline(timeout, grace);
@@ -561,8 +560,7 @@ impl Worker {
             }
         };
 
-        signal_handle.abort();
-        let _ = signal_handle.await;
+        runtime.mark_shutting_down();
 
         // Final safety net: guarantee engine.cleanup() runs if start()
         // succeeded. No-op if cleanup already ran via the orchestrator.
@@ -576,29 +574,36 @@ impl Worker {
     async fn run_inner(
         &mut self,
         runtime: Runtime,
+        drt: Option<DistributedRuntime>,
         shutdown: &CancellationToken,
     ) -> Result<(), DynamoError> {
         // model_input was already validated at the top of `run`; re-checking
         // here would double-error on misconfig.
-        let config = dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
-            self.config.runtime.discovery_backend.as_deref(),
-            self.config.runtime.request_plane.as_deref(),
-            self.config.runtime.event_plane.as_deref(),
-        )
-        .map_err(|e| {
-            err(
-                ErrorType::Backend(BackendError::InvalidArgument),
-                format!("distributed runtime config: {e}"),
-            )
-        })?;
-        let drt = DistributedRuntime::new(runtime, config)
-            .await
-            .map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::CannotConnect),
-                    format!("distributed runtime: {e}"),
-                )
-            })?;
+        let drt = match drt {
+            Some(drt) => drt,
+            None => {
+                let config =
+                    dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
+                        self.config.runtime.discovery_backend.as_deref(),
+                        self.config.runtime.request_plane.as_deref(),
+                        self.config.runtime.event_plane.as_deref(),
+                    )
+                    .map_err(|e| {
+                        err(
+                            ErrorType::Backend(BackendError::InvalidArgument),
+                            format!("distributed runtime config: {e}"),
+                        )
+                    })?;
+                DistributedRuntime::new(runtime, config)
+                    .await
+                    .map_err(|e| {
+                        err(
+                            ErrorType::Backend(BackendError::CannotConnect),
+                            format!("distributed runtime: {e}"),
+                        )
+                    })?
+            }
+        };
         tracing::debug!("distributed runtime connected");
 
         let component = drt
@@ -863,6 +868,7 @@ impl Worker {
     /// grace period → engine drain → cleanup. Shared by every shutdown path —
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
     async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
+        endpoint.drt().runtime().mark_shutting_down();
         if let Err(e) = endpoint.unregister_endpoint_instance().await {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {
@@ -3007,6 +3013,46 @@ mod tests {
         // start() may have allocated partial state before raising; the
         // state machine keeps cleanup() owed by parking in StartFailed.
         assert_eq!(worker.state, LifecycleState::StartFailed);
+    }
+
+    // The external-DRT entrypoint must retain cleanup ownership and withdraw
+    // readiness on a startup error, even when its caller keeps the runtime alive.
+    #[tokio::test]
+    async fn run_with_drt_failed_start_cleans_up_and_withdraws_readiness() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_HOST", Some("127.0.0.1")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+                ("DYN_SYSTEM_HEALTH_PATH", Some("/health")),
+            ],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let drt = DistributedRuntime::new_with_probe_policy(
+                    runtime.clone(),
+                    dynamo_runtime::distributed::DistributedConfig::process_local(),
+                    dynamo_runtime::SystemStatusProbePolicy::RuntimeOnly,
+                )
+                .await
+                .unwrap();
+                let url = format!(
+                    "http://{}/health",
+                    drt.system_status_server_info().unwrap().socket_addr
+                );
+                let (engine, cleanup_calls) = StateMockEngine::new(true);
+                let client = reqwest::Client::new();
+                assert_eq!(client.get(&url).send().await.unwrap().status(), 200);
+                assert!(
+                    worker_with(engine)
+                        .run_with_drt(drt, CancellationToken::new())
+                        .await
+                        .is_err()
+                );
+                assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(client.get(&url).send().await.unwrap().status(), 503);
+                runtime.shutdown();
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

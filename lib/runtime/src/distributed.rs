@@ -10,6 +10,7 @@ use crate::pipeline::network::ResponsePlaneMode;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
+use crate::system_status_server::SystemStatusProbePolicy;
 use crate::{discovery, system_status_server, transports};
 use crate::{
     discovery::{Discovery, DiscoverySpec, EndpointRegistrationLease, EndpointRegistrationManager},
@@ -169,7 +170,27 @@ impl std::fmt::Debug for DistributedRuntime {
 }
 
 impl DistributedRuntime {
+    pub(crate) async fn check_dependencies(&self) -> Result<()> {
+        if let Some(client) = &self.nats_client {
+            anyhow::ensure!(
+                client.client().connection_state() == async_nats::connection::State::Connected,
+                "NATS is disconnected"
+            );
+        }
+        self.discovery_client.check_connection().await
+    }
+
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
+        Self::new_with_probe_policy(runtime, config, SystemStatusProbePolicy::Worker).await
+    }
+
+    /// Construct the runtime with HTTP probes available while dependencies connect.
+    /// Runtime-only probes are intended for services whose engine has separate probes.
+    pub async fn new_with_probe_policy(
+        runtime: Runtime,
+        config: DistributedConfig,
+        probe_policy: SystemStatusProbePolicy,
+    ) -> Result<Self> {
         let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
         let response_plane = match response_plane {
@@ -177,20 +198,33 @@ impl DistributedRuntime {
             None => ResponsePlaneMode::configured()?,
         };
 
+        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
+        let status_server = if config.system_server_enabled() {
+            match system_status_server::StartingSystemStatusServer::bind(
+                &config,
+                runtime.clone(),
+                probe_policy,
+            )
+            .await
+            {
+                Ok(server) => Some(server),
+                Err(error) if probe_policy == SystemStatusProbePolicy::RuntimeOnly => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "System status server startup failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let nats_client = match nats_config {
             Some(nc) => Some(nc.connect().await?),
             None => None,
         };
 
-        // Start system status server for health and metrics if enabled in configuration
-        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
-        // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
-        // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
-        let cancel_token = if config.system_server_enabled() {
-            Some(runtime.clone().child_token())
-        } else {
-            None
-        };
         let starting_health_status = config.starting_health_status.clone();
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
         let health_endpoint_path = config.system_health_path.clone();
@@ -341,49 +375,6 @@ impl DistributedRuntime {
             }
         }
 
-        // Handle system status server initialization
-        if let Some(cancel_token) = cancel_token {
-            // System server is enabled - start both the state and HTTP server
-            let host = config.system_host.clone();
-            let port = config.system_port as u16;
-
-            // Start system status server (it creates SystemStatusState internally)
-            match crate::system_status_server::spawn_system_status_server(
-                &host,
-                port,
-                cancel_token,
-                Arc::new(distributed_runtime.clone()),
-                distributed_runtime.discovery_metadata.clone(),
-            )
-            .await
-            {
-                Ok((addr, handle)) => {
-                    tracing::info!("System status server started successfully on {addr}");
-
-                    // Store system status server information
-                    let system_status_server_info =
-                        crate::system_status_server::SystemStatusServerInfo::new(
-                            addr,
-                            Some(handle),
-                        );
-
-                    // Initialize the system_status_server field
-                    distributed_runtime
-                        .system_status_server
-                        .set(Arc::new(system_status_server_info))
-                        .expect("System status server info should only be set once");
-                }
-                Err(e) => {
-                    tracing::error!("System status server startup failed: {e}");
-                }
-            }
-        } else {
-            // System server HTTP is disabled, but uptime metrics are still being tracked via SystemHealth
-            tracing::debug!(
-                "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
-            );
-        }
-
         // Start health check manager if enabled
         if config.health_check_enabled {
             let health_check_config = crate::health_check::HealthCheckConfig {
@@ -407,6 +398,17 @@ impl DistributedRuntime {
                 ),
                 Err(e) => tracing::error!("Health check manager failed to start: {e}"),
             }
+        }
+
+        if let Some(server) = status_server {
+            let info = server.attach(
+                Arc::new(distributed_runtime.clone()),
+                distributed_runtime.discovery_metadata.clone(),
+            )?;
+            distributed_runtime
+                .system_status_server
+                .set(Arc::new(info))
+                .expect("System status server info should only be set once");
         }
 
         Ok(distributed_runtime)

@@ -75,3 +75,57 @@ fn run_worker(
         result
     })
 }
+
+/// Install signals before any asynchronous startup work. Dropping the returned
+/// handle removes the listener task; the caller owns the full startup lifetime.
+pub fn shutdown_signal(
+    runtime: Runtime,
+) -> Result<
+    (
+        tokio_util::sync::CancellationToken,
+        tokio_util::task::AbortOnDropHandle<()>,
+    ),
+    crate::DynamoError,
+> {
+    use crate::{BackendError, DynamoError, ErrorType};
+    use tokio_util::sync::CancellationToken;
+    // Install the OS signal handlers synchronously, before spawning
+    // anything, so a SIGTERM delivered between this point and the
+    // task's first poll is captured by the kernel-side handler rather
+    // than the OS default (which would terminate the process abruptly).
+    // `Signal::recv` then drives the shared cancellation token.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("install SIGTERM handler: {e}"))
+                .build()
+        })?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("install SIGINT handler: {e}"))
+                .build()
+        })?;
+
+    // Single shared shutdown signal observed across all phases. The
+    // background task only flips the token; lifecycle transitions stay
+    // on this owned Worker instance.
+    let shutdown_token = CancellationToken::new();
+    let signal_token = shutdown_token.clone();
+    let signal_handle = tokio::spawn(async move {
+        tokio::select! {
+            _ = runtime.primary_token().cancelled_owned() => tracing::info!("Runtime shutdown received"),
+            _ = sigterm.recv() => tracing::info!("SIGTERM received"),
+            _ = sigint.recv() => tracing::info!("SIGINT received"),
+        }
+        runtime.mark_shutting_down();
+        signal_token.cancel();
+    });
+
+    Ok((
+        shutdown_token,
+        tokio_util::task::AbortOnDropHandle::new(signal_handle),
+    ))
+}

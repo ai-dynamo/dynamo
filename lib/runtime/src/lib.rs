@@ -31,7 +31,7 @@ pub mod health_check;
 pub mod local_endpoint_registry;
 pub mod metadata_registry;
 pub mod system_status_server;
-pub use system_status_server::SystemStatusServerInfo;
+pub use system_status_server::{SystemStatusProbePolicy, SystemStatusServerInfo};
 pub mod distributed;
 pub mod instances;
 pub mod logging;

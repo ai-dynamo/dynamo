@@ -44,6 +44,103 @@ pub struct VllmSidecarEngine {
     cancel: CancellationToken,
 }
 
+pub(crate) struct PreparedStartup {
+    endpoint: GrpcEndpoint,
+    transport: GrpcTransportConfig,
+    pub(crate) config: WorkerConfig,
+    vllm_http_url: Option<RlAdminBaseUrl>,
+    vllm_rl_world_size: Option<u32>,
+}
+
+impl PreparedStartup {
+    pub(crate) fn new(args: Args) -> Result<Self, DynamoError> {
+        if args.sidecar.common.dyn_tool_call_parser.is_some()
+            || args.sidecar.common.dyn_reasoning_parser.is_some()
+        {
+            return Err(client::invalid_argument(
+                "vLLM gRPC does not preserve the request options required by Dynamo tool-call and reasoning parsers",
+            ));
+        }
+
+        let endpoint = args.sidecar.grpc_endpoint;
+        let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
+        let vllm_http_url = args
+            .vllm_http_endpoint
+            .map(|endpoint| {
+                RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
+                    client::invalid_argument(format!(
+                        "invalid RL admin endpoint derived from --vllm-http-endpoint: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let transport = args.sidecar.grpc.config();
+        // Validate the duration now, but start the budget only in discover().
+        client::startup_deadline(transport.startup_deadline)?;
+        let mode = args.sidecar.common.disaggregation_mode;
+        let config = WorkerConfig {
+            namespace: args.sidecar.common.namespace,
+            // Disaggregated workers register under fixed role components so the
+            // frontend can route the disaggregated handoff; aggregated keeps the
+            // operator-configured component (`--component` / `DYN_COMPONENT`).
+            component: match mode {
+                DisaggregationMode::Aggregated => args.sidecar.common.component,
+                _ => mode.discovery_component().to_string(),
+            },
+            endpoint: args.sidecar.common.endpoint,
+            endpoint_types: args.sidecar.common.endpoint_types,
+            custom_jinja_template: args.sidecar.common.custom_jinja_template,
+            // gRPC cannot yet preserve the parser request semantics.
+            tool_call_parser: None,
+            reasoning_parser: None,
+            exclude_tools_when_tool_choice_none: args
+                .sidecar
+                .common
+                .exclude_tools_when_tool_choice_none,
+            enable_kv_routing: !mode.is_encode(),
+            disaggregation_mode: mode,
+            route_to_encoder: args.sidecar.common.route_to_encoder,
+            enable_rl,
+            ..Default::default()
+        };
+        Ok(Self {
+            endpoint,
+            transport,
+            config,
+            vllm_http_url,
+            vllm_rl_world_size,
+        })
+    }
+
+    pub(crate) async fn discover(
+        mut self,
+    ) -> Result<(VllmSidecarEngine, WorkerConfig), DynamoError> {
+        let bootstrap_deadline = client::startup_deadline(self.transport.startup_deadline)?;
+        eprintln!(
+            "Discovering vLLM model metadata from {}; startup deadline: {:?}",
+            self.endpoint, self.transport.startup_deadline
+        );
+        let model = bootstrap_discover(&self.endpoint, self.transport, bootstrap_deadline).await?;
+        let mode = self.config.disaggregation_mode;
+        if mode.is_encode() && !model.supports_multimodal {
+            return Err(client::invalid_argument(format!(
+                "encode mode requires a multimodal engine; `{}` does not advertise multimodal support",
+                model.served_name
+            )));
+        }
+        self.config.rl_metadata = self
+            .config
+            .enable_rl
+            .then(|| model.rl_worker_metadata(self.vllm_http_url, self.vllm_rl_world_size))
+            .transpose()?;
+        self.config.model_name = model.source.clone();
+        self.config.served_model_name = Some(model.served_name.clone());
+        let engine = VllmSidecarEngine::new(self.endpoint, model, mode, self.transport);
+        Ok((engine, self.config))
+    }
+}
+
 fn cancelled(state: &ResponseState) -> LLMEngineOutput {
     LLMEngineOutput::cancelled().with_usage(usage(
         state.prompt_tokens(),
@@ -96,74 +193,12 @@ impl VllmSidecarEngine {
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        if args.sidecar.common.dyn_tool_call_parser.is_some()
-            || args.sidecar.common.dyn_reasoning_parser.is_some()
-        {
-            return Err(client::invalid_argument(
-                "vLLM gRPC does not preserve the request options required by Dynamo tool-call and reasoning parsers",
-            ));
-        }
-
-        let endpoint = args.sidecar.grpc_endpoint;
-        let enable_rl = args.sidecar.common.enable_rl;
-        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
-        let vllm_http_url = args
-            .vllm_http_endpoint
-            .map(|endpoint| {
-                RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
-                    client::invalid_argument(format!(
-                        "invalid RL admin endpoint derived from --vllm-http-endpoint: {error}"
-                    ))
-                })
-            })
-            .transpose()?;
-        let transport = args.sidecar.grpc.config();
-        let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
-        eprintln!(
-            "Discovering vLLM model metadata from {endpoint}; startup deadline: {:?}",
-            transport.startup_deadline
-        );
-        let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
-        let mode = args.sidecar.common.disaggregation_mode;
-        if mode.is_encode() && !model.supports_multimodal {
-            return Err(client::invalid_argument(format!(
-                "encode mode requires a multimodal engine; `{}` does not advertise multimodal support",
-                model.served_name
-            )));
-        }
-        let rl_metadata = enable_rl
-            .then(|| model.rl_worker_metadata(vllm_http_url, vllm_rl_world_size))
-            .transpose()?;
-        let engine = Self::new(endpoint, model.clone(), mode, transport);
-        let config = WorkerConfig {
-            namespace: args.sidecar.common.namespace,
-            // Disaggregated workers register under fixed role components so the
-            // frontend can route the disaggregated handoff; aggregated keeps the
-            // operator-configured component (`--component` / `DYN_COMPONENT`).
-            component: match mode {
-                DisaggregationMode::Aggregated => args.sidecar.common.component,
-                _ => mode.discovery_component().to_string(),
-            },
-            endpoint: args.sidecar.common.endpoint,
-            endpoint_types: args.sidecar.common.endpoint_types,
-            custom_jinja_template: args.sidecar.common.custom_jinja_template,
-            model_name: model.source.clone(),
-            served_model_name: Some(model.served_name.clone()),
-            // gRPC cannot yet preserve the parser request semantics.
-            tool_call_parser: None,
-            reasoning_parser: None,
-            exclude_tools_when_tool_choice_none: args
-                .sidecar
-                .common
-                .exclude_tools_when_tool_choice_none,
-            enable_kv_routing: !mode.is_encode(),
-            disaggregation_mode: mode,
-            route_to_encoder: args.sidecar.common.route_to_encoder,
-            enable_rl,
-            rl_metadata,
-            ..Default::default()
-        };
-        Ok((engine, config))
+        let prepared = PreparedStartup::new(args)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
+        runtime.block_on(prepared.discover())
     }
 
     fn started_client(&self) -> Result<&VllmClient, DynamoError> {
@@ -1352,32 +1387,25 @@ fn required_object_json(body: &Map<String, Value>, field: &str) -> Result<Vec<u8
         .map_err(|error| client::invalid_argument(format!("invalid `{field}`: {error}")))
 }
 
-fn bootstrap_discover(
+async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: GrpcTransportConfig,
     startup_deadline: Instant,
 ) -> Result<DiscoveredModel, DynamoError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
-    runtime.block_on(async {
-        let bootstrap_transport = GrpcTransportConfig {
-            connections: std::num::NonZeroUsize::MIN,
-            ..transport
-        };
-        let client =
-            VllmClient::connect(endpoint, bootstrap_transport, startup_deadline, true).await?;
-        client
-            .wait_for_services(
-                &[CONTROL_SERVICE],
-                startup_deadline,
-                transport.retry_interval,
-            )
-            .await?;
-        let (model, server) = client.discover(startup_deadline).await?;
-        DiscoveredModel::from_proto(model, server)
-    })
+    let bootstrap_transport = GrpcTransportConfig {
+        connections: std::num::NonZeroUsize::MIN,
+        ..transport
+    };
+    let client = VllmClient::connect(endpoint, bootstrap_transport, startup_deadline, true).await?;
+    client
+        .wait_for_services(
+            &[CONTROL_SERVICE],
+            startup_deadline,
+            transport.retry_interval,
+        )
+        .await?;
+    let (model, server) = client.discover(startup_deadline).await?;
+    DiscoveredModel::from_proto(model, server)
 }
 
 fn is_hot_swap_requested() -> bool {
