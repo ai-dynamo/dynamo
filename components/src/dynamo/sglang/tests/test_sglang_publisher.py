@@ -12,7 +12,7 @@ import dynamo.sglang.publisher as publisher_mod
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
-    _resolve_multinode_leader_worker_id,
+    _resolve_multinode_leader_worker_ids,
     get_local_dp_rank_range,
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
@@ -156,9 +156,9 @@ async def test_resolve_multinode_leader_worker_id_uses_single_instance():
 
     server_args = SimpleNamespace(nnodes=2, node_rank=1)
 
-    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_ids = await _resolve_multinode_leader_worker_ids(FakeEndpoint(), server_args)
 
-    assert worker_id == 1234
+    assert worker_ids == [1234]
 
 
 @pytest.mark.asyncio
@@ -185,9 +185,9 @@ async def test_resolve_multinode_leader_worker_id_uses_worker_group(monkeypatch)
         dist_timeout=5,
     )
 
-    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_ids = await _resolve_multinode_leader_worker_ids(FakeEndpoint(), server_args)
 
-    assert worker_id == 1234
+    assert worker_ids == [1234]
     assert calls == [
         (
             SGLANG_WORKER_GROUP_ID_KEY,
@@ -220,9 +220,9 @@ async def test_resolve_multinode_leader_worker_id_has_no_default_timeout(monkeyp
         node_rank=1,
     )
 
-    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_ids = await _resolve_multinode_leader_worker_ids(FakeEndpoint(), server_args)
 
-    assert worker_id == 1234
+    assert worker_ids == [1234]
     assert calls == [
         (
             SGLANG_WORKER_GROUP_ID_KEY,
@@ -230,6 +230,54 @@ async def test_resolve_multinode_leader_worker_id_has_no_default_timeout(monkeyp
             None,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_multinode_leader_worker_ids_waits_for_every_gateway(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        async def wait_for_instances_by_runtime_data(
+            self, key, value, min_count, timeout_s=None
+        ):
+            calls.append((key, value, min_count, timeout_s))
+            return [7, 5, 6]
+
+    class FakeEndpoint:
+        async def client(self):
+            return FakeClient()
+
+    monkeypatch.setattr(
+        publisher_mod,
+        "get_sglang_worker_group_id",
+        lambda server_args: "dist_init:tcp://10.0.0.1:2345",
+    )
+    server_args = SimpleNamespace(nnodes=2, node_rank=1, dist_timeout=5)
+
+    worker_ids = await _resolve_multinode_leader_worker_ids(
+        FakeEndpoint(), server_args, expected=3
+    )
+
+    assert worker_ids == [7, 5, 6]
+    assert calls == [
+        (SGLANG_WORKER_GROUP_ID_KEY, "dist_init:tcp://10.0.0.1:2345", 3, 5.0)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_multinode_leader_worker_ids_needs_group_id_for_gateways():
+    class FakeClient:
+        async def wait_for_instances(self):
+            return [1234]
+
+    class FakeEndpoint:
+        async def client(self):
+            return FakeClient()
+
+    with pytest.raises(RuntimeError, match="dist_init_addr"):
+        await _resolve_multinode_leader_worker_ids(
+            FakeEndpoint(), SimpleNamespace(nnodes=2, node_rank=1), expected=2
+        )
 
 
 @pytest.mark.asyncio
@@ -244,9 +292,9 @@ async def test_resolve_multinode_leader_worker_id_ignores_ambiguous_instances():
 
     server_args = SimpleNamespace(nnodes=2, node_rank=1)
 
-    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_ids = await _resolve_multinode_leader_worker_ids(FakeEndpoint(), server_args)
 
-    assert worker_id is None
+    assert worker_ids == []
 
 
 @pytest.mark.asyncio
@@ -310,11 +358,11 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
 
 @pytest.mark.asyncio
 async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
-    resolve_leader = AsyncMock(return_value=1234)
+    resolve_leader = AsyncMock(return_value=[1234])
     kv_event_publisher = Mock()
     monkeypatch.setattr(
         publisher_mod,
-        "_resolve_multinode_leader_worker_id",
+        "_resolve_multinode_leader_worker_ids",
         resolve_leader,
     )
     monkeypatch.setattr(publisher_mod, "KvEventPublisher", kv_event_publisher)
@@ -365,9 +413,9 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
     init_called = asyncio.Event()
     cleanup_called = asyncio.Event()
 
-    async def missing_resolution(generate_endpoint, server_args):
+    async def missing_resolution(generate_endpoint, server_args, expected=1):
         resolution_done.set()
-        return None
+        return []
 
     class FakePublisher:
         generate_endpoint = object()
@@ -383,7 +431,7 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
 
     monkeypatch.setattr(
         publisher_mod,
-        "_resolve_multinode_leader_worker_id",
+        "_resolve_multinode_leader_worker_ids",
         missing_resolution,
     )
     metrics_task = asyncio.create_task(asyncio.Event().wait())
@@ -412,7 +460,7 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
 async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatch):
     cleanup_called = asyncio.Event()
 
-    async def fail_resolution(generate_endpoint, server_args):
+    async def fail_resolution(generate_endpoint, server_args, expected=1):
         raise RuntimeError("resolution failed")
 
     class FakePublisher:
@@ -425,7 +473,7 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
 
     monkeypatch.setattr(
         publisher_mod,
-        "_resolve_multinode_leader_worker_id",
+        "_resolve_multinode_leader_worker_ids",
         fail_resolution,
     )
     metrics_task = asyncio.create_task(asyncio.Event().wait())
@@ -811,3 +859,81 @@ async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
             await task
         except asyncio.CancelledError:
             pass
+
+
+def _publisher_with_sockets(sock, fanout, owner, stop_after_publish):
+    """A DynamoSglangPublisher with only what run() touches, no engine or runtime."""
+    pub = publisher_mod.DynamoSglangPublisher.__new__(
+        publisher_mod.DynamoSglangPublisher
+    )
+    pub._sock, pub._fanout = sock, fanout
+    pub._publishes_engine_gauges = owner
+    pub._running = True
+    pub.dp_rank = 0
+    pub.server_args = SimpleNamespace(page_size=1)
+    published = []
+
+    def publish(dp_rank, kv_used_blocks):
+        published.append((dp_rank, kv_used_blocks))
+        if stop_after_publish:
+            pub._running = False
+
+    pub.metrics_publisher = SimpleNamespace(publish=publish)
+    pub.component_gauges = Mock()
+    return pub, published
+
+
+@pytest.mark.asyncio
+async def test_metrics_fanout_reaches_sibling_gateways(tmp_path, monkeypatch):
+    import zmq
+    import zmq.asyncio
+
+    monkeypatch.setattr(
+        publisher_mod, "kv_metrics_block_values", lambda metrics, page_size: (7, 100)
+    )
+    metrics_ep = f"ipc://{tmp_path}/metrics"
+    fanout_ep = f"ipc://{tmp_path}/fanout"
+    ctx = zmq.asyncio.Context()
+    sockets = []
+    try:
+        owner_sock, fanout = publisher_mod._open_metrics_sockets(
+            ctx, metrics_ep, fanout_ep, owner=True
+        )
+        sockets += [owner_sock, fanout]
+        assert fanout is not None
+        sibling_sock, sibling_fanout = publisher_mod._open_metrics_sockets(
+            ctx, metrics_ep, fanout_ep, owner=False
+        )
+        sockets.append(sibling_sock)
+        assert sibling_fanout is None
+        await asyncio.sleep(0.3)  # PUB/SUB slow joiner
+
+        owner, owner_published = _publisher_with_sockets(
+            owner_sock, fanout, owner=True, stop_after_publish=True
+        )
+        sibling, sibling_published = _publisher_with_sockets(
+            sibling_sock, None, owner=False, stop_after_publish=True
+        )
+
+        scheduler = ctx.socket(zmq.PUSH)
+        sockets.append(scheduler)
+        scheduler.connect(metrics_ep)
+        kv_metrics = SimpleNamespace(data_parallel_rank=3, gpu_cache_usage_perc=0.5)
+        await asyncio.wait_for(scheduler.send_pyobj(kv_metrics), 5)
+
+        # The owner's run() consumes the scheduler message and relays it; the
+        # sibling's run() must see it through the fan-out with no other source.
+        await asyncio.wait_for(asyncio.gather(owner.run(), sibling.run()), 10)
+
+        assert owner_published == [(3, 7)]
+        assert sibling_published == [(3, 7)]
+        owner.component_gauges.set_total_blocks.assert_called_once_with("3", 100)
+        sibling.component_gauges.set_total_blocks.assert_not_called()
+
+        with pytest.raises(ValueError, match="fan-out"):
+            publisher_mod._open_metrics_sockets(ctx, metrics_ep, None, owner=False)
+    finally:
+        for s in sockets:
+            if s is not None:
+                s.close(linger=0)
+        ctx.term()

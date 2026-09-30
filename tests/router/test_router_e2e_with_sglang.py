@@ -14,6 +14,7 @@ import pytest
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
     run_basic_router_test,
+    run_cache_salt_isolation_test,
     run_disagg_router_decisions_test,
     run_indexers_sync_test,
     run_router_decisions_test,
@@ -21,7 +22,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
     allocate_port,
@@ -124,9 +125,17 @@ class SGLangProcess(ManagedEngineProcessMixin):
         # it never binds this port -- the env var only flips the feature on. One
         # shared value across workers is therefore sufficient (no collision).
         self._fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        # Pin the torch.distributed rendezvous port per worker: on the non-DP path
+        # SGLang probes and closes a port, so it can be taken before the real bind.
+        self._nccl_ports = [
+            allocate_port(DynamoPortRange.NCCL.value) for _ in range(num_workers)
+        ]
         request.addfinalizer(
             lambda: deallocate_ports(
-                self._system_ports + self._kv_event_ports + [self._fpm_port]
+                self._system_ports
+                + self._kv_event_ports
+                + self._nccl_ports
+                + [self._fpm_port]
             )
         )
 
@@ -227,6 +236,9 @@ class SGLangProcess(ManagedEngineProcessMixin):
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
 
+            nccl_port = self._nccl_ports[worker_idx]
+            command.extend(["--nccl-port", str(nccl_port)])
+
             # Each SGLang worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
             # Ports are dynamically allocated for xdist-safe parallel execution.
             system_port = self._system_ports[worker_idx]
@@ -254,7 +266,11 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 timeout=120,  # Allow time for model loading
                 display_output=True,
                 health_check_ports=[],
-                health_check_urls=[],
+                # Gate each worker on its own /health, which reports ready once
+                # dynamo.sglang registers its health-check payload on generate.
+                health_check_urls=[
+                    (f"http://localhost:{system_port}/health", check_health_ready)
+                ],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
             )
@@ -262,13 +278,15 @@ class SGLangProcess(ManagedEngineProcessMixin):
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}, "
+                    f"nccl_port={nccl_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created SGLang worker {worker_idx} on GPU {gpu_device} "
-                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}, "
+                    f"nccl_port={nccl_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
@@ -331,6 +349,33 @@ def test_router_decisions_sglang_multiple_workers(
         num_workers=2,
         single_gpu=True,
         test_dp_rank=False,
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_router_cache_salt_isolation_sglang(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    run_cache_salt_isolation_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=MODEL_NAME,
+        block_size=PAGE_SIZE,
+        component_name="backend",
     )
 
 

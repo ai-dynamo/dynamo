@@ -37,4 +37,7 @@ pillow>=12.3.0,<13  # bounded: this file installs with --force-reinstall
 # step with requirements.{vllm,trtllm}.txt and the runtime templates;
 # tests/dependencies/test_pynvvideocodec_spec.py enforces that.
 PyNvVideoCodec==2.2.3
+# Dynamo installs with --no-deps, so the shared image-cache client must be
+# installed explicitly even though the cache is disabled by default.
+redis>=6.2.0,<9.0.0
 zstandard==0.23.0

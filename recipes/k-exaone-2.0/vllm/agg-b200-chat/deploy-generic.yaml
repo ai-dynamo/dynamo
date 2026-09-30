@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
+#   scripts/kustomize-matrix.py unfold recipes/k-exaone-2.0/vllm/agg-b200-chat/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py render recipes/k-exaone-2.0/vllm/agg-b200-chat/.kustomize-matrix.yaml
+# Inspect only this Kustomize overlay (from the repository root):
+#   kustomize build recipes/k-exaone-2.0/vllm/agg-b200-chat/kustomize/overlays/generic
+# You may edit a copy before applying it.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: k-exaone-2-agg
+spec:
+  backendFramework: vllm
+  components:
+  - minAvailable: 1
+    name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - exec python3 -m dynamo.frontend --router-mode kv --router-kv-events --kv-cache-block-size
+            64 --http-host 0.0.0.0 --http-port 8000
+          command:
+          - /bin/bash
+          - -lc
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
+          name: main
+          ports:
+          - containerPort: 8000
+            name: http
+            protocol: TCP
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+            readOnly: true
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+    replicas: 1
+    type: frontend
+  - minAvailable: 1
+    name: Worker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - |
+            ulimit -l unlimited
+            exec python3 -m dynamo.vllm --model "${MODEL_NAME}" --served-model-name "${MODEL_NAME}" \
+              --tensor-parallel-size 4 \
+              --gpu-memory-utilization 0.93 \
+              --max-num-seqs 32 \
+              --max-num-batched-tokens 8192 \
+              --block-size 64 \
+              --dyn-reasoning-parser qwen3 \
+              --dyn-tool-call-parser qwen3_coder \
+              --kernel-config '{"moe_backend":"FLASHINFER_CUTLASS"}' \
+              --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq"}' \
+              --spec-method exaone_moe_mtp \
+              --spec-tokens 2
+          command:
+          - /bin/bash
+          - -lc
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+          name: main
+          resources:
+            limits:
+              memory: 480Gi
+              nvidia.com/gpu: "4"
+            requests:
+              memory: 200Gi
+              nvidia.com/gpu: "4"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+            runAsUser: 0
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 20
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+            readOnly: true
+          - mountPath: /dev/shm
+            name: dshm
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - emptyDir:
+            medium: Memory
+          name: dshm
+    replicas: 1
+    # digest-pinned image has no semver tag for the operator to parse
+    runtimeVersionOverride: 1.4.1
+    sharedMemorySize: 40Gi
+    type: worker
+  env:
+  - name: HF_HOME
+    value: /model-cache
+  - name: HF_HUB_OFFLINE
+    value: "1"
+  - name: TRANSFORMERS_OFFLINE
+    value: "1"
+  - name: MODEL_NAME
+    value: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4
+  - name: VLLM_WORKER_MULTIPROC_METHOD
+    value: spawn

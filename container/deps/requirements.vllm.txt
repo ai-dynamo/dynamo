@@ -39,3 +39,6 @@ pillow>=12.3.0
 # and the runtime templates; tests/dependencies/test_pynvvideocodec_spec.py
 # enforces that.
 PyNvVideoCodec==2.2.3
+# Dynamo installs with --no-deps, so declare the shared image-cache client
+# explicitly instead of relying on LMCache's unbounded transitive dependency.
+redis>=6.2.0,<9.0.0

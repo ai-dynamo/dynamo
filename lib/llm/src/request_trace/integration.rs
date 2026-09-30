@@ -4,6 +4,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use dynamo_runtime::engine::{AsyncEngineContext, AsyncEngineContextProvider};
 use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -24,7 +25,9 @@ struct RequestTraceRequestEndState {
 
 pub(crate) struct RequestEndTraceState {
     agent: Option<AgentContextTraceState>,
-    request: RequestTraceRequestEndState,
+    request: Option<RequestTraceRequestEndState>,
+    request_id: String,
+    request_context: Arc<dyn AsyncEngineContext>,
 }
 
 fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'static str> {
@@ -122,7 +125,45 @@ fn build_request_end_trace_state_for_policy(
         replay_metrics,
     };
 
-    Some(RequestEndTraceState { agent, request })
+    Some(RequestEndTraceState {
+        agent,
+        request: Some(request),
+        request_id: request_id.to_string(),
+        request_context: context.context(),
+    })
+}
+
+impl RequestEndTraceState {
+    fn emit(&mut self) {
+        let Some(request_state) = self.request.take() else {
+            return;
+        };
+        if let Some(agent_state) = self.agent.take() {
+            let (agent_context, mut metrics) =
+                super::request_metrics_from_agent_state(agent_state, self.request_id.clone());
+            metrics.replay = Some(super::into_owned_replay_metrics(
+                request_state.replay_metrics,
+            ));
+            super::record::emit_agent_request_end(agent_context, metrics);
+        } else {
+            super::record::emit_request_end(
+                self.request_id.clone(),
+                &request_state.request_tracker,
+                super::into_owned_replay_metrics(request_state.replay_metrics),
+            );
+        }
+    }
+}
+
+impl Drop for RequestEndTraceState {
+    fn drop(&mut self) {
+        if self.request_context.is_killed() {
+            if let Some(request) = &self.request {
+                request.request_tracker.record_finish_if_missing();
+            }
+            self.emit();
+        }
+    }
 }
 
 pub(crate) fn finish_reason_metadata_handle(
@@ -137,33 +178,18 @@ pub(crate) fn finish_reason_metadata_handle(
 fn wrap_request_end_stream<Resp>(
     stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
     trace_state: Option<RequestEndTraceState>,
-    request_id: String,
 ) -> Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>
 where
     Resp: Send + 'static,
 {
-    let Some(trace_state) = trace_state else {
+    let Some(mut trace_state) = trace_state else {
         return stream;
     };
 
     let (stream, done) = crate::telemetry::stream::notify_on_completion(stream);
     tokio::spawn(async move {
         done.await;
-        let request_state = trace_state.request;
-        if let Some(agent_state) = trace_state.agent {
-            let (agent_context, mut metrics) =
-                super::request_metrics_from_agent_state(agent_state, request_id.clone());
-            metrics.replay = Some(super::into_owned_replay_metrics(
-                request_state.replay_metrics,
-            ));
-            super::record::emit_agent_request_end(agent_context, metrics);
-        } else {
-            super::record::emit_request_end(
-                request_id.clone(),
-                &request_state.request_tracker,
-                super::into_owned_replay_metrics(request_state.replay_metrics),
-            );
-        }
+        trace_state.emit();
     });
     stream
 }
@@ -171,33 +197,31 @@ where
 pub(crate) fn wrap_chat_request_end_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     trace_state: Option<RequestEndTraceState>,
-    request_id: String,
 ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> {
     let Some(finish_reason_metadata) = finish_reason_metadata_handle(&trace_state) else {
-        return wrap_request_end_stream(stream, trace_state, request_id);
+        return wrap_request_end_stream(stream, trace_state);
     };
 
     let stream = stream.map(move |response| {
         super::record_chat_finish_reason_metadata(&finish_reason_metadata, &response);
         response
     });
-    wrap_request_end_stream(Box::pin(stream), trace_state, request_id)
+    wrap_request_end_stream(Box::pin(stream), trace_state)
 }
 
 pub(crate) fn wrap_completion_request_end_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>,
     trace_state: Option<RequestEndTraceState>,
-    request_id: String,
 ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>> {
     let Some(finish_reason_metadata) = finish_reason_metadata_handle(&trace_state) else {
-        return wrap_request_end_stream(stream, trace_state, request_id);
+        return wrap_request_end_stream(stream, trace_state);
     };
 
     let stream = stream.map(move |response| {
         super::record_completion_finish_reason_metadata(&finish_reason_metadata, &response);
         response
     });
-    wrap_request_end_stream(Box::pin(stream), trace_state, request_id)
+    wrap_request_end_stream(Box::pin(stream), trace_state)
 }
 
 #[cfg(test)]
@@ -247,6 +271,52 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    fn request_end_state(
+        request_id: &str,
+        tracker: Arc<RequestTracker>,
+    ) -> (RequestEndTraceState, Arc<dyn AsyncEngineContext>) {
+        let context = Context::new(()).context();
+        (
+            RequestEndTraceState {
+                agent: None,
+                request: Some(RequestTraceRequestEndState {
+                    request_tracker: tracker,
+                    replay_metrics: Arc::new(RequestReplayMetrics {
+                        trace_block_size: 2,
+                        input_length: 2,
+                        input_sequence_hashes: vec![11],
+                    }),
+                }),
+                request_id: request_id.to_string(),
+                request_context: context.clone(),
+            },
+            context,
+        )
+    }
+
+    fn drain_request_records(
+        receiver: &mut tokio::sync::broadcast::Receiver<crate::request_trace::RequestTraceRecord>,
+        request_id: &str,
+    ) -> Vec<crate::request_trace::RequestTraceRecord> {
+        let mut records = Vec::new();
+        loop {
+            match receiver.try_recv() {
+                Ok(record)
+                    if record
+                        .request
+                        .as_ref()
+                        .is_some_and(|request| request.request_id == request_id) =>
+                {
+                    records.push(record);
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        records
     }
 
     #[test]
@@ -312,30 +382,113 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cancellation_before_response_stream_emits_request_end() {
+        BUS.init(16);
+        let mut receiver = BUS.subscribe();
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(2, None);
+        let (state, context) = request_end_state("req-pre-stream-cancel", tracker);
+
+        context.kill();
+        drop(state);
+
+        let records = drain_request_records(&mut receiver, "req-pre-stream-cancel");
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        let request = record.request.as_ref().expect("request payload");
+        assert_eq!(request.input_tokens, Some(2));
+        assert_eq!(request.output_tokens, Some(0));
+    }
+
+    #[test]
+    fn agent_cancellation_finalizes_missing_timing_and_preserves_existing_finish() {
+        BUS.init(64);
+        let mut receiver = BUS.subscribe();
+        for already_finished in [false, true] {
+            let request_id = format!("req-agent-cancel-{already_finished}");
+            let tracker = Arc::new(RequestTracker::new());
+            let (mut state, context) = request_end_state(&request_id, tracker.clone());
+            state.agent = Some(AgentContextTraceState {
+                agent_context: AgentContext {
+                    session_id: "cancel-timing".to_string(),
+                    parent_session_id: None,
+                    session_final: None,
+                    compaction: None,
+                    input_trigger: None,
+                },
+                request_model: "test-model".to_string(),
+                request_tracker: Some(tracker.clone()),
+                x_request_id: None,
+                finish_reason_metadata: Default::default(),
+            });
+            if already_finished {
+                tracker.record_finish();
+            }
+            let original_total = tracker.total_time_ms();
+            std::thread::sleep(Duration::from_millis(20));
+            context.kill();
+            drop(state);
+
+            let records = drain_request_records(&mut receiver, &request_id);
+            assert_eq!(records.len(), 1);
+            let record = &records[0];
+            let request = record.request.as_ref().unwrap();
+            let total = request.total_time_ms.expect("cancellation finish timing");
+            if let Some(original_total) = original_total {
+                assert_eq!(total, original_total);
+            } else {
+                assert!(total >= 20.0);
+            }
+            assert_eq!(
+                record.event_time_unix_ms,
+                request.request_received_ms.unwrap() + total.round() as u64
+            );
+        }
+    }
+
+    #[test]
+    fn early_error_without_cancellation_does_not_emit_request_end() {
+        BUS.init(16);
+        let mut receiver = BUS.subscribe();
+        let (state, _context) =
+            request_end_state("req-pre-stream-error", Arc::new(RequestTracker::new()));
+
+        drop(state);
+
+        assert!(drain_request_records(&mut receiver, "req-pre-stream-error").is_empty());
+    }
+
+    #[test]
+    fn explicit_emit_followed_by_drop_emits_once() {
+        BUS.init(16);
+        let mut receiver = BUS.subscribe();
+        let (mut state, context) =
+            request_end_state("req-emit-once", Arc::new(RequestTracker::new()));
+
+        state.emit();
+        context.kill();
+        drop(state);
+
+        assert_eq!(
+            drain_request_records(&mut receiver, "req-emit-once").len(),
+            1
+        );
+    }
+
     #[tokio::test]
-    async fn cancellation_reads_tracker_after_inner_stream_drop() {
+    async fn cancellation_after_response_stream_reads_tracker_after_inner_drop() {
         BUS.init(16);
         let mut receiver = BUS.subscribe();
         let tracker = Arc::new(RequestTracker::new());
         let dropped = Arc::new(AtomicBool::new(false));
-        let state = RequestEndTraceState {
-            agent: None,
-            request: RequestTraceRequestEndState {
-                request_tracker: tracker.clone(),
-                replay_metrics: Arc::new(RequestReplayMetrics {
-                    trace_block_size: 2,
-                    input_length: 2,
-                    input_sequence_hashes: vec![11],
-                }),
-            },
-        };
+        let (state, _context) = request_end_state("req-drop", tracker.clone());
         let stream = TrackerDropStream {
             tracker,
             dropped: dropped.clone(),
         };
 
-        let wrapped =
-            wrap_request_end_stream(Box::pin(stream), Some(state), "req-drop".to_string());
+        let wrapped = wrap_request_end_stream(Box::pin(stream), Some(state));
         drop(wrapped);
 
         let record = tokio::time::timeout(Duration::from_secs(5), async {
@@ -382,6 +535,7 @@ mod tests {
             crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
             "llm-call-1".to_string(),
         );
+        let expected_request_id = context.id().to_string();
         let state = build_request_end_trace_state_for_policy(
             &request,
             &Some(tracker.clone()),
@@ -395,8 +549,7 @@ mod tests {
             dropped: dropped.clone(),
         };
 
-        let wrapped =
-            wrap_request_end_stream(Box::pin(stream), Some(state), "req-agent".to_string());
+        let wrapped = wrap_request_end_stream(Box::pin(stream), Some(state));
         drop(wrapped);
 
         let record = tokio::time::timeout(Duration::from_secs(5), async {
@@ -405,7 +558,7 @@ mod tests {
                 if record
                     .request
                     .as_ref()
-                    .is_some_and(|request| request.request_id == "req-agent")
+                    .is_some_and(|request| request.request_id == expected_request_id)
                 {
                     break record;
                 }

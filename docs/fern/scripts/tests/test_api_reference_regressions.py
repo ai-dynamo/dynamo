@@ -571,6 +571,28 @@ def test_pre_merge_gates_every_api_generator_input() -> None:
     assert "steps.filter.outputs.api_docs_any_modified" in action
 
 
+K8S_DRIFT_GATE_STEP = "Fail if the committed Kubernetes API reference was stale"
+
+
+def _publish_step_run(step_name: str) -> str:
+    """Return a fern-docs.yml step's `run` body, parsed rather than grepped.
+
+    Substring-matching the whole workflow cannot tell a real command from the
+    same text inside a comment, so an assertion can pass on prose while the
+    command it guards has changed underneath it.
+    """
+    document = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "fern-docs.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            if step.get("name") == step_name:
+                return step.get("run", "")
+    raise AssertionError(f"fern-docs.yml has no step named {step_name!r}")
+
+
 def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "pre-merge.yml").read_text(
         encoding="utf-8"
@@ -598,9 +620,52 @@ def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     assert "gen_kubernetes_api.py --check" in workflow
     # The publish and preview paths must GENERATE the pages before syncing
     # them to the docs-website branch (dev sync and version snapshots both).
+    # Asserted against the parsed `run` body, not the file text: the step's
+    # comment names these same commands, so a whole-file substring check would
+    # pass on prose after the command itself changed.
+    generate = _publish_step_run("Generate API references")
     for generator in ("python", "rust"):
-        assert f"gen_{generator}_api.py --check" not in publish
-    assert "gen_kubernetes_api.py --check" in publish
+        assert f"gen_{generator}_api.py --check" not in generate
+    # Kubernetes output stays committed, but publish REGENERATES it rather than
+    # gating on it. As `--check` this step failed, which skipped the sync and
+    # publish steps below, so a main left stale by merge skew silently froze the
+    # live site. The probe records drift and the gate below fails the run after
+    # the site is current.
+    assert re.search(r"gen_kubernetes_api\.py$", generate, re.MULTILINE)
+    assert "gen_kubernetes_api.py --check" in generate
+    assert "kubernetes_drift=true" in generate
+    gate = _publish_step_run(K8S_DRIFT_GATE_STEP)
+    assert "exit 1" in gate
+    # Wiring and polarity, not only shape. `steps.<id>` for an id that does
+    # not exist renders empty, so dropping or renaming `id: api_refs`, or
+    # inverting either the probe or the gate, leaves the gate permanently
+    # inert while every assertion above still passes. Nothing else in the repo
+    # catches a dangling step reference: no hook or workflow runs actionlint.
+    fern_docs = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "fern-docs.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    by_name = {
+        step.get("name"): step
+        for step in fern_docs["jobs"]["preview-or-publish-docs"]["steps"]
+    }
+    assert by_name[K8S_DRIFT_GATE_STEP]["if"] == (
+        "${{ !cancelled() && steps."
+        f"{by_name['Generate API references']['id']}"
+        ".outputs.kubernetes_drift == 'true' }}"
+    )
+    assert re.search(
+        r"--check[^\n]*then\n\s*echo \"kubernetes_drift=false\"[^\n]*\n"
+        r"\s*else\n\s*echo \"kubernetes_drift=true\"",
+        generate,
+    )
+    # The regenerated page is rsynced before the gate runs, so write mode needs
+    # its own floor: a generator that exits 0 on a gutted page must not publish.
+    assert "regenerated_bytes" in generate
+    assert "committed_bytes * 4 / 5" in generate
+    # The gate is only honest if it runs after the site has been published.
+    assert publish.index("Publish Docs") < publish.index(K8S_DRIFT_GATE_STEP)
     assert "Generate API references" in publish
     assert "Generate API references at the tag" in publish
     # fern check validates nav paths, so the fern-check job must materialize
