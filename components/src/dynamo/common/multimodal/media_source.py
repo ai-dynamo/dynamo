@@ -73,23 +73,17 @@ def decode_data_uri(url: str, max_bytes: int | None = None) -> bytes:
     if "base64" not in meta.split(";"):
         raise UrlValidationError("Unsupported data URI: expected base64 payload")
     if max_bytes is not None:
-        # unquote() below copies its whole input, so a client can defeat the
-        # size guard just by percent-escaping a huge payload: the guard would
-        # only fire after that copy already ran. Percent-unescaping a string
-        # never grows it (each `%XY` triplet collapses to one byte), so the
-        # RAW payload length upper-bounds len(body) and therefore the decoded
-        # byte count -- reject on that bound first, len() is O(1). The "- 2"
-        # gives padding the same benefit of the doubt the exact check below
-        # gives it, so this can only reject what the exact check would also
-        # reject.
-        if len(payload) // 4 * 3 - 2 > max_bytes:
+        # Percent escapes can triple each base64 character. Bound the raw
+        # payload before unquoting, then check the decoded size below.
+        max_encoded_chars = 4 * ((max_bytes + 2) // 3)
+        if len(payload) > 3 * max_encoded_chars:
             raise UrlValidationError(
                 f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
             )
     body = unquote(payload)
     if max_bytes is not None:
-        padding = min(2, len(body) - len(body.rstrip("=")))
-        if len(body) // 4 * 3 - padding > max_bytes:
+        # The decoder also accepts padding after complete base64 quartets.
+        if len(body.rstrip("=")) * 3 // 4 > max_bytes:
             raise UrlValidationError(
                 f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
             )

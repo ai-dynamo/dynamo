@@ -1340,7 +1340,11 @@ class TestImageReferenceInputs:
     ):
         handler = image_request_handler
         handler.engine_client.engine.od_config.model_class_name = model_class_name
-        for index, color in enumerate(("red", "green", None)):
+        # Text-only recovery bypasses the model-specific image builder.
+        colors = (
+            ("red", "green", None) if model_class_name is None else ("red", "green")
+        )
+        for index, color in enumerate(colors):
             request = {
                 "prompt": "a teapot",
                 "size": "512x768",
@@ -1379,7 +1383,7 @@ class TestImageReferenceInputs:
                     processor_kwargs["modalities"] = ["img2img"]
             assert prompt["mm_processor_kwargs"] == processor_kwargs
 
-        assert handler.engine_client.generate.call_count == 3
+        assert handler.engine_client.generate.call_count == len(colors)
         assert handler._image_loader.load_image.await_count == 2
 
     @pytest.mark.asyncio
@@ -1464,6 +1468,26 @@ class TestImageReferenceInputs:
                 pass
 
         assert exc_info.value is error
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reference_exceeding_pixel_limit_rejected(
+        self, image_request_handler, monkeypatch
+    ):
+        handler = image_request_handler
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 16)
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (8, 8)).save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode()
+        request = {
+            "prompt": "a teapot",
+            "input_reference": f"data:image/png;base64,{encoded}",
+        }
+
+        with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
         handler.engine_client.generate.assert_not_called()
 
 
