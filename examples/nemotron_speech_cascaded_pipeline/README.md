@@ -46,7 +46,7 @@ flowchart LR
             Frontend["Container: main<br/>Published Dynamo Frontend<br/>OpenAI APIs and routing"]
         end
 
-        subgraph ASRPod["Kubernetes Pod: SpeechAsrWorker"]
+        subgraph ASRPod["Kubernetes Pod: asr"]
             ASRWorker["Container: main<br/>Custom Dynamo ASR adapter<br/>CPU only"]
             ASR["Container: asr-nim<br/>Same Nemotron ASR NIM<br/>1 GPU"]
         end
@@ -55,7 +55,7 @@ flowchart LR
             LLMWorker["Container: main<br/>Published Dynamo vLLM worker<br/>FP8, TP=1, 1 GPU"]
         end
 
-        subgraph TTSPod["Kubernetes Pod: SpeechTtsWorker"]
+        subgraph TTSPod["Kubernetes Pod: tts"]
             TTSWorker["Container: main<br/>Custom Dynamo TTS adapter<br/>CPU only"]
             TTS["Container: tts-nim<br/>Same Magpie TTS NIM<br/>1 GPU"]
         end
@@ -257,7 +257,7 @@ If a pod does not become ready, inspect its events and container logs:
 kubectl describe pod --namespace "${NAMESPACE}" \
   --selector nvidia.com/dynamo-graph-deployment-name=nemotron-speech-cascaded
 kubectl logs --namespace "${NAMESPACE}" \
-  --selector nvidia.com/dynamo-component=SpeechAsrWorker \
+  --selector nvidia.com/dynamo-component=asr \
   --container asr-nim --tail=100
 ```
 

@@ -30,7 +30,7 @@ spec:
               args: [--http-port, "8000"]
       replicas: 1
       type: frontend
-    - name: SpeechAsrWorker
+    - name: asr
       podTemplate:
         spec:
           containers:
@@ -143,7 +143,7 @@ spec:
       scalingAdapter: {}
       sharedMemorySize: 16Gi
       type: worker
-    - name: SpeechTtsWorker
+    - name: tts
       podTemplate:
         spec:
           containers:
