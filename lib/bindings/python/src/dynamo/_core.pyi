@@ -3279,7 +3279,7 @@ class EntrypointArgs:
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
-            tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
+            tokenizer_fallback: Whether alternate tokenizer load failures fall back to the artifact's default backend (HuggingFace, or TikToken for tiktoken.model)
         """
         ...
 

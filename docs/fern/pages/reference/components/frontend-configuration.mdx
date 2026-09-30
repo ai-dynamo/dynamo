@@ -632,7 +632,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 ## Tokenizer
 
 <ParamField path="--tokenizer" type="string" default="default">
-  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance hybrid encoder; and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
+  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance encoder (hybrid with HuggingFace decoding for `tokenizer.json`, native for bare `tiktoken.model` artifacts such as the Kimi family); and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding of `tokenizer.json` models. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md).
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge> <Badge intent="note" minimal>basetenkenizer</Badge></span>
 
@@ -640,7 +640,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 </ParamField>
 
 <ParamField path="--tokenizer-fallback / --no-tokenizer-fallback" type="boolean" default="true">
-  Fall back to HuggingFace when `fastokens` or `basetenkenizer` cannot load the model tokenizer. Use
+  Fall back to the artifact's default backend (HuggingFace, or TikToken for `tiktoken.model`) when `fastokens` or `basetenkenizer` cannot load the model tokenizer. Use
   `--no-tokenizer-fallback` to fail model initialization instead. In dynamic mode, discovery retries
   the load while the frontend continues running.
 

@@ -124,7 +124,9 @@ pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_towe
 /// to the other engine.
 pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 
-/// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
+/// Tokenizer backend used by the Rust preprocessor for BPE models: `tokenizer.json`
+/// checkpoints support all three; bare TikToken artifacts (`tiktoken.model`) honor `fastokens`
+/// and otherwise use the tiktoken-rs backend.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerBackend {

@@ -1318,7 +1318,8 @@ impl ModelDeploymentCard {
     /// - `runtime_config.tokenizer_backend` — select `default`, `fastokens`, or `basetenkenizer`
     /// - `DYN_TOKENIZER` — fallback backend for callers without explicit runtime config
     /// - `runtime_config.tokenizer_fallback_enabled` — control whether an alternate backend load
-    ///   failure falls back to HuggingFace
+    ///   failure falls back to the artifact's default backend (HuggingFace for `tokenizer.json`,
+    ///   tiktoken-rs for `tiktoken.model`)
     /// - `DYN_TOKENIZER_FALLBACK=0` — fallback control for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
@@ -1543,14 +1544,71 @@ impl ModelDeploymentCard {
                 let path_str = p.to_str().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer path contains invalid UTF-8: {}", p.display())
                 })?;
-                let tokenizer = crate::tokenizers::TikTokenTokenizer::from_file_auto(path_str)
-                    .with_context(|| {
-                        format!("Failed to load tiktoken tokenizer from {}", p.display())
-                    })?;
-
-                let specials = tokenizer.special_tokens().to_vec();
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
-                if cache_enabled {
+                let load_tiktoken_rs = || {
+                    crate::tokenizers::TikTokenTokenizer::from_file_auto(path_str).with_context(
+                        || format!("Failed to load tiktoken tokenizer from {}", p.display()),
+                    )
+                };
+                // `--tokenizer fastokens` applies to bare `tiktoken.model` checkpoints too
+                // (the Kimi family ships no tokenizer.json): fastokens reads the same ranks,
+                // regex and special tokens and produces the same ids. The plain-text L1
+                // prefix cache is skipped for it: `FastTikTokenTokenizer` rejects
+                // `validate_prefix_cache` because fastokens' scanner and regex paths disagree
+                // on `(?i:'s)` case folding, so splitting after a special token could change
+                // ids. Segmented (renderer) encodes never used the plain-text cache.
+                let (raw, specials, plain_text_cacheable): (
+                    Arc<dyn crate::tokenizers::traits::Tokenizer>,
+                    Vec<String>,
+                    bool,
+                ) = match tokenizer_backend {
+                    TokenizerBackend::Fastokens => {
+                        match crate::tokenizers::FastTikTokenTokenizer::from_file_auto(path_str) {
+                            Ok(fast) => {
+                                tracing::info!(
+                                    "Using fastokens tokenizer backend for tiktoken model"
+                                );
+                                let specials = fast.special_tokens().to_vec();
+                                (Arc::new(fast), specials, false)
+                            }
+                            Err(e) => {
+                                if !is_fallback_enabled {
+                                    return Err(e).context(
+                                            "failed to load fastokens tokenizer backend for tiktoken model and fallback is disabled",
+                                        );
+                                }
+                                tracing::warn!(
+                                    %e,
+                                    "Failed to load fastokens for tiktoken model, falling back to tiktoken-rs"
+                                );
+                                let tokenizer = load_tiktoken_rs()?;
+                                let specials = tokenizer.special_tokens().to_vec();
+                                (Arc::new(tokenizer), specials, true)
+                            }
+                        }
+                    }
+                    TokenizerBackend::Basetenkenizer => {
+                        // basetenkenizer only parses tokenizer.json; there is no rank-file
+                        // loader, so the flag cannot apply here. Say so instead of silently
+                        // ignoring it.
+                        tracing::info!(
+                            "basetenkenizer has no tiktoken.model loader; using tiktoken-rs"
+                        );
+                        let tokenizer = load_tiktoken_rs()?;
+                        let specials = tokenizer.special_tokens().to_vec();
+                        (Arc::new(tokenizer), specials, true)
+                    }
+                    TokenizerBackend::Default => {
+                        let tokenizer = load_tiktoken_rs()?;
+                        let specials = tokenizer.special_tokens().to_vec();
+                        (Arc::new(tokenizer), specials, true)
+                    }
+                };
+                if cache_enabled && !plain_text_cacheable {
+                    tracing::info!(
+                        "fastokens tiktoken backend does not support the plain-text L1 prefix cache; serving uncached"
+                    );
+                    raw
+                } else if cache_enabled {
                     let shared_cache = shared_tokenizer_cache();
                     let namespace = tokenizer_cache_namespace(self.mdcsum(), "tiktoken");
                     tracing::info!(

@@ -673,7 +673,9 @@ class FrontendArgGroup(ArgGroup):
                 "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library), "
                 "'fastokens' (fastokens crate for high-performance BPE encoding), or "
                 "'basetenkenizer' (Baseten Tokenizer for native encoding and decoding). "
-                "Has no effect on TikToken models."
+                "'fastokens' also applies to checkpoints that ship only a TikToken artifact "
+                "(tiktoken.model / *.tiktoken, e.g. the Kimi family), replacing the tiktoken-rs "
+                "encoder with the same token ids; 'basetenkenizer' applies to tokenizer.json only."
             ),
             choices=["default", "fastokens", "basetenkenizer"],
         )
@@ -684,10 +686,11 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_TOKENIZER_FALLBACK",
             default=True,
             help=(
-                "Automatic fallback to HuggingFace is deprecated and will be "
+                "Automatic tokenizer fallback is deprecated and will be "
                 "disabled by default in a future release. The current behavior "
-                "falls back when the selected fastokens or basetenkenizer backend "
-                "cannot load the model tokenizer. Use "
+                "falls back to the artifact's default backend (HuggingFace for "
+                "tokenizer.json, TikToken for tiktoken.model) when the selected "
+                "fastokens or basetenkenizer backend cannot load the model tokenizer. Use "
                 "--no-tokenizer-fallback to fail model initialization instead. "
                 "In dynamic mode, discovery retries the load while the frontend "
                 "continues running."

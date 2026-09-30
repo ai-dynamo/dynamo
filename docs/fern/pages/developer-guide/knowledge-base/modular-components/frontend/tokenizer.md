@@ -5,7 +5,7 @@ title: Tokenizer
 subtitle: Selects the HuggingFace, fastokens, or Baseten tokenizer backend for BPE models served through the Dynamo Frontend.
 ---
 
-The Dynamo Frontend supports multiple tokenizer backends for BPE-based `tokenizer.json` models. `BPE` is the underlying tokenization algorithm, not a backend-specific feature: the default HuggingFace, `fastokens`, and `basetenkenizer` paths can all serve supported BPE models. The backend choice controls which implementation performs tokenization before requests are sent to the inference engine.
+The Dynamo Frontend supports multiple tokenizer backends for BPE-based `tokenizer.json` models, and the `fastokens` backend also serves checkpoints that ship only a TikToken artifact (`tiktoken.model` / `*.tiktoken`, e.g. the Kimi family). `BPE` is the underlying tokenization algorithm, not a backend-specific feature: the default HuggingFace, `fastokens`, and `basetenkenizer` paths can all serve supported BPE models. The backend choice controls which implementation performs tokenization before requests are sent to the inference engine.
 
 ## Tokenizer Backends
 
@@ -17,7 +17,8 @@ It supports features in `tokenizer.json` files (normalizers, pre-tokenizers, pos
 #### `fastokens` High-Performance Encoder
 
 The `fastokens` backend uses the [`fastokens`](https://github.com/Atero-ai/fastokens) crate, a purpose-built encoder optimized for throughput on supported BPE `tokenizer.json` models.
-It is a _hybrid_ backend: encoding uses `fastokens` while decoding falls back to HuggingFace so that incremental detokenization, byte-fallback, and special-token handling work correctly.
+For `tokenizer.json` models it is a _hybrid_ backend: encoding uses `fastokens` while decoding falls back to HuggingFace so that incremental detokenization, byte-fallback, and special-token handling work correctly.
+For bare TikToken artifacts (`tiktoken.model` / `*.tiktoken`) it loads the same ranks, pre-tokenization regex, and `tokenizer_config.json` special tokens as the TikToken backend, produces the same token ids, and encodes and decodes natively; no HuggingFace tokenizer is involved.
 It supports segmented encoding so renderers can distinguish trusted control tokens from ordinary content.
 
 Use this backend when tokenization is a measurable bottleneck, for example on high-concurrency prefill-heavy workloads.
@@ -33,7 +34,13 @@ The frontend selects the tokenizer backend as follows. When both `tokenizer.json
 ```mermaid
 flowchart TD
     A["Frontend resolves<br/>--tokenizer or DYN_TOKENIZER"] --> B{"Available tokenizer artifact?"}
-    B -->|"tiktoken.model / *.tiktoken"| C["TikToken backend<br/>backend flag has no effect"]
+    B -->|"tiktoken.model / *.tiktoken"| M{"Requested backend?"}
+    M -->|"default / basetenkenizer"| C["TikToken backend<br/>tiktoken-rs encode + decode"]
+    M -->|"fastokens"| N{"fastokens loads<br/>the ranks?"}
+    N -->|"yes"| O["fastokens encode + decode<br/>(same ids as TikToken)"]
+    N -->|"no"| P{"Fallback allowed?"}
+    P -->|"yes, the default"| C
+    P -->|"no"| K
     B -->|"tokenizer.json"| L{"HuggingFace<br/>loads?"}
     B -->|"none"| K["Model load fails<br/>(dynamic discovery retries)"]
     L -->|"no"| K
@@ -60,24 +67,31 @@ flowchart TD
     style J fill:#fdf3d0,stroke:#e0c56e
     style K fill:#f8d7da,stroke:#e08b93
     style L fill:#fdf3d0,stroke:#e0c56e
+    style M fill:#fdf3d0,stroke:#e0c56e
+    style N fill:#fdf3d0,stroke:#e0c56e
+    style O fill:#d9f0dc,stroke:#8fc79a
+    style P fill:#fdf3d0,stroke:#e0c56e
 ```
 
 #### Compatibility notes:
 
 - Works with standard BPE `tokenizer.json` files (Qwen, LLaMA, GPT-family, Mistral, DeepSeek, etc.).
-- If `fastokens` or `basetenkenizer` cannot load a particular tokenizer file, the frontend logs a warning and transparently falls back to HuggingFace by default. Use `--no-tokenizer-fallback` to reject incompatible tokenizers during model initialization.
+- If `fastokens` or `basetenkenizer` cannot load a particular tokenizer file, the frontend logs a warning and transparently falls back to the artifact's default backend (HuggingFace for `tokenizer.json`, TikToken for `tiktoken.model`) by default. Use `--no-tokenizer-fallback` to reject incompatible tokenizers during model initialization.
 - Special tokens declared only in a sibling `tokenizer_config.json` are merged into the
   HuggingFace and Baseten paths, and into Dynamo's L1 prefix-cache boundaries. The FastTokenizer
   encoder loads `tokenizer.json` alone and cannot receive that merge, so a model that declares a
   special token only in `tokenizer_config.json` encodes it as ordinary text under `fastokens` and
-  produces different token IDs than the other two backends.
+  produces different token IDs than the other two backends. This caveat is specific to
+  `tokenizer.json`: on the TikToken path `fastokens` reads `tokenizer_config.json` special tokens
+  exactly like the TikToken backend.
 - Multimodal KV routing is disabled while `fastokens` is active, because image placeholders such as
-  `<|image_pad|>` are frequently declared only in `tokenizer_config.json`. Requests still complete,
+  `<|image_pad|>` are frequently declared only in `tokenizer_config.json`. The gate is keyed on the
+  backend flag, so it also applies to `tiktoken.model` checkpoints. Requests still complete,
   and per-image token metrics remain available when the model is supported by the image-token
   counter; routing falls back to text-prefix overlap. See
   [Multimodal KV Routing](../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
-- Has no effect on TikToken-format tokenizers (`.model` / `.tiktoken` files), which always use the TikToken backend.
-- Dedicated vLLM embedding workers let vLLM tokenize raw text by default. When [`--embedding-frontend-tokenization`](../../../../reference/backends/vllm-configuration.mdx) is enabled, raw-text requests use a request-specific Dynamo tokenizer. The request's `add_special_tokens` value overrides `DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS`; the default is `true`. For `tokenizer.json` models, `true` selects HuggingFace while `false` follows the configured backend selection shown above. TikToken artifacts always use TikToken, and token-ID inputs bypass frontend tokenization.
+- On TikToken-format tokenizers (`.model` / `.tiktoken` files) only `fastokens` changes the engine (token ids stay identical; a load failure falls back to TikToken under the default fallback policy). `basetenkenizer` has no TikToken loader and leaves the TikToken backend in place. The plain-text L1 prefix cache is not applied to `fastokens` over a TikToken artifact yet (fastokens' scanner and regex pre-tokenizers disagree on `(?i:'s)` case folding, which would make cached and uncached ids differ); renderer-segmented encodes are unaffected.
+- Dedicated vLLM embedding workers let vLLM tokenize raw text by default. When [`--embedding-frontend-tokenization`](../../../../reference/backends/vllm-configuration.mdx) is enabled, raw-text requests use a request-specific Dynamo tokenizer. The request's `add_special_tokens` value overrides `DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS`; the default is `true`. For `tokenizer.json` models, `true` selects HuggingFace while `false` follows the configured backend selection shown above. TikToken artifacts use TikToken when `true` and follow the same backend selection (TikToken, or `fastokens`) when `false`; token-ID inputs bypass frontend tokenization.
 
 ## Configuration
 
@@ -114,7 +128,7 @@ python -m dynamo.frontend --tokenizer basetenkenizer --no-tokenizer-fallback
 When a non-default backend is selected:
 
 1. The frontend resolves `--tokenizer` / `DYN_TOKENIZER` and passes the selected backend to the Rust runtime.
-2. `ModelDeploymentCard::tokenizer()` loads the HuggingFace tokenizer first for fallback behavior and L1 cache special-token metadata.
-3. Dynamo constructs `FastTokenizer` for `fastokens` or `BasetenTokenizer` for `basetenkenizer` from the same `tokenizer.json` file.
-4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace. With `--no-tokenizer-fallback`, model initialization fails and reports the backend loading error instead. In dynamic mode, discovery retries the load while the frontend continues running.
+2. For `tokenizer.json`, `ModelDeploymentCard::tokenizer()` loads the HuggingFace tokenizer first for fallback behavior and L1 cache special-token metadata.
+3. Dynamo constructs `FastTokenizer` for `fastokens` or `BasetenTokenizer` for `basetenkenizer` from the same `tokenizer.json` file. For a bare TikToken artifact with `fastokens`, Dynamo constructs `FastTikTokenTokenizer` from `tiktoken.model` plus the sibling `config.json` (`model_type`, which selects the built-in pre-tokenization regex) and `tokenizer_config.json` (special tokens); no HuggingFace tokenizer is loaded.
+4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to the artifact's default backend (HuggingFace, or TikToken for `tiktoken.model`). With `--no-tokenizer-fallback`, model initialization fails and reports the backend loading error instead. In dynamic mode, discovery retries the load while the frontend continues running.
 5. When the L1 prefix cache is enabled, Dynamo wraps the selected backend with the same special-token boundary metadata and cache metrics used by the default path.
