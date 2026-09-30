@@ -12,19 +12,17 @@ import (
 	"strings"
 )
 
-// BuildCompilationMode records the compiler-authored execution mode in a normalized build.
-type BuildCompilationMode string
+// compilationMode records the compiler-authored execution mode in a normalized build.
+type compilationMode string
 
 // BuildFamily identifies the physical LPU target family of a normalized build.
 type BuildFamily string
 
 const (
-	// BuildCompilationModeUnknown represents a build whose compilation mode is not known.
-	BuildCompilationModeUnknown BuildCompilationMode = ""
-	// BuildCompilationModeLPUOnly represents a build executed entirely on LPUs.
-	BuildCompilationModeLPUOnly BuildCompilationMode = "lpuOnly"
-	// BuildCompilationModeHybrid retains the model manifest's historical "lpx" value.
-	BuildCompilationModeHybrid BuildCompilationMode = "lpx"
+	// compilationModeLPUOnly represents a build executed entirely on LPUs.
+	compilationModeLPUOnly compilationMode = "lpuOnly"
+	// compilationModeHybrid retains the model manifest's historical "lpx" value.
+	compilationModeHybrid compilationMode = "lpx"
 	// BuildFamilyXT identifies the XT8888 LPU target family.
 	BuildFamilyXT BuildFamily = "xt8888"
 	// BuildFamilyHX identifies the HX16x8x2x3 LPU target family.
@@ -36,39 +34,41 @@ const (
 // The version 2 Cap'n Proto manifest populates this shape before deployment code
 // derives placement and replica counts.
 type Build struct {
-	// Path is the absolute file or GCS reference of the build payload.
-	Path string
-	// Family is the physical LPU target family.
-	Family BuildFamily
-	// CompilationMode selects the compiler-authored LPU-only or hybrid artifact mode.
-	CompilationMode BuildCompilationMode
-	// Partitions contains the normalized physical compiler partitions.
-	Partitions []BuildPartition
-	// SelectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
-	SelectedPropSyncChains [][]int
-	// StandaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
-	StandaloneTokenEmbeddings bool
-	// SupportsCPUEmbeddings reports whether standalone token embeddings may run on the CPU.
-	SupportsCPUEmbeddings bool
-	// IOFPGACount is the number of I/O FPGA endpoints described by the build.
-	IOFPGACount int32
-	// IOFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
-	IOFanoutFactor int32
+	// contentID is the digest of the compiler manifest that produced the build.
+	contentID string
+	// path is the absolute file or GCS reference of the build payload.
+	path string
+	// family is the physical LPU target family.
+	family BuildFamily
+	// compilationMode selects the compiler-authored LPU-only or hybrid artifact mode.
+	compilationMode compilationMode
+	// partitions contains the normalized physical compiler partitions.
+	partitions []buildPartition
+	// selectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
+	selectedPropSyncChains [][]int
+	// standaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
+	standaloneTokenEmbeddings bool
+	// supportsCPUEmbeddings reports whether standalone token embeddings may run on the CPU.
+	supportsCPUEmbeddings bool
+	// ioFPGACount is the number of I/O FPGA endpoints described by the build.
+	ioFPGACount int32
+	// ioFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
+	ioFanoutFactor int32
 }
 
-// BuildPartition describes one normalized physical compiler partition.
-type BuildPartition struct {
-	// SourcePartitionID is the compiler partition id used in artifacts and
+// buildPartition describes one normalized physical compiler partition.
+type buildPartition struct {
+	// sourcePartitionID is the compiler partition id used in artifacts and
 	// selected prop-sync chains. It is not the slice index after sorting/filtering.
-	SourcePartitionID int
-	// PartPath is the nonempty relative gas-dir fragment under the build payload.
-	PartPath string
-	// NumChips is the positive LPU chip count declared by the manifest.
-	NumChips int
-	// DevicesPerNode is the positive number of LPU devices per node declared by the manifest.
-	DevicesPerNode int
-	// HXExtent is the scheduler-facing four-dimensional HX allocation.
-	HXExtent []int64
+	sourcePartitionID int
+	// partPath is the nonempty relative gas-dir fragment under the build payload.
+	partPath string
+	// numChips is the positive LPU chip count declared by the manifest.
+	numChips int
+	// devicesPerNode is the positive number of LPU devices per node declared by the manifest.
+	devicesPerNode int
+	// hxExtent is the scheduler-facing four-dimensional HX allocation.
+	hxExtent []int64
 
 	// runtimeNodeCount overrides the node count derived from manifest geometry after
 	// selected prop-sync partitions are collapsed for the LPU runtime. Sub-host
@@ -81,11 +81,11 @@ type BuildPartition struct {
 // partition. Source partitions derive it from manifest geometry; collapsed runtime
 // partitions preserve the sum of their physical scheduler endpoints.
 // The partition must have validated chip and device counts.
-func (p BuildPartition) effectiveNodeCount() int {
+func (p buildPartition) effectiveNodeCount() int {
 	if p.runtimeNodeCount > 0 {
 		return p.runtimeNodeCount
 	}
-	return max(1, p.NumChips/p.DevicesPerNode)
+	return max(1, p.numChips/p.devicesPerNode)
 }
 
 // buildRuntimePath resolves a snapshot reference to its runtime filesystem path.

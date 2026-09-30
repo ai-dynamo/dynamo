@@ -48,9 +48,9 @@ func TestBuildFromGbuildManifestV2ProjectsRuntimeIO(t *testing.T) {
 	fields := newManifestV2Fields(t)
 	build, err := buildFromGbuildManifestV2("gs://models/build", fields.manifest)
 	require.NoError(t, err)
-	require.EqualValues(t, 4, build.IOFPGACount)
-	require.EqualValues(t, 2, build.IOFanoutFactor)
-	require.Len(t, build.Partitions, 1)
+	require.EqualValues(t, 4, build.ioFPGACount)
+	require.EqualValues(t, 2, build.ioFanoutFactor)
+	require.Len(t, build.partitions, 1)
 
 	t.Log("Accept compat FPGA I/O mode without changing the normalized build contract")
 	fields.runtimeIO.SetReserved1(1)
@@ -204,7 +204,7 @@ func TestBuildFromGbuildManifestV2ValidatesContract(t *testing.T) {
 	}
 }
 
-func TestAcquireBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
+func TestAcquireBuildRejectsInvalidHXArtifacts(t *testing.T) {
 	t.Log("Define malformed HX artifact inventories")
 	for _, test := range []struct {
 		name    string
@@ -247,7 +247,7 @@ func TestAcquireBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
 			buildDir := writeCompilerFixture(t, fixture)
 
 			t.Log("Reject malformed HX artifacts before publishing the acquired snapshot")
-			snapshot, err := (&defaultModelRegistry{}).AcquireBuildSnapshot(t.Context(), buildDir)
+			snapshot, err := (&defaultModelRegistry{}).AcquireBuild(t.Context(), buildDir)
 			require.ErrorIs(t, err, errInvalidBuildManifest)
 			require.ErrorContains(t, err, test.wantErr)
 			require.Nil(t, snapshot)
@@ -310,27 +310,27 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 			partition, compatible, err := buildPartitionFromManifestV2(raw)
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
-				require.Equal(t, BuildPartition{}, partition)
+				require.Equal(t, buildPartition{}, partition)
 				require.False(t, compatible)
 				return
 			}
 			require.NoError(t, err)
 			require.Equal(t, test.wantCompatible, compatible)
-			require.Equal(t, 7, partition.SourcePartitionID)
-			require.Equal(t, "part-0", partition.PartPath)
-			require.EqualValues(t, test.numChips, partition.NumChips)
-			require.EqualValues(t, test.devicesPerNode, partition.DevicesPerNode)
+			require.Equal(t, 7, partition.sourcePartitionID)
+			require.Equal(t, "part-0", partition.partPath)
+			require.EqualValues(t, test.numChips, partition.numChips)
+			require.EqualValues(t, test.devicesPerNode, partition.devicesPerNode)
 			require.Equal(t, test.wantNodes, partition.effectiveNodeCount())
-			require.Len(t, partition.HXExtent, len(test.wantExtent))
+			require.Len(t, partition.hxExtent, len(test.wantExtent))
 			for index, value := range test.wantExtent {
-				require.EqualValues(t, value, partition.HXExtent[index])
+				require.EqualValues(t, value, partition.hxExtent[index])
 			}
 
 			t.Log("Reject unsafe paths for every supported partition family")
 			require.NoError(t, detail.SetPath("../outside"))
 			partition, compatible, err = buildPartitionFromManifestV2(raw)
 			require.ErrorContains(t, err, "path")
-			require.Equal(t, BuildPartition{}, partition)
+			require.Equal(t, buildPartition{}, partition)
 			require.False(t, compatible)
 		})
 	}
@@ -338,24 +338,24 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 
 func TestManifestPartitionFamilyOrdering(t *testing.T) {
 	t.Log("Classify HX partitions while preserving manifest order")
-	hx := []BuildPartition{
-		{SourcePartitionID: 7, NumChips: 16, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
-		{SourcePartitionID: 3, NumChips: 16, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
+	hx := []buildPartition{
+		{sourcePartitionID: 7, numChips: 16, devicesPerNode: 16, hxExtent: []int64{16, 1, 1, 1}},
+		{sourcePartitionID: 3, numChips: 16, devicesPerNode: 16, hxExtent: []int64{16, 1, 1, 1}},
 	}
 	family, _, _, err := classifyManifestPartitions(hx, false)
 	require.NoError(t, err)
 	require.Equal(t, BuildFamilyHX, family)
-	require.Equal(t, []int{7, 3}, []int{hx[0].SourcePartitionID, hx[1].SourcePartitionID})
+	require.Equal(t, []int{7, 3}, []int{hx[0].sourcePartitionID, hx[1].sourcePartitionID})
 
 	t.Log("Classify XT partitions while sorting by source partition identity")
-	xt := []BuildPartition{
-		{SourcePartitionID: 7, NumChips: 8, DevicesPerNode: 8},
-		{SourcePartitionID: 3, NumChips: 8, DevicesPerNode: 8},
+	xt := []buildPartition{
+		{sourcePartitionID: 7, numChips: 8, devicesPerNode: 8},
+		{sourcePartitionID: 3, numChips: 8, devicesPerNode: 8},
 	}
 	family, _, _, err = classifyManifestPartitions(xt, false)
 	require.NoError(t, err)
 	require.Equal(t, BuildFamilyXT, family)
-	require.Equal(t, []int{3, 7}, []int{xt[0].SourcePartitionID, xt[1].SourcePartitionID})
+	require.Equal(t, []int{3, 7}, []int{xt[0].sourcePartitionID, xt[1].sourcePartitionID})
 }
 
 func TestBuildFromGbuildManifestV2ValidatesPartSelect(t *testing.T) {
@@ -416,9 +416,9 @@ func TestBuildFromGbuildManifestV2ValidatesPartSelect(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Len(t, build.Partitions, 2)
-			require.Equal(t, 0, build.Partitions[0].SourcePartitionID)
-			require.Equal(t, 1, build.Partitions[1].SourcePartitionID)
+			require.Len(t, build.partitions, 2)
+			require.Equal(t, 0, build.partitions[0].sourcePartitionID)
+			require.Equal(t, 1, build.partitions[1].sourcePartitionID)
 		})
 	}
 }

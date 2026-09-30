@@ -40,8 +40,8 @@ type ModelProjectionInput struct {
 	Models []string
 	// RuntimeBuildRef is the build reference projected into runtime configuration.
 	RuntimeBuildRef string
-	// BuildSnapshot is the validated, non-nil immutable build input.
-	BuildSnapshot *BuildSnapshot
+	// Build is the validated, non-nil immutable build input.
+	Build *Build
 }
 
 // ModelProjection holds scheduler request inputs and runtime rendering state
@@ -57,7 +57,7 @@ type ModelProjection struct {
 	configuredBuild        Build
 	allocationMetadata     json.RawMessage
 	// partitions retains immutable physical build evidence before runtime collapse.
-	partitions    []BuildPartition
+	partitions    []buildPartition
 	connectors    []lpxv1alpha1.PropSyncConnectorRequest
 	agentReplicas int
 }
@@ -99,14 +99,14 @@ func (p *ModelProjection) RequestSpec(
 		request := lpxv1alpha1.PartitionRequest{
 			ID:                  partitionID,
 			Ordinal:             int64(index),
-			CompilerPartitionID: int64(uint32(partition.SourcePartitionID)),
+			CompilerPartitionID: int64(uint32(partition.sourcePartitionID)),
 		}
-		if p.configuredBuild.Family == BuildFamilyXT {
+		if p.configuredBuild.family == BuildFamilyXT {
 			shape, _ := xtShape(partition)
 			request.XtShape = &shape
 		}
-		if partition.HXExtent != nil {
-			extent := slices.Clone(partition.HXExtent)
+		if partition.hxExtent != nil {
+			extent := slices.Clone(partition.hxExtent)
 			request.Extent = &extent
 		}
 		partitions[index] = request
@@ -125,7 +125,7 @@ func (p *ModelProjection) RequestSpec(
 		},
 		RepairPolicy:       &lpxv1alpha1.RepairPolicy{Mode: lpxv1alpha1.RepairPolicyModeSamePlacement},
 		PropSyncConnectors: connectors,
-		TargetFamily:       lpxv1alpha1.TargetFamily(p.configuredBuild.Family),
+		TargetFamily:       lpxv1alpha1.TargetFamily(p.configuredBuild.family),
 		WorkloadMode:       p.schedulerWorkloadMode(),
 		ExecutionBackend:   lpxv1alpha1.ExecutionBackendNodeLocal,
 		NodeLocal: &lpxv1alpha1.NodeLocalRequest{
@@ -144,7 +144,7 @@ func (p *ModelProjection) RequestSpec(
 // schedulerWorkloadMode translates the normalized build family and pipeline at the LPX wire boundary.
 func (p *ModelProjection) schedulerWorkloadMode() lpxv1alpha1.WorkloadMode {
 	// HX and XT have separate wire values for the same two runtime shapes.
-	if p.configuredBuild.Family == BuildFamilyHX {
+	if p.configuredBuild.family == BuildFamilyHX {
 		if p.pipeline == PipelineHybrid {
 			return lpxv1alpha1.WorkloadModeV3HxStrictHybrid
 		}

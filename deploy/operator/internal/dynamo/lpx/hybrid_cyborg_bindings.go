@@ -20,9 +20,9 @@ func (w *Workload) renderCyborgConfigMap(plan *MaterializationPlan) (*corev1.Con
 
 	// Cyborg supplies the PCS prefix; startup supplies this workload's Grove index.
 	serverPrefix := plan.ScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
-	servers := make([]string, len(build.Partitions))
+	servers := make([]string, len(build.partitions))
 	offset := 0
-	for index, partition := range build.Partitions {
+	for index, partition := range build.partitions {
 		servers[index] = serverPrefix + strconv.Itoa(offset)
 		offset += partition.effectiveNodeCount()
 	}

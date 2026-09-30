@@ -27,14 +27,14 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 
 	t.Log("Project hybrid while keeping manifest-selected links independent of global prop sync")
 	intent := ModelProjectionInput{
-		Pipeline:      PipelineHybrid,
-		Models:        []string{"default"},
-		BuildSnapshot: acquireTestSnapshot(t, buildDir),
+		Pipeline: PipelineHybrid,
+		Models:   []string{"default"},
+		Build:    acquireTestSnapshot(t, buildDir),
 	}
 	projectionBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection := projectionBatch[0]
-	require.Equal(t, BuildCompilationModeHybrid, projection.configuredBuild.CompilationMode)
+	require.Equal(t, compilationModeHybrid, projection.configuredBuild.compilationMode)
 	digest, err := workloadSetDigest([]*ModelProjection{projection})
 	require.NoError(t, err)
 	require.Equal(t, projection.Digest(), digest, "one model is the aggregate digest base case")
@@ -74,7 +74,7 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	t.Log("Remove the manifest's selected chain without synthesizing hybrid connectors")
 	fixture.selectedPropSyncChains = nil
 	writeTestV3CapnpManifest(t, buildDir, fixture)
-	intent.BuildSnapshot = acquireTestSnapshot(t, buildDir)
+	intent.Build = acquireTestSnapshot(t, buildDir)
 	projectionBatch, err = appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection = projectionBatch[0]
@@ -142,7 +142,7 @@ func TestProjectModelV3RejectsInvalidPropSyncChains(t *testing.T) {
 
 			t.Log("Reject the selected chain at the projector boundary")
 			_, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineSingle, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: PipelineSingle, Models: []string{"default"}, Build: normalized,
 			})
 			require.ErrorContains(t, err, test.wantErr)
 		})
@@ -160,7 +160,7 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	buildDir := writeCompilerFixture(t, fixture)
 	snapshot := acquireTestSnapshot(t, buildDir)
 	intent := ModelProjectionInput{
-		Pipeline: PipelineSingle, Models: []string{"default"}, BuildSnapshot: snapshot,
+		Pipeline: PipelineSingle, Models: []string{"default"}, Build: snapshot,
 	}
 
 	t.Log("Project the selected chain through the LPU-only runtime")
@@ -210,7 +210,7 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	fixture.numLPUNodes = 6
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2, 3}}
 	writeTestV3CapnpManifest(t, buildDir, fixture)
-	intent.BuildSnapshot = acquireTestSnapshot(t, buildDir)
+	intent.Build = acquireTestSnapshot(t, buildDir)
 	projectionBatch, err = appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection = projectionBatch[0]
@@ -258,15 +258,15 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	buildDir := writeCompilerFixture(t, fixture)
 	firstSnapshot := acquireTestSnapshot(t, buildDir)
 	intent := ModelProjectionInput{
-		Pipeline: PipelineSingle, Models: []string{"default"}, BuildSnapshot: firstSnapshot,
+		Pipeline: PipelineSingle, Models: []string{"default"}, Build: firstSnapshot,
 	}
 	firstBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	first := firstBatch[0]
 
 	t.Log("Retain the acquired locator and exact single-partition allocation metadata")
-	require.Equal(t, "file://"+buildDir, intent.BuildSnapshot.build.Path)
-	require.Equal(t, intent.BuildSnapshot.build.Path, first.configuredBuild.Path)
+	require.Equal(t, "file://"+buildDir, intent.Build.path)
+	require.Equal(t, intent.Build.path, first.configuredBuild.path)
 	firstSpec := first.RequestSpec(&MaterializationPlan{}, "agents")
 	require.JSONEq(t, `{
 		"arch":"lp30",
@@ -285,7 +285,7 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	fixture.numLPUNodes = 2
 	writeTestV3CapnpManifest(t, buildDir, fixture)
 	secondSnapshot := acquireTestSnapshot(t, buildDir)
-	intent.BuildSnapshot = secondSnapshot
+	intent.Build = secondSnapshot
 	secondBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	second := secondBatch[0]

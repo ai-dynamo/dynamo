@@ -77,14 +77,14 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	for _, projection := range projections {
 		// Render runtime partitions, including XT's collapsed prop-sync chains.
 		offset := 0
-		for index, partition := range projection.configuredBuild.Partitions {
+		for index, partition := range projection.configuredBuild.partitions {
 			nodeCount := partition.effectiveNodeCount()
 			nodes = append(nodes, strconv.Itoa(nodeCount))
 			indices = append(indices, strconv.Itoa(index))
-			ids = append(ids, strconv.FormatUint(uint64(uint32(partition.SourcePartitionID)), 10))
+			ids = append(ids, strconv.FormatUint(uint64(uint32(partition.sourcePartitionID)), 10))
 			models = append(models, projection.model)
 			offsets = append(offsets, strconv.Itoa(offset))
-			paths = append(paths, partition.PartPath)
+			paths = append(paths, partition.partPath)
 			offset += nodeCount
 		}
 	}
@@ -96,7 +96,7 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	}
 
 	// Omit model-identity columns that the XT Single runtime never consumes.
-	if projections[0].configuredBuild.Family != BuildFamilyXT || projections[0].pipeline != PipelineSingle {
+	if projections[0].configuredBuild.family != BuildFamilyXT || projections[0].pipeline != PipelineSingle {
 		data["partition_indices"] = strings.Join(indices, "\n")
 		data["partition_models"] = strings.Join(models, "\n")
 	}

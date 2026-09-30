@@ -58,10 +58,10 @@ func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testin
 		model:    "default",
 		pipeline: PipelineSingle,
 		configuredBuild: Build{
-			Family: BuildFamilyXT,
-			Partitions: []BuildPartition{
-				{SourcePartitionID: 7, PartPath: "part-7", NumChips: 16, DevicesPerNode: 8},
-				{SourcePartitionID: 9, PartPath: "part-9", NumChips: 8, DevicesPerNode: 8},
+			family: BuildFamilyXT,
+			partitions: []buildPartition{
+				{sourcePartitionID: 7, partPath: "part-7", numChips: 16, devicesPerNode: 8},
+				{sourcePartitionID: 9, partPath: "part-9", numChips: 8, devicesPerNode: 8},
 			},
 		},
 	}

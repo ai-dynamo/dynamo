@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 )
@@ -31,16 +33,29 @@ const (
 	BuildSchemeGCS = "gs"
 )
 
-type defaultModelRegistry struct {
-	registryURL *url.URL
-	mxClient    modelpb.ModelServiceClient
-}
+// errInvalidBuildManifest separates invalid compiler input from acquisition failures.
+var errInvalidBuildManifest = errors.New("invalid build manifest")
+
+const (
+	// This domain identifies snapshots of manifest bytes without a file inventory.
+	buildSnapshotIdentityVersion = "dynamo-lpx-compiler-snapshot/v4"
+	// Bound the single manifest to the Model Express transport's metadata ceiling.
+	maxBuildSnapshotMetadataBytes = modelExpressMaxMessageSize
+	buildSnapshotTimeout          = 30 * time.Second
+)
 
 // ModelRegistry resolves build references and acquires their compiler metadata.
 type ModelRegistry interface {
 	BuildURL(id string) (*url.URL, error)
 	EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error)
-	AcquireBuildSnapshot(ctx context.Context, id string) (*BuildSnapshot, error)
+	// AcquireBuild returns a validated immutable build for id or an error.
+	// Invalid compiler input wraps errInvalidBuildManifest; other errors are acquisition failures.
+	AcquireBuild(ctx context.Context, id string) (*Build, error)
+}
+
+type defaultModelRegistry struct {
+	registryURL *url.URL
+	mxClient    modelpb.ModelServiceClient
 }
 
 // NewModelRegistry constructs a registry rooted at modelRegistryURL. An empty
@@ -189,6 +204,43 @@ func parseBuildRef(ref string) (*url.URL, error) {
 	}
 
 	return uri, nil
+}
+
+// AcquireBuild reads and validates the immutable compiler manifest once and
+// identifies the build by the digest of that manifest. Callers must treat the
+// build as immutable and copy it before runtime configuration.
+// The receiver must be non-nil and is not mutated. Payload files are not inspected.
+func (r *defaultModelRegistry) AcquireBuild(ctx context.Context, id string) (*Build, error) {
+	// Bound the manifest read and resolve the build's provider-specific locator.
+	ctx, cancel := context.WithTimeout(ctx, buildSnapshotTimeout)
+	defer cancel()
+	refURL, err := r.BuildURL(id)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch only the required manifest, preserving read and transport failures.
+	manifestData, err := r.readBuildFileBounded(ctx, refURL, gbuildManifestV2CapnpFile, maxBuildSnapshotMetadataBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate compiler input before publishing a snapshot to projection consumers.
+	manifest, err := decodeGbuildManifestV2(manifestData)
+	if err != nil {
+		return nil, fmt.Errorf("%w for %q: %w", errInvalidBuildManifest, refURL.String(), err)
+	}
+	acquired, err := buildFromGbuildManifestV2(refURL.String(), manifest)
+	if err != nil {
+		return nil, fmt.Errorf("%w for %q: %w", errInvalidBuildManifest, refURL.String(), err)
+	}
+
+	// Hash the exact manifest bytes in their own domain, independent of filenames and locator.
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(buildSnapshotIdentityVersion + "\x00"))
+	_, _ = hash.Write(manifestData)
+	acquired.contentID = fmt.Sprintf("sha256:%x", hash.Sum(nil))
+	return acquired, nil
 }
 
 // readBuildFileBounded reads one relative file. The receiver and buildURL must

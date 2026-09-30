@@ -46,7 +46,7 @@ func applyModelPaths(container *corev1.Container, projections []*ModelProjection
 	env := make([]corev1.EnvVar, 0, len(container.Env)+len(names))
 	for index, name := range names {
 		projection := projections[index]
-		path, err := buildRuntimePath(projection.configuredBuild.Path, projection.runtimeBuildRef, modelStoragePath)
+		path, err := buildRuntimePath(projection.configuredBuild.path, projection.runtimeBuildRef, modelStoragePath)
 		if err != nil {
 			return fmt.Errorf("resolve %s: %w", name, err)
 		}

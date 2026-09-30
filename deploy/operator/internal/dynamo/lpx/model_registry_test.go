@@ -105,7 +105,7 @@ func TestAcquireLocalBuildSnapshotRejectsUnreadableManifest(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Log("Fail closed as an acquisition error that names the manifest")
-			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "build-id")
+			snapshot, err := registry.AcquireBuild(t.Context(), "build-id")
 			require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
 			require.NotErrorIs(t, err, errInvalidBuildManifest)
 			require.Nil(t, snapshot)
@@ -136,7 +136,7 @@ func TestAcquireLocalBuildSnapshotCancellation(t *testing.T) {
 
 			t.Log("Reject the acquisition without returning a snapshot")
 			registry := &defaultModelRegistry{}
-			snapshot, err := registry.AcquireBuildSnapshot(ctx, buildDir)
+			snapshot, err := registry.AcquireBuild(ctx, buildDir)
 			require.ErrorIs(t, err, tt.wantErr)
 			require.Nil(t, snapshot)
 		})
@@ -151,7 +151,7 @@ func TestAcquireLocalBuildSnapshotRejectsFIFOManifest(t *testing.T) {
 		t.Log("Reject the FIFO manifest while the acquisition context is still active")
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		snapshot, err := (&defaultModelRegistry{}).AcquireBuildSnapshot(ctx, buildDir)
+		snapshot, err := (&defaultModelRegistry{}).AcquireBuild(ctx, buildDir)
 		require.ErrorContains(t, err, "not a regular file")
 		require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
 		require.Nil(t, snapshot)
@@ -297,7 +297,7 @@ func TestGCSBuildSnapshotReadFailures(t *testing.T) {
 			}
 			registry, err := NewModelRegistry("gs://bucket/registry", client)
 			require.NoError(t, err)
-			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "model/build")
+			snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
 
 			t.Log("Preserve the transport or protocol failure separately from invalid compiler input")
 			require.Error(t, err)

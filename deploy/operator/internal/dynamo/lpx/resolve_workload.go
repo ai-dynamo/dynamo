@@ -32,22 +32,15 @@ var ErrUnsupportedRuntime = errors.New("unsupported LPX runtime")
 // immutable build snapshot from its backing store.
 var ErrBuildSnapshotAcquisition = errors.New("acquiring immutable LPX build snapshot")
 
-// BuildSnapshotSource acquires immutable build inputs by build reference.
-type BuildSnapshotSource interface {
-	// AcquireBuildSnapshot returns a validated snapshot for id or an error.
-	// Invalid compiler input wraps errInvalidBuildManifest; other errors are acquisition failures.
-	AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error)
-}
-
 // ResolveWorkload projects one admitted component group against immutable builds.
-// dgd and source must be non-nil. componentNames must contain exactly the members
+// dgd and registry must be non-nil. componentNames must contain exactly the members
 // of one ComponentGroups entry from the admitted dgd, in any order.
 // Inputs are read without mutation.
 func ResolveWorkload(
 	ctx context.Context,
 	dgd *dynamov1beta1.DynamoGraphDeployment,
 	componentNames []string,
-	source BuildSnapshotSource,
+	registry ModelRegistry,
 ) (*Workload, error) {
 	// Resolve only this group's native components from the unchanged graph.
 	components := make([]*dynamov1beta1.DynamoComponentDeploymentSharedSpec, 0, len(componentNames))
@@ -62,7 +55,7 @@ func ResolveWorkload(
 
 	// Acquire each build and expand its models in canonical runtime order.
 	var (
-		snapshot *BuildSnapshot
+		snapshot *Build
 		pipeline Pipeline
 
 		projections = make([]*ModelProjection, 0, len(components))
@@ -74,7 +67,7 @@ func ResolveWorkload(
 
 		// An admitted group has at most two components, so only its preceding component can share a build.
 		if len(projections) == 0 || projections[len(projections)-1].runtimeBuildRef != model.BuildID {
-			acquired, acquireErr := source.AcquireBuildSnapshot(ctx, model.BuildID)
+			acquired, acquireErr := registry.AcquireBuild(ctx, model.BuildID)
 			if acquireErr != nil {
 				// Keep compiler validation failures distinct from retryable acquisition failures.
 				if errors.Is(acquireErr, errInvalidBuildManifest) {
@@ -97,12 +90,12 @@ func ResolveWorkload(
 			pipeline = PipelineSingle
 			if len(components) == 2 {
 				pipeline = PipelineSpecDecode
-			} else if snapshot.build.CompilationMode == BuildCompilationModeHybrid {
+			} else if snapshot.compilationMode == compilationModeHybrid {
 				pipeline = PipelineHybrid
 			}
 		}
 
-		if err := validateWorkloadConductor(stage, pipeline, snapshot.build.CompilationMode); err != nil {
+		if err := validateWorkloadConductor(stage, pipeline, snapshot.compilationMode); err != nil {
 			return nil, err
 		}
 
@@ -113,7 +106,7 @@ func ResolveWorkload(
 			Pipeline:        pipeline,
 			Models:          modelNames,
 			RuntimeBuildRef: model.BuildID,
-			BuildSnapshot:   snapshot,
+			Build:           snapshot,
 		}
 		projected, err := appendModelProjections(projections, intent)
 		if err != nil {
@@ -153,11 +146,11 @@ func ResolveWorkload(
 func validateWorkloadConductor(
 	component *dynamov1beta1.DynamoComponentDeploymentSharedSpec,
 	pipeline Pipeline,
-	compilationMode BuildCompilationMode,
+	compilationMode compilationMode,
 ) error {
 	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
 	// Hybrid execution is selected by immutable build metadata, not template presence.
-	if compilationMode == BuildCompilationModeHybrid {
+	if compilationMode == compilationModeHybrid {
 		if pipeline == PipelineSpecDecode {
 			return fmt.Errorf("%w: the shared speculative runtime requires LPU-only builds", ErrUnsupportedRuntime)
 		}

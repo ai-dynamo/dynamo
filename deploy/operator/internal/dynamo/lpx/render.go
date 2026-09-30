@@ -93,7 +93,7 @@ func RenderNodeLocal(
 	if err != nil {
 		return nil, err
 	}
-	v2HybridRuntime := projections[0].configuredBuild.Family == BuildFamilyXT &&
+	v2HybridRuntime := projections[0].configuredBuild.family == BuildFamilyXT &&
 		projections[0].pipeline == PipelineHybrid
 
 	// Render the optional Cyborg config and construct final resource order once.
@@ -250,11 +250,11 @@ func RenderNodeLocal(
 // nil conductor means no emitted launcher.
 func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, projection *ModelProjection, configMapName, allocation string) error {
 	// Use this component's manifest geometry for its Agent resources and configuration mount.
-	family := projection.configuredBuild.Family
+	family := projection.configuredBuild.family
 	if err := withLPUConfigVolume(agentPodSpec, configMapName, family == BuildFamilyXT); err != nil {
 		return err
 	}
-	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].DevicesPerNode)
+	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].devicesPerNode)
 
 	// Placement is already resolved; shape only the actual conductor's LPX-owned fields.
 	if conductorPodSpec != nil {

@@ -20,7 +20,7 @@ func writeManifestV2Payload(t *testing.T, buildDir string, payload []byte) {
 	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildManifestV2CapnpFile), payload, 0o600))
 }
 
-func TestAcquireBuildSnapshotTracksOnlyManifestContent(t *testing.T) {
+func TestAcquireBuildTracksOnlyManifestContent(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Write the compiler manifest beside invalid publication JSON and unrelated payloads")
@@ -41,16 +41,16 @@ func TestAcquireBuildSnapshotTracksOnlyManifestContent(t *testing.T) {
 	registry, err := NewModelRegistry("", nil)
 	require.NoError(t, err)
 	ref := (&url.URL{Scheme: BuildSchemeFile, Path: buildDir}).String()
-	first, err := registry.AcquireBuildSnapshot(t.Context(), ref)
+	first, err := registry.AcquireBuild(t.Context(), ref)
 	require.NoError(t, err)
-	require.Equal(t, ref, first.build.Path)
-	require.EqualValues(t, 4, first.build.IOFPGACount)
-	require.EqualValues(t, 2, first.build.IOFanoutFactor)
+	require.Equal(t, ref, first.path)
+	require.EqualValues(t, 4, first.ioFPGACount)
+	require.EqualValues(t, 2, first.ioFanoutFactor)
 
 	t.Log("Resolve the same snapshot through a registry-relative build ID")
 	relativeRegistry, err := NewModelRegistry(registryDir, nil)
 	require.NoError(t, err)
-	relative, err := relativeRegistry.AcquireBuildSnapshot(t.Context(), "build-id")
+	relative, err := relativeRegistry.AcquireBuild(t.Context(), "build-id")
 	require.NoError(t, err)
 	require.Equal(t, first, relative)
 
@@ -59,7 +59,7 @@ func TestAcquireBuildSnapshotTracksOnlyManifestContent(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(buildDir, "extra-metadata.json")))
 	require.NoError(t, os.WriteFile(filepath.Join(buildDir, "weights.bin"), []byte("changed weights"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(buildDir, "new-file"), nil, 0o600))
-	second, err := registry.AcquireBuildSnapshot(t.Context(), ref)
+	second, err := registry.AcquireBuild(t.Context(), ref)
 	require.NoError(t, err)
 	require.Equal(t, first, second)
 
@@ -72,9 +72,9 @@ func TestAcquireBuildSnapshotTracksOnlyManifestContent(t *testing.T) {
 	updated, err := manifest.Message().Marshal()
 	require.NoError(t, err)
 	writeManifestV2Payload(t, buildDir, updated)
-	third, err := registry.AcquireBuildSnapshot(t.Context(), ref)
+	third, err := registry.AcquireBuild(t.Context(), ref)
 	require.NoError(t, err)
 	require.NotEqual(t, second.contentID, third.contentID)
-	require.EqualValues(t, 1, third.build.IOFanoutFactor)
-	require.EqualValues(t, 2, first.build.IOFanoutFactor)
+	require.EqualValues(t, 1, third.ioFanoutFactor)
+	require.EqualValues(t, 2, first.ioFanoutFactor)
 }

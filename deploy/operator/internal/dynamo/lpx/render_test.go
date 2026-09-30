@@ -70,7 +70,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 		name       string
 		family     lpxv1alpha1.TargetFamily
 		pipeline   Pipeline
-		snapshot   *BuildSnapshot
+		snapshot   *Build
 		configPath string
 	}{
 		{
@@ -315,7 +315,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
-	selected, err := ResolveWorkload(t.Context(), source, singleGroupComponents(t, source), staticBuildSnapshotSource{
+	selected, err := ResolveWorkload(t.Context(), source, singleGroupComponents(t, source), staticModelRegistry{
 		"draft-build": draftSnapshot, "target-build": targetSnapshot,
 	})
 	require.NoError(t, err)
@@ -391,11 +391,11 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	}
 }
 
-func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *BuildSnapshot) *ModelProjection {
+func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *Build) *ModelProjection {
 	t.Helper()
 	intent := ModelProjectionInput{
 		Pipeline: pipeline,
-		Models:   []string{"default"}, RuntimeBuildRef: "model-build", BuildSnapshot: snapshot,
+		Models:   []string{"default"}, RuntimeBuildRef: "model-build", Build: snapshot,
 	}
 	projectionBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)

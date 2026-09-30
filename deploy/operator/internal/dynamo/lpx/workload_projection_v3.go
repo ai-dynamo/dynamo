@@ -22,38 +22,38 @@ const (
 // projectV3Component derives the HX component shared by every model and writes
 // its model-independent digest fields.
 func projectV3Component(intent ModelProjectionInput, fields digestTranscript) (ModelProjection, error) {
-	configured := *intent.BuildSnapshot.build
-	allocationMetadata, connectors, err := projectV3PropSync(configured.Partitions, configured.SelectedPropSyncChains, intent.Pipeline)
+	configured := *intent.Build
+	allocationMetadata, connectors, err := projectV3PropSync(configured.partitions, configured.selectedPropSyncChains, intent.Pipeline)
 	if err != nil {
 		return ModelProjection{}, err
 	}
 	// Selected chains are represented by the allocation metadata and connectors.
-	configured.SelectedPropSyncChains = nil
+	configured.selectedPropSyncChains = nil
 
 	// Count runtime endpoints while binding ordered partitions into projection identity.
-	// Manifest validation guarantees NumChips/DevicesPerNode equals the HX extent's node count.
+	// Manifest validation guarantees numChips/devicesPerNode equals the HX extent's node count.
 	fields.field("v3-envelope-schema", []byte(v3CompilerEnvelopeSchema))
 	agentReplicas := 0
-	for index, partition := range configured.Partitions {
+	for index, partition := range configured.partitions {
 		agentReplicas += partition.effectiveNodeCount()
 		fields.intField("ordered-compiler-id-index", int64(index))
-		fields.uint32Field("ordered-compiler-id", uint32(partition.SourcePartitionID))
+		fields.uint32Field("ordered-compiler-id", uint32(partition.sourcePartitionID))
 	}
 	fields.field("allocation-metadata", allocationMetadata)
 	// Bind the Cyborg runtime contract into hybrid projection identity.
-	bindHybridRuntimeIO(fields, intent.Pipeline, configured.IOFPGACount, configured.IOFanoutFactor)
+	bindHybridRuntimeIO(fields, intent.Pipeline, configured.ioFPGACount, configured.ioFanoutFactor)
 
 	return ModelProjection{
 		configuredBuild:    configured,
 		allocationMetadata: allocationMetadata,
-		partitions:         configured.Partitions,
+		partitions:         configured.partitions,
 		connectors:         connectors,
 		agentReplicas:      agentReplicas,
 	}, nil
 }
 
 func projectV3PropSync(
-	partitions []BuildPartition,
+	partitions []buildPartition,
 	chains [][]int,
 	pipeline Pipeline,
 ) (json.RawMessage, []lpxv1alpha1.PropSyncConnectorRequest, error) {
@@ -69,10 +69,10 @@ func projectV3PropSync(
 	partitionInfo := make(map[string]any, len(partitions)+1)
 	partitionInfo["num_partitions"] = len(partitions)
 	for _, partition := range partitions {
-		compilerID := uint32(partition.SourcePartitionID)
+		compilerID := uint32(partition.sourcePartitionID)
 		partitionInfo[strconv.FormatUint(uint64(compilerID), 10)] = map[string]any{
 			"device":     v3LPUDevice,
-			"allocation": partition.HXExtent,
+			"allocation": partition.hxExtent,
 		}
 	}
 
@@ -81,11 +81,11 @@ func projectV3PropSync(
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, 0, len(edgePositions))
 	for _, fromPosition := range edgePositions {
 		source := partitions[fromPosition]
-		destinationID := partitions[fromPosition+1].SourcePartitionID
-		logicalConnections := make([]lpxv1alpha1.HxLogicalConnection, source.DevicesPerNode)
-		connections := make([][2]int64, source.DevicesPerNode)
+		destinationID := partitions[fromPosition+1].sourcePartitionID
+		logicalConnections := make([]lpxv1alpha1.HxLogicalConnection, source.devicesPerNode)
+		connections := make([][2]int64, source.devicesPerNode)
 		// Connections leave from the source partition's final node.
-		sourceOffset := int64(source.NumChips - source.DevicesPerNode)
+		sourceOffset := int64(source.numChips - source.devicesPerNode)
 		for logicalDevice := range logicalConnections {
 			from := sourceOffset + int64(logicalDevice)
 			logicalConnections[logicalDevice] = lpxv1alpha1.HxLogicalConnection{
@@ -96,7 +96,7 @@ func projectV3PropSync(
 		}
 		acceptableLaneMultiplicities := []int64{4, 2, 1}
 		propSyncPairs = append(propSyncPairs, map[string]any{
-			"source_partition":    source.SourcePartitionID,
+			"source_partition":    source.sourcePartitionID,
 			"dest_partition":      destinationID,
 			"connections":         connections,
 			"num_supported_lanes": acceptableLaneMultiplicities,

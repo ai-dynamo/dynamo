@@ -28,9 +28,9 @@ func TestProjectModelV2SubHostPartitionUsesWholeHostShape(t *testing.T) {
 
 	t.Log("Project the sub-host build through the selected single-pipeline LPX path")
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline:      PipelineSingle,
-		Models:        []string{"default"},
-		BuildSnapshot: snapshot,
+		Pipeline: PipelineSingle,
+		Models:   []string{"default"},
+		Build:    snapshot,
 	})
 	require.NoError(t, err)
 	projection := projectionBatch[0]
@@ -47,16 +47,16 @@ func TestProjectModelV2SubHostPartitionUsesWholeHostShape(t *testing.T) {
 func TestProjectModelV2ValidatesPhysicalPartitionsInOrder(t *testing.T) {
 	t.Log("Create a V2 build whose first physical partition has an invalid shape")
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
-	build.SelectedPropSyncChains = [][]int{{100, 101}}
-	build.Partitions[0].NumChips = 9
-	build.Partitions[0].SourcePartitionID = 1
+	build := normalized
+	build.compilationMode = compilationModeHybrid
+	build.selectedPropSyncChains = [][]int{{100, 101}}
+	build.partitions[0].numChips = 9
+	build.partitions[0].sourcePartitionID = 1
 
 	t.Log("Project the invalid physical partition")
 	_, err := appendModelProjections(nil, ModelProjectionInput{
 		Pipeline: PipelineHybrid, Models: []string{"default"},
-		BuildSnapshot: normalized,
+		Build: normalized,
 	})
 
 	t.Log("Reject the invalid shape at the first applicable validation boundary")
@@ -87,12 +87,12 @@ func TestProjectModelV2RejectsUnsupportedDeviceDensity(t *testing.T) {
 				fixture.partitions[index].devicesPerNode = test.devicesPerNode
 			}
 			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-			require.Equal(t, BuildFamilyXT, normalized.build.Family)
-			require.EqualValues(t, test.devicesPerNode, normalized.build.Partitions[0].DevicesPerNode)
+			require.Equal(t, BuildFamilyXT, normalized.family)
+			require.EqualValues(t, test.devicesPerNode, normalized.partitions[0].devicesPerNode)
 
 			t.Log("Reject unsupported hardware at scheduler projection before producing a request")
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineSingle, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: PipelineSingle, Models: []string{"default"}, Build: normalized,
 			})
 			require.ErrorContains(t, err, fmt.Sprintf("devicesPerNode %d, want 8 for XT8888 scheduler shapes", test.devicesPerNode))
 			require.Empty(t, projections)
@@ -113,7 +113,7 @@ func TestXTShape(t *testing.T) {
 		roundedChipCount := max(chipCount, 8)
 		wantShape, registered := registeredShapes[roundedChipCount]
 		registered = registered && chipCount > 0
-		shape, err := xtShape(BuildPartition{NumChips: chipCount, DevicesPerNode: 8})
+		shape, err := xtShape(buildPartition{numChips: chipCount, devicesPerNode: 8})
 		if !registered {
 			require.Error(t, err, chipCount)
 			continue
@@ -124,7 +124,7 @@ func TestXTShape(t *testing.T) {
 
 	t.Log("Reject integer extremes without indexing outside the registry")
 	for _, chipCount := range []int{math.MinInt, math.MaxInt} {
-		_, err := xtShape(BuildPartition{NumChips: chipCount, DevicesPerNode: 8})
+		_, err := xtShape(buildPartition{numChips: chipCount, devicesPerNode: 8})
 		require.Error(t, err, chipCount)
 	}
 }
@@ -134,8 +134,8 @@ func TestProjectModelV2UsesManifestPropSync(t *testing.T) {
 
 	t.Log("Acquire a V2 build with compiler-selected prop-sync metadata")
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-	build := normalized.build
-	require.Equal(t, [][]int{{7, 8}}, build.SelectedPropSyncChains)
+	build := normalized
+	require.Equal(t, [][]int{{7, 8}}, build.selectedPropSyncChains)
 
 	t.Log("Preserve both physical partitions with their adjacent selected connector")
 	projection := projectTestBuild(t, normalized, PipelineSingle)
@@ -143,10 +143,10 @@ func TestProjectModelV2UsesManifestPropSync(t *testing.T) {
 	require.Len(t, spec.Partitions, 2)
 	require.Len(t, spec.PropSyncConnectors, 1)
 	require.Equal(t, int64(0), *spec.PropSyncConnectors[0].Requirement.MaxInterPartitionOffset)
-	require.Equal(t, [][]int{{7, 8}}, build.SelectedPropSyncChains)
+	require.Equal(t, [][]int{{7, 8}}, build.selectedPropSyncChains)
 
 	t.Log("Keep all physical partitions without synthesizing a chain absent from the manifest")
-	build.SelectedPropSyncChains = nil
+	build.selectedPropSyncChains = nil
 	projection = projectTestBuild(t, normalized, PipelineSingle)
 	spec = projection.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Len(t, spec.Partitions, 2)
@@ -167,27 +167,27 @@ func TestProjectModelV2SingleEmbeddingPlacementFromManifest(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Prepare a selected V2 chain with explicit embedding placement capabilities")
 			normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-			build := normalized.build
-			build.Partitions[0].SourcePartitionID = 0
-			build.Partitions[1].SourcePartitionID = 1
-			build.StandaloneTokenEmbeddings = test.standalone
-			build.SupportsCPUEmbeddings = test.cpuSupported
-			build.SelectedPropSyncChains = [][]int{{0, 1}}
+			build := normalized
+			build.partitions[0].sourcePartitionID = 0
+			build.partitions[1].sourcePartitionID = 1
+			build.standaloneTokenEmbeddings = test.standalone
+			build.supportsCPUEmbeddings = test.cpuSupported
+			build.selectedPropSyncChains = [][]int{{0, 1}}
 
 			t.Log("Project retained source partitions into placement and runtime metadata")
 			projection := projectTestBuild(t, normalized, PipelineSingle)
 			spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 			require.Equal(t, test.firstPartition, spec.Partitions[0].CompilerPartitionID)
 			require.EqualValues(t, 2*(2-test.firstPartition), projection.agentReplicas)
-			require.EqualValues(t, test.firstPartition, projection.configuredBuild.Partitions[0].SourcePartitionID)
-			require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
+			require.EqualValues(t, test.firstPartition, projection.configuredBuild.partitions[0].sourcePartitionID)
+			require.Empty(t, projection.configuredBuild.selectedPropSyncChains)
 
 			t.Log("Keep scheduler output independently mutable from the projection and compiler snapshot")
 			spec.Partitions[0].CompilerPartitionID = -1
-			require.EqualValues(t, test.firstPartition, projection.partitions[0].SourcePartitionID)
+			require.EqualValues(t, test.firstPartition, projection.partitions[0].sourcePartitionID)
 			require.EqualValues(t, test.firstPartition, projection.RequestSpec(&MaterializationPlan{}, "agents").Partitions[0].CompilerPartitionID)
-			require.Equal(t, 0, build.Partitions[0].SourcePartitionID)
-			require.Equal(t, [][]int{{0, 1}}, build.SelectedPropSyncChains)
+			require.Equal(t, 0, build.partitions[0].sourcePartitionID)
+			require.Equal(t, [][]int{{0, 1}}, build.selectedPropSyncChains)
 		})
 	}
 }
@@ -195,13 +195,13 @@ func TestProjectModelV2SingleEmbeddingPlacementFromManifest(t *testing.T) {
 func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 	t.Log("Prepare a hybrid V2 build with a standalone embedding partition")
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
-	build.Partitions[0].SourcePartitionID = 0
-	build.Partitions[1].SourcePartitionID = 1
-	build.StandaloneTokenEmbeddings = true
-	build.SupportsCPUEmbeddings = true
-	build.SelectedPropSyncChains = nil
+	build := normalized
+	build.compilationMode = compilationModeHybrid
+	build.partitions[0].sourcePartitionID = 0
+	build.partitions[1].sourcePartitionID = 1
+	build.standaloneTokenEmbeddings = true
+	build.supportsCPUEmbeddings = true
+	build.selectedPropSyncChains = nil
 
 	t.Log("Keep Cyborg's partition zero independently of Nova's embedding placement")
 	projection := projectTestBuild(t, normalized, PipelineHybrid)
@@ -220,12 +220,12 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 
 	t.Log("Prepare a selected adjacent chain between unselected physical partitions")
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-	build := normalized.build
-	prefix, suffix := build.Partitions[0], build.Partitions[1]
-	prefix.SourcePartitionID, prefix.PartPath = 3, "part-3"
-	suffix.SourcePartitionID, suffix.PartPath = 11, "part-11"
-	build.Partitions = append([]BuildPartition{prefix}, append(build.Partitions, suffix)...)
-	build.SelectedPropSyncChains = [][]int{{7, 8}}
+	build := normalized
+	prefix, suffix := build.partitions[0], build.partitions[1]
+	prefix.sourcePartitionID, prefix.partPath = 3, "part-3"
+	suffix.sourcePartitionID, suffix.partPath = 11, "part-11"
+	build.partitions = append([]buildPartition{prefix}, append(build.partitions, suffix)...)
+	build.selectedPropSyncChains = [][]int{{7, 8}}
 
 	t.Log("Project the manifest-selected chain")
 	projection := projectTestBuild(t, normalized, PipelineSingle)
@@ -243,17 +243,17 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T) {
 	t.Parallel()
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
+	build := normalized
+	build.compilationMode = compilationModeHybrid
 
 	t.Log("Use individually schedulable physical shapes whose collapsed runtime total is not a scheduler shape")
-	build.Partitions[0].NumChips = 8
-	build.Partitions[1].NumChips = 64
-	third := build.Partitions[1]
-	third.SourcePartitionID = 11
-	third.PartPath = "part-11"
-	build.Partitions = append(build.Partitions, third)
-	build.SelectedPropSyncChains = [][]int{{7, 8}}
+	build.partitions[0].numChips = 8
+	build.partitions[1].numChips = 64
+	third := build.partitions[1]
+	third.sourcePartitionID = 11
+	third.partPath = "part-11"
+	build.partitions = append(build.partitions, third)
+	build.selectedPropSyncChains = [][]int{{7, 8}}
 
 	t.Log("Project the selected chain beside an independent third partition")
 	projection := projectTestBuild(t, normalized, PipelineHybrid)
@@ -272,16 +272,16 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	require.Equal(t, "0\n1", data["partition_indices"])
 	require.Equal(t, "0\n9", data["partition_node_offsets"])
 	require.Equal(t, "part-7\npart-11", data["partition_paths"])
-	require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
+	require.Empty(t, projection.configuredBuild.selectedPropSyncChains)
 	require.Equal(t, 17, projection.agentReplicas)
-	require.Equal(t, [][]int{{7, 8}}, build.SelectedPropSyncChains)
+	require.Equal(t, [][]int{{7, 8}}, build.selectedPropSyncChains)
 
 	t.Log("Preserve physical output order when selected chains are declared in reverse")
-	fourth := build.Partitions[2]
-	fourth.SourcePartitionID = 13
-	build.Partitions = append(build.Partitions, fourth)
-	build.SelectedPropSyncChains = [][]int{{11, 13}, {7, 8}}
-	connectors, err := v2Connectors(build, build.Partitions)
+	fourth := build.partitions[2]
+	fourth.sourcePartitionID = 13
+	build.partitions = append(build.partitions, fourth)
+	build.selectedPropSyncChains = [][]int{{11, 13}, {7, 8}}
+	connectors, err := v2Connectors(build, build.partitions)
 	require.NoError(t, err)
 	require.Len(t, connectors, 2)
 	require.Equal(t, "partition-000", connectors[0].FromPartitionID)
@@ -294,21 +294,21 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T) {
 	t.Parallel()
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
+	build := normalized
+	build.compilationMode = compilationModeHybrid
 
 	t.Log("Model a selected chain starting at Cyborg's standalone embedding partition")
-	partitions := make([]BuildPartition, 3)
+	partitions := make([]buildPartition, 3)
 	for sourceID := range partitions {
-		partitions[sourceID] = build.Partitions[0]
-		partitions[sourceID].SourcePartitionID = sourceID
-		partitions[sourceID].PartPath = fmt.Sprintf("part-%d", sourceID)
-		partitions[sourceID].NumChips = 8
+		partitions[sourceID] = build.partitions[0]
+		partitions[sourceID].sourcePartitionID = sourceID
+		partitions[sourceID].partPath = fmt.Sprintf("part-%d", sourceID)
+		partitions[sourceID].numChips = 8
 	}
-	build.Partitions = partitions
-	build.SelectedPropSyncChains = [][]int{{0, 1, 2}}
-	build.StandaloneTokenEmbeddings = true
-	build.SupportsCPUEmbeddings = true
+	build.partitions = partitions
+	build.selectedPropSyncChains = [][]int{{0, 1, 2}}
+	build.standaloneTokenEmbeddings = true
+	build.supportsCPUEmbeddings = true
 
 	t.Log("Project without applying Nova's CPU-embedding partition omission")
 	projection := projectTestBuild(t, normalized, PipelineHybrid)
@@ -325,9 +325,9 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 	require.Equal(t, "0", data["partition_ids"])
 	require.Equal(t, "3", data["nodes_per_partition"])
 	require.Equal(t, "part-0", data["partition_paths"])
-	require.Equal(t, 24, projection.configuredBuild.Partitions[0].NumChips)
-	require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
-	require.Equal(t, [][]int{{0, 1, 2}}, build.SelectedPropSyncChains)
+	require.Equal(t, 24, projection.configuredBuild.partitions[0].numChips)
+	require.Empty(t, projection.configuredBuild.selectedPropSyncChains)
+	require.Equal(t, [][]int{{0, 1, 2}}, build.selectedPropSyncChains)
 }
 
 func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *testing.T) {
@@ -335,13 +335,13 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 
 	t.Log("Prepare two selected V2 sub-host partitions")
 	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
+	build := normalized
+	build.compilationMode = compilationModeHybrid
 
-	for index := range build.Partitions {
-		build.Partitions[index].NumChips = 2
+	for index := range build.partitions {
+		build.partitions[index].numChips = 2
 	}
-	build.SelectedPropSyncChains = [][]int{{7, 8}}
+	build.selectedPropSyncChains = [][]int{{7, 8}}
 
 	t.Log("Project and collapse the selected runtime chain")
 	projection := projectTestBuild(t, normalized, PipelineHybrid)
@@ -354,9 +354,9 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	data := resolvedPartitionData([]*ModelProjection{projection})
 	require.Equal(t, "2", data["nodes_per_partition"])
 	require.Equal(t, "0", data["partition_node_offsets"])
-	require.Equal(t, 2, projection.configuredBuild.Partitions[0].effectiveNodeCount())
-	require.Equal(t, 4, projection.configuredBuild.Partitions[0].NumChips)
-	require.Equal(t, 8, projection.configuredBuild.Partitions[0].DevicesPerNode)
+	require.Equal(t, 2, projection.configuredBuild.partitions[0].effectiveNodeCount())
+	require.Equal(t, 4, projection.configuredBuild.partitions[0].numChips)
+	require.Equal(t, 8, projection.configuredBuild.partitions[0].devicesPerNode)
 }
 
 func TestBuildRejectsInvalidRuntimeSelectedPropSyncChain(t *testing.T) {
@@ -396,16 +396,16 @@ func TestBuildRejectsInvalidRuntimeSelectedPropSyncChain(t *testing.T) {
 
 			t.Log("Configure malformed or incompatible LPU-only selected-chain metadata")
 			configured := Build{
-				Partitions: []BuildPartition{
-					{SourcePartitionID: 0}, {SourcePartitionID: 1}, {SourcePartitionID: 2}, {SourcePartitionID: 3},
+				partitions: []buildPartition{
+					{sourcePartitionID: 0}, {sourcePartitionID: 1}, {sourcePartitionID: 2}, {sourcePartitionID: 3},
 				},
-				SelectedPropSyncChains: tt.chains,
+				selectedPropSyncChains: tt.chains,
 			}
 
 			t.Log("Reject the build without consuming its selected-chain marker")
 			err := configured.consumeRuntimeSelectedPropSyncChain()
 			require.ErrorContains(t, err, tt.wantErr)
-			require.Equal(t, tt.chains, configured.SelectedPropSyncChains)
+			require.Equal(t, tt.chains, configured.selectedPropSyncChains)
 		})
 	}
 }

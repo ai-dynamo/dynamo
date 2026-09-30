@@ -14,7 +14,7 @@ import (
 
 // validateSelectedPropSyncGraph returns validated forward-adjacent edge source positions in selected-chain order.
 func validateSelectedPropSyncGraph(
-	partitions []BuildPartition,
+	partitions []buildPartition,
 	chains [][]int,
 	subject string,
 ) ([]int, error) {
@@ -26,7 +26,7 @@ func validateSelectedPropSyncGraph(
 	// Index every physical partition once for both reference validation and connector projection.
 	partitionPositions := make(map[int]int, len(partitions))
 	for position, partition := range partitions {
-		partitionPositions[partition.SourcePartitionID] = position
+		partitionPositions[partition.sourcePartitionID] = position
 	}
 
 	// Reject malformed references across every chain before evaluating relationships between valid members.
@@ -63,17 +63,17 @@ func validateSelectedPropSyncGraph(
 }
 
 func (b *Build) consumeRuntimeSelectedPropSyncChain() error {
-	if len(b.SelectedPropSyncChains) == 0 {
+	if len(b.selectedPropSyncChains) == 0 {
 		return nil
 	}
-	if len(b.SelectedPropSyncChains) != 1 {
-		return fmt.Errorf("LPU-only runtime requires exactly one selected prop-sync chain, got %d", len(b.SelectedPropSyncChains))
+	if len(b.selectedPropSyncChains) != 1 {
+		return fmt.Errorf("LPU-only runtime requires exactly one selected prop-sync chain, got %d", len(b.selectedPropSyncChains))
 	}
-	chain := b.SelectedPropSyncChains[0]
+	chain := b.selectedPropSyncChains[0]
 
 	// Locate the selected chain in normalized physical partition order.
-	firstSelected := sort.Search(len(b.Partitions), func(index int) bool {
-		return b.Partitions[index].SourcePartitionID >= chain[0]
+	firstSelected := sort.Search(len(b.partitions), func(index int) bool {
+		return b.partitions[index].sourcePartitionID >= chain[0]
 	})
 
 	// A reached member has a contiguous prefix, so modular distance below its index identifies a duplicate.
@@ -86,31 +86,31 @@ func (b *Build) consumeRuntimeSelectedPropSyncChain() error {
 		}
 
 		partitionIndex := firstSelected + memberIndex
-		if partitionIndex >= len(b.Partitions) || b.Partitions[partitionIndex].SourcePartitionID != partitionID {
+		if partitionIndex >= len(b.partitions) || b.partitions[partitionIndex].sourcePartitionID != partitionID {
 			return fmt.Errorf("LPU-only selected prop-sync chain %s references missing partition id %d", formatPropSyncChain(chain), partitionID)
 		}
 	}
 
-	b.Partitions = b.Partitions[firstSelected : firstSelected+len(chain)]
-	b.SelectedPropSyncChains = nil
+	b.partitions = b.partitions[firstSelected : firstSelected+len(chain)]
+	b.selectedPropSyncChains = nil
 	return nil
 }
 
 // collapseSelectedPropSyncChain projects validated nonempty contiguous physical partitions onto their runtime root.
-func collapseSelectedPropSyncChain(partitions []BuildPartition) BuildPartition {
+func collapseSelectedPropSyncChain(partitions []buildPartition) buildPartition {
 	root := partitions[0]
 	totalChipCount := 0
 	totalNodeCount := 0
 	for _, partition := range partitions {
-		totalChipCount += partition.NumChips
+		totalChipCount += partition.numChips
 		totalNodeCount += partition.effectiveNodeCount()
 	}
 
-	return BuildPartition{
-		SourcePartitionID: root.SourcePartitionID,
-		PartPath:          root.PartPath,
-		NumChips:          totalChipCount,
-		DevicesPerNode:    root.DevicesPerNode,
+	return buildPartition{
+		sourcePartitionID: root.sourcePartitionID,
+		partPath:          root.partPath,
+		numChips:          totalChipCount,
+		devicesPerNode:    root.devicesPerNode,
 		runtimeNodeCount:  totalNodeCount,
 	}
 }

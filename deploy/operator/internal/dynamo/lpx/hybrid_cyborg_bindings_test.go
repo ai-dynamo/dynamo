@@ -26,7 +26,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 		Pipeline:        PipelineHybrid,
 		Models:          []string{"default"},
 		RuntimeBuildRef: "model-build",
-		BuildSnapshot:   snapshot,
+		Build:           snapshot,
 	})
 	require.NoError(t, err)
 	projection := projectionBatch[0]

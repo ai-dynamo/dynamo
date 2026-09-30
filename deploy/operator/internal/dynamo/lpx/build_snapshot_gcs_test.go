@@ -48,12 +48,12 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 
 			t.Log("Read and validate the manifest once, retaining the current registry locator")
 			started := time.Now()
-			snapshot, err := registry.AcquireBuildSnapshot(testCase.ctx, testCase.ref)
+			snapshot, err := registry.AcquireBuild(testCase.ctx, testCase.ref)
 			require.NoError(t, err)
-			build := snapshot.build
-			require.Equal(t, "gs://bucket/registry/model/build", build.Path)
-			require.Len(t, build.Partitions, 1)
-			require.Equal(t, "part-0", build.Partitions[0].PartPath)
+			build := snapshot
+			require.Equal(t, "gs://bucket/registry/model/build", build.path)
+			require.Len(t, build.partitions, 1)
+			require.Equal(t, "part-0", build.partitions[0].partPath)
 			require.Empty(t, client.listRequests)
 			require.Len(t, client.filesRequests, 1)
 			require.Equal(t, []string{gbuildManifestV2CapnpFile}, client.filesRequests[0].GetFileSelector().GetPaths())

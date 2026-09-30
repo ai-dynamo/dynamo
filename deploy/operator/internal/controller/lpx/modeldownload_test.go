@@ -314,9 +314,9 @@ type fakeModelDownloadRegistry struct {
 	acquireBuildSnapshotCalls int
 }
 
-func (r *fakeModelDownloadRegistry) AcquireBuildSnapshot(ctx context.Context, id string) (*lpx.BuildSnapshot, error) {
+func (r *fakeModelDownloadRegistry) AcquireBuild(ctx context.Context, id string) (*lpx.Build, error) {
 	r.acquireBuildSnapshotCalls++
-	return r.ModelRegistry.AcquireBuildSnapshot(ctx, id)
+	return r.ModelRegistry.AcquireBuild(ctx, id)
 }
 
 func (r *fakeModelDownloadRegistry) EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error) {

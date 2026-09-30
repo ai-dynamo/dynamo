@@ -19,7 +19,7 @@ const v2ProjectionVersion = "v2-xt-node-local/v1"
 // projectV2Component derives the XT component shared by every model and writes
 // its model-independent digest fields.
 func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (ModelProjection, error) {
-	source := intent.BuildSnapshot.build
+	source := intent.Build
 	configured := *source
 
 	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
@@ -29,21 +29,21 @@ func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (M
 		}
 
 		// Omit host-only embeddings by retaining a view of the immutable source partitions.
-		if configured.SupportsCPUEmbeddings && configured.StandaloneTokenEmbeddings &&
-			len(configured.Partitions) > 1 && configured.Partitions[0].SourcePartitionID == 0 {
-			configured.Partitions = configured.Partitions[1:]
+		if configured.supportsCPUEmbeddings && configured.standaloneTokenEmbeddings &&
+			len(configured.partitions) > 1 && configured.partitions[0].sourcePartitionID == 0 {
+			configured.partitions = configured.partitions[1:]
 		}
 	}
 
 	// Bind the V2 workload and runtime contract into projection identity before partition validation.
 	fields.field("input-embeddings-on-gpu", []byte{1})
-	bindHybridRuntimeIO(fields, intent.Pipeline, configured.IOFPGACount, configured.IOFanoutFactor)
+	bindHybridRuntimeIO(fields, intent.Pipeline, configured.ioFPGACount, configured.ioFanoutFactor)
 
 	// Bind validated physical partitions into projection identity while counting runtime endpoints.
-	partitions := configured.Partitions
+	partitions := configured.partitions
 	agentReplicas := 0
 	for index, partition := range partitions {
-		compilerID := uint32(partition.SourcePartitionID)
+		compilerID := uint32(partition.sourcePartitionID)
 		shape, err := xtShape(partition)
 		if err != nil {
 			return ModelProjection{}, fmt.Errorf("V2 compiler partition %d: %w", compilerID, err)
@@ -60,15 +60,15 @@ func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (M
 		return ModelProjection{}, err
 	}
 	// Preserve physical scheduler partitions while collapsing selected chains only in LPU runtime state.
-	if intent.Pipeline == PipelineHybrid && len(configured.SelectedPropSyncChains) != 0 {
-		runtimeChainByRoot := make(map[int][]int, len(configured.SelectedPropSyncChains))
-		for _, chain := range configured.SelectedPropSyncChains {
+	if intent.Pipeline == PipelineHybrid && len(configured.selectedPropSyncChains) != 0 {
+		runtimeChainByRoot := make(map[int][]int, len(configured.selectedPropSyncChains))
+		for _, chain := range configured.selectedPropSyncChains {
 			runtimeChainByRoot[chain[0]] = chain
 		}
-		collapsed := make([]BuildPartition, 0, len(partitions))
+		collapsed := make([]buildPartition, 0, len(partitions))
 		for partitionIndex := 0; partitionIndex < len(partitions); {
 			partition := partitions[partitionIndex]
-			chain, selected := runtimeChainByRoot[partition.SourcePartitionID]
+			chain, selected := runtimeChainByRoot[partition.sourcePartitionID]
 			if !selected {
 				collapsed = append(collapsed, partition)
 				partitionIndex++
@@ -78,8 +78,8 @@ func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (M
 			collapsed = append(collapsed, collapseSelectedPropSyncChain(partitions[partitionIndex:chainEnd]))
 			partitionIndex = chainEnd
 		}
-		configured.Partitions = collapsed
-		configured.SelectedPropSyncChains = nil
+		configured.partitions = collapsed
+		configured.selectedPropSyncChains = nil
 	}
 
 	for _, connector := range connectors {
@@ -98,14 +98,14 @@ func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (M
 	}, nil
 }
 
-func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {
+func xtShape(partition buildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {
 	// XT8888 scheduler shapes require eight physical devices per host.
-	if partition.DevicesPerNode != 8 {
-		return "", fmt.Errorf("devicesPerNode %d, want 8 for XT8888 scheduler shapes", partition.DevicesPerNode)
+	if partition.devicesPerNode != 8 {
+		return "", fmt.Errorf("devicesPerNode %d, want 8 for XT8888 scheduler shapes", partition.devicesPerNode)
 	}
 
 	// Reserve one whole physical host for compiler partitions that use fewer than eight chips.
-	chipCount := partition.NumChips
+	chipCount := partition.numChips
 	if chipCount > 0 && chipCount < 8 {
 		return lpxv1alpha1.Xt8888PartitionShapeC8, nil
 	}
@@ -121,17 +121,17 @@ func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, error)
 // interval of its physical partitions. Runtime chain collapse happens afterward.
 func v2Connectors(
 	build *Build,
-	partitions []BuildPartition,
+	partitions []buildPartition,
 ) ([]lpxv1alpha1.PropSyncConnectorRequest, error) {
 	// Only compiler-selected relationships impose placement constraints.
-	if len(build.SelectedPropSyncChains) == 0 {
+	if len(build.selectedPropSyncChains) == 0 {
 		return []lpxv1alpha1.PropSyncConnectorRequest{}, nil
 	}
 
 	// Validate explicit chains before ordering their scheduler edges.
 	edgePositions, err := validateSelectedPropSyncGraph(
-		build.Partitions,
-		build.SelectedPropSyncChains,
+		build.partitions,
+		build.selectedPropSyncChains,
 		"selected prop-sync chain",
 	)
 	if err != nil {
@@ -142,8 +142,8 @@ func v2Connectors(
 	slices.Sort(edgePositions)
 
 	// Rebase selected physical edges into the retained partition interval.
-	start := sort.Search(len(build.Partitions), func(index int) bool {
-		return build.Partitions[index].SourcePartitionID >= partitions[0].SourcePartitionID
+	start := sort.Search(len(build.partitions), func(index int) bool {
+		return build.partitions[index].sourcePartitionID >= partitions[0].sourcePartitionID
 	})
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, 0, len(edgePositions))
 	for _, position := range edgePositions {

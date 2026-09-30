@@ -17,7 +17,7 @@ func TestWorkloadDigestIsIndependentOfBuildLocator(t *testing.T) {
 	t.Log("Acquire equal compiler contents under distinct local build paths")
 	first := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	second := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-	require.NotEqual(t, first.build.Path, second.build.Path)
+	require.NotEqual(t, first.path, second.path)
 	require.Equal(t, first.contentID, second.contentID)
 
 	t.Log("Project either immutable snapshot through the same intent")
