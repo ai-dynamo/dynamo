@@ -16,11 +16,11 @@ use dynamo_runtime::{
     engine::{AsyncEngineContext, AsyncEngineContextProvider},
     pipeline::{Context, ManyOut},
 };
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{StreamExt, stream};
 use indexmap::IndexMap;
 use rand::Rng;
 use serde::Serialize;
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::{
     RouteDoc,
@@ -47,6 +47,9 @@ use crate::{
 
 pub(super) const DEFAULT_PATH: &str = "/v1/systemone";
 const BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TOKENIZATION_WORK: usize = 1_048_576;
+const MAX_TOKENIZATION_TEXT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CONCURRENT_SIBLINGS: usize = 4;
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
@@ -176,6 +179,30 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+fn acquire_admission(
+    admission: Arc<Semaphore>,
+    branches: u32,
+    limit: usize,
+) -> Result<OwnedSemaphorePermit, Box<Response>> {
+    if branches as usize > limit {
+        return Err(Box::new(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("request needs {branches} branches; the System One branch limit is {limit}"),
+        )));
+    }
+    admission.try_acquire_many_owned(branches).map_err(|_| {
+        let mut response = error(
+            super::error::overload_status_code(),
+            "System One request capacity is exhausted",
+        );
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            HeaderValue::from_static("1"),
+        );
+        Box::new(response)
+    })
+}
+
 fn resolve_dp_rank(reported: Option<u32>, start_rank: u32, size: u32) -> Option<u32> {
     reported.or_else(|| (size == 1).then_some(start_rank))
 }
@@ -214,6 +241,10 @@ fn add_input_tokens(total: usize, next: usize, limit: usize) -> Result<usize, St
         ));
     }
     Ok(expanded)
+}
+
+fn encoding_prompt_limit(remaining_work: usize, candidates: usize) -> usize {
+    remaining_work / (candidates + 2)
 }
 
 fn pin_to_placement(preprocessed: &mut PreprocessedRequest, placement: Placement) {
@@ -305,15 +336,22 @@ async fn handle_request(
     };
 
     let branch_count = u32::try_from(request.questions.len()).unwrap_or(u32::MAX);
-    let admission_permit = match state
-        .systemone_admission()
-        .try_acquire_many_owned(branch_count)
-    {
+    let admission_permit = match acquire_admission(
+        state.systemone_admission(),
+        branch_count,
+        state.systemone_max_inflight_branches(),
+    ) {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
+
+    let max_input_tokens = state.systemone_max_input_tokens();
+    let preflight_permit = match state.systemone_preflight_admission().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
             let mut response = error(
                 super::error::overload_status_code(),
-                "System One request capacity is exhausted",
+                "System One preprocessing capacity is exhausted",
             );
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
@@ -322,12 +360,11 @@ async fn handle_request(
             return response;
         }
     };
-
-    let max_input_tokens = state.systemone_max_input_tokens();
     let preflight_started = Instant::now();
     let selection_for_preflight = selection.clone();
     let (branches, admission_permit) =
         match spawn_blocking_with_permit(admission_permit, move || {
+            let _preflight_permit = preflight_permit;
             prepare_branches(request, &selection_for_preflight, max_input_tokens)
         })
         .await
@@ -397,6 +434,8 @@ fn prepare_branches(
 ) -> Result<Vec<PreparedBranch>, (StatusCode, String)> {
     let context_length = selection.card.effective_context_length() as usize;
     let mut total_input_tokens = 0_usize;
+    let mut remaining_tokenization_work = MAX_TOKENIZATION_WORK;
+    let mut remaining_encoding_bytes = MAX_TOKENIZATION_TEXT_BYTES;
     let mut branches = Vec::with_capacity(request.questions.len());
     for (index, (question_id, question)) in request.questions.into_iter().enumerate() {
         let rendered = render_question_prompt(&request.state, &question)
@@ -406,19 +445,31 @@ fn prepare_branches(
             remaining_tokens
         } else {
             remaining_tokens.min(context_length.saturating_sub(1))
-        };
-        let (prompt_ids, label_ids) = selection
+        }
+        .min(encoding_prompt_limit(
+            remaining_tokenization_work,
+            rendered.labels.len(),
+        ));
+        let (prompt_ids, label_ids, encoding_bytes) = selection
             .preprocessor
             .render_systemone_question(
                 &selection.canonical_model,
                 &rendered.content,
                 request.chat_template_kwargs.as_ref(),
                 &rendered.labels,
-                max_prompt_tokens,
+                (max_prompt_tokens, remaining_encoding_bytes),
             )
             .map_err(|cause| {
                 if let Some(oversized) =
                     cause.downcast_ref::<crate::preprocessor::SystemOnePromptTooLong>()
+                {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("question {question_id:?}: {oversized}"),
+                    );
+                }
+                if let Some(oversized) =
+                    cause.downcast_ref::<crate::preprocessor::SystemOneEncodingTooLarge>()
                 {
                     return (
                         StatusCode::UNPROCESSABLE_ENTITY,
@@ -436,6 +487,8 @@ fn prepare_branches(
         total_input_tokens =
             add_input_tokens(total_input_tokens, prompt_ids.len(), max_input_tokens)
                 .map_err(|message| (StatusCode::UNPROCESSABLE_ENTITY, message))?;
+        remaining_tokenization_work -= prompt_ids.len() * (rendered.labels.len() + 2);
+        remaining_encoding_bytes -= encoding_bytes;
         let native = build_native_score_request(&prompt_ids, &label_ids, "validation")
             .and_then(|value| {
                 serde_json::from_value::<SglangGenerateRequest>(value).map_err(|cause| {
@@ -497,10 +550,9 @@ async fn dispatch(
     let mut results = Vec::with_capacity(branches.len() + 1);
     results.push(first_result);
 
-    let mut siblings = FuturesUnordered::new();
     let fanout_started = Instant::now();
-    for branch in branches {
-        siblings.push(run_branch(
+    let mut siblings = stream::iter(branches.into_iter().map(|branch| {
+        run_branch(
             selection.clone(),
             branch,
             request_id.clone(),
@@ -508,8 +560,9 @@ async fn dispatch(
             Some(placement),
             parent_context.clone(),
             metrics.clone(),
-        ));
-    }
+        )
+    }))
+    .buffer_unordered(MAX_CONCURRENT_SIBLINGS);
     while let Some(result) = siblings.next().await {
         match result {
             Ok(result) if result.placement == placement => results.push(result),
@@ -526,6 +579,7 @@ async fn dispatch(
             Err(cause) => return dispatch_error(&request_id, &parent_context, cause),
         }
     }
+    drop(siblings);
 
     metrics.observe_systemone_phase(
         &selection.canonical_model,

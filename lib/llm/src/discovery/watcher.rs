@@ -542,6 +542,10 @@ impl ModelWatcher {
                 && card
                     .runtime_config
                     .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
+                && card.runtime_config.supports_runtime_capability(
+                    crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1,
+                )
+                && card.runtime_config.max_num_seqs == Some(1)
                 && card.worker_type == Some(WorkerType::Aggregated)
                 && card.needs.is_empty()
                 && card.lora.is_none()

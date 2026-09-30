@@ -702,6 +702,10 @@ impl Model {
     ) -> Option<SystemOneExecutionSelection> {
         let card = worker_set.card();
         if !worker_set.supports_runtime_capability(capability)
+            || !worker_set.supports_runtime_capability(
+                crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1,
+            )
+            || card.runtime_config.max_num_seqs != Some(1)
             || card.worker_type != Some(crate::worker_type::WorkerType::Aggregated)
             || !card.needs.is_empty()
             || card.lora.is_some()
@@ -1143,6 +1147,10 @@ mod tests {
             crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
             true.into(),
         );
+        card.runtime_config
+            .runtime_data
+            .insert("sglang_systemone_serial_v1".to_string(), true.into());
+        card.runtime_config.max_num_seqs = Some(1);
         configure(&mut card);
         let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
         let mut worker_set = WorkerSet::new(namespace.to_string(), namespace.to_string(), card);
@@ -1196,7 +1204,29 @@ mod tests {
     #[test]
     fn systemone_selection_distinguishes_unsupported_from_unavailable() {
         let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
-        let unsupported: [fn(&mut ModelDeploymentCard); 8] = [
+        let unsupported: [fn(&mut ModelDeploymentCard); 13] = [
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove("sglang_systemone_serial_v1");
+            },
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .insert("sglang_systemone_serial_v1".to_string(), false.into());
+            },
+            |card| {
+                card.runtime_config.runtime_data.insert(
+                    "sglang_systemone_serial_v1".to_string(),
+                    "unsupported".into(),
+                );
+            },
+            |card| {
+                card.runtime_config.max_num_seqs = None;
+            },
+            |card| {
+                card.runtime_config.max_num_seqs = Some(2);
+            },
             |card| {
                 card.runtime_config.runtime_data.clear();
             },
