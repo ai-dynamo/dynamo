@@ -46,6 +46,10 @@ patches:
     - op: add
       path: /spec/services/agg/extraPodSpec/mainContainer/env/-
       value: {name: PRTE_MCA_rmaps_default_ranking_policy, value: slot}
+    # These pods expose no gIB devices; Socket preserves intra-clique MNNVL.
+    - op: add
+      path: /spec/services/agg/extraPodSpec/mainContainer/env/-
+      value: {name: NCCL_NET, value: Socket}
     - op: replace
       path: /spec/services/agg/extraPodSpec/resourceClaims/0/resourceClaimTemplateName
       value: kimi-k25-compute-domain-channel
