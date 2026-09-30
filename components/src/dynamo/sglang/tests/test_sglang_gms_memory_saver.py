@@ -73,16 +73,20 @@ def test_setup_gms_declares_memory_saver(monkeypatch, fake_gms_model_loader):
     assert gms_sglang.is_gms_active()
 
 
-def test_setup_gms_assigns_memory_saver_for_legacy_args(
+def test_setup_gms_rejects_engine_without_resolution_api(
     monkeypatch,
     fake_gms_model_loader,
 ):
+    """SGLang <0.5.19 support is dropped; fail loudly instead of silently.
+
+    Assigning enable_memory_saver directly is a no-op on builds that resolve
+    config separately from raw ServerArgs, which would leave GMS regions inert.
+    """
     server_args = SimpleNamespace(enable_memory_saver=False)
     monkeypatch.setattr(gms_sglang, "declare_resolution", None)
 
-    gms_sglang.setup_gms(server_args)
-
-    assert server_args.enable_memory_saver is True
+    with pytest.raises(RuntimeError, match="declare_resolution"):
+        gms_sglang.setup_gms(server_args)
 
 
 class _FakeManager:
