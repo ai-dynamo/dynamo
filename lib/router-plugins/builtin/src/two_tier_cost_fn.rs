@@ -23,16 +23,17 @@
 //! instance parameters defaulting to that router's values, so an instance with no `parameters`
 //! mapping reproduces it exactly.
 //!
-//! Ties between equally ranked workers resolve on candidate row order, which the host leaves
-//! unspecified. This matches the ported implementation; note that Dynamo's built-in selector
+//! Ties between equally ranked workers resolve to the lowest worker ID. The ported router breaks
+//! ties by its stable worker-list order; Dynamo's candidate row order is unspecified and can
+//! differ between processes, so worker identity stands in for it. Dynamo's built-in selector
 //! instead samples uniformly among ties.
 
 use std::sync::Arc;
 
 use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    ScoredWorkerCandidate, WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
     WorkerSelectionPolicyFactory,
 };
 use dynamo_kv_router::plugins::{
@@ -91,16 +92,16 @@ impl Parameters {
     }
 }
 
-fn least_loaded(load: &[WorkerLoadInput], rows: impl Iterator<Item = usize>) -> Option<usize> {
-    rows.min_by_key(|&row| load[row].active_requests())
-}
-
 fn select_row(
     parameters: &Parameters,
+    candidates: &[ScoredWorkerCandidate],
     cache: WorkerCacheInputs<'_>,
     load: &[WorkerLoadInput],
     request_blocks: u64,
 ) -> Option<usize> {
+    let least_loaded = |rows: &mut dyn Iterator<Item = usize>| {
+        rows.min_by_key(|&row| (load[row].active_requests(), candidates[row].worker()))
+    };
     if cache.is_empty() || cache.len() != load.len() {
         return None;
     }
@@ -110,7 +111,7 @@ fn select_row(
     if max_load.saturating_sub(min_load) > parameters.balance_abs_threshold
         && (max_load as f64) > parameters.balance_rel_threshold * (min_load as f64)
     {
-        return least_loaded(load, 0..load.len());
+        return least_loaded(&mut (0..load.len()));
     }
 
     let max_overlap = cache
@@ -123,15 +124,12 @@ fn select_row(
         max_overlap / request_blocks as f64
     };
     if cache_ratio > parameters.cache_threshold {
-        return least_loaded(
-            load,
-            cache.iter().enumerate().filter_map(|(row, item)| {
-                (item.device_overlap_blocks() == max_overlap).then_some(row)
-            }),
-        );
+        return least_loaded(&mut cache.iter().enumerate().filter_map(|(row, item)| {
+            (item.device_overlap_blocks() == max_overlap).then_some(row)
+        }));
     }
 
-    least_loaded(load, 0..load.len())
+    least_loaded(&mut (0..load.len()))
 }
 
 struct TwoTierCostFnPicker {
@@ -154,8 +152,14 @@ impl WorkerPicker for TwoTierCostFnPicker {
         let load = input
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        select_row(&self.parameters, cache, load, context.request_blocks())
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        select_row(
+            &self.parameters,
+            input.candidates(),
+            cache,
+            load,
+            context.request_blocks(),
+        )
+        .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
     }
 }
 
@@ -327,6 +331,16 @@ mod tests {
         assert!(cache(-0.1).is_err() && cache(1.1).is_err() && cache(f64::NAN).is_err());
         assert!(ratio(0.9).is_err() && ratio(f64::NAN).is_err());
         assert!(Parameters::default().validate().is_ok());
+    }
+
+    #[test]
+    fn ties_resolve_to_the_lowest_worker_id() {
+        // Each selection builds a fresh worker map, whose iteration order varies with its
+        // random hasher seed, so a tie broken by row order would not hold across the loop.
+        for _ in 0..16 {
+            assert_eq!(select([(B, 0, 0), (A, 0, 0)]), worker(A));
+            assert_eq!(select([(A, 6, 1), (B, 6, 1)]), worker(A));
+        }
     }
 
     #[test]
