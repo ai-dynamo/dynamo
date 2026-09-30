@@ -12,7 +12,8 @@
 //! - Each worker's TTFT is estimated as its in-flight prefill tokens over
 //!   `peak_prefill_tokens_per_second`. When the best sticky worker's estimate trails the best
 //!   non-sticky worker's by more than `max_ttft_penalty_ms`, stickiness breaks and every worker
-//!   stays in play; otherwise only sticky workers do.
+//!   stays in play; otherwise only sticky workers do. A zero `max_ttft_penalty_ms` disables this
+//!   gate, as in llm-d.
 //! - Among the remaining workers, the token-load score `1 − min(1, tokens / queue_threshold_tokens)`
 //!   picks the highest, with `tokens` the in-flight prefill tokens plus this request's uncached
 //!   prompt tokens on that worker. Ties rotate.
@@ -142,12 +143,12 @@ impl WorkerPicker for AffinityPicker {
         let load = input
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let request_blocks = context.request_blocks() as f64;
+        // Like llm-d, measure the share against complete blocks, the only ones a cache holds.
+        let full_blocks = (context.prompt_tokens() / context.block_size().max(1) as usize) as f64;
         let sticky = |row: usize| {
-            request_blocks > 0.0
+            full_blocks > 0.0
                 && cache.get(row).is_some_and(|cache| {
-                    device_overlap_blocks(cache) / request_blocks
-                        >= self.parameters.affinity_threshold
+                    device_overlap_blocks(cache) / full_blocks >= self.parameters.affinity_threshold
                 })
         };
         let ttft_ms = |row: usize| {

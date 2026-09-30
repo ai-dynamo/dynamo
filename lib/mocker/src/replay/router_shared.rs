@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Context;
 use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -69,7 +68,7 @@ pub(super) enum ReplaySelector {
     Policy(WorkerSelectionPolicy),
 }
 
-impl<C: WorkerConfigLike> WorkerSelector<C> for ReplaySelector {
+impl<C: WorkerConfigLike + Sync> WorkerSelector<C> for ReplaySelector {
     fn required_worker_inputs(&self) -> WorkerInputs {
         match self {
             Self::Default(selector) => WorkerSelector::<C>::required_worker_inputs(selector),
@@ -179,9 +178,12 @@ pub(super) fn replay_selector_with_seed(
     {
         let mut registry = dynamo_custom_policy_builtin::default_registry();
         dynamo_custom_policy_builtin::register(&mut registry)?;
+        // One self-contained message: Python bindings display only the outermost error.
         let factory = registry
             .resolve_for_worker_type(config, worker_type)
-            .with_context(|| format!("resolving worker-selection policy {instance:?}"))?
+            .map_err(|error| {
+                anyhow::anyhow!("resolving worker-selection policy {instance:?}: {error}")
+            })?
             .ok_or_else(|| {
                 anyhow::anyhow!("worker-selection policy {instance:?} did not resolve")
             })?;

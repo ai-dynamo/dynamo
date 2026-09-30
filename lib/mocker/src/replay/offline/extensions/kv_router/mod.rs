@@ -295,7 +295,16 @@ impl PendingRequest {
             token_seq: self.token_seq.clone(),
             isl_tokens: self.isl_tokens,
             overlap: OverlapSignals {
-                tier_overlap_blocks: TierOverlapBlocks::default(),
+                // Replay's primary index holds device-resident blocks only.
+                tier_overlap_blocks: TierOverlapBlocks {
+                    device: self
+                        .overlaps
+                        .scores
+                        .iter()
+                        .map(|(worker, overlap)| (*worker, *overlap as usize))
+                        .collect(),
+                    ..TierOverlapBlocks::default()
+                },
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
@@ -1398,7 +1407,8 @@ mod tests {
             ..KvRouterConfig::default()
         };
         let targets = |config| {
-            let mut router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 2).unwrap();
+            let mut router =
+                OfflineReplayRouter::new(&replay_args(), Some(config), None, 2).unwrap();
             (1..=2)
                 .map(|uuid| {
                     router
@@ -1416,6 +1426,38 @@ mod tests {
         assert_ne!(default[0], default[1]);
         let hashed = targets(chwbl);
         assert_eq!(hashed[0], hashed[1]);
+    }
+
+    #[test]
+    fn replay_passes_device_overlap_to_catalog_policies() {
+        let policy_file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "worker_selection:\n  aggregated: two-tier\n  instances:\n    - name: two-tier\n      type: dynamo-two-tier-cost-fn\n",
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 2).unwrap();
+        let target = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event_for_rank(
+                1,
+                0,
+                1,
+                hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        // Two-tier reads device-tier overlap; without it, the idle-worker tie goes to worker 0.
+        let effects = router
+            .on_request_arrival(&target, Some(hashes), 0.0)
+            .unwrap();
+        assert_eq!(effects.admissions[0].worker_idx, 1);
     }
 
     #[test]

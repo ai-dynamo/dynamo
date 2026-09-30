@@ -6,9 +6,10 @@
 //! Ported from KubeAI's `balance_chwbl.go`, with defaults from SGLang's `prefix_hash` gateway
 //! policy, both after "Consistent Hashing with Bounded Loads" (Mirrokni et al., SODA 2018).
 //! Requests sharing their first `prefix_tokens` map to the same worker. A worker accepts a
-//! request while its active requests stay within `load_factor` times the fleet average, counting
-//! the new request; otherwise the request walks to the next worker in hash order. When every
-//! worker is over the bound, the first worker in hash order takes it.
+//! request while its current active requests are at most `load_factor × (total + 1) / n`, the
+//! fleet average counting the new request, exactly as KubeAI's `chwblLoadOK` and SGLang's
+//! `load_ok` compute it. Otherwise the request walks to the next worker in hash order. When
+//! every worker is over the bound, the first worker in hash order takes it.
 //!
 //! The policy reads no cache state, so it routes identically with or without KV events. The key
 //! is block aligned: it covers the prompt's first `prefix_tokens / block_size` full blocks, or
@@ -67,7 +68,7 @@ impl Parameters {
 
 struct ChwblPicker {
     parameters: Parameters,
-    order: Vec<usize>,
+    order: Vec<(std::cmp::Reverse<u64>, usize)>,
 }
 
 impl WorkerPicker for ChwblPicker {
@@ -97,20 +98,27 @@ impl WorkerPicker for ChwblPicker {
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"));
         };
 
-        self.order.clear();
-        self.order.extend(0..candidates.len());
-        self.order.sort_unstable_by_key(|&row| {
-            std::cmp::Reverse(rendezvous(key, candidates[row].worker(), 0))
-        });
         let total: usize = (0..candidates.len()).map(requests).sum();
         let bound = (total + 1) as f64 / candidates.len() as f64 * self.parameters.load_factor;
         let within_bound = |row: usize| total == 0 || requests(row) as f64 <= bound;
+        let weight = |row: usize| rendezvous(key, candidates[row].worker(), 0);
+        let owner = (0..candidates.len())
+            .max_by_key(|&row| weight(row))
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))?;
+        if within_bound(owner) {
+            return Ok(owner);
+        }
+        // Walk the remaining workers in hash order only when the owner is over its bound.
+        self.order.clear();
         self.order
+            .extend((0..candidates.len()).map(|row| (std::cmp::Reverse(weight(row)), row)));
+        self.order.sort_unstable();
+        Ok(self
+            .order
             .iter()
-            .copied()
+            .map(|&(_, row)| row)
             .find(|&row| within_bound(row))
-            .or_else(|| self.order.first().copied())
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+            .unwrap_or(owner))
     }
 }
 

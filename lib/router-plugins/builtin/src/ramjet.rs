@@ -15,10 +15,10 @@
 //!   leader then survive the cap, which keeps long sessions sticky. `marginal` credits overlap
 //!   above the coldest worker; `absolute` credits capped raw overlap.
 //! - Ramjet charges each in-flight request `clamp(ceil(uncached_prompt_bytes / 32 KB), 1, 8)`
-//!   load units; its phase-aware mode keeps only one unit once the first token streams. Dynamo
-//!   exposes load per worker, not per request, so this port charges `active_requests +
-//!   active_prefill_tokens / load_unit_tokens`, matching the phase-aware mode without the
-//!   per-request cap.
+//!   load units. Its non-default phase-aware mode keeps only one unit once the first token
+//!   streams. Dynamo exposes load per worker, not per request, so this port approximates the
+//!   phase-aware mode with `active_requests + active_prefill_tokens / load_unit_tokens`: up to one
+//!   more unit per prefilling request than Ramjet's rounding, and no per-request cap.
 //!
 //! Ramjet builds its own approximate prefix index from served responses, with an eviction
 //! horizon to age out stale blocks. This port reads Dynamo's KV-event index instead, which
@@ -53,7 +53,8 @@ enum AffinityBasis {
     Relative,
 }
 
-/// Defaults follow Ramjet's, except `basis`, which follows its published Dynamo comparison.
+/// Defaults follow Ramjet's, except `basis`, which follows its published Dynamo comparison, and
+/// the load model, which approximates the phase-aware mode.
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Parameters {

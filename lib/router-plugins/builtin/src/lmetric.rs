@@ -16,7 +16,8 @@
 //!
 //! The hot-spot detector follows the paper's two phases. A request class is the set of requests
 //! sharing the first `class_prefix_blocks` prompt blocks. For class `c` with arrival share `x`
-//! over the last `window_requests` selections, the workers holding its prefix `M`, and all other
+//! over the last `window_requests` selections of prompts long enough to have a class, the workers
+//! holding its prefix `M`, and all other
 //! workers `M̄`, an alarm is raised when `x / (1 − x) > |M| / |M̄|`. While alarmed, `M` is
 //! filtered out once `2|M|` consecutive class requests would have been placed on it. The paper
 //! uses a time window; this port counts selections so replays stay deterministic.
@@ -43,7 +44,6 @@ pub const POLICY_TYPE: &str = "lmetric";
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Parameters {
-    /// Enables the hot-spot detector.
     hotspot_detection: bool,
     /// Prompt blocks that define a request class.
     class_prefix_blocks: usize,
@@ -92,7 +92,7 @@ impl HotspotDetector {
         Self {
             class_prefix_blocks: parameters.class_prefix_blocks,
             window_requests: parameters.window_requests,
-            window: VecDeque::with_capacity(parameters.window_requests),
+            window: VecDeque::new(),
             classes: HashMap::new(),
         }
     }

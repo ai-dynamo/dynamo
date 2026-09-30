@@ -34,8 +34,11 @@ pub(crate) fn rotate_by_worker(
     worker: impl Fn(usize) -> WorkerWithDpRank,
     rotation: usize,
 ) -> Option<usize> {
-    rows.sort_unstable_by_key(|&row| worker(row));
-    (!rows.is_empty()).then(|| rows[rotation % rows.len()])
+    if rows.is_empty() {
+        return None;
+    }
+    let index = rotation % rows.len();
+    Some(*rows.select_nth_unstable_by_key(index, |&row| worker(row)).1)
 }
 
 fn mix(mut value: u64) -> u64 {

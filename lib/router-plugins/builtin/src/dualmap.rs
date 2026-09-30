@@ -6,10 +6,11 @@
 //! Ported from "DualMap: Enabling Both Cache Affinity and Load Balancing for Distributed LLM
 //! Serving" (<https://arxiv.org/abs/2602.06502>). Two independent hashes of the prompt prefix map
 //! every request to two candidate workers, so requests sharing a prefix share candidates. The
-//! request goes to the candidate with more cached prefix unless its pending prefill, including
-//! this request, would exceed `pending_prefill_token_budget`, the backlog a worker can clear
-//! within the TTFT SLO; then it goes to the candidate with less pending prefill. Equal cache
-//! reuse also picks the less loaded candidate.
+//! request goes to the candidate with more cached prefix unless its prefill backlog, including
+//! this request's uncached prompt, would exceed `pending_prefill_token_budget`, the backlog a
+//! worker can clear within the TTFT SLO. Then, like the paper's TTFT comparison, it goes to the
+//! candidate that would carry the smaller backlog including this request. Equal cache reuse also
+//! picks that candidate.
 //!
 //! A prefix is hot when its share of the last `window_requests` requests exceeds `2 / n` for `n`
 //! workers. Hot prefixes hash a longer key, doubling from `hash_prefix_blocks`, so their requests
@@ -18,8 +19,8 @@
 //! This port uses rendezvous hashing, which keeps the mapping stable as workers join and leave
 //! like the paper's consistent-hash rings. The paper also migrates queued requests between the
 //! two candidates; Dynamo places each request once, so that step is omitted. Requests without
-//! prefix hashes, such as those in disaggregated prefill pools, go to the worker with the least
-//! pending prefill.
+//! prefix hashes, such as those in disaggregated prefill pools, go to the worker with the smallest
+//! backlog including this request.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -84,7 +85,7 @@ impl DualMapPicker {
     fn new(parameters: Parameters) -> Self {
         Self {
             parameters,
-            window: VecDeque::with_capacity(parameters.window_requests),
+            window: VecDeque::new(),
             arrivals: HashMap::new(),
         }
     }
@@ -145,9 +146,15 @@ impl WorkerPicker for DualMapPicker {
         let load = input
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let pending = |row: usize| (load[row].active_prefill_tokens(), candidates[row].worker());
-        let least_pending = |rows: &mut dyn Iterator<Item = usize>| {
-            rows.min_by_key(|&row| pending(row))
+        // Prefill tokens a candidate would carry after taking this request.
+        let backlog = |row: usize| {
+            load[row].active_prefill_tokens()
+                + cache.get(row).map_or(context.prompt_tokens(), |cache| {
+                    uncached_prompt_tokens(context, cache)
+                })
+        };
+        let least_backlog = |rows: &mut dyn Iterator<Item = usize>| {
+            rows.min_by_key(|&row| (backlog(row), candidates[row].worker()))
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
         };
 
@@ -156,29 +163,27 @@ impl WorkerPicker for DualMapPicker {
             _ => None,
         };
         let Some(key) = key else {
-            return least_pending(&mut (0..candidates.len()));
+            return least_backlog(&mut (0..candidates.len()));
         };
         let draw = |seed: u64, skip: Option<usize>| {
             (0..candidates.len())
                 .filter(|&row| Some(row) != skip)
                 .max_by_key(|&row| rendezvous(key, candidates[row].worker(), seed))
         };
-        let (Some(first), Some(second)) = (draw(1, None), draw(2, draw(1, None))) else {
-            return least_pending(&mut (0..candidates.len()));
+        let first = draw(1, None);
+        let (Some(first), Some(second)) = (first, first.and_then(|first| draw(2, Some(first))))
+        else {
+            return least_backlog(&mut (0..candidates.len()));
         };
 
         let cached = |row: usize| cache.get(row).map_or(0.0, device_overlap_blocks);
         let (warm, cold) = match cached(first).total_cmp(&cached(second)) {
-            std::cmp::Ordering::Equal => return least_pending(&mut [first, second].into_iter()),
+            std::cmp::Ordering::Equal => return least_backlog(&mut [first, second].into_iter()),
             std::cmp::Ordering::Greater => (first, second),
             std::cmp::Ordering::Less => (second, first),
         };
-        let warm_backlog = load[warm].active_prefill_tokens()
-            + cache.get(warm).map_or(context.prompt_tokens(), |cache| {
-                uncached_prompt_tokens(context, cache)
-            });
-        if warm_backlog > self.parameters.pending_prefill_token_budget {
-            return least_pending(&mut [warm, cold].into_iter());
+        if backlog(warm) > self.parameters.pending_prefill_token_budget {
+            return least_backlog(&mut [warm, cold].into_iter());
         }
         Ok(warm)
     }
@@ -234,6 +239,28 @@ mod tests {
             .map(|_| select(&policy, request(8, 3), &workers))
             .collect();
         // Idle, uncached candidates tie; the same prefix keeps landing on one worker.
+        assert_eq!(picks.len(), 1);
+    }
+
+    #[test]
+    fn requests_sharing_a_cold_prefix_share_candidates() {
+        // Diverse earlier prefixes keep prefix 42 below the 2/n hotness share, so requests that
+        // share its first 4 blocks hash the same short key even though block 8 differs.
+        let policy = policy(Parameters {
+            window_requests: 16,
+            ..Parameters::default()
+        });
+        let workers = idle(8);
+        for prefix in 100..112 {
+            select(&policy, request(8, prefix), &workers);
+        }
+        let picks: std::collections::HashSet<_> = (0..2)
+            .map(|suffix| {
+                let mut request = request(8, 42);
+                request.token_seq.as_mut().unwrap()[7] = 90_000 + suffix;
+                select(&policy, request, &workers)
+            })
+            .collect();
         assert_eq!(picks.len(), 1);
     }
 

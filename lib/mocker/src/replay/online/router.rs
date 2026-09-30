@@ -302,7 +302,15 @@ impl KvReplayRouter {
                 request.tokens.len(),
                 token_seq,
                 None,
-                TierOverlapBlocks::default(),
+                TierOverlapBlocks {
+                    // Replay's primary index holds device-resident blocks only.
+                    device: overlaps
+                        .scores
+                        .iter()
+                        .map(|(worker, overlap)| (*worker, *overlap as usize))
+                        .collect(),
+                    ..TierOverlapBlocks::default()
+                },
                 effective_overlap_blocks,
                 effective_cached_tokens,
                 None,
