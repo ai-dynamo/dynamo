@@ -165,6 +165,7 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
 
 
 async def worker(argv: list[str] | None = None) -> None:
+    """Resolve the model source, configure the engine, and serve a Dynamo worker."""
     if argv is None:
         argv = sys.argv[1:]
     config = await parse_args_with_model_fetch(argv)
