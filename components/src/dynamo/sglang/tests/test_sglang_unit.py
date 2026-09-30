@@ -9,6 +9,7 @@ import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import torch
@@ -1636,6 +1637,70 @@ def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
     )
 
     assert should_fetch_model(args, "Qwen/Qwen3-0.6B") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("load_format", ["auto", "remote_instance"])
+async def test_parse_args_resolves_ngc_before_server_args(
+    monkeypatch, tmp_path, load_format
+):
+    model_uri = "ngc://test-org/test-team/test-model:v1"
+    local_path = str(tmp_path)
+    fetch = AsyncMock(return_value=local_path)
+    monkeypatch.setattr(sglang_args, "fetch_model", fetch)
+    monkeypatch.delenv(SNAPSHOT_CONTROL_DIR_ENV, raising=False)
+
+    def resolve(parsed_args):
+        # ServerArgs resolves the model config before the weight loader runs.
+        assert parsed_args.model_path == local_path
+        return _dcp_server_args_stub(
+            model_path=parsed_args.model_path,
+            served_model_name=parsed_args.served_model_name,
+            load_format=parsed_args.load_format,
+            remote_instance_weight_loader_backend=(
+                parsed_args.remote_instance_weight_loader_backend
+            ),
+        )
+
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", resolve)
+    argv = [
+        "--model",
+        model_uri,
+        "--load-format",
+        load_format,
+        "--served-model-name",
+        "my-model,alternate:model",
+    ]
+    if load_format == "remote_instance":
+        argv.extend(["--remote-instance-weight-loader-backend", "modelexpress"])
+
+    config = await parse_args(argv)
+
+    # A full download supplies the plugin's native fallback as well as config.
+    fetch.assert_awaited_once_with(model_uri)
+    assert config.server_args.model_path == local_path
+    assert config.server_args.served_model_name == "my-model"
+    assert config.dynamo_args.served_model_aliases == ["alternate:model"]
+    assert config.server_args.load_format == load_format
+    if load_format == "remote_instance":
+        assert use_modelexpress_remote_instance(config.server_args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("served_model_name", [None, " ", "model:adapter"])
+async def test_ngc_requires_valid_served_name_before_fetch(
+    monkeypatch, served_model_name
+):
+    fetch = AsyncMock()
+    monkeypatch.setattr(sglang_args, "fetch_model", fetch)
+    argv = ["--model", "ngc://test-org/test-team/test-model:v1"]
+    if served_model_name is not None:
+        argv.extend(["--served-model-name", served_model_name])
+
+    with pytest.raises(ValueError, match="--served-model-name my-model"):
+        await parse_args(argv)
+
+    fetch.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

@@ -313,7 +313,7 @@ impl LocalModelBuilder {
     }
 
     /// Make an LLM ready for use:
-    /// - Download it from Hugging Face (and NGC in future) if necessary
+    /// - Download it from Hugging Face or NGC if necessary
     /// - Resolve the path
     /// - Load it's ModelDeploymentCard card
     /// - Name it correctly
@@ -525,7 +525,7 @@ pub async fn update_model_taints(
 
 impl LocalModel {
     /// Ensure a model is accessible locally, returning it's path.
-    /// Downloads the model from Hugging Face if necessary.
+    /// Downloads the model from Hugging Face, or from NGC for `ngc://` names, if necessary.
     /// If ignore_weights is true, model weight files will be skipped and only the model config
     /// will be downloaded.
     /// Returns the path to the model files
