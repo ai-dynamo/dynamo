@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from dynamo.vllm.realtime import RealtimeHandler, RealtimeTranscriptionHandler
+from dynamo.vllm.realtime.transcription import VllmRealtimeTranscriber
 
 pytestmark = [
     pytest.mark.unit,
@@ -70,11 +71,13 @@ async def _stream_audio(audio_stream, input_stream):
 
 def _handler(engine: _FakeEngine) -> RealtimeTranscriptionHandler:
     return RealtimeTranscriptionHandler(
-        engine_client=engine,
         model_name=MODEL,
         model_sample_rate=16_000.0,
-        streaming_input_factory=_stream_audio,
-        sampling_params_factory=lambda: object(),
+        transcribe=VllmRealtimeTranscriber(
+            engine_client=engine,
+            streaming_input_factory=_stream_audio,
+            sampling_params_factory=lambda: object(),
+        ),
     )
 
 
@@ -339,3 +342,38 @@ def test_next_turn_is_pumped_while_previous_turn_uses_engine_slot():
     ]
     assert engine.started == 2
     assert len(completed) == 2
+
+
+def test_native_realtime_adapter_feeds_tokens_back_before_next_audio_chunk():
+    async def scenario():
+        feedback = []
+
+        async def streaming_input(audio_stream, input_stream):
+            async for audio in audio_stream:
+                yield audio
+                feedback.append(await asyncio.wait_for(input_stream.get(), 1))
+
+        class FeedbackEngine:
+            async def generate(self, *, prompt, sampling_params, request_id):
+                async for _ in prompt:
+                    yield SimpleNamespace(
+                        prompt_token_ids=[1, 2, 3],
+                        outputs=[SimpleNamespace(text="word ", token_ids=[4, 5])],
+                    )
+
+        async def audio():
+            for _ in range(2):
+                yield np.zeros(16, dtype=np.float32)
+
+        transcribe = VllmRealtimeTranscriber(
+            engine_client=FeedbackEngine(),
+            streaming_input_factory=streaming_input,
+            sampling_params_factory=lambda: object(),
+        )
+        deltas = [item async for item in transcribe(audio(), "native-turn")]
+        assert feedback == [[4, 5], [4, 5]]
+        assert "".join(item.text for item in deltas) == "word word "
+        assert sum(item.input_tokens for item in deltas) == 3
+        assert sum(item.output_tokens for item in deltas) == 4
+
+    asyncio.run(scenario())

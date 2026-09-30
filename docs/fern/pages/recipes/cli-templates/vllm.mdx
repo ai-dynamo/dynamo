@@ -46,6 +46,46 @@ The default model is `Qwen/Qwen3-0.6B`.
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg.sh)
 </Accordion>
+<Accordion title="Incremental Qwen3-ASR Transcription">
+
+**Experimental.** Starts a standard vLLM worker for English transcription over the
+OpenAI-compatible `/v1/realtime` WebSocket endpoint. The Qwen3-ASR adapter emits transcript
+deltas while audio arrives; vLLM-Omni is not required.
+
+```bash
+./launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-0.6B \
+    --max-model-len 4096 --max-num-seqs 2
+```
+
+In another terminal, send an English speech file and require a delta before committing the audio:
+
+```bash
+python launch/realtime_audio_client.py \
+    --session-type transcription \
+    --model Qwen/Qwen3-ASR-0.6B \
+    --input-audio speech.wav \
+    --require-incremental
+```
+
+The client resamples input to 24 kHz mono PCM16 and sends 100 ms frames while receiving events.
+Use a clip longer than four seconds with enough speech to produce partial text. A successful check
+prints `delta before commit: True`; short clips can finish correctly without an earlier delta.
+
+Qwen3-ASR reprocesses accumulated audio every two seconds. The first two chunks may revise the
+whole hypothesis; subsequent decodes preserve emitted text and withhold five tokens for revision.
+The first partial therefore requires at least four seconds of audio, plus inference time, and can
+arrive later for silence or short hypotheses. Committing flushes the remaining audio and text.
+The concatenated deltas equal the completed transcript.
+
+This path accepts English transcription sessions, explicit `input_audio_buffer.commit`, and
+`input_audio_buffer.clear`. The existing 60-second utterance limit applies. Server voice activity
+detection, prompts, noise reduction, and timestamps are not supported. Repeated processing of
+accumulated audio increases work for longer utterances; this is not a streaming audio encoder with
+persistent encoder state. Models with neither native vLLM realtime support nor a Qwen3-ASR adapter
+are rejected during worker initialization.
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
+</Accordion>
 <Accordion title="Text Embeddings">
 
 Starts a vLLM pooling worker and exposes the OpenAI-compatible embeddings endpoint. Use it for

@@ -25,6 +25,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# The Voxtral checkpoint needs this architecture override. Qwen3-ASR and other
+# models must keep the architecture declared by their own checkpoint.
+MODEL_ARGS=()
+if [[ "$MODEL" == "mistralai/Voxtral-Mini-4B-Realtime-2602" ]]; then
+    MODEL_ARGS+=(--hf-overrides '{"architectures":["VoxtralRealtimeGeneration"]}')
+fi
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 print_launch_banner --no-curl "Launching vLLM Realtime Transcription" "$MODEL" "$HTTP_PORT"
@@ -44,7 +51,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --realtime \
     --model "$MODEL" \
     --enforce-eager \
-    --hf-overrides '{"architectures":["VoxtralRealtimeGeneration"]}' \
+    "${MODEL_ARGS[@]}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

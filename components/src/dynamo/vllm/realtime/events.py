@@ -87,6 +87,7 @@ def input_audio_transcription_completed_event(
     *,
     input_tokens: int,
     output_tokens: int,
+    input_text_tokens: int = 0,
 ) -> dict[str, Any]:
     return {
         "type": "conversation.item.input_audio_transcription.completed",
@@ -101,8 +102,8 @@ def input_audio_transcription_completed_event(
             "output_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
             "input_token_details": {
-                "audio_tokens": input_tokens,
-                "text_tokens": 0,
+                "audio_tokens": input_tokens - input_text_tokens,
+                "text_tokens": input_text_tokens,
             },
         },
     }

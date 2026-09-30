@@ -11,7 +11,8 @@ import binascii
 import logging
 import math
 import uuid
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import aclosing
 from typing import Any, Protocol
 
 import numpy as np
@@ -28,7 +29,8 @@ from .events import (
     invalid_request_error_event,
     session_updated_event,
 )
-from .serving import StreamingInputFactory, build_realtime_serving
+from .serving import build_realtime_serving
+from .transcription import Transcribe, VllmRealtimeTranscriber
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +38,6 @@ OPENAI_PCM_SAMPLE_RATE = 24_000
 MAX_AUDIO_CHUNK_BYTES = 4 * 1024 * 1024
 RESAMPLE_BLOCK_MILLISECONDS = 100
 MAX_UTTERANCE_SECONDS = 60
-
-SamplingParamsFactory = Callable[[], Any]
 
 
 class RealtimeSessionHandler(Protocol):
@@ -100,17 +100,6 @@ class RealtimeHandler:
 
         async for event in handler.generate(replay(), context):
             yield event
-
-
-def _default_sampling_params() -> Any:
-    from vllm.sampling_params import RequestOutputKind, SamplingParams
-
-    return SamplingParams.from_optional(
-        temperature=0.0,
-        max_tokens=64,
-        output_kind=RequestOutputKind.DELTA,
-        skip_clone=True,
-    )
 
 
 def decode_pcm16(audio_b64: str) -> np.ndarray:
@@ -186,22 +175,18 @@ class _Turn(RealtimeTurn):
 
 
 class RealtimeTranscriptionHandler:
-    """Translate OpenAI realtime transcription events to vLLM streaming input."""
+    """Translate OpenAI realtime events to a model's transcription adapter."""
 
     def __init__(
         self,
         *,
-        engine_client: Any,
         model_name: str,
         model_sample_rate: int | float,
-        streaming_input_factory: StreamingInputFactory,
-        sampling_params_factory: SamplingParamsFactory = _default_sampling_params,
+        transcribe: Transcribe,
     ) -> None:
-        self.engine_client = engine_client
         self.model_name = model_name
         self.model_sample_rate = int(model_sample_rate)
-        self._streaming_input_factory = streaming_input_factory
-        self._sampling_params_factory = sampling_params_factory
+        self._transcribe = transcribe
 
     @classmethod
     def from_engine(
@@ -216,26 +201,45 @@ class RealtimeTranscriptionHandler:
             model_name=model_name,
             model_path=model_path,
         )
+        # These optional backend imports are only needed when constructing a
+        # real engine adapter; protocol-only unit tests do not require vLLM.
+        from vllm.model_executor.models.interfaces import supports_realtime
+        from vllm.sampling_params import RequestOutputKind, SamplingParams
+
+        transcribe: Transcribe
+        if supports_realtime(serving.model_cls):
+
+            def sampling_params() -> Any:
+                return SamplingParams.from_optional(
+                    temperature=0.0,
+                    max_tokens=serving.model_cls.realtime_max_tokens,
+                    output_kind=RequestOutputKind.DELTA,
+                    skip_clone=True,
+                )
+
+            transcribe = VllmRealtimeTranscriber(
+                engine_client=engine_client,
+                streaming_input_factory=serving.transcribe_realtime,
+                sampling_params_factory=sampling_params,
+            )
+        elif serving.model_config.hf_config.model_type == "qwen3_asr":
+            from .qwen3_asr import Qwen3ASRTranscriber
+
+            transcribe = Qwen3ASRTranscriber(
+                engine_client=engine_client, serving=serving
+            )
+        else:
+            raise ValueError(
+                f"Model '{model_name}' does not support realtime transcription: "
+                "expected vLLM SupportsRealtime or Qwen3-ASR."
+            )
         speech_config = serving.model_cls.get_speech_to_text_config(
             serving.model_config, "transcribe"
         )
-
-        def sampling_params() -> Any:
-            from vllm.sampling_params import RequestOutputKind, SamplingParams
-
-            return SamplingParams.from_optional(
-                temperature=0.0,
-                max_tokens=serving.model_cls.realtime_max_tokens,
-                output_kind=RequestOutputKind.DELTA,
-                skip_clone=True,
-            )
-
         return cls(
-            engine_client=engine_client,
             model_name=model_name,
             model_sample_rate=speech_config.sample_rate,
-            streaming_input_factory=serving.transcribe_realtime,
-            sampling_params_factory=sampling_params,
+            transcribe=transcribe,
         )
 
     async def _run_turn(
@@ -243,47 +247,37 @@ class RealtimeTranscriptionHandler:
         turn: _Turn,
         context: Context,
     ) -> None:
-        input_stream: asyncio.Queue[list[int]] = asyncio.Queue()
-        streaming_input = self._streaming_input_factory(
-            turn.audio_stream(), input_stream
-        )
-        transcript = ""
+        transcript: list[str] = []
         input_tokens = 0
         output_tokens = 0
+        input_text_tokens = 0
 
         try:
-            result_stream = self.engine_client.generate(
-                prompt=streaming_input,
-                sampling_params=self._sampling_params_factory(),
-                request_id=turn.request_id,
-            )
-            async for result in result_stream:
-                if context.is_stopped():
-                    return
-                outputs = getattr(result, "outputs", None)
-                if not outputs:
-                    continue
-                candidate = outputs[0]
-                delta = getattr(candidate, "text", "") or ""
-                token_ids = list(getattr(candidate, "token_ids", None) or [])
-                if not input_tokens:
-                    input_tokens = len(getattr(result, "prompt_token_ids", None) or [])
-                output_tokens += len(token_ids)
-                if token_ids:
-                    input_stream.put_nowait(token_ids)
-                if delta:
-                    transcript += delta
-                    await turn.events.put(
-                        input_audio_transcription_delta_event(turn.item_id, delta)
-                    )
+            async with aclosing(
+                self._transcribe(turn.audio_stream(), turn.request_id)
+            ) as results:
+                async for result in results:
+                    if context.is_stopped():
+                        return
+                    input_tokens += result.input_tokens
+                    output_tokens += result.output_tokens
+                    input_text_tokens += result.input_text_tokens
+                    if result.text:
+                        transcript.append(result.text)
+                        await turn.events.put(
+                            input_audio_transcription_delta_event(
+                                turn.item_id, result.text
+                            )
+                        )
 
             if not context.is_stopped():
                 await turn.events.put(
                     input_audio_transcription_completed_event(
                         turn.item_id,
-                        transcript,
+                        "".join(transcript),
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
+                        input_text_tokens=input_text_tokens,
                     )
                 )
         except asyncio.CancelledError:
