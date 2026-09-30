@@ -2444,7 +2444,6 @@ async fn pooling(
     Ok(response)
 }
 
-/// Parses chat-completion requests and manages their HTTP request lifecycle.
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,

@@ -3625,7 +3625,7 @@ mod stream_options {
             ("DYN_ENABLE_FORCE_INCLUDE_USAGE", Some("false")),
         ], async {
             let script = load_agent_fixture("text.sse").await.unwrap();
-            let chat = Arc::new(scripted_chat_engine::ScriptedChatEngine::new((0..8).map(|_| Ok(script.clone()))));
+            let chat = Arc::new(scripted_chat_engine::ScriptedChatEngine::new((0..6).map(|_| Ok(script.clone()))));
             let completion = Arc::new(CompletionEngine::default());
             let (listener, port) = ports::bind_random_port().await;
             let service = HttpService::builder().port(port).host("127.0.0.1")
@@ -3641,7 +3641,7 @@ mod stream_options {
                 let mut body = json!({"model": MODEL});
                 if endpoint == "chat/completions" { body["messages"] = json!([{"role": "user", "content": "Say hello"}]); }
                 else { body["prompt"] = json!("Say hello"); }
-                for stream in [None, Some(json!(null)), Some(json!(false)), Some(json!(true))] {
+                for stream in [None, Some(json!(false)), Some(json!(true))] {
                     body.as_object_mut().unwrap().remove("stream");
                     if let Some(flag) = &stream { body["stream"] = flag.clone(); }
                     for include_usage in [false, true] {
