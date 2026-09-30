@@ -55,6 +55,14 @@ impl Store for NATSStore {
 }
 
 impl NATSStore {
+    pub(super) fn check_connection(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.client.client().connection_state() == async_nats::connection::State::Connected,
+            "NATS is disconnected"
+        );
+        Ok(())
+    }
+
     pub fn new(client: Client, endpoint: EndpointId) -> Self {
         NATSStore { client, endpoint }
     }

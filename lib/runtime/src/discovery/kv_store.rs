@@ -390,6 +390,10 @@ impl KVStoreDiscovery {
 
 #[async_trait]
 impl Discovery for KVStoreDiscovery {
+    async fn check_connection(&self) -> Result<()> {
+        self.store.check_connection().await
+    }
+
     fn instance_id(&self) -> u64 {
         self.store.connection_id()
     }

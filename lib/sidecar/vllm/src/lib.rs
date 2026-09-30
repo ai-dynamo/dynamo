@@ -10,11 +10,13 @@ mod engine;
 mod json;
 mod lora;
 mod model;
+mod run;
 
 #[doc(hidden)]
 pub use vllm_proto as proto;
 
 pub use engine::VllmSidecarEngine;
+pub use run::{RunError, run};
 
 #[cfg(test)]
 mod tests;

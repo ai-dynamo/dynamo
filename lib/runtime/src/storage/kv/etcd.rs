@@ -18,6 +18,10 @@ pub struct EtcdStore {
 }
 
 impl EtcdStore {
+    pub(super) async fn check_connection(&self) -> anyhow::Result<()> {
+        self.client.check_connection().await
+    }
+
     pub fn new(client: etcd::Client) -> Self {
         Self { client }
     }

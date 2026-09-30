@@ -184,6 +184,14 @@ impl KubeDiscoveryClient {
 
 #[async_trait]
 impl Discovery for KubeDiscoveryClient {
+    async fn check_connection(&self) -> Result<()> {
+        // Query the API directly: a cached watch snapshot cannot establish connectivity.
+        let api: Api<DynamoWorkerMetadata> =
+            Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
+        api.list(&kube::api::ListParams::default().limit(1)).await?;
+        Ok(())
+    }
+
     fn instance_id(&self) -> u64 {
         self.instance_id
     }
@@ -577,6 +585,42 @@ mod tests {
     use crate::component::TransportType;
     use crate::discovery::startup_contract as contract;
     use crate::discovery::{EventScope, EventTransport, ModelTaintsUpdate};
+
+    // A cached empty discovery snapshot must not mask API loss or a missing
+    // CRD, while an authoritative empty list is a healthy dependency.
+    #[tokio::test]
+    async fn dependency_probe_distinguishes_empty_missing_and_recovered_api() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        let status = Arc::new(AtomicU16::new(200));
+        let response_status = status.clone();
+        let service = tower::service_fn(
+            move |_request: axum::http::Request<kube::client::Body>| {
+                let status = response_status.load(Ordering::SeqCst);
+                async move {
+                    let body = if status == 200 {
+                        serde_json::json!({"apiVersion":"nvidia.com/v1alpha1", "kind":"DynamoWorkerMetadataList", "metadata":{}, "items":[]})
+                    } else {
+                        serde_json::json!({"apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":"NotFound", "message":"resource unavailable", "code":status})
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        axum::http::Response::builder()
+                            .status(status)
+                            .body(axum::body::Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                }
+            },
+        );
+        let (mut client, _daemon) = client_with(&[]);
+        client.kube_client = KubeClient::new(service, "ns");
+        assert!(client.check_connection().await.is_ok());
+        for code in [404, 503] {
+            status.store(code, Ordering::SeqCst);
+            assert!(client.check_connection().await.is_err());
+        }
+        status.store(200, Ordering::SeqCst);
+        assert!(client.check_connection().await.is_ok());
+    }
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {
         DiscoveryInstance::Endpoint(crate::component::Instance {

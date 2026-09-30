@@ -127,12 +127,13 @@ fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = vllm_sidecar_argv(argv.unwrap_or_default());
-    let (engine, config) = py
-        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args(cli_argv))
-        .map_err(sidecar_startup_to_pyerr)?;
-
-    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+    py.allow_threads(move || dynamo_vllm_sidecar::run(cli_argv))
+        .map_err(|error| match error {
+            dynamo_vllm_sidecar::RunError::Startup(error) => sidecar_startup_to_pyerr(error),
+            dynamo_vllm_sidecar::RunError::Runtime(error) => {
+                pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+            }
+        })
 }
 
 const TRTLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-trtllm-sidecar";

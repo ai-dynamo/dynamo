@@ -17,7 +17,7 @@ use crate::utils::ip_resolver::{
 use axum::{
     Router,
     body::Bytes,
-    extract::{Json, Path, State},
+    extract::{Json, Path, Request, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{any, delete, get, post},
@@ -28,9 +28,10 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 use tower_http::trace::TraceLayer;
 
 /// System status server information containing socket address and handle
@@ -171,8 +172,11 @@ pub async fn spawn_system_status_server(
     drt: Arc<crate::DistributedRuntime>,
     discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    // Create system status server state with the provided distributed runtime
-    let server_state = Arc::new(SystemStatusState::new(drt, discovery_metadata)?);
+    let app = system_status_router(Arc::new(SystemStatusState::new(drt, discovery_metadata)?));
+    serve_system_status(host, port, cancel_token, app).await
+}
+
+fn system_status_router(server_state: Arc<SystemStatusState>) -> Router {
     let health_path = server_state
         .drt()
         .system_health()
@@ -262,13 +266,19 @@ pub async fn spawn_system_status_server(
         }),
     );
 
-    let app = app
-        .fallback(|| async {
-            tracing::info!("[fallback handler] called");
-            (StatusCode::NOT_FOUND, "Route not found").into_response()
-        })
-        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
+    app.fallback(|| async {
+        tracing::info!("[fallback handler] called");
+        (StatusCode::NOT_FOUND, "Route not found").into_response()
+    })
+}
 
+async fn serve_system_status(
+    host: &str,
+    port: u16,
+    cancel_token: CancellationToken,
+    app: Router,
+) -> anyhow::Result<(SocketAddr, JoinHandle<()>)> {
+    let app = app.layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_system_status_server] binding to: {address}");
 
@@ -301,6 +311,138 @@ pub async fn spawn_system_status_server(
     });
 
     Ok((actual_address, handle))
+}
+
+/// Probe semantics for the runtime-owned HTTP server.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SystemStatusProbePolicy {
+    /// Both probes report the existing worker/endpoint health status.
+    #[default]
+    Worker,
+    /// Liveness is unconditional; readiness checks only runtime dependencies.
+    RuntimeOnly,
+}
+
+struct StartingStatusState {
+    runtime: crate::Runtime,
+    policy: SystemStatusProbePolicy,
+    attached: OnceLock<(Arc<SystemStatusState>, Router)>,
+}
+
+impl StartingStatusState {
+    async fn health(&self) -> axum::response::Response {
+        let Some((state, _)) = self.attached.get() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        if self.policy == SystemStatusProbePolicy::Worker {
+            return health_handler(state.clone()).await.into_response();
+        }
+        let ready = !self.runtime.is_shutting_down()
+            && matches!(
+                tokio::time::timeout(Duration::from_secs(1), state.drt().check_dependencies()).await,
+                Ok(Ok(()))
+            )
+            // Shutdown may have started while a dependency request was in flight.
+            && !self.runtime.is_shutting_down();
+        let status = if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        (
+            status,
+            Json(json!({"status": if ready { "ready" } else { "notready" }})),
+        )
+            .into_response()
+    }
+}
+
+/// Owns the listener during construction. Dropping an incomplete constructor
+/// aborts the server, so failed/cancelled startup cannot leave a live probe behind.
+pub(crate) struct StartingSystemStatusServer {
+    state: Arc<StartingStatusState>,
+    address: SocketAddr,
+    cancel: CancellationToken,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl StartingSystemStatusServer {
+    pub(crate) async fn bind(
+        config: &crate::config::RuntimeConfig,
+        runtime: crate::Runtime,
+        policy: SystemStatusProbePolicy,
+    ) -> anyhow::Result<Self> {
+        let cancel = if policy == SystemStatusProbePolicy::RuntimeOnly {
+            runtime.primary_token().child_token()
+        } else {
+            runtime.child_token()
+        };
+        let state = Arc::new(StartingStatusState {
+            runtime,
+            policy,
+            attached: OnceLock::new(),
+        });
+        let health = state.clone();
+        let live = state.clone();
+        let routes = state.clone();
+        let app = Router::new()
+            .route(
+                &config.system_health_path,
+                get(move || async move { health.health().await }),
+            )
+            .route(
+                &config.system_live_path,
+                get(move || async move {
+                    if live.policy == SystemStatusProbePolicy::RuntimeOnly {
+                        StatusCode::OK.into_response()
+                    } else {
+                        live.health().await
+                    }
+                }),
+            )
+            .fallback(move |request: Request| async move {
+                match routes.attached.get() {
+                    Some((_, router)) => router.clone().oneshot(request).await.unwrap(),
+                    None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                }
+            });
+        let (address, handle) = serve_system_status(
+            &config.system_host,
+            config.system_port as u16,
+            cancel.clone(),
+            app,
+        )
+        .await?;
+        Ok(Self {
+            state,
+            address,
+            cancel,
+            handle: Some(handle),
+        })
+    }
+
+    pub(crate) fn attach(
+        mut self,
+        drt: Arc<crate::DistributedRuntime>,
+        discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
+    ) -> anyhow::Result<SystemStatusServerInfo> {
+        let state = Arc::new(SystemStatusState::new(drt, discovery_metadata)?);
+        let router = system_status_router(state.clone());
+        assert!(self.state.attached.set((state, router)).is_ok());
+        Ok(SystemStatusServerInfo::new(
+            self.address,
+            self.handle.take(),
+        ))
+    }
+}
+
+impl Drop for StartingSystemStatusServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.cancel.cancel();
+            handle.abort();
+        }
+    }
 }
 
 /// Health handler with optional active health checking
@@ -747,6 +889,146 @@ mod tests {
     use super::*;
     use crate::utils::ip_resolver::test_support::StubResolver;
     use tokio::time::Duration;
+
+    async fn status(address: SocketAddr, path: &str) -> StatusCode {
+        reqwest::Client::new()
+            .get(format!("http://{address}{path}"))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    // Regression: losing the early listener on attachment (or binding twice on
+    // port 0) makes Kubernetes probes disagree with the published HTTP address.
+    #[tokio::test]
+    async fn runtime_probe_policies_use_one_allocated_listener() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_HOST", Some("127.0.0.1")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+                ("DYN_SYSTEM_HEALTH_PATH", Some("/ready")),
+                ("DYN_SYSTEM_LIVE_PATH", Some("/alive")),
+                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
+                ("DYN_HEALTH_CHECK_ENABLED", Some("false")),
+            ],
+            async {
+                for policy in [
+                    SystemStatusProbePolicy::Worker,
+                    SystemStatusProbePolicy::RuntimeOnly,
+                ] {
+                    let runtime = crate::Runtime::from_current().unwrap();
+                    let drt = crate::DistributedRuntime::new_with_probe_policy(
+                        runtime.clone(),
+                        crate::distributed::DistributedConfig::process_local(),
+                        policy,
+                    )
+                    .await
+                    .unwrap();
+                    let info = drt.system_status_server_info().unwrap();
+                    let address = info.socket_addr;
+                    assert_ne!(address.port(), 0);
+                    let expected = if policy == SystemStatusProbePolicy::RuntimeOnly {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    };
+                    assert_eq!(status(address, "/alive").await, expected);
+                    assert_eq!(status(address, "/ready").await, expected);
+                    assert_eq!(status(address, "/live").await, StatusCode::NOT_FOUND);
+                    assert_eq!(status(address, "/metrics").await, StatusCode::OK);
+                    // The engine has never been constructed or registered.
+                    runtime.mark_shutting_down();
+                    assert_eq!(
+                        status(address, "/ready").await,
+                        StatusCode::SERVICE_UNAVAILABLE
+                    );
+                    assert_eq!(status(address, "/alive").await, expected);
+                    runtime.shutdown();
+                    runtime.primary_token().cancelled().await;
+                    tokio::time::timeout(Duration::from_secs(3), async {
+                        while !info.handle.as_ref().unwrap().is_finished() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    TcpListener::bind(address)
+                        .await
+                        .expect("shutdown releases the published listener");
+                }
+            },
+        )
+        .await;
+    }
+
+    // Regression: dropping construction after binding could strand a live HTTP
+    // server even though no DistributedRuntime will ever be returned.
+    #[tokio::test]
+    async fn starting_probes_and_cancelled_listener() {
+        for policy in [
+            SystemStatusProbePolicy::Worker,
+            SystemStatusProbePolicy::RuntimeOnly,
+        ] {
+            let runtime = crate::Runtime::from_current().unwrap();
+            let config = crate::config::RuntimeConfig {
+                system_host: "127.0.0.1".into(),
+                system_port: 0,
+                ..Default::default()
+            };
+            let server = StartingSystemStatusServer::bind(&config, runtime.clone(), policy)
+                .await
+                .unwrap();
+            let address = server.address;
+            assert_eq!(
+                status(address, "/health").await,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+            let live = if policy == SystemStatusProbePolicy::RuntimeOnly {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            assert_eq!(status(address, "/live").await, live);
+            // An accepted keep-alive connection must close too: axum owns its
+            // connection tasks separately from the listener task.
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let mut connection = tokio::io::BufReader::new(stream);
+            connection
+                .get_mut()
+                .write_all(b"GET /live HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            loop {
+                let mut line = String::new();
+                connection.read_line(&mut line).await.unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            drop(server);
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(listener) = TcpListener::bind(address).await {
+                        break listener;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("cancelled construction releases its listener");
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                connection.read_to_end(&mut Vec::new()),
+            )
+            .await
+            .expect("cancelled startup closes accepted connections")
+            .unwrap();
+            runtime.shutdown();
+        }
+    }
 
     #[test]
     fn advertised_address_stays_in_the_bound_family() {

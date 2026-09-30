@@ -254,6 +254,16 @@ pool. Override them with `--grpc-connect-attempt-timeout-secs`,
 `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the
 corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
+When `DYN_SYSTEM_PORT` enables the status server, both the executable and Python
+launcher bind it before connecting runtime dependencies or discovering vLLM.
+`/live` returns 200 while HTTP is running. `/health` returns 503 during runtime
+initialization, dependency loss, or shutdown, and 200 when the runtime dependencies
+are available, including while waiting for vLLM. It checks configured NATS and
+discovery dependencies within a one-second timeout; engine readiness and model
+registration are separate. The metadata discovery deadline starts after runtime
+initialization. `DYN_SYSTEM_HEALTH_PATH` and `DYN_SYSTEM_LIVE_PATH` customize these
+probe paths; `DYN_SYSTEM_PORT=-1` keeps the status server disabled.
+
 Each request owns its response stream but borrows a channel from the shared pool. Aggregate and prefill cancellation drops only that request's stream. Decode cancellation first submits the decode request and retains its stream until the first output token or a response containing `finish_info`, so a NIXL receiver can complete and release the transferred KV; it then drops the stream. If the stream ends early, returns a gRPC error, or produces an invalid response after cancellation, the sidecar logs the failure and reports the request as cancelled. vLLM automatically aborts the corresponding engine request while the pooled HTTP/2 connection remains available to other requests. The sidecar does not call the Control `Abort` RPC.
 
 ## Test without vLLM or a GPU
