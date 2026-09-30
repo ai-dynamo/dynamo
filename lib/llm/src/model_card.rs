@@ -47,7 +47,7 @@ fn append_runtime_contract_checksum(
     canonicalize_json_object_keys(&mut value);
     let value = serde_json::to_vec(&value).expect("serializing serde_json::Value cannot fail");
 
-    // These contracts control model-visible media prompt expansion. Workers
+    // This contract controls model-visible media prompt expansion. Workers
     // with different contracts must not share a cohort whose preprocessor is
     // built from one representative card.
     bytes.extend_from_slice(b"\0dynamo/model-card/runtime-contract/v1\0");
@@ -3175,6 +3175,55 @@ mod ownership_tests {
     }
 
     #[test]
+    fn prefill_load_model_wire_aliases_preserve_card_and_mdcsum() {
+        use crate::entrypoint::RouterConfig;
+        use dynamo_kv_router::scheduling::config::RouterPrefillLoadModel;
+        use dynamo_runtime::pipeline::RouterMode;
+
+        for mode in [RouterMode::KV, RouterMode::RoundRobin] {
+            let mut card = ModelDeploymentCard::with_name_only("wire-compat-model");
+            let mut router = RouterConfig {
+                router_mode: mode,
+                ..Default::default()
+            };
+            router.kv_router_config.router_prefill_load_model = RouterPrefillLoadModel::Ais;
+            card.router_config = Some(router);
+            let emitted: serde_json::Value =
+                serde_json::from_str(&card.to_json().unwrap()).unwrap();
+            assert_eq!(
+                emitted["router_config"]["kv_router_config"]["router_prefill_load_model"],
+                "aic"
+            );
+
+            for spelling in ["aic", "ais"] {
+                let mut input = emitted.clone();
+                input["router_config"]["kv_router_config"]["router_prefill_load_model"] =
+                    serde_json::json!(spelling);
+                let parsed = ModelDeploymentCard::load_from_json_str(&input.to_string()).unwrap();
+                assert_eq!(
+                    parsed
+                        .router_config
+                        .as_ref()
+                        .unwrap()
+                        .kv_router_config
+                        .router_prefill_load_model,
+                    RouterPrefillLoadModel::Ais
+                );
+                assert_eq!(parsed.mdcsum(), card.mdcsum());
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&parsed.to_json().unwrap()).unwrap(),
+                    emitted
+                );
+            }
+        }
+
+        let card = ModelDeploymentCard::with_name_only("wire-compat-default");
+        let parsed = ModelDeploymentCard::load_from_json_str(&card.to_json().unwrap()).unwrap();
+        assert!(parsed.router_config.is_none());
+        assert_eq!(parsed.mdcsum(), card.mdcsum());
+    }
+
+    #[test]
     fn context_length_wire_compatibility() {
         let card = ModelDeploymentCard::with_name_only("model");
         let mut legacy_value = serde_json::to_value(&card).unwrap();
@@ -3326,6 +3375,7 @@ mod ownership_tests {
     #[test]
     fn video_processor_runtime_contract_checksum_boundaries() {
         use crate::local_model::runtime_config::{
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
         };
@@ -3360,6 +3410,23 @@ mod ownership_tests {
                 "resize_mode": "round_ties_even"
             }),
         );
+        let sglang_qwen = card_with_contract(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "legacy_ceil",
+                "sglang_preprocess": {
+                    "image_factor": 28,
+                    "video_min_pixels": 100352,
+                    "video_max_pixels": 602112,
+                    "video_total_pixels": 90316800,
+                    "frame_factor": 2,
+                    "fps": 2.0,
+                    "min_frames": 4,
+                    "max_frames": 768
+                }
+            }),
+        );
         let nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             serde_json::json!({"video_pruning_rate": 0.5}),
@@ -3372,6 +3439,8 @@ mod ownership_tests {
 
         assert_eq!(missing.mdcsum(), unrelated.mdcsum());
         assert_eq!(missing.mdcsum(), qwen.mdcsum());
+        assert_eq!(missing.mdcsum(), sglang_qwen.mdcsum());
+        assert_eq!(qwen.mdcsum(), sglang_qwen.mdcsum());
         assert_eq!(qwen.mdcsum(), same_qwen.mdcsum());
         assert_eq!(qwen.mdcsum(), different_qwen.mdcsum());
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());

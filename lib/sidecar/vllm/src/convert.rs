@@ -12,7 +12,12 @@ use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_
 use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::client;
-use crate::json::{json_to_struct, struct_to_json};
+use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
+
+/// Payload names and peer, used only to name the source in codec errors.
+const PEER: &str = "vLLM";
+const KV_TRANSFER_PARAMS: &str = "kv_transfer_params";
+const EC_TRANSFER_PARAMS: &str = "ec_transfer_params";
 use crate::proto as pb;
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
@@ -570,6 +575,16 @@ fn consume_redundant_nvext(
                 "extra_args.nvext.token_in must be true when present",
             ));
         }
+        // Worker attribution and timing are produced by the frontend.
+        if let Some(fields) = nvext.get_mut("extra_fields") {
+            let fields = fields.as_array_mut().ok_or_else(|| {
+                client::invalid_argument("extra_args.nvext.extra_fields must be an array")
+            })?;
+            fields.retain(|field| !matches!(field.as_str(), Some("worker_id" | "timing")));
+            if fields.is_empty() {
+                nvext.remove("extra_fields");
+            }
+        }
         nvext.is_empty()
     };
     if remove_nvext {
@@ -1106,8 +1121,12 @@ fn build_kv_parameters(
         cache_salt: cache_salt
             .map(|cache_salt| format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"))
             .unwrap_or_default(),
-        kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
-        ec_transfer_params: ec_transfer_params.map(json_to_struct).transpose()?,
+        kv_transfer_params: kv_transfer_params
+            .map(|value| json_to_struct_v14(value, KV_TRANSFER_PARAMS))
+            .transpose()?,
+        ec_transfer_params: ec_transfer_params
+            .map(|value| json_to_struct_v14(value, EC_TRANSFER_PARAMS))
+            .transpose()?,
     })
 }
 
@@ -1406,7 +1425,7 @@ impl ResponseState {
             }
             let params = finish
                 .ec_transfer_params
-                .map(struct_to_json)
+                .map(|value| struct_to_json_v14(value, PEER, EC_TRANSFER_PARAMS))
                 .transpose()?
                 .and_then(|value| value.as_object().cloned())
                 .ok_or_else(|| {
@@ -1414,7 +1433,10 @@ impl ResponseState {
                 })?;
             return Ok(Some(LLMEngineOutput::encode_terminal(params)));
         }
-        mapped.disaggregated_params = finish.kv_transfer_params.map(struct_to_json).transpose()?;
+        mapped.disaggregated_params = finish
+            .kv_transfer_params
+            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
+            .transpose()?;
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",

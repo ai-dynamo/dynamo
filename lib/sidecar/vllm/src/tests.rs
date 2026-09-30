@@ -36,9 +36,9 @@ use tonic_health::ServingStatus as HealthServingStatus;
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{ResponseState, build_generate_request, normalize_response_options};
 use crate::engine::VllmSidecarEngine;
-use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
+use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
 
 #[derive(Clone, Default)]
 struct FakeVllm {
@@ -196,7 +196,7 @@ impl pb::inference_server::Inference for FakeVllm {
             .kv
             .as_ref()
             .and_then(|kv| kv.kv_transfer_params.clone())
-            .map(struct_to_json)
+            .map(|value| struct_to_json_v14(value, "vLLM", "kv_transfer_params"))
             .transpose()
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let is_prefill = request_kv
@@ -274,7 +274,7 @@ impl pb::inference_server::Inference for FakeVllm {
                 }
             } else if encoder_response {
                 let ec = (!omit_encoder_metadata).then(|| {
-                    json_to_struct(encoder_handoff).expect("encoder handoff")
+                    json_to_struct_v14(encoder_handoff, "ec_transfer_params").expect("encoder handoff")
                 });
                 yield encode_response(ec);
             } else if let Some(outputs) = sequence_outputs {
@@ -286,7 +286,7 @@ impl pb::inference_server::Inference for FakeVllm {
                 }
             } else {
                 let kv = is_prefill.then(|| {
-                    json_to_struct(handoff.clone()).expect("encode handoff")
+                    json_to_struct_v14(handoff.clone(), "kv_transfer_params").expect("encode handoff")
                 });
                 yield sequence_response(true, wants_logprobs, kv);
             }
@@ -790,7 +790,8 @@ fn encode_response(ec_transfer_params: Option<prost_types::Struct>) -> pb::Gener
 #[test]
 fn encode_response_enforces_terminal_contract() {
     let request = epd_image_request();
-    let ec_transfer_params = || json_to_struct(encoder_handoff()).expect("encoder handoff");
+    let ec_transfer_params =
+        || json_to_struct_v14(encoder_handoff(), "ec_transfer_params").expect("encoder handoff");
 
     let mut length = encode_response(Some(ec_transfer_params()));
     length
@@ -1049,6 +1050,49 @@ fn request() -> PreprocessedRequest {
         })))
         .build()
         .expect("request")
+}
+
+#[test]
+fn frontend_router_metadata_does_not_require_engine_support() {
+    let baseline = build_generate_request(
+        request(),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    for (fields, is_supported) in [
+        (json!(["worker_id", "timing"]), true),
+        (json!(["worker_id", "engine_data"]), false),
+    ] {
+        let mut request = request();
+        request.extra_args.as_mut().unwrap()["nvext"]["extra_fields"] = fields;
+        let result = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        );
+        if is_supported {
+            assert_eq!(result.unwrap(), baseline);
+        } else {
+            assert!(result.is_err());
+        }
+    }
+}
+
+#[test]
+fn frontend_router_metadata_rejects_non_array_fields() {
+    let mut request = request();
+    request.extra_args.as_mut().unwrap()["nvext"]["extra_fields"] = json!("worker_id");
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "InvalidRequest: extra_args.nvext.extra_fields must be an array"
+    );
 }
 
 #[test]
@@ -2060,7 +2104,12 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert!(kv.bypass_prefix_cache);
     assert_eq!(kv.cache_salt, "dynamo-cache-salt:cache-salt");
     assert_eq!(
-        struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
+        struct_to_json_v14(
+            kv.kv_transfer_params.clone().unwrap(),
+            "vLLM",
+            "kv_transfer_params"
+        )
+        .unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
     );
 }
@@ -2643,12 +2692,14 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         assert_eq!(downstream_wire.media.len(), 2, "{topology}");
         assert_eq!(downstream_wire.media[0].uuid, "image-a", "{topology}");
         assert_eq!(downstream_wire.media[1].uuid, "image-b", "{topology}");
-        let forwarded_ec = struct_to_json(
+        let forwarded_ec = struct_to_json_v14(
             downstream_wire
                 .kv
                 .as_ref()
                 .and_then(|kv| kv.ec_transfer_params.clone())
                 .expect("forwarded EC metadata"),
+            "vLLM",
+            "ec_transfer_params",
         )
         .expect("EC metadata JSON");
         assert_eq!(forwarded_ec, encoder_handoff(), "{topology}");
@@ -2689,9 +2740,12 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
             assert_eq!(decode_wire.media[1].uuid, "image-b");
             let decode_cache = decode_wire.kv.expect("decode cache parameters");
             assert!(decode_cache.kv_transfer_params.is_some());
-            let decode_ec =
-                struct_to_json(decode_cache.ec_transfer_params.expect("decode EC metadata"))
-                    .expect("decode EC metadata JSON");
+            let decode_ec = struct_to_json_v14(
+                decode_cache.ec_transfer_params.expect("decode EC metadata"),
+                "vLLM",
+                "ec_transfer_params",
+            )
+            .expect("decode EC metadata JSON");
             assert_eq!(decode_ec, encoder_handoff());
         }
     }
@@ -3560,7 +3614,12 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 
         let requests = server.service.requests.lock().await;
         let decode_wire = requests.last().unwrap().kv.as_ref().unwrap();
-        let decoded = struct_to_json(decode_wire.kv_transfer_params.clone().unwrap()).unwrap();
+        let decoded = struct_to_json_v14(
+            decode_wire.kv_transfer_params.clone().unwrap(),
+            "vLLM",
+            "kv_transfer_params",
+        )
+        .unwrap();
         // Every field round-trips opaquely except remote_port, which the sidecar
         // stringifies so vLLM builds a valid NIXL side-channel URL (a protobuf
         // Struct number would reach the engine as `20097.0`).
