@@ -95,10 +95,7 @@ fn selection(worker_id: u64) -> WorkerSelectionResult {
 
 use super::*;
 
-impl<Sel> RoutingHost<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RoutingHost {
     fn select_lora_target(
         &self,
         request: &PreprocessedRequest,
@@ -297,6 +294,10 @@ where
             )));
         }
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+        // Declared before worker selection because the session-affinity wait is
+        // the first stage that can spend it.
+        let budget = CleanupBudget::default();
+        let staged_kv = StagedKv::for_request(request.content());
         let (lora_target, lora_fallback, lora_load) =
             match self.select_lora_target(request.content())? {
                 Some(selection) => (
@@ -319,7 +320,8 @@ where
                 None,
             )
         } else {
-            self.select_with_session_affinity(&request, phase, is_query_only, |target| {
+            self.validate_explicit_worker(request.content(), phase)?;
+            self.select_with_session_affinity(&request, phase, is_query_only, &budget, |target| {
                 let pinned_target = explicit.or(match self.session_affinity_mode {
                     SessionAffinityMode::Hard => target,
                     SessionAffinityMode::Soft if is_direct => target,
@@ -342,7 +344,7 @@ where
             device_aware_telemetry,
         } = selection;
         let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
-            operation.as_ref().and_then(AffinityAcquire::target)
+            operation.as_ref().and_then(Hold::target).map(from_table)
         } else {
             None
         };
@@ -355,7 +357,7 @@ where
         let uses_occupancy = self
             .required_worker_inputs()
             .contains(WorkerInputs::OCCUPANCY);
-        let mut guard: RequestGuard<Sel> = RequestGuard::new_builtin(
+        let mut guard: RequestGuard = RequestGuard::new_builtin(
             self.request_metrics.clone(),
             initial_worker,
             occupancy_reservation,
@@ -370,11 +372,15 @@ where
         drop(route_guard);
 
         guard.start_dispatch(&phase_label);
-        guard.record_prefill_start();
+        guard.record_prefill_start(request.content());
         let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");
-            cancel_on_stop(
+            await_with_cleanup_policy(
                 request_context.as_ref(),
+                phase,
+                staged_kv,
+                "builtin.dispatch_direct",
+                &budget,
                 self.inner.direct_within_prepared(
                     request,
                     target.worker_id,
@@ -402,16 +408,24 @@ where
                     return Err(error);
                 }
             };
-            cancel_on_stop(
+            await_with_cleanup_policy(
                 request_context.as_ref(),
+                phase,
+                staged_kv,
+                "builtin.dispatch_exact",
+                &budget,
                 self.inner.dispatch_exact(request, target.worker_id),
             )
             .await
             .and_then(|result| result)
             .map(|stream| (metadata, target, selected_occupancy, stream))
         } else if uses_occupancy {
-            cancel_on_stop(
+            await_with_cleanup_policy(
                 request_context.as_ref(),
+                phase,
+                staged_kv,
+                "builtin.dispatch_occupancy",
+                &budget,
                 self.inner.dispatch_preselected_prepared(
                     request,
                     initial_worker,
@@ -427,8 +441,12 @@ where
             .and_then(|result| result)
             .map(|((metadata, target, occupancy), stream)| (metadata, target, occupancy, stream))
         } else {
-            cancel_on_stop(
+            await_with_cleanup_policy(
                 request_context.as_ref(),
+                phase,
+                staged_kv,
+                "builtin.dispatch",
+                &budget,
                 self.inner.direct_within_prepared(
                     request,
                     initial_worker,
@@ -501,13 +519,7 @@ where
         }
         guard.mark_dispatched();
         let stream = into_monitored_response(response_stream, guard);
-        match operation {
-            Some(operation) => Ok((
-                metadata,
-                operation.into_stream(target, stream, self.session_affinity_mode)?,
-            )),
-            None => Ok((metadata, stream)),
-        }
+        Ok((metadata, self.bind_affinity(operation, target, stream)?))
     }
 }
 

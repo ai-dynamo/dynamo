@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use dynamo_tokens::SequenceHash;
@@ -12,12 +12,12 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
+use crate::kv_hints::KvTransferCandidates;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
     WorkerId, WorkerWithDpRank,
 };
-use crate::router_hint::RouterHintRootCandidates;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
@@ -53,7 +53,7 @@ pub type OverloadedWorkerProvider =
 /// set. `None` means no hard-availability source is attached; `Some` is
 /// authoritative, so an empty set rejects every candidate.
 pub type WorkerAvailabilityProvider =
-    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
+    Arc<dyn Fn(&SchedulingRequest) -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerSelectionPolicyError {
@@ -116,6 +116,24 @@ pub enum KvSchedulerError {
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
 
+    #[error("request classifier panicked: {0}")]
+    RequestClassifierPanicked(String),
+
+    #[error("request classifier failed: {0}")]
+    RequestClassifierFailed(Arc<super::ClassifierError>),
+
+    #[error("request classifier is already tracking request ID {0:?}")]
+    DuplicateClassificationRequestId(String),
+
+    #[error("invalid request classification metadata: {0}")]
+    InvalidClassificationMetadata(String),
+
+    #[error("request lifecycle for request ID {0:?} ended before classification completed")]
+    ClassificationLifecycleEnded(String),
+
+    #[error("request deadline exceeded")]
+    DeadlineExceeded,
+
     #[error(transparent)]
     WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
@@ -136,7 +154,7 @@ pub struct SchedulingResponse {
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub target_cached_prefix_blocks: u32,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
 }
 
@@ -294,24 +312,6 @@ pub enum WorkerSelectionInputTrigger {
     Other,
 }
 
-/// KV lifecycle hints supplied with an agent request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WorkerSelectionKvHints {
-    evict_session: bool,
-}
-
-impl WorkerSelectionKvHints {
-    /// Create the KV hints passed to worker selection.
-    pub fn new(evict_session: bool) -> Self {
-        Self { evict_session }
-    }
-
-    /// Return whether the caller asked consumers to evict the session state.
-    pub fn evict_session(&self) -> bool {
-        self.evict_session
-    }
-}
-
 /// Session metadata supplied to a custom worker-selection policy.
 ///
 /// The internal request protocol supplies these values. Optional values remain
@@ -321,8 +321,8 @@ pub struct SessionContext {
     session_id: String,
     parent_session_id: Option<String>,
     session_final: Option<bool>,
-    kv_hints: Option<WorkerSelectionKvHints>,
     input_trigger: Option<WorkerSelectionInputTrigger>,
+    agent_headers: Option<Arc<BTreeMap<String, Vec<String>>>>,
 }
 
 impl SessionContext {
@@ -331,15 +331,14 @@ impl SessionContext {
         session_id: String,
         parent_session_id: Option<String>,
         session_final: Option<bool>,
-        kv_hints: Option<WorkerSelectionKvHints>,
         input_trigger: Option<WorkerSelectionInputTrigger>,
     ) -> Self {
         Self {
             session_id,
             parent_session_id,
             session_final,
-            kv_hints,
             input_trigger,
+            agent_headers: None,
         }
     }
 
@@ -361,14 +360,30 @@ impl SessionContext {
         self.session_final
     }
 
-    /// Return optional KV lifecycle hints from the request.
-    pub fn kv_hints(&self) -> Option<&WorkerSelectionKvHints> {
-        self.kv_hints.as_ref()
-    }
-
     /// Return the event that caused this request, when supplied.
     pub fn input_trigger(&self) -> Option<WorkerSelectionInputTrigger> {
         self.input_trigger
+    }
+
+    /// Attach request-scoped opaque headers captured by the protocol ingress.
+    /// The map is shared with the request envelope without copying its values.
+    pub fn with_agent_headers(mut self, headers: Arc<BTreeMap<String, Vec<String>>>) -> Self {
+        self.agent_headers = Some(headers);
+        self
+    }
+
+    /// Return raw coding-agent observations for this request, without normalization.
+    ///
+    /// HTTP ingress lowercases names and preserves repeated text values in order.
+    /// It omits sensitive/non-text values and values exceeding its capture limits
+    /// (64 values, 16 KiB/value, 32 KiB including names). An empty map or missing
+    /// key means no observation was captured, not that a lifecycle event did not
+    /// occur. Values are untrusted; plugins own parsing and harness semantics.
+    /// This request-level input needs no worker signal group and is never weighted
+    /// or interpreted by the default policy.
+    pub fn agent_headers(&self) -> &BTreeMap<String, Vec<String>> {
+        static EMPTY: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        self.agent_headers.as_deref().unwrap_or(&EMPTY)
     }
 }
 
@@ -394,8 +409,8 @@ pub struct ScheduleRequest {
     pub policy_class: Option<String>,
     pub session_context: Option<SessionContext>,
     pub overlap: OverlapSignals,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
-    pub retain_router_hint_chain: bool,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 }
 
@@ -428,8 +443,8 @@ pub struct SchedulingRequest {
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
-    pub retain_router_hint_chain: bool,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 
     // Load state computed during admission.
@@ -460,13 +475,24 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         self.request
     }
 
+    pub(crate) fn with_available_workers(
+        mut self,
+        available: Option<&'a HashSet<WorkerId>>,
+    ) -> Self {
+        self.eligibility = self.eligibility.with_available_workers(available);
+        self
+    }
+
     pub fn best_effective_prefill_tokens(&self) -> usize {
         effective_prefill_tokens(self.request.isl_tokens, self.best_cached_tokens())
     }
 
     pub fn best_cached_tokens(&self) -> usize {
         match self.eligibility.pinned_worker() {
-            Some(worker) => self.request.effective_cached_tokens_for(worker),
+            Some(worker) => self
+                .eligibility
+                .validate_worker_rank(self.workers, worker)
+                .map_or(0, |_| self.request.effective_cached_tokens_for(worker)),
             None => self
                 .request
                 .overlap
@@ -600,11 +626,11 @@ mod tests {
             session_context: None,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             shared_cache_hits: None,
             worker_loads,
             resp_tx: None,

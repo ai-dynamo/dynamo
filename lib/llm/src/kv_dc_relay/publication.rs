@@ -3,7 +3,7 @@
 
 //! Transport-neutral publication boundary for DC Relay state.
 
-mod cbi1;
+pub(super) mod cbi1;
 mod codec;
 mod hub;
 mod source;

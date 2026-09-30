@@ -18,6 +18,7 @@ from dynamo.profiler.utils.config import (
     get_worker_component_from_config,
     remove_valued_arguments,
     set_argument_value,
+    set_unique_argument_value,
     setup_worker_component_resources,
     update_image,
     validate_and_get_worker_args,
@@ -88,6 +89,70 @@ def _ensure_safe_prefill_cuda_graph_bs(args: list[str]) -> list[str]:
     return args
 
 
+def _normalize_prefill_dp_limits(args: list[str]) -> list[str]:
+    """Keep SGLang's per-rank request limit positive under DP attention."""
+    args = _ensure_safe_prefill_cuda_graph_bs(args)
+    parsed_args = break_arguments(args)
+    if not _has_arg(parsed_args, "--enable-dp-attention"):
+        return args
+
+    dp_size_value = _arg_value_any(
+        parsed_args,
+        ("--data-parallel-size", "--dp-size", "--dp"),
+    )
+    if dp_size_value is None:
+        if any(
+            _has_arg(parsed_args, key)
+            for key in ("--data-parallel-size", "--dp-size", "--dp")
+        ):
+            raise ValueError("SGLang data parallel size must have an integer value")
+        dp_size = 1
+    else:
+        try:
+            dp_size = int(dp_size_value)
+        except ValueError as exc:
+            raise ValueError(
+                "SGLang data parallel size must be an integer, "
+                f"got {dp_size_value!r}"
+            ) from exc
+        if dp_size <= 0:
+            raise ValueError(
+                f"SGLang data parallel size must be greater than zero, got {dp_size}"
+            )
+
+    max_running_requests = _arg_value(parsed_args, "--max-running-requests")
+    if max_running_requests is None:
+        if _has_arg(parsed_args, "--max-running-requests"):
+            raise ValueError("SGLang --max-running-requests must have an integer value")
+        return args
+
+    try:
+        max_running_requests_int = int(max_running_requests)
+    except ValueError as exc:
+        raise ValueError(
+            "SGLang --max-running-requests must be an integer, "
+            f"got {max_running_requests!r}"
+        ) from exc
+    if max_running_requests_int <= 0:
+        raise ValueError(
+            "SGLang --max-running-requests must be greater than zero, "
+            f"got {max_running_requests_int}"
+        )
+
+    if max_running_requests_int >= dp_size:
+        return args
+
+    logger.warning(
+        "Clamping SGLang prefill --max-running-requests from %d to attention "
+        "DP size %d so every DP rank can admit a request.",
+        max_running_requests_int,
+        dp_size,
+    )
+    return set_unique_argument_value(
+        parsed_args, "--max-running-requests", str(dp_size)
+    )
+
+
 class SGLangConfigModifier(BaseConfigModifier):
     BACKEND = "sglang"
 
@@ -112,7 +177,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         decode_gpus: int,
         num_gpus_per_node: int | None = None,
     ) -> None:
-        prefill_cli_args = _ensure_safe_prefill_cuda_graph_bs(prefill_cli_args)
+        prefill_cli_args = _normalize_prefill_dp_limits(prefill_cli_args)
         super()._apply_disagg_workers(
             cfg,
             prefill_cli_args=prefill_cli_args,
@@ -447,7 +512,7 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         # Set max concurrency to control effective batch size
         args = set_argument_value(args, "--max-running-requests", str(max_batch_size))
-        args = _ensure_safe_prefill_cuda_graph_bs(args)
+        args = _normalize_prefill_dp_limits(args)
 
         # Cap total tokens processed in a batch to avoid chunked prefill
         args = set_argument_value(args, "--chunked-prefill-size", str(max_num_tokens))

@@ -16,12 +16,12 @@ use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
+use crate::kv_router::RouterLoadSource;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
+use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
 use crate::kv_router::routing_load::SchedulerLoadReceiver;
-use crate::kv_router::{KV_METRICS_SUBJECT, RouterLoadSource};
 use dynamo_runtime::component::Client;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
-use dynamo_runtime::transports::event_plane::EventSubscriber;
 
 use super::runtime_config_watch;
 
@@ -78,9 +78,9 @@ fn publish_overloaded_instances_if_needed(
     overloaded_tracker: &OverloadedWorkerTracker,
     overloaded_changed: bool,
 ) -> bool {
-    // NOTE: Recovery still relies on load producers publishing after meaningful capacity or
-    // lifecycle changes. This only prevents the next observation from being suppressed when
-    // request-path backpressure changed Client state outside this monitor's cached set.
+    // A fresh load observation clears request-path overload leases early.
+    // This prevents the monitor's unchanged-set suppression from retaining
+    // a request-path mark until its bounded lease expires.
     if !overloaded_changed && !overload_reconciliation_needed(client) {
         return false;
     }
@@ -753,11 +753,10 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 }
             };
 
-        // Subscribe to KV metrics events using EventSubscriber (Msgpack payloads)
-        // This is optional - if NATS isn't available, we skip KV metrics but still do TTFT/ITL cleanup
-        let kv_metrics_rx = match EventSubscriber::for_endpoint(endpoint, KV_METRICS_SUBJECT).await
-        {
-            Ok(sub) => Some(sub.typed::<ActiveLoad>()),
+        // Subscribe to KV metrics over the configured event transport. This is
+        // optional; cleanup of TTFT and ITL metrics continues without it.
+        let kv_metrics_rx = match KvMetricsSubscriber::for_endpoint(endpoint).await {
+            Ok(sub) => Some(sub),
             Err(e) => {
                 tracing::warn!(
                     "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
@@ -807,10 +806,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             loop {
                 let kv_event_future = async {
                     if let Some(kv_metrics_rx) = &mut kv_metrics_rx {
-                        kv_metrics_rx
-                            .next()
-                            .await
-                            .map(|result| result.map(|(_envelope, active_load)| active_load))
+                        kv_metrics_rx.next().await
                     } else {
                         std::future::pending().await
                     }
@@ -911,6 +907,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                         last_thresholds = cfg.clone();
                         let overloaded_workers = collect_overloaded_workers(&worker_load_states, &cfg);
+                        // Deliberately not `publish_overloaded_instances_if_needed`: unlike the
+                        // load branches below, this one carries no fresh load observation. It wakes
+                        // on endpoint membership and runtime-config changes, so the recompute above
+                        // reads whatever load state was last observed. Publishing on an unchanged
+                        // set here would retire request-path overload leases on no load evidence at
+                        // all — and because `runtime_config_watch` joins availability for the whole
+                        // endpoint, one unrelated worker appearing would clear another worker's
+                        // in-force lease. Leases are bounded, so they expire on their own instead.
                         if overloaded_tracker.replace(overloaded_workers) {
                             publish_overloaded_instances(&client, &overloaded_tracker.ids());
                         }

@@ -390,9 +390,9 @@ func TestGmsRCTName(t *testing.T) {
 		},
 		{
 			name:        "camel case",
-			serviceName: "VllmWorker",
+			serviceName: "worker",
 			rank:        0,
-			expected:    "vllmworker-gpu-rank-0",
+			expected:    "worker-gpu-rank-0",
 		},
 		{
 			name:        "uppercase",
@@ -428,11 +428,11 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	configs, err := gmsResourceClaimTemplateConfigs("VllmWorker", gmsSpec, resources, roles)
+	configs, err := gmsResourceClaimTemplateConfigs("worker", gmsSpec, resources, roles)
 	require.NoError(t, err)
 
 	require.Len(t, configs, 1)
-	assert.Equal(t, "vllmworker-gpu-rank-0", configs[0].Name)
+	assert.Equal(t, "worker-gpu-rank-0", configs[0].Name)
 	assert.Empty(t, validation.IsDNS1123Subdomain(configs[0].Name))
 
 	req := configs[0].TemplateSpec.Spec.Devices.Requests[0]
@@ -452,14 +452,14 @@ func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
 	}
 
 	t.Log("Build ResourceClaimTemplate configs from a mixed-case service name")
-	configs, err := gmsResourceClaimTemplateConfigs("VllmDecodeWorker", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
+	configs, err := gmsResourceClaimTemplateConfigs("decode", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
 	require.NoError(t, err)
 
 	t.Log("Verify every rank has a normalized RFC 1123-compliant name")
 	require.Len(t, configs, 2)
 	expectedNames := []string{
-		"vllmdecodeworker-gpu-rank-0",
-		"vllmdecodeworker-gpu-rank-1",
+		"decode-gpu-rank-0",
+		"decode-gpu-rank-1",
 	}
 	for i, config := range configs {
 		assert.Equal(t, expectedNames[i], config.Name)
@@ -479,10 +479,10 @@ func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	refs := gmsResourceSharingEntries("VllmWorker", roles)
+	refs := gmsResourceSharingEntries("worker", roles)
 
 	require.Len(t, refs, 1)
-	assert.Equal(t, "vllmworker-gpu-rank-0", refs[0].Name)
+	assert.Equal(t, "worker-gpu-rank-0", refs[0].Name)
 	assert.Empty(t, validation.IsDNS1123Subdomain(refs[0].Name))
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
 	require.NotNil(t, refs[0].Filter)
@@ -499,13 +499,13 @@ func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
 	}
 
 	t.Log("Build resource-sharing entries from a mixed-case service name")
-	refs := gmsResourceSharingEntries("VllmDecodeWorker", roles)
+	refs := gmsResourceSharingEntries("decode", roles)
 
 	t.Log("Verify every rank has a normalized RFC 1123-compliant name")
 	require.Len(t, refs, 2)
 	expectedNames := []string{
-		"vllmdecodeworker-gpu-rank-0",
-		"vllmdecodeworker-gpu-rank-1",
+		"decode-gpu-rank-0",
+		"decode-gpu-rank-1",
 	}
 	for i, ref := range refs {
 		assert.Equal(t, expectedNames[i], ref.Name)

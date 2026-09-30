@@ -33,28 +33,7 @@ PLANNER_MOCKER_PROFILE_DATA = (
     "/workspace/components/src/dynamo/planner/tests/data/profiling_results/"
     "H200_TP1P_TP1D"
 )
-REMOTE_CODE_WORKERS = {
-    "vllm": ("VllmDecodeWorker", "VllmPrefillWorker"),
-    "sglang": ("decode", "prefill", "SglangDecodeWorker", "SglangPrefillWorker"),
-}
-
-
-def remote_code_override(backend: str) -> dict:
-    """Explicitly trust the known Qwen test model in generated worker services."""
-
-    worker_override = {
-        "extraPodSpec": {"mainContainer": {"args": ["--trust-remote-code"]}}
-    }
-    return {
-        "apiVersion": "nvidia.com/v1alpha1",
-        "kind": "DynamoGraphDeployment",
-        "spec": {
-            "services": {
-                name: copy.deepcopy(worker_override)
-                for name in REMOTE_CODE_WORKERS[backend]
-            }
-        },
-    }
+REMOTE_CODE_BACKENDS = frozenset({"vllm", "sglang"})
 
 
 def manifest(
@@ -65,10 +44,8 @@ def manifest(
     spec = copy.deepcopy(spec) if spec else {}
     backend = spec.get("backend", manager.config.backend)
     model = spec.get("model", manager.config.model)
-    if not manager.config.mocker and model == QWEN and backend in REMOTE_CODE_WORKERS:
-        spec.setdefault("overrides", {}).setdefault(
-            "dgd", remote_code_override(backend)
-        )
+    if not manager.config.mocker and model == QWEN and backend in REMOTE_CODE_BACKENDS:
+        spec.setdefault("overrides", {}).setdefault("trustRemoteCode", True)
 
     return build_dgdr(
         manager.config,
