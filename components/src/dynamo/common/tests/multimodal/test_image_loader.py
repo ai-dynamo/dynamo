@@ -202,10 +202,13 @@ async def test_data_url_invalid_base64_normalized(loader: ImageLoader) -> None:
         await loader.load_image("data:image/png;base64,NOT_VALID!!!")
 
 
-async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
+async def test_data_url_non_image_rejected(loader: ImageLoader, caplog) -> None:
     """data: URL with non-image media type should raise ValueError."""
-    with pytest.raises(ValueError, match="Data URL must be an image type"):
-        await loader.load_image("data:text/plain;base64,aGVsbG8=")
+    encoded = base64.b64encode(b"private inline reference" * 1000).decode()
+    with pytest.raises(ValueError, match="Data URL must be an image type") as exc_info:
+        await loader.load_image(f"data:text/plain;base64,{encoded}")
+    _assert_inline_reference_elided(caplog, encoded)
+    assert encoded[:32] not in str(exc_info.value)
 
 
 @pytest.mark.parametrize("escaped", [False, True])
@@ -498,6 +501,13 @@ def _make_svg_bytes() -> bytes:
     return b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'/>"
 
 
+def _assert_inline_reference_elided(caplog, encoded: str) -> None:
+    assert caplog.records
+    assert encoded[:32] not in caplog.text
+    assert "payload elided" in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
+
+
 async def test_unsupported_format_url_raises_415(loader: ImageLoader) -> None:
     """Fetching a URL that returns an unsupported image format (e.g. SVG) should raise
     HttpStatusError with status 415, not 500."""
@@ -584,15 +594,17 @@ async def test_frontend_decoded_grayscale_image_is_converted_to_rgb(
 
 
 async def test_unsupported_format_batch_data_url_raises_415(
-    loader: ImageLoader,
+    loader: ImageLoader, caplog
 ) -> None:
     """The batch path must preserve the 415 status for data: URLs as well."""
+    caplog.set_level(logging.DEBUG, logger="dynamo.common.multimodal.image_loader")
     svg_b64 = base64.b64encode(_make_svg_bytes()).decode()
     with pytest.raises(HttpStatusError) as exc_info:
         await loader.load_image_batch(
             [{URL_VARIANT_KEY: f"data:image/svg+xml;base64,{svg_b64}"}]
         )
     assert exc_info.value.status == 415
+    _assert_inline_reference_elided(caplog, svg_b64)
 
 
 # --- SSRF / URL-validation error contract ---
@@ -676,7 +688,7 @@ async def test_malformed_data_url_batch_raises_value_error(
 
 
 async def test_unexpected_decoder_error_not_wrapped_as_value_error(
-    loader: ImageLoader,
+    loader: ImageLoader, caplog
 ) -> None:
     """An unexpected decoder failure must not be
     classified as a client validation error: it propagates unchanged from
@@ -695,22 +707,23 @@ async def test_unexpected_decoder_error_not_wrapped_as_value_error(
         )
     assert not isinstance(exc_info.value, ValueError)
     assert "decode engine fault" in str(exc_info.value)
+    _assert_inline_reference_elided(caplog, "aGVsbG8=")
 
 
-async def test_truncated_data_url_batch_raises_400(loader: ImageLoader) -> None:
+async def test_truncated_data_url_batch_raises_400(loader: ImageLoader, caplog) -> None:
     """Truncated image bytes are malformed client input, not a server fault:
     the batch path should return 400."""
     img = Image.new("RGB", (64, 64), color="red")
     buf = BytesIO()
     img.save(buf, format="JPEG")
-    truncated_url = (
-        f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()[:-20]).decode()}"
-    )
+    encoded = base64.b64encode(buf.getvalue()[:-20]).decode()
+    truncated_url = f"data:image/jpeg;base64,{encoded}"
 
     with pytest.raises(HttpStatusError) as exc_info:
         await loader.load_image_batch([{URL_VARIANT_KEY: truncated_url}])
     assert exc_info.value.status == 400
     assert "Invalid or truncated image data" in exc_info.value.message
+    _assert_inline_reference_elided(caplog, encoded)
 
 
 async def test_unexpected_http_decoder_error_not_wrapped_as_value_error(

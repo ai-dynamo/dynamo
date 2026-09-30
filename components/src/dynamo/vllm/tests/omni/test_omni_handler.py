@@ -1494,30 +1494,35 @@ class TestImageReferenceInputs:
 class TestImageEndpointSizeValidation:
     """/v1/images/generations takes the same bound as the chat path."""
 
-    def test_rejects_out_of_range_size(self):
+    @pytest.mark.asyncio
+    async def test_rejects_out_of_range_size(self):
         handler = _make_handler()
         req = NvCreateImageRequest(prompt="x", size="99999x99999")
         with pytest.raises(ValueError, match=r"width in size='99999x99999'"):
-            handler._engine_inputs_from_image(req)
+            await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
 
-    def test_accepts_a_supported_size(self):
+    @pytest.mark.asyncio
+    async def test_accepts_a_supported_size(self):
         handler = _make_handler()
         req = NvCreateImageRequest(prompt="x", size="1024x768")
-        inputs = handler._engine_inputs_from_image(req)
+        inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
         assert inputs.prompt["mm_processor_kwargs"] == {
             "target_h": 768,
             "target_w": 1024,
         }
 
     @pytest.mark.asyncio
-    async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(self):
-        """The images route has no failure shape, so a rejection must not be
-        yielded as a chat.completion.chunk. It leaves the handler as
-        InvalidArgument, the registered binding exception the HTTP layer answers
-        with a 400."""
-        handler = _make_handler()
-        handler.config.output_modalities = ["image"]
+    @pytest.mark.parametrize("reference", [None, "https://example.com/reference.png"])
+    async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(
+        self, image_request_handler, reference
+    ):
+        handler = image_request_handler
+        handler._image_loader.load_image.side_effect = AssertionError(
+            "Invalid dimensions must be rejected before image loading"
+        )
         request = {"prompt": "x", "size": "99999x99999"}
+        if reference is not None:
+            request["input_reference"] = reference
 
         with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
@@ -1528,6 +1533,8 @@ class TestImageEndpointSizeValidation:
         assert str(excinfo.value) == (
             "width in size='99999x99999' must be between 1 and 4096"
         )
+        handler._image_loader.load_image.assert_not_awaited()
+        handler.engine_client.generate.assert_not_called()
 
 
 class TestVideoEndpointValidation:

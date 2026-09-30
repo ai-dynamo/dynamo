@@ -564,9 +564,9 @@ def test_describe_media_source_bounds_data_uri_metadata() -> None:
         assert f"({len(source)} chars" in label  # true size stays visible
 
 
-def test_describe_media_source_keeps_an_ordinary_data_uri_intact() -> None:
-    """Control: a real media type is short and must survive the new bound."""
-    label = describe_media_source("data:image/png;base64," + "A" * 50_000)
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_describe_media_source_elides_data_uri_payload(scheme) -> None:
+    label = describe_media_source(scheme + ":image/png;base64," + "A" * 50_000)
 
     assert label.startswith("data:image/png (")
     assert "payload elided" in label
