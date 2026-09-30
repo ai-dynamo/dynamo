@@ -269,24 +269,49 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 	It("rejects mixed DS and single-node DCD workers without changing existing workloads", func() {
 		ctx := context.Background()
 		dgd := newEnvtestDSHappyPathDGD("demo-ds-mixed-workers")
+		dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName:          "extra-worker",
+			ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+			RuntimeVersionOverride: "1.0.0",
+			Replicas:               ptr.To(int32(1)),
+			PodTemplate:            envtestDSTestPodTemplate(),
+		})
 		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
 
 		reconciler := newEnvtestDSReconcilers()
-		By("creating and marking the two-role DisaggregatedSet ready")
-		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		baselineDS := fetchTypedDisaggregatedSet(ctx, current)
-		markDisaggregatedSetReady(ctx, current)
-		baselineResult, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
-		Expect(baselineResult.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
+		current := &nvidiacomv1beta1.DynamoGraphDeployment{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgd), current)).To(Succeed())
 
-		By("seeding the historical four-replica DCD before adding a one-replica worker intent")
+		By("seeding the existing DS roles and historical four-replica DCD")
+		rollingUpdateCtx := dynamo.RollingUpdateContext{}
+		normalized, err := dynamo.NormalizeDynamoGraphDeploymentComponents(current, nil, nil, rollingUpdateCtx)
+		Expect(err).NotTo(HaveOccurred())
+		selection, reason := selectDisaggregatedSetComponents(current)
+		Expect(reason).To(BeEmpty())
+		componentRenderer := newDCDWorkloadRenderer(
+			k8sClient,
+			&configv1alpha1.OperatorConfiguration{
+				Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+			},
+			&commoncontroller.RuntimeConfig{Gate: features.Gates{LWS: true}},
+			&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+		)
+		ds, err := newDisaggregatedSetWorkloadRenderer(componentRenderer).Render(
+			ctx, current, normalized, selection, rollingUpdateCtx, nil,
+		)
+		Expect(err).NotTo(HaveOccurred())
+		setDGDControllerOwnerReference(current, ds)
+		Expect(k8sClient.Create(ctx, ds)).To(Succeed())
+		baselineDS := fetchTypedDisaggregatedSet(ctx, current)
+
 		historicalReplicas := int32(4)
 		historicalComponent := nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-			ComponentName: "extra-worker",
-			ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-			Replicas:      &historicalReplicas,
-			PodTemplate:   envtestDSTestPodTemplate(),
+			ComponentName:          "extra-worker",
+			ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+			RuntimeVersionOverride: "1.0.0",
+			Replicas:               &historicalReplicas,
+			PodTemplate:            envtestDSTestPodTemplate(),
 		}
 		historicalDCD := &nvidiacomv1beta1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
@@ -300,14 +325,6 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, historicalDCD)).To(Succeed())
-
-		current.Spec.Components = append(current.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-			ComponentName: "extra-worker",
-			ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-			Replicas:      ptr.To(int32(1)),
-			PodTemplate:   envtestDSTestPodTemplate(),
-		})
-		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
 		By("reporting unsupported intent and retaining both the DS spec and old DCD replicas")
 		result, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
