@@ -1,21 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Planner integration coverage against the real AIC native estimator."""
+"""Planner integration coverage against the real AISimulate native estimator."""
 
 from __future__ import annotations
 
 import pytest
-from aiconfigurator_core.sdk.engine import compile_engine
+from aisimulate_core.sdk.engine import compile_engine
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.planner.config.parallelization import PickedParallelConfig
-from dynamo.planner.config.planner_config import AICPerfModelSpec, PlannerConfig
-from dynamo.planner.core.perf_model.aic_adapter import PlannerEnginePerfModel
+from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
+from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
 from dynamo.planner.core.types import EngineCapabilities
 
 pytestmark = [
@@ -28,21 +27,24 @@ pytestmark = [
 
 
 @pytest.fixture(autouse=True)
-def _offline_aic(monkeypatch: pytest.MonkeyPatch) -> None:
+def _offline_ais(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
 
 
 def _config() -> PlannerConfig:
-    pick = PickedParallelConfig()
     return PlannerConfig.model_construct(
-        aic_perf_model=AICPerfModelSpec.model_construct(
-            hf_id="Qwen/Qwen3-32B",
-            system="h200_sxm",
-            backend="vllm",
-            backend_version="current",
-            prefill_pick=pick,
-            decode_pick=pick,
+        ais_perf_model=AISPerfModelSpec(
+            roles={
+                role: {
+                    "model": "Qwen/Qwen3-32B",
+                    "system": "h200_sxm",
+                    "backend": "vllm",
+                    "backend_version": "current",
+                    "worker_type": role,
+                }
+                for role in ("prefill", "decode")
+            }
         ),
         max_num_fpm_samples=16,
         load_min_observations=5,
@@ -62,7 +64,7 @@ def _capabilities() -> EngineCapabilities:
     )
 
 
-def test_planner_uses_native_aic_for_estimates_and_capacity() -> None:
+def test_planner_uses_native_ais_for_estimates_and_capacity() -> None:
     assert compile_engine
     prefill_model = PlannerEnginePerfModel(
         worker_type="prefill", config=_config(), capabilities=_capabilities()
@@ -112,9 +114,9 @@ def test_planner_uses_native_aic_for_estimates_and_capacity() -> None:
     assert decode_capacity is not None and decode_capacity.rps > 0.0
 
 
-def test_planner_uses_real_aic_regression_fallback_after_tuning() -> None:
+def test_planner_uses_real_ais_regression_fallback_after_tuning() -> None:
     config = PlannerConfig.model_construct(
-        aic_perf_model=None,
+        ais_perf_model=None,
         max_num_fpm_samples=16,
         load_min_observations=2,
         fpm_sample_bucket_size=16,
@@ -166,3 +168,27 @@ def test_planner_uses_real_aic_regression_fallback_after_tuning() -> None:
         add_next_request=False,
     )
     assert itl_s == pytest.approx(0.01, rel=1e-6)
+
+
+def test_ngram_worker_depth_preserves_native_speculation_identity() -> None:
+    config = _config()
+    config.ais_perf_model.roles["decode"]["speculation"] = {
+        "kind": "ngram",
+        "params": {"num_speculative_tokens": 2},
+    }
+    capabilities = _capabilities()
+    model = PlannerEnginePerfModel(
+        worker_type="decode", config=config, capabilities=capabilities
+    )
+    assert model.has_sufficient_data()
+
+    capabilities.speculative_nextn = 2
+    model.update_capabilities(capabilities)
+    assert model.has_sufficient_data()
+    identity = model._engine_diagnostics()["provenance"]["config"]
+    assert identity["nextn"] == 0
+    assert identity["speculation"]["params"]["num_speculative_tokens"] == 2
+
+    capabilities.speculative_nextn = 3
+    with pytest.raises(ValueError, match="speculation depth conflicts"):
+        model.update_capabilities(capabilities)
