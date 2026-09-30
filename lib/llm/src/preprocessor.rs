@@ -135,6 +135,13 @@ pub(crate) struct SystemOnePromptTooLong {
     pub(crate) limit: usize,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("prompt validation needs {bytes} encoded text bytes; the remaining limit is {limit}")]
+pub(crate) struct SystemOneEncodingTooLarge {
+    pub(crate) bytes: usize,
+    pub(crate) limit: usize,
+}
+
 /// Build a private validation diagnostic. Callers may attach structured `PublicDetails` only when every value is safe for clients.
 pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
     DynamoError::builder()
@@ -2757,8 +2764,9 @@ impl OpenAIPreprocessor {
         content: &str,
         chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
         labels: &[String],
-        max_prompt_tokens: usize,
-    ) -> anyhow::Result<(Vec<TokenIdType>, Vec<TokenIdType>)> {
+        limits: (usize, usize),
+    ) -> anyhow::Result<(Vec<TokenIdType>, Vec<TokenIdType>, usize)> {
+        let (max_prompt_tokens, max_encoding_bytes) = limits;
         let mut request: NvCreateChatCompletionRequest =
             serde_json::from_value(serde_json::json!({
                 "model": model,
@@ -2787,6 +2795,19 @@ impl OpenAIPreprocessor {
             anyhow::bail!(
                 "/v1/systemone requires a chat template that closes or disables reasoning before the answer position"
             );
+        }
+        let encoding_bytes = prompt
+            .as_str()
+            .len()
+            .checked_mul(labels.len() + 2)
+            .and_then(|bytes| bytes.checked_add(labels.iter().map(String::len).sum()))
+            .unwrap_or(usize::MAX);
+        if encoding_bytes > max_encoding_bytes {
+            return Err(SystemOneEncodingTooLarge {
+                bytes: encoding_bytes,
+                limit: max_encoding_bytes,
+            }
+            .into());
         }
         let prompt_ids = self.tokenize_rendered_prompt(&prompt)?.token_ids().to_vec();
         if prompt_ids.len() > max_prompt_tokens {
@@ -2820,7 +2841,7 @@ impl OpenAIPreprocessor {
             }
             label_ids.push(label_id);
         }
-        Ok((prompt_ids, label_ids))
+        Ok((prompt_ids, label_ids, encoding_bytes))
     }
 
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
@@ -7874,7 +7895,24 @@ mod tests {
         preprocessor.tokenizer = Arc::new(SystemOneCountingTokenizer(encodes.clone()));
         let labels: Vec<_> = ('A'..='Z').map(|label| label.to_string()).collect();
         let error = preprocessor
-            .render_systemone_question("test-model", &"x".repeat(4096), None, &labels, 8)
+            .render_systemone_question("test-model", &"x".repeat(4096), None, &labels, (65_536, 8))
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<SystemOneEncodingTooLarge>()
+                .unwrap()
+                .limit,
+            8
+        );
+        assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let error = preprocessor
+            .render_systemone_question(
+                "test-model",
+                &"x".repeat(4096),
+                None,
+                &labels,
+                (8, usize::MAX),
+            )
             .unwrap_err();
         let oversized = error.downcast_ref::<SystemOnePromptTooLong>().unwrap();
         assert_eq!(oversized.limit, 8);
@@ -7907,7 +7945,7 @@ mod tests {
                     "A decision",
                     Some(&kwargs),
                     &["yes".to_string(), "no".to_string()],
-                    65_536,
+                    (65_536, usize::MAX),
                 )
                 .unwrap_err();
             assert!(error.to_string().contains("reasoning disabled"), "{parser}");

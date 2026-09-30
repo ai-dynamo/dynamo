@@ -53,6 +53,30 @@ fn cumulative_input_limit_is_checked_without_overflow() {
 }
 
 #[test]
+fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
+    let admission = Arc::new(Semaphore::new(2));
+    let response = super::acquire_admission(admission.clone(), 3, 2).unwrap_err();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!response.headers().contains_key("retry-after"));
+    let permit = super::acquire_admission(admission.clone(), 2, 2).unwrap();
+    let response = super::acquire_admission(admission.clone(), 1, 2).unwrap_err();
+    assert_eq!(
+        response.status(),
+        super::super::error::overload_status_code()
+    );
+    assert_eq!(response.headers()["retry-after"], "1");
+    drop(permit);
+    assert!(super::acquire_admission(admission, 1, 2).is_ok());
+}
+
+#[test]
+fn candidate_tokenization_work_bounds_prompt_size() {
+    assert_eq!(super::encoding_prompt_limit(120, 10), 10);
+    assert_eq!(super::encoding_prompt_limit(11, 10), 0);
+    assert_eq!(super::encoding_prompt_limit(120, 2), 30);
+}
+
+#[test]
 fn placement_pin_sets_both_worker_and_rank() {
     let native: SglangGenerateRequest =
         serde_json::from_value(build_native_score_request(&[1], &[2], "test-salt").unwrap())
@@ -233,6 +257,7 @@ enum EngineBehavior {
     MalformedWithPendingSibling,
     PendingGenerate,
     PendingStream,
+    PendingSiblings,
     RejectGenerate,
     RejectStream,
 }
@@ -320,7 +345,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         if matches!(self.behavior, EngineBehavior::PendingGenerate) {
             return pending().await;
         }
-        if matches!(self.behavior, EngineBehavior::PendingStream) {
+        if matches!(self.behavior, EngineBehavior::PendingStream)
+            || (matches!(self.behavior, EngineBehavior::PendingSiblings) && index > 0)
+        {
             return Ok(ResponseStream::new(
                 Box::pin(stream::pending()),
                 stream_context,
@@ -395,6 +422,42 @@ async fn dispatch_request(
     )
     .await;
     (response, parent, semaphore)
+}
+
+#[tokio::test]
+async fn dispatch_limits_active_siblings_and_cancels_queued_work() {
+    let engine = TestEngine::new(EngineBehavior::PendingSiblings);
+    let parent = Context::new(()).context();
+    let admission = Arc::new(Semaphore::new(20));
+    let permit = admission.clone().acquire_many_owned(20).await.unwrap();
+    let task = tokio::spawn(dispatch(
+        selection(engine.clone()),
+        (0..20).map(prepared_noul_branch).collect(),
+        "bounded-fanout".to_string(),
+        parent.clone(),
+        permit,
+        Arc::new(super::super::metrics::Metrics::new()),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if engine.observations.lock().unwrap().len() >= 5 {
+                break;
+            }
+            engine.started.notified().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(engine.observations.lock().unwrap().len(), 5);
+    parent.kill();
+    let response = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 499);
+    assert_eq!(engine.observations.lock().unwrap().len(), 5);
+    assert_eq!(admission.available_permits(), 20);
 }
 
 #[tokio::test]

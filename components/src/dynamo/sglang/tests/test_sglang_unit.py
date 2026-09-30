@@ -1629,6 +1629,127 @@ def test_use_modelexpress_remote_instance_rejects_other_load_paths(
     assert use_modelexpress_remote_instance(args) is False
 
 
+@pytest.mark.parametrize(
+    ("overrides", "input_name", "worker_name", "expected"),
+    [
+        ({}, "Tokens", "Aggregated", True),
+        ({"max_running_requests": None}, "Tokens", "Aggregated", False),
+        ({"max_running_requests": 2}, "Tokens", "Aggregated", False),
+        ({"disable_overlap_schedule": False}, "Tokens", "Aggregated", False),
+        ({"pp_size": 2}, "Tokens", "Aggregated", False),
+        ({"speculative_algorithm": "EAGLE"}, "Tokens", "Aggregated", False),
+        ({"enable_priority_scheduling": True}, "Tokens", "Aggregated", False),
+        (
+            {"enable_priority_scheduling": True, "disable_priority_preemption": True},
+            "Tokens",
+            "Aggregated",
+            True,
+        ),
+        ({}, "Text", "Aggregated", False),
+        ({}, "Tokens", "Decode", False),
+        ({}, "Tokens", "Prefill", False),
+        (
+            {"max_running_requests": 2, "dp_size": 2, "enable_dp_attention": True},
+            "Tokens",
+            "Aggregated",
+            True,
+        ),
+    ],
+)
+def test_systemone_serial_capability_registration_gate(
+    monkeypatch, overrides, input_name, worker_name, expected
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+    monkeypatch.setattr(sglang_register, "version", lambda package: "0.5.19")
+    server_args = SimpleNamespace(
+        **{
+            "max_running_requests": 1,
+            "disable_overlap_schedule": True,
+            "pp_size": 1,
+            "speculative_algorithm": None,
+            "enable_priority_scheduling": False,
+            "disable_priority_preemption": False,
+            **overrides,
+        }
+    )
+    assert (
+        sglang_register._supports_systemone_serial(
+            server_args,
+            getattr(sglang_register.ModelInput, input_name),
+            sglang_register.ModelType.Chat,
+            getattr(sglang_register.WorkerType, worker_name),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("installed", "expected"),
+    [("0.5.18", False), ("0.5.19", True), ("0.5.19+cu129", True), ("0.5.20", False)],
+)
+def test_systemone_serial_capability_version_gate(monkeypatch, installed, expected):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+    monkeypatch.setattr(sglang_register, "version", lambda package: installed)
+    server_args = SimpleNamespace(
+        max_running_requests=1, disable_overlap_schedule=True, pp_size=1
+    )
+    assert (
+        sglang_register._supports_systemone_serial(
+            server_args,
+            sglang_register.ModelInput.Tokens,
+            sglang_register.ModelType.Chat,
+            sglang_register.WorkerType.Aggregated,
+        )
+        is expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("serial", [False, True])
+async def test_systemone_serial_capability_published_only_when_isolated(
+    monkeypatch, serial
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+    published = {}
+    runtime_config = SimpleNamespace(
+        set_engine_specific=lambda key, value: published.update({key: value})
+    )
+
+    async def fake_get_runtime_config(*args):
+        return runtime_config
+
+    async def fake_register_model(*args, **kwargs):
+        assert kwargs["runtime_config"] is runtime_config
+
+    monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+    monkeypatch.setattr(sglang_register, "version", lambda package: "0.5.19")
+    server_args = SimpleNamespace(
+        model_path="Qwen/Qwen3-0.6B",
+        served_model_name="model",
+        page_size=16,
+        max_running_requests=1,
+        disable_overlap_schedule=serial,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+    dynamo_args = SimpleNamespace(
+        use_sglang_tokenizer=False, custom_jinja_template=None
+    )
+    assert await sglang_register._register_model_with_runtime_config(
+        engine=SimpleNamespace(),
+        endpoint=SimpleNamespace(),
+        server_args=server_args,
+        dynamo_args=dynamo_args,
+        worker_type=sglang_register.WorkerType.Aggregated,
+    )
+    assert published["sglang_generate"] == "true"
+    assert published.get("sglang_systemone_serial_v1") == ("true" if serial else None)
+
+
 def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
     args = SimpleNamespace(
         load_format="remote_instance",

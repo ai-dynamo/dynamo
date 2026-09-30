@@ -2906,6 +2906,11 @@ mod tests {
             crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
             true.into(),
         );
+        card.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1.to_string(),
+            true.into(),
+        );
+        card.runtime_config.max_num_seqs = Some(1);
         let preprocessor = crate::preprocessor::OpenAIPreprocessor::new(card.clone()).unwrap();
         let mut worker_set = WorkerSet::new(name.to_string(), name.to_string(), card);
         worker_set.generate_engine = Some(Arc::new(SystemOneStubEngine));
