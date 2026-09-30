@@ -788,7 +788,9 @@ where
     /// Moves the replayed tokens in a retried attempt's usage from prompt to completion: the
     /// worker counts them as prompt, and its completion count covers only its own attempt. The
     /// total is unchanged. Prefix-cache hits are prefixes and the client's prompt is a prefix of
-    /// the replayed one, so the cached count is capped at the client's prompt.
+    /// the replayed one, so the cached count is capped at the client's prompt. The worker's
+    /// completion details cover only its own attempt, so they are dropped; the frontend's
+    /// reasoning estimate, which sees every delivered token, fills `reasoning_tokens` instead.
     fn rebase_usage(&self, response: &mut Annotated<Resp>) {
         if self.replayed_tokens == 0 {
             return;
@@ -809,6 +811,7 @@ where
         {
             *cached = (*cached).min(usage.prompt_tokens);
         }
+        usage.completion_tokens_details = None;
     }
 
     /// Returns `true` if the tracked request token length plus `new_output_len`
@@ -2751,8 +2754,9 @@ mod tests {
     }
 
     /// Reports usage the way a worker does: against the prompt it was sent, counting only the
-    /// tokens this attempt generated, with every prompt token a prefix-cache hit. The first
-    /// `failing_attempts` attempts disconnect after `fail_after` tokens.
+    /// tokens this attempt generated, with every prompt token a prefix-cache hit and every
+    /// generated token reported as reasoning. The first `failing_attempts` attempts disconnect
+    /// after `fail_after` tokens.
     struct UsageMockEngine {
         calls: Arc<AtomicU32>,
         prompts: Arc<std::sync::Mutex<Vec<Vec<TokenIdType>>>>,
@@ -2801,7 +2805,12 @@ mod tests {
                         audio_tokens: None,
                         cached_tokens: Some(prompt_tokens),
                     }),
-                    completion_tokens_details: None,
+                    completion_tokens_details: Some(
+                        dynamo_protocols::types::CompletionTokensDetails {
+                            reasoning_tokens: Some(generated as u32),
+                            ..Default::default()
+                        },
+                    ),
                 });
             }
             let ctx = Arc::new(Controller::new(self.context_id.clone()));
@@ -2857,6 +2866,13 @@ mod tests {
             .and_then(|details| details.cached_tokens)
     }
 
+    fn reasoning_tokens(usage: &CompletionUsage) -> Option<u32> {
+        usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens)
+    }
+
     /// Regression test for #15255: the retried worker counts the replayed tokens as prompt, and
     /// its completion count covers only its own attempt, so the replayed tokens must move from
     /// prompt to completion.
@@ -2878,6 +2894,10 @@ mod tests {
             Some(3),
             "the replayed prompt's cache hit, capped at the client's prompt"
         );
+        assert!(
+            usage.completion_tokens_details.is_none(),
+            "the retried attempt's details cover only its own tokens"
+        );
     }
 
     #[tokio::test]
@@ -2890,6 +2910,7 @@ mod tests {
         assert_eq!(usage.completion_tokens, 6);
         assert_eq!(usage.total_tokens, 9);
         assert_eq!(cached_tokens(&usage), Some(3));
+        assert!(usage.completion_tokens_details.is_none());
     }
 
     #[tokio::test]
@@ -2901,6 +2922,7 @@ mod tests {
         assert_eq!(usage.completion_tokens, 4);
         assert_eq!(usage.total_tokens, 7);
         assert_eq!(cached_tokens(&usage), Some(3));
+        assert_eq!(reasoning_tokens(&usage), Some(4));
     }
 
     #[tokio::test]
