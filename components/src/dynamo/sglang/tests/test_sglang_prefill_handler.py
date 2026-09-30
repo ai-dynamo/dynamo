@@ -274,22 +274,26 @@ def _kv_hit_prefill_handler(monkeypatch, responses, *, cancelled):
     return handler
 
 
-_PREFILL_RESPONSES = [
-    {
-        "meta_info": {
-            "id": "request-id",
-            "finish_reason": {"type": "length"},
-            "prompt_tokens": 3,
-            "cached_tokens": 2,
+@pytest.fixture
+def prefill_responses():
+    return [
+        {
+            "meta_info": {
+                "id": "request-id",
+                "finish_reason": {"type": "length"},
+                "prompt_tokens": 3,
+                "cached_tokens": 2,
+            }
         }
-    }
-]
+    ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
-async def test_prefill_reports_kv_cache_hit_after_bootstrap(monkeypatch):
-    handler = _kv_hit_prefill_handler(monkeypatch, _PREFILL_RESPONSES, cancelled=False)
+async def test_prefill_reports_kv_cache_hit_after_bootstrap(
+    monkeypatch, prefill_responses
+):
+    handler = _kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=False)
     context = SimpleNamespace(
         id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
     )
@@ -311,8 +315,10 @@ async def test_prefill_reports_kv_cache_hit_after_bootstrap(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
-async def test_prefill_omits_kv_cache_hit_after_cancellation(monkeypatch):
-    handler = _kv_hit_prefill_handler(monkeypatch, _PREFILL_RESPONSES, cancelled=True)
+async def test_prefill_omits_kv_cache_hit_after_cancellation(
+    monkeypatch, prefill_responses
+):
+    handler = _kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=True)
     context = SimpleNamespace(
         id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
     )
