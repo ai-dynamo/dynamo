@@ -5,7 +5,9 @@ name: Release Pipeline
 
 # workflow_dispatch is capped at 10 inputs by GitHub (this block has 9).
 # on_demand/release_version are workflow_call-only: the sole on-demand entry
-# point is on-demand-release.yml, which owns the manual approval gate.
+# point is stage-release-rc.yml. The ops gate and the manual approval gate live
+# HERE (authorize/approval jobs), so they bind every caller; stage-release-rc.yml
+# repeats only the ops gate, as a fast-fail before its long ECR wait.
 on:
   workflow_dispatch:
     inputs:
@@ -156,14 +158,16 @@ jobs:
   # GATE: Version Extraction
   # ============================================================================
 
-  # TEMPORARY(1.5.1-rc0): the ops-membership steps below carry `&& github.event_name
-  # != 'push'` for the push test loop. REVERT before merge.
-  # OPS GATE — operator-driven runs (on-demand staging and direct rc dispatch)
-  # require an active ai-dynamo/devops member. The nightly path (scheduled /
-  # nightly=true) is exempt so unattended runs are not blocked. Lives here (not
-  # only in the on-demand wrapper) so it binds EVERY caller of this reusable
-  # workflow — including a rogue workflow that calls it with on_demand=true.
-  # In automated-release to reach the RELEASE_APP secrets; carries no approval.
+  # OPS GATE — every run requires an active ai-dynamo/devops member, except the
+  # unattended nightly (nightly=true AND a scheduled trigger). A manual nightly
+  # (dispatch of this workflow or of nightly-ci.yml) is gated like any other run.
+  # Lives here (not only in the callers) so it binds EVERY caller of this
+  # reusable workflow — including a rogue workflow that calls it directly.
+  #
+  # The two steps are YAML anchors (&ops-token / &ops-check), repeated as the
+  # first steps of EVERY job that reads automated-release secrets. "Re-run failed
+  # jobs" reuses this job's earlier success, so a job-local check is the only
+  # thing that re-verifies whoever triggered the re-run (github.triggering_actor).
   authorize:
     name: Ops gate
     runs-on: prod-default-small-v2
@@ -171,38 +175,48 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Mint app token
-        if: ${{ (inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly)) && github.event_name != 'push' }}
-        id: app-token
+      - &ops-token
+        name: Mint app token (ops gate)
+        if: ${{ !(inputs.nightly && github.event_name == 'schedule') }}
+        id: ops-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-      - name: Require release-ops team membership
-        if: ${{ (inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly)) && github.event_name != 'push' }}
+      - &ops-check
+        name: Require release-ops team membership
+        if: ${{ !(inputs.nightly && github.event_name == 'schedule') }}
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.ops-token.outputs.token }}
           ORG: ${{ github.repository_owner }}
           TEAM: devops
           ACTOR: ${{ github.actor }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          # The ORIGINAL trigger (the caller's, for a reusable workflow; unchanged
+          # on re-runs). A push/PR-triggered run must never reach release secrets,
+          # so a future test hook with a push trigger fails here instead.
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          case "${EVENT}" in
+            workflow_dispatch|schedule) ;;
+            *) echo "::error::The release pipeline only runs from a manual dispatch or the nightly schedule (got '${EVENT}')."; exit 1 ;;
+          esac
           for USER in $(printf '%s\n%s\n' "${ACTOR}" "${TRIGGERING_ACTOR}" | sort -u); do
             HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${USER}")
-            STATE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('state',''))" \
-              "${RUNNER_TEMP}/membership.json" 2>/dev/null || echo "")
-            if [ "${HTTP}" != "200" ] || [ "${STATE}" != "active" ]; then
-              echo "::error::@${USER} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may stage a release."
+            # grep, not python3/jq: this step runs on every secret-using job's
+            # runner, including the gitlab_ci_runners group.
+            if [ "${HTTP}" != "200" ] || ! grep -Eq '"state"[[:space:]]*:[[:space:]]*"active"' "${RUNNER_TEMP}/membership.json"; then
+              echo "::error::@${USER} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may run this release job."
               exit 1
             fi
             echo "@${USER} authorized via ${ORG}/${TEAM}"
           done
       - name: Gate mode
-        run: echo "ops gate applied=${{ (inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly)) && github.event_name != 'push' }} (nightly exempt)"
+        run: echo "ops gate applied=${{ !(inputs.nightly && github.event_name == 'schedule') }} (only scheduled nightly is exempt)"
 
   # APPROVAL GATE — operator runs also require a manual-release-approval reviewer.
   # Dynamic environment: empty (no gate) on the nightly path so unattended runs are
@@ -289,7 +303,7 @@ jobs:
           fi
 
           if [[ "${ON_DEMAND}" == "true" ]]; then
-            # Branch + version bump are created/validated by on-demand-release.yml;
+            # Branch + version bump are created/validated by stage-release-rc.yml;
             # the version is passed explicitly rather than derived from the ref.
             if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
               echo "Error: on_demand=true requires release_version X.Y.Z[.devN|.postN] (got: '${RELEASE_VERSION}')"
@@ -315,7 +329,7 @@ jobs:
             if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
               echo "Error: workflow_dispatch must be triggered from a release/X.Y.Z[.devN|.postN] branch (or main with nightly=true)"
               echo "Current branch: $BRANCH_NAME"
-              echo "Named releases are not dispatchable here — run on-demand-release.yml with a BARE v<X.Y.Z>[-<name>] release_branch (a release/X.Y.Z-<name> branch is treated as a throwaway test branch there too)."
+              echo "Named releases are not dispatchable here — run stage-release-rc.yml with a BARE v<X.Y.Z>[-<name>] release_branch (a release/X.Y.Z-<name> branch is treated as a throwaway test branch there too)."
               exit 1
             fi
             VERSION="${BRANCH_NAME#release/}"
@@ -412,7 +426,7 @@ jobs:
             #   helm + crate (SemVer):   ${SEMVER_BASE}-rcN  where .devN/.postN become a
             #                            -devN/-postN pre-release (e.g. 0.1.0-rc0, 0.1.0-post3-rc0)
             #   wheel: clean version, disambiguated by the rcN upload subpath.
-            # Passed through from on-demand-release.yml's rc_number INPUT (default rc0;
+            # Passed through from stage-release-rc.yml's rc_number INPUT (default rc0;
             # NO GitHub tag is created). Require it (don't default to 0) so a broken
             # hand-off fails loud instead of silently colliding on rc0.
             RC_NUM="${INPUT_RC_NUMBER}"
@@ -519,6 +533,9 @@ jobs:
       SGLANG_EFA_BUILD_RESULT: ${{ inputs.sglang_efa_build_result }}
       TRTLLM_EFA_BUILD_RESULT: ${{ inputs.trtllm_efa_build_result }}
     steps:
+      # Re-verify the ops gate in-job (see authorize): blocks re-run bypass.
+      - *ops-token
+      - *ops-check
       - name: Checkout at source commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -929,25 +946,39 @@ jobs:
 
       - name: Validate chart/image coherence (on-demand)
         if: ${{ env.NIGHTLY != 'true' && env.ON_DEMAND == 'true' && env.HELM_SUBSET != 'none' }}
+        env:
+          STAGED_CONTAINERS: ${{ steps.copy_images.outputs.staged_containers }}
+          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
         run: |
           set -euo pipefail
           # A published chart must reference only images published now (in
-          # CONTAINER_SUBSET) or already resolvable at the exact repository the
-          # chart references (the GA registry in values.yaml — NOT the staging
-          # org, where only rc-suffixed tags exist).
+          # CONTAINER_SUBSET, and proven staged — copy_image failures are
+          # non-fatal) or already resolvable at the exact repository the chart
+          # references (the GA registry in values.yaml — NOT the staging org,
+          # where only rc-suffixed tags exist).
           HELM="${HELM_SUBSET:-all}"
           CSET="${CONTAINER_SUBSET:-all}"
           want_helm() { [ "${HELM}" = "all" ] && return 0; case ",${HELM}," in *,"$1",*) return 0 ;; esac; return 1; }
           want_ctr()  { [ "${CSET}" = "all" ] && return 0; case ",${CSET}," in *,"$1",*) return 0 ;; esac; return 1; }
           fail=0
-          # Each site: chart_token|container_token|values.yaml|image repo (as referenced by the chart)
+          # Each site: chart_token|container_token|values.yaml|image repo (as referenced by the chart)|staged image name
           SITES=(
-            "platform|operator|deploy/helm/charts/platform/components/operator/values.yaml|nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
+            "platform|operator|deploy/helm/charts/platform/components/operator/values.yaml|nvcr.io/nvidia/ai-dynamo/kubernetes-operator|kubernetes-operator"
           )
           for SITE in "${SITES[@]}"; do
-            IFS='|' read -r CHART CTOK VALUES REPO <<<"${SITE}"
+            IFS='|' read -r CHART CTOK VALUES REPO STAGED <<<"${SITE}"
             want_helm "${CHART}" || { echo "chart ${CHART} not published; skip coherence check"; continue; }
-            if want_ctr "${CTOK}"; then echo "ok: ${CHART} image ${CTOK} published this release"; continue; fi
+            if want_ctr "${CTOK}"; then
+              # Selected: the copy step tolerates per-image failures, so require
+              # the image in its successful-copy record before shipping a chart.
+              if [[ ",${STAGED_CONTAINERS}," == *",${STAGED}:${NGC_VERSION_TAG},"* ]]; then
+                echo "ok: ${CHART} image ${CTOK} staged this release (${STAGED}:${NGC_VERSION_TAG})"
+              else
+                echo "::error::chart ${CHART} needs ${CTOK}, which was selected but ${STAGED}:${NGC_VERSION_TAG} failed to copy — see 'Copy images to NGC'"
+                fail=1
+              fi
+              continue
+            fi
             # Image excluded: read the pinned tag the bump wrote and prove it exists
             # at the exact repository string the chart will deploy from.
             TAG=$(awk -v r="${REPO}" '
@@ -1251,7 +1282,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${FAILED_COUNT:-0}" -ne 0 ]; then
-            echo "::error::${FAILED_COUNT} selected container image(s) failed to copy to NGC — see 'Copy images to NGC'. Once fixed, re-stage with a fresh round (rc_round on on-demand-release.yml; rc_number on an rc dispatch)."
+            echo "::error::${FAILED_COUNT} selected container image(s) failed to copy to NGC — see 'Copy images to NGC'. Once fixed, re-stage as a sub-round of the same rc (rc_round X.1, X.2, ... on stage-release-rc.yml; a direct rc dispatch still needs a new integer rc_number)."
             exit 1
           fi
           echo "All selected container images copied."
@@ -1281,6 +1312,9 @@ jobs:
       RC_NUMBER: ${{ needs.prepare-release.outputs.rc_number }}
       WHEEL_SUBSET: ${{ inputs.wheels }}
     steps:
+      # Re-verify the ops gate in-job (see authorize): blocks re-run bypass.
+      - *ops-token
+      - *ops-check
       - name: Setup crane
         env:
           CRANE_VERSION: v0.20.2
@@ -1416,21 +1450,39 @@ jobs:
           set -euo pipefail
 
           # Catches UTC-midnight drift between the build-time version stamp and
-          # prepare-release's wheel_version; ai_dynamo and ai_dynamo_runtime must agree.
+          # prepare-release's wheel_version. Every wheel that will be uploaded must agree,
+          # including kvbm (optional: built conditionally, so it is checked only if present).
+          WSUB="${WHEEL_SUBSET:-all}"
+          want_wheel() {
+            [ "${WSUB}" = "all" ] && return 0
+            case ",${WSUB}," in *,"$1",*) return 0 ;; esac
+            return 1
+          }
           shopt -s nullglob
           AI_DYNAMO_WHEELS=("${UPLOAD_DIR}"/ai_dynamo-*-py3-none-any.whl)
           AI_DYNAMO_RUNTIME_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_runtime-*.whl)
+          KVBM_WHEELS=("${UPLOAD_DIR}"/kvbm-*.whl)
           shopt -u nullglob
 
-          if [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ]; then
-            echo "::error::Missing ai_dynamo or ai_dynamo_runtime wheel in ${UPLOAD_DIR}"
-            exit 1
+          CHECK=()
+          if want_wheel ai-dynamo; then
+            [ ${#AI_DYNAMO_WHEELS[@]} -gt 0 ] || { echo "::error::Missing ai_dynamo wheel in ${UPLOAD_DIR}"; exit 1; }
+            CHECK+=("${AI_DYNAMO_WHEELS[@]}")
+          fi
+          if want_wheel ai-dynamo-runtime; then
+            [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -gt 0 ] || { echo "::error::Missing ai_dynamo_runtime wheel in ${UPLOAD_DIR}"; exit 1; }
+            CHECK+=("${AI_DYNAMO_RUNTIME_WHEELS[@]}")
+          fi
+          if want_wheel kvbm; then CHECK+=("${KVBM_WHEELS[@]}"); fi
+          if [ ${#CHECK[@]} -eq 0 ]; then
+            echo "No selected wheels to verify."
+            exit 0
           fi
 
           echo "Expected wheel version: ${EXPECTED_WHEEL_VERSION}"
 
           mismatch=0
-          for path in "${AI_DYNAMO_WHEELS[@]}" "${AI_DYNAMO_RUNTIME_WHEELS[@]}"; do
+          for path in "${CHECK[@]}"; do
             file="$(basename "${path}")"
             # PEP 427: <dist>-<version>-<tags>.whl; version sits between the 1st and 2nd hyphen.
             rest="${file#*-}"
@@ -1561,6 +1613,9 @@ jobs:
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
       NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
     steps:
+      # Re-verify the ops gate in-job (see authorize): blocks re-run bypass.
+      - *ops-token
+      - *ops-check
       - name: Checkout at source commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -1814,17 +1869,20 @@ jobs:
 
   trigger-gitlab-release-pipeline:
     name: Trigger GitLab Release Pipeline
-    # rc/nightly: every SELECTED stage must succeed (a 'none' subset skips the
-    # stage and counts as satisfied). On-demand: fires even on staging failures —
-    # GitLab's manual approval gates are the real publish gates. !cancelled()
-    # overrides the implicit needs-success(); stage-crates never blocks
-    # (continue-on-error).
+    # Every SELECTED stage must succeed (a 'none' subset skips the stage and
+    # counts as satisfied), so GitLab is never told to scan or promote something
+    # that failed to stage. A failed rc is repaired by re-staging at a new rc
+    # round. On-demand also requires crates to have FULLY staged: stage-crates is
+    # continue-on-error (its job result is masked as success), so crates_status
+    # is the authoritative signal. Nightly crates stay fail-soft (not gated).
+    # !cancelled() overrides the implicit needs-success().
     needs: [prepare-release, release-publish, stage-wheels-artifactory, stage-crates-artifactory]
     if: >-
       ${{ !cancelled() && needs.prepare-release.result == 'success' && inputs.skip_gitlab_pipeline != true &&
-          (needs.prepare-release.outputs.on_demand == 'true' ||
-           ((needs.release-publish.result == 'success' || (inputs.containers == 'none' && inputs.helm == 'none')) &&
-            (needs.stage-wheels-artifactory.result == 'success' || inputs.wheels == 'none'))) }}
+          (needs.release-publish.result == 'success' || (inputs.containers == 'none' && inputs.helm == 'none')) &&
+          (needs.stage-wheels-artifactory.result == 'success' || inputs.wheels == 'none') &&
+          (needs.prepare-release.outputs.on_demand != 'true' || inputs.crates == 'none' || inputs.crates == '' ||
+           needs.stage-crates-artifactory.outputs.crates_status == 'success') }}
     runs-on:
       group: gitlab_ci_runners
     environment: automated-release
@@ -1832,6 +1890,9 @@ jobs:
       pipeline_id:  ${{ steps.trigger.outputs.pipeline_id }}
       pipeline_url: ${{ steps.trigger.outputs.pipeline_url }}
     steps:
+      # Re-verify the ops gate in-job (see authorize): blocks re-run bypass.
+      - *ops-token
+      - *ops-check
       - name: Trigger GitLab pipeline
         id: trigger
         env:
@@ -1909,14 +1970,31 @@ jobs:
             # publish); RELEASE_TYPE=ondemand (no hyphen) matches dynamo.yml's rules.
             PIPELINE_TYPE="security"
             RELEASE_TYPE="ondemand"
-            # Coarse ARTIFACTS list derived from the per-type subsets ('none' omits
-            # the type). The fine-grained *_SUBSET vars below carry the exact picks.
+            # Coarse ARTIFACTS list keyed on what ACTUALLY staged (like nightly),
+            # not on what was requested: GitLab must never scan or promote a type
+            # that did not land. The job-level gate already requires every
+            # selected stage to succeed; this is the second line of defense.
             ARTIFACTS=""
-            [ "${WHEEL_SUBSET:-all}" != "none" ]     && ARTIFACTS="${ARTIFACTS},wheel"
-            [ "${CONTAINER_SUBSET:-all}" != "none" ] && ARTIFACTS="${ARTIFACTS},container"
-            [ "${CRATE_SUBSET:-all}" != "none" ]     && ARTIFACTS="${ARTIFACTS},crate"
-            [ "${HELM_SUBSET:-all}" != "none" ]      && ARTIFACTS="${ARTIFACTS},helm"
+            [ -n "${STAGED_WHEELS}" ]     && ARTIFACTS="${ARTIFACTS},wheel"
+            [ -n "${STAGED_CONTAINERS}" ] && ARTIFACTS="${ARTIFACTS},container"
+            [ -n "${STAGED_CRATES}" ]     && ARTIFACTS="${ARTIFACTS},crate"
+            [ -n "${STAGED_HELM}" ]       && ARTIFACTS="${ARTIFACTS},helm"
             ARTIFACTS="${ARTIFACTS#,}"
+            # A selected type that staged nothing is a failed stage, even when its
+            # job reported success (helm push is continue-on-error). Refuse, so
+            # the operator re-stages as a sub-round (rc_round X.1) instead of a silent gap.
+            MISSING=""
+            for P in "wheel:${WHEEL_SUBSET:-all}:${STAGED_WHEELS}" \
+                     "container:${CONTAINER_SUBSET:-all}:${STAGED_CONTAINERS}" \
+                     "crate:${CRATE_SUBSET:-none}:${STAGED_CRATES}" \
+                     "helm:${HELM_SUBSET:-all}:${STAGED_HELM}"; do
+              IFS=':' read -r KIND SEL GOT <<<"${P}"
+              if [ "${SEL}" != "none" ] && [ -z "${GOT}" ]; then MISSING="${MISSING} ${KIND}"; fi
+            done
+            if [ -n "${MISSING}" ]; then
+              echo "::error::On-demand run selected but did not stage:${MISSING}. Refusing to trigger GitLab; fix and re-stage as a sub-round of the same rc (rc_round X.1, X.2, ...)."
+              exit 1
+            fi
             NIGHTLY_TAG=""
             RC_TAG=""
             RELEASE_TAG="v${VERSION}"

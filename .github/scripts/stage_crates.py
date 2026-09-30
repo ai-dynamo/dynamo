@@ -46,7 +46,7 @@ EXCLUDE_PATH_SUBSTRINGS = ("/bindings/", "/examples/", "/deploy/")
 # them is closure-safe) and that registry consumers never pull.
 EXCLUDE_NAMES = frozenset({"kvbm-consolidator"})
 # Artifactory < 7.148 rejects the `Content-Type: application/octet-stream` header
-# cargo >= 1.96 sends on publish with a 415 (JFrog RTDEV-83141, rust-lang/cargo#17086),
+# cargo >= 1.96 sends on publish with a 415 (rust-lang/cargo#17086),
 # so the upload runs on the last pre-header toolchain. Remove once the
 # registry host runs Artifactory 7.148+.
 PUBLISH_TOOLCHAIN = "1.95.0"

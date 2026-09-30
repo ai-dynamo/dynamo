@@ -54,18 +54,20 @@ SUBCRATE_CARGO_TARGETS = [
     "lib/kvbm-physical/Cargo.toml",
 ]
 
-# Member manifests that pin the workspace version inside a dependency
-# inline table, e.g. backend-common's
-# `dynamo-llm = { path = "../llm", version = "1.4.0", default-features = false }`
-# (a direct path dep because cargo cannot express `workspace = true` +
-# `default-features = false`). VERSION_LINE_RE is line-anchored and
-# intentionally skips inline tables, so these files get the same exact-string
-# rewrite as the root path-dep pins (the pinned value always equals
-# [workspace.package].version). Covered by BOTH modes: the dev-suffix stamp
-# (rewrite_root_cargo) and --set-version (set_release_version).
-WORKSPACE_PIN_CARGO_TARGETS = [
-    "lib/backend-common/Cargo.toml",
-]
+# Direct path deps on workspace crates, e.g. backend-common's
+# `dynamo-llm = { path = "../llm", default-features = false }` (cargo cannot
+# express `workspace = true` + `default-features = false`). Main keeps them
+# BARE; `cargo publish` needs a version on each. There is NO hand-kept list:
+# workspace_pin_manifests() discovers every publishable root-workspace member,
+# and stamp_workspace_pin() pins exactly the deps `cargo publish` requires
+# (normal/build deps, relative path, target inherits the workspace version).
+# A new crate is covered by adding it to [workspace] members — nothing here.
+DEP_SECTION_RE = re.compile(
+    r"^\[(?:target\.[^\]]+\.)?(?:build-)?dependencies\]\s*$")
+WORKSPACE_VERSION_RE = re.compile(
+    r"^\s*version\s*(?:\.\s*workspace\s*=\s*true|=\s*\{\s*workspace\s*=\s*true\s*\})",
+    re.MULTILINE)
+PUBLISH_FALSE_RE = re.compile(r"^\s*publish\s*=\s*false\b", re.MULTILINE)
 
 # Helm charts carry the unified version in version / appVersion / dependency
 # version. Each entry is (helm_subset_token, Chart.yaml path); a chart is bumped
@@ -242,17 +244,12 @@ def rewrite_root_cargo(root: Path, suffix: str) -> None:
     text = pin_re.sub(lambda mm: f"{mm.group(1)}{new}{mm.group(2)}", text)
     path.write_text(text)
 
-    # Bump the same literal pin where it lives in member manifests (inline
-    # dep tables that VERSION_LINE_RE deliberately skips). The early
+    # Re-stamp workspace path-dep pins that already carry a version (a release
+    # branch built nightly-style). Bare pins stay bare (inject=False): main's
+    # nightlies get the version from stage_crates at staging time. The early
     # "already stamped" return above keeps this idempotent.
-    for rel in WORKSPACE_PIN_CARGO_TARGETS:
-        p = root / rel
-        if not p.exists():
-            continue
-        t = p.read_text()
-        t2 = pin_re.sub(lambda mm: f"{mm.group(1)}{new}{mm.group(2)}", t)
-        if t2 != t:
-            p.write_text(t2)
+    for p in workspace_pin_manifests(root):
+        stamp_workspace_pin(p, new, inject=False)
 
 
 def _workspace_version(root: Path) -> str:
@@ -303,6 +300,61 @@ def set_cargo(path: Path, old: str, new: str) -> int:
     )
     path.write_text(text)
     return n
+
+
+def workspace_pin_manifests(root: Path) -> list[Path]:
+    """Publishable members of the root workspace ([workspace] members, globs
+    expanded; `publish = false` skipped)."""
+    text = (root / "Cargo.toml").read_text()
+    m = re.search(r"^\[workspace\][^\[]*?\bmembers\s*=\s*\[(.*?)\]", text, re.MULTILINE | re.DOTALL)
+    if not m:
+        return []
+    out: list[Path] = []
+    for pat in re.findall(r'"([^"]+)"', m.group(1)):
+        for d in sorted(root.glob(pat)):
+            p = d / "Cargo.toml"
+            if p.is_file() and not PUBLISH_FALSE_RE.search(p.read_text()):
+                out.append(p)
+    return out
+
+
+def stamp_workspace_pin(path: Path, new: str, inject: bool = True) -> list[str]:
+    """Pin `path`'s inline path-deps on workspace-versioned crates to `new`.
+
+    Only deps `cargo publish` needs are touched: inline tables in normal/build
+    dependency sections (dev-deps are stripped on publish), with a relative
+    `path` whose target inherits `version.workspace = true`. An existing version
+    (even a stale one) is overwritten; a bare pin gets one after `path` when
+    `inject`. Registry deps and independently-versioned crates are never
+    touched. Idempotent. Returns the stamped dep names."""
+    stamped: list[str] = []
+    in_deps = False
+    lines = path.read_text().split("\n")
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("["):
+            in_deps = bool(DEP_SECTION_RE.match(line.strip()))
+            continue
+        dm = re.match(r'^(\s*)([A-Za-z0-9_-]+)(\s*=\s*)(\{[^{}]*\})(.*)$', line)
+        if not in_deps or not dm:
+            continue
+        table = dm.group(4)
+        pm = re.search(r'\bpath\s*=\s*"(\.[^"]*)"', table)
+        if not pm:
+            continue                           # not a relative path dep
+        target = (path.parent / pm.group(1) / "Cargo.toml").resolve()
+        if not target.is_file() or not WORKSPACE_VERSION_RE.search(target.read_text()):
+            continue                           # target has its own version
+        vm = re.search(r'\bversion\s*=\s*"([^"]*)"', table)
+        if vm:
+            table = table[: vm.start(1)] + new + table[vm.end(1):]
+        elif inject:
+            table = table[: pm.end()] + f', version = "{new}"' + table[pm.end():]
+        else:
+            continue
+        lines[i] = f"{dm.group(1)}{dm.group(2)}{dm.group(3)}{table}{dm.group(5)}"
+        stamped.append(dm.group(2))
+    path.write_text("\n".join(lines))
+    return stamped
 
 
 def set_helm(path: Path, old: str, new: str) -> None:
@@ -536,17 +588,14 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
     for rel in SUBCRATE_CARGO_TARGETS:
         if _exists(rel):
             _require(rel, set_cargo(root / rel, old, semver), semver)
-    # Workspace-version pins in member manifests (inline dep tables, e.g.
-    # backend-common's dynamo-llm pin) carry the same literal as the root
-    # pins; a pin pre-committed at the new version passes via the _require
-    # already-stamped tolerance. Older refs have a bare path dep with no
-    # version key at all — nothing to stamp (stage_crates injects the version
-    # at publish), so the guard only applies when a pin exists.
-    for rel in WORKSPACE_PIN_CARGO_TARGETS:
-        if _exists(rel):
-            n = set_cargo(root / rel, old, semver)
-            if re.search(r"path\s*=[^}\n]*\bversion\s*=", (root / rel).read_text()):
-                _require(rel, n, semver)
+    # Workspace-version path-dep pins (e.g. backend-common's dynamo-llm). Main
+    # keeps these BARE; the release cut stamps them so the release branch's
+    # cargo publish (crates.io GA) works. Discovered, not listed.
+    for p in workspace_pin_manifests(root):
+        names = stamp_workspace_pin(p, semver)
+        if names:
+            print(f"set_release_version: pinned {p.relative_to(root)}: {', '.join(names)} -> {semver}",
+                  file=sys.stderr)
     # Chart identity -- only for charts in the --helm subset.
     for token, rel in HELM_CHART_TARGETS:
         if token in helm and _exists(rel):

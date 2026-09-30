@@ -29,10 +29,18 @@ on:
 permissions:
   contents: read
 
+# One cut per branch at a time: a second dispatch queues instead of racing the
+# first on the same branch push.
+concurrency:
+  group: cut-release-branch-${{ inputs.release_branch || inputs.release_version }}
+  cancel-in-progress: false
+
 jobs:
   # OPS GATE — only active ai-dynamo/devops members may run this. Fail-closed:
   # a missing app Members:read permission or any API error denies. Checks BOTH
   # github.actor and github.triggering_actor (actor does not re-resolve on re-runs).
+  # The steps are YAML anchors, repeated in prepare-branch so a "re-run failed
+  # jobs" (which reuses this job's earlier success) re-checks whoever re-ran it.
   authorize:
     name: Verify release-ops membership
     runs-on: prod-default-small-v2
@@ -40,29 +48,37 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Mint app token
-        id: app-token
+      - &ops-token
+        name: Mint app token (ops gate)
+        id: ops-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-      - name: Require release-ops team membership
+      - &ops-check
+        name: Require release-ops team membership
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.ops-token.outputs.token }}
           ORG: ${{ github.repository_owner }}
           TEAM: devops
           ACTOR: ${{ github.actor }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          # The ORIGINAL trigger (the caller's, for a reusable workflow; unchanged
+          # on re-runs). A push/PR-triggered run must never reach release secrets,
+          # so a future test hook with a push trigger fails here instead.
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          case "${EVENT}" in
+            workflow_dispatch) ;;
+            *) echo "::error::Cut Release Branch only runs from a manual dispatch (got '${EVENT}')."; exit 1 ;;
+          esac
           for USER in $(printf '%s\n%s\n' "${ACTOR}" "${TRIGGERING_ACTOR}" | sort -u); do
             HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${USER}")
-            STATE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('state',''))" \
-              "${RUNNER_TEMP}/membership.json" 2>/dev/null || echo "")
-            if [ "${HTTP}" != "200" ] || [ "${STATE}" != "active" ]; then
+            if [ "${HTTP}" != "200" ] || ! grep -Eq '"state"[[:space:]]*:[[:space:]]*"active"' "${RUNNER_TEMP}/membership.json"; then
               echo "::error::@${USER} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may run this workflow."
               exit 1
             fi
@@ -103,6 +119,9 @@ jobs:
       bump_sha: ${{ steps.bump.outputs.bump_sha }}
       is_test: ${{ steps.bump.outputs.is_test }}
     steps:
+      # Re-verify the ops gate in-job (see authorize): blocks re-run bypass.
+      - *ops-token
+      - *ops-check
       - name: Validate inputs
         env:
           RELEASE_VERSION: ${{ inputs.release_version }}
@@ -132,6 +151,17 @@ jobs:
             echo "::error::source_ref must be 'main', a release/* branch, a named release branch (v<X.Y.Z>[-<name>]), or a 40-char SHA (got '${SOURCE_REF}')"
             exit 1
           fi
+
+      # Pinned toolchain action instead of `curl | sh`. Runs before the push
+      # token is minted and is never passed a token. override: false keeps the
+      # checked-out rust-toolchain.toml authoritative (a newer cargo could
+      # rewrite Cargo.lock's format); cache off — this job only runs cargo update.
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f  # v2.0.0
+        with:
+          toolchain: stable
+          override: false
+          cache: false
 
       - name: Mint app token
         id: app-token
@@ -197,11 +227,6 @@ jobs:
           python3 "${RUNNER_TEMP}/apply_dev_version.py" "" . --set-version "${RELEASE_VERSION}" \
             --containers all --helm all --image-refs
 
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 --retry 5 --retry-delay 2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain stable
-            source "${HOME}/.cargo/env"
-          fi
           # Sync EVERY Cargo.lock (root + nested workspaces: bindings/python, kvbm,
           # runtime/examples): a root-only `cargo update` leaves their pins stale and
           # fails the `--locked` checks. Discovered from git so a newly added nested

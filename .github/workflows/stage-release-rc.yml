@@ -4,17 +4,14 @@
 # Stage Release RC: stage (or re-stage) an EXISTING release branch at a chosen rc
 # round via release.yml, then trigger the GitLab pipeline. Run once per rc round.
 # The branch + version stamp are created by "Cut Release Branch"; this workflow is
-# read-only on the tree. The devops ops gate and the reviewer approval that guard
-# the publish live in release.yml, so they bind this and every other caller.
+# read-only on the tree. The authoritative devops ops gate and the reviewer
+# approval live in release.yml, so they bind this and every other caller. This
+# workflow repeats the ops gate (authorize job) as a fast-fail, so a non-devops
+# dispatch is rejected before any job reaches the automated-release environment.
 
 name: Stage Release RC
 
 on:
-  # TEMPORARY(1.5.1-rc0): push stages release/1.5.1 rc0 (all artifacts) with no
-  # dispatch inputs. REVERT before merge.
-  push:
-    branches:
-      - pull-request/13961
   workflow_dispatch:
     inputs:
       release_branch:
@@ -26,7 +23,7 @@ on:
         required: true
         type: string
       rc_round:
-        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created.'
+        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). To repair a failed stage without bumping the rc QA sees, re-stage as a sub-round (2 -> 2.1 -> 2.2); registries are immutable, so each attempt needs a distinct value. NO GitHub tag is created.'
         required: false
         type: string
         default: '0'
@@ -59,15 +56,70 @@ on:
 permissions:
   contents: read
 
+# One staging run per (branch, rc round): a second dispatch queues instead of
+# racing the first into immutable registries. Never cancel a run mid-stage.
+concurrency:
+  group: stage-release-rc-${{ inputs.release_branch }}-${{ inputs.rc_round }}
+  cancel-in-progress: false
+
 jobs:
-  # RESOLVE TARGET (read-only) — validate inputs; resolve the branch tip SHA (the
-  # commit whose post-merge images this rc stages), the rc round, and the subsets.
-  # No ops gate here: the authoritative devops + approval gate for the publish path
-  # lives in release.yml (reached via invoke-release), which binds every caller.
-  resolve-target:
-    name: Resolve staging target
+  # OPS GATE (fast-fail) — only active ai-dynamo/devops members may stage. Checks
+  # BOTH github.actor and github.triggering_actor (actor does not re-resolve on
+  # re-runs). The steps are YAML anchors, repeated in await-post-merge (the only
+  # other job here that reads automated-release secrets) so a "re-run failed
+  # jobs" by a non-devops user is re-checked. release.yml re-checks its own jobs.
+  authorize:
+    name: Verify release-ops membership
     runs-on: prod-default-small-v2
     environment: automated-release
+    permissions:
+      contents: read
+    steps:
+      - &ops-token
+        name: Mint app token (ops gate)
+        id: ops-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - &ops-check
+        name: Require release-ops team membership
+        env:
+          GH_TOKEN: ${{ steps.ops-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          TEAM: devops
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          # The ORIGINAL trigger (the caller's, for a reusable workflow; unchanged
+          # on re-runs). A push/PR-triggered run must never reach release secrets,
+          # so a future test hook with a push trigger fails here instead.
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          case "${EVENT}" in
+            workflow_dispatch) ;;
+            *) echo "::error::Stage Release RC only runs from a manual dispatch (got '${EVENT}')."; exit 1 ;;
+          esac
+          for USER in $(printf '%s\n%s\n' "${ACTOR}" "${TRIGGERING_ACTOR}" | sort -u); do
+            HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${USER}")
+            if [ "${HTTP}" != "200" ] || ! grep -Eq '"state"[[:space:]]*:[[:space:]]*"active"' "${RUNNER_TEMP}/membership.json"; then
+              echo "::error::@${USER} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may stage a release."
+              exit 1
+            fi
+            echo "@${USER} authorized via ${ORG}/${TEAM}"
+          done
+
+  # RESOLVE TARGET (read-only) — validate inputs; resolve the branch tip SHA (the
+  # commit whose post-merge images this rc stages), the rc round, and the subsets.
+  # Reads no environment secrets (only GITHUB_TOKEN), so it runs outside
+  # automated-release.
+  resolve-target:
+    name: Resolve staging target
+    needs: [authorize]
+    runs-on: prod-default-small-v2
     permissions:
       contents: read
     outputs:
@@ -81,10 +133,9 @@ jobs:
       - name: Validate and resolve target SHA
         id: target
         env:
-          # TEMPORARY(1.5.1-rc0): fallbacks cover inputless push events. REVERT to bare inputs.*.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.5.1' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || 'release/1.5.1' }}
-          RC_ROUND: ${{ inputs.rc_round || '0' }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          RC_ROUND: ${{ inputs.rc_round }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -137,8 +188,7 @@ jobs:
       - name: Resolve artifact selection
         id: resolve
         env:
-          # TEMPORARY(1.5.1-rc0): revert to bare inputs.release_version before merge.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.5.1' }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
           CONTAINERS: ${{ inputs.containers }}
           WHEELS: ${{ inputs.wheels }}
           CRATES: ${{ inputs.crates }}
@@ -255,6 +305,9 @@ jobs:
       contents: read
       actions: read
     steps:
+      # Re-verify the ops gate in-job (see authorize): blocks re-run bypass.
+      - *ops-token
+      - *ops-check
       - name: Wait for the selected artifacts' build images in ECR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -354,9 +407,8 @@ jobs:
           done
 
   # STAGE ARTIFACTS + TRIGGER GITLAB (release.yml in on-demand mode). release.yml's
-  # own authorize + approval gate covers the publish path for every caller, so the
-  # ops/approval gate is NOT duplicated here; this workflow's authorize job stays as
-  # a fast-fail so a non-devops dispatch is rejected before the ECR wait.
+  # own authorize + approval gate covers the publish path for every caller; the
+  # approval is NOT duplicated here.
   invoke-release:
     name: Stage release
     needs: [resolve-target, await-post-merge]
@@ -364,8 +416,7 @@ jobs:
     with:
       commit_sha: ${{ needs.resolve-target.outputs.bump_sha }}
       on_demand: true
-      # TEMPORARY(1.5.1-rc0): revert to bare inputs.release_version before merge.
-      release_version: ${{ inputs.release_version || '1.5.1' }}
+      release_version: ${{ inputs.release_version }}
       # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
       rc_number: ${{ needs.resolve-target.outputs.rc_number }}
       # Normalized subsets from resolve-target.
