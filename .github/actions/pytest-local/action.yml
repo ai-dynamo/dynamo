@@ -176,9 +176,18 @@ runs:
         # Artifacts go to the GitHub Actions checkout so the per-job upload in
         # shared-test.yml can find them.
         TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
-        mkdir -p "${TEST_RESULTS_DIR}"
+        mkdir -p "${TEST_RESULTS_DIR}/status"
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
+        # Emptied up front so the file read at the end of the job can only have
+        # come from this run of this stage. Truncated rather than removed: the
+        # distroless planner test image ships no rm (see the tool list in
+        # container/Dockerfile.test), and an empty file is the better signal
+        # anyway - absent means the stage never started, empty means it started
+        # and was cut off before recording an exit code.
+        STATUS_FILE="${TEST_RESULTS_DIR}/status/${STR_TEST_TYPE}.exitcode"
+        : > "${STATUS_FILE}"
 
         # NVMe guard: GPU runners mount ${NVME_DIR} (nvme-scratch emptyDir, NVMe-backed via
         # instanceStorePolicy: RAID0). CPU/ARM runners have no ${NVME_DIR} mount.
@@ -303,7 +312,39 @@ runs:
           echo "⚠️  JUnit XML file not found - test results may not be available for upload"
         fi
 
+        # Checked by "Verify test stages completed" in shared-test.yml, which
+        # cannot use the exit below or $GITHUB_ENV: a truncated script is still
+        # reported as a successful step and its $GITHUB_ENV writes are dropped.
+        # Keep this last - its absence is what proves the script was truncated.
+        echo "${TEST_EXIT_CODE}" > "${STATUS_FILE}"
+
         exit ${TEST_EXIT_CODE}
+
+    # conftest.py's autouse `logger` fixture writes every test's full root-logger
+    # output (ManagedProcess/EngineProcess health-check status, retry reasons,
+    # subprocess log tails, ...) to /tmp/dynamo_tests/<test-name>/test.log.txt --
+    # a much richer trace than the JUnit XML's truncated captured-output, but
+    # nothing ever uploaded it. failure()-gated (not always()) to keep this
+    # opt-in-by-outcome: pytest-local is shared by every framework's CI, and
+    # most runs pass.
+    - name: Collect per-test log files
+      if: failure()
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p test-results/dynamo-tests-logs
+        if [ -d /tmp/dynamo_tests ]; then
+          cp -r /tmp/dynamo_tests/. test-results/dynamo-tests-logs/
+        fi
+
+    - name: Upload per-test log files
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: failure()
+      with:
+        name: dynamo-tests-logs-${{ inputs.test_suite_name }}-${{ inputs.test_type }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/dynamo-tests-logs/
+        retention-days: 7
+        if-no-files-found: ignore
 
     # Allure results and coverage data are uploaded per stage, under the same
     # artifact names as before the step collapse, because an external CI-metrics

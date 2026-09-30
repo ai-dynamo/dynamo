@@ -198,16 +198,7 @@ export function WelcomeHero({ src }: WelcomeHeroProps) {
         <RotatingStatement />
         <div className="dynamo-welcome__actions">
           <a className="dynamo-welcome__cta" href="/dynamo/dev/kubernetes">
-            Get started with OSS
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m9 18 6-6-6-6" />
-            </svg>
-          </a>
-          <a
-            className="dynamo-welcome__cta dynamo-welcome__cta--secondary"
-            href="/dynamo/dev/reference/enterprise/overview"
-          >
-            Enterprise Support
+            Get started
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="m9 18 6-6-6-6" />
             </svg>

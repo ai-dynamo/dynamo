@@ -142,11 +142,17 @@ fn trailing_tokens_ignored_after_stop() {
 
 #[test]
 fn min_tokens_delays_stop() {
-    let mut decoder = make_decoder(None, Some(3), Some(vec![EOS]), None, false);
+    let mut decoder = make_decoder(None, Some(2), Some(vec![EOS]), None, false);
     let result = decoder.process_token_ids(&[HI, EOS]).unwrap();
 
     assert_eq!(result.text.as_deref(), Some("hi</s>"));
     assert!(result.stop_trigger.is_none());
+
+    let result = decoder.process_token_ids(&[EOS]).unwrap();
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::HiddenStopTokenDetected(id)) if id == EOS
+    ));
 }
 
 #[test]

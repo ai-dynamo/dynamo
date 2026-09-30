@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.aic import materialize_aic_num_gpu_blocks
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -27,9 +27,14 @@ from aisimulate.sweeper.replay import (
     RunnerCapabilities,
 )
 
-from dynamo.llm import AicPerfConfig, KvRouterConfig
+from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
-from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.api import (
+    TelemetryOptions,
+    run_synthetic_trace_replay,
+    run_trace_replay,
+)
+from dynamo.replay.config import lower_upstream_engine_args
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -68,6 +73,20 @@ class DynamoReplayRunnerFactory:
             supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
             supported_hooks=(_PLANNER_HOOK, _ROUTER_HOOK),
             supports_disaggregated_attention_dp=False,
+            supported_execution_modes=("offline",),
+            supported_trace_formats=(
+                "mooncake",
+                "mooncake-delta",
+                "agentic_mooncake",
+                "applied_compute_agentic",
+                "dynamo",
+                "weka",
+            ),
+            supports_agentic_lanes=True,
+            # Full AgentX runtime conformance remains a separate checkpoint.
+            # Keep the public runner honest about the narrower integration here.
+            supported_agentic_topologies=("agg",),
+            agentic_qualification="functional_only",
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:
@@ -100,16 +119,17 @@ class DynamoReplayRunner:
 
         output_requirements = output_requirements or ReplayOutputRequirements()
         self.capabilities.require_compatible(spec)
+        execution_model = self._execution_target_model(spec)
         (
             planner_config,
             router_mode,
             router_config,
-            aic_perf_config,
+            ais_perf_config,
         ) = self._resolve_hooks(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
-            "aic_perf_config": aic_perf_config,
+            "ais_perf_config": ais_perf_config,
             "arrival_speedup_ratio": self._arrival_speedup_ratio(spec),
             "replay_concurrency": self._effective_in_flight_cap(spec),
             "planner_config": planner_config,
@@ -121,16 +141,33 @@ class DynamoReplayRunner:
             # explicitly request detailed output through the Runner contract.
             "capture_per_request": output_requirements.capture_per_request,
             "capture_planner_details": output_requirements.include_raw_report,
+            "telemetry_options": (
+                TelemetryOptions(
+                    sample_interval_ms=output_requirements.telemetry_sample_interval_ms
+                )
+                if output_requirements.capture_telemetry
+                else None
+            ),
             **self._goodput_sla_kwargs(spec),
         }
 
         if self._is_trace(spec):
-            report = self._run_trace(spec, common)
+            report = self._run_trace(spec, common, execution_model=execution_model)
         else:
             common.update(self._synthetic_kwargs(spec))
             report = self._run_synthetic(spec, common)
 
         metrics, metadata = self._normalize_report(report, output_requirements)
+        trace_format = spec.workload.get("trace_format")
+        agentic_lanes = spec.workload.get("agentic_lanes")
+        if trace_format in {"weka", "agentic_mooncake"} or (
+            trace_format == "dynamo" and agentic_lanes is not None
+        ):
+            metadata.update(
+                agentic_qualification=self.capabilities.agentic_qualification,
+                agentic_input_format=trace_format,
+                agentic_lanes=agentic_lanes,
+            )
         self._require_goodput_metric(metrics, spec)
         return ReplayReport(metrics=metrics, metadata=metadata)
 
@@ -148,12 +185,12 @@ class DynamoReplayRunner:
         dict[str, JSONValue] | None,
         str,
         KvRouterConfig | None,
-        AicPerfConfig | None,
+        AisPerfConfig | None,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
-        aic_perf_config: AicPerfConfig | None = None
+        ais_perf_config: AisPerfConfig | None = None
         planner_seen = False
         router_seen = False
         for hook in hooks:
@@ -183,19 +220,19 @@ class DynamoReplayRunner:
                         "Dynamo Router hook config requires a router_config mapping"
                     )
                 router_config = KvRouterConfig.from_json(json.dumps(raw_config))
-                raw_aic = hook.config.get("aic_perf_config")
-                if raw_aic is not None:
-                    if not isinstance(raw_aic, dict):
+                raw_ais = hook.config.get("ais_perf_config")
+                if raw_ais is not None:
+                    if not isinstance(raw_ais, dict):
                         raise TypeError(
-                            "Dynamo Router AIC config must be a mapping or null"
+                            "Dynamo Router AIS config must be a mapping or null"
                         )
-                    aic_perf_config = AicPerfConfig(**raw_aic)
+                    ais_perf_config = AisPerfConfig(config=raw_ais)
                 continue
             raise ValueError(
                 f"unsupported Dynamo runtime hook "
                 f"{hook.provider}:{hook.kind}@{hook.api_version}"
             )
-        return planner_config, router_mode, router_config, aic_perf_config
+        return planner_config, router_mode, router_config, ais_perf_config
 
     @staticmethod
     def _is_trace(spec: ReplaySpec) -> bool:
@@ -241,32 +278,55 @@ class DynamoReplayRunner:
         }
 
     @staticmethod
+    def _execution_target_model(spec: ReplaySpec) -> str | None:
+        if not DynamoReplayRunner._is_trace(spec):
+            return None
+        trace_format = spec.workload.get("trace_format", "mooncake")
+        if trace_format not in {"weka", "agentic_mooncake", "dynamo"}:
+            return None
+
+        deployment = spec.backend_deployment
+        if deployment.deployment_mode == "agg":
+            role = "aggregated"
+            raw_engine_args = deployment.agg_engine_args
+        else:
+            role = "decode"
+            raw_engine_args = deployment.decode_engine_args
+
+        # Accept both the upstream wire spelling and the canonical AIS identity.
+        candidates: list[Any] = []
+        metadata = deployment.performance_model_metadata.get(role)
+        if isinstance(metadata, Mapping):
+            config = metadata.get("config")
+            if isinstance(config, Mapping):
+                candidates += [config.get("model_path"), config.get("model")]
+        if isinstance(raw_engine_args, Mapping):
+            candidates.append(raw_engine_args.get("aic_model_path"))
+            ais_config = raw_engine_args.get("ais_perf_config")
+            if isinstance(ais_config, Mapping):
+                candidates.append(ais_config.get("model"))
+        for model in candidates:
+            if isinstance(model, str) and model.strip():
+                return model.strip()
+        if trace_format == "dynamo":
+            # The native loader distinguishes standard from agentic Dynamo
+            # traces and enforces a target model only for the latter.
+            return None
+        raise ValueError("agentic execution requires a configured target model")
+
+    @staticmethod
     def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
-        lowered = dict(payload)
-        timing = lowered.get("timing_model")
-        if isinstance(timing, dict) and timing.get("type") in {
-            "fixed",
-            "polynomial",
-        }:
-            attention_dp = lowered.pop("aic_attention_dp_size", None)
-            if attention_dp is not None:
-                lowered["dp_size"] = attention_dp
-            for name in (
-                "aic_backend",
-                "aic_backend_version",
-                "aic_system",
-                "aic_model_path",
-            ):
-                lowered.pop(name, None)
-        lowered = materialize_aic_num_gpu_blocks(lowered)
-        # Pipeline parallelism is already represented in the public parallel
-        # mapping and used for AIC capacity. MockEngineArgs has no PP field.
-        lowered.pop("aic_pp_size", None)
-        return MockEngineArgs.from_json(json.dumps(lowered))
+        return MockEngineArgs.from_json(json.dumps(lower_upstream_engine_args(payload)))
 
-    def _run_trace(self, spec: ReplaySpec, common: dict[str, Any]):
+    def _run_trace(
+        self,
+        spec: ReplaySpec,
+        common: dict[str, Any],
+        *,
+        execution_model: str | None,
+    ):
         deployment = spec.backend_deployment
         raw_paths = spec.workload.get("trace_paths")
         trace_files: str | list[str]
@@ -285,15 +345,23 @@ class DynamoReplayRunner:
         if not isinstance(trace_format, str):
             raise TypeError("trace workload requires a string trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
+        trace_block_size = spec.workload.get("trace_block_size")
+        # Weka and Dynamo traces carry their source block size in the trace
+        # metadata. Leave it unset so AISimulate can validate and use that
+        # embedded value instead of imposing the synthetic-workload default.
+        if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
+            trace_block_size = self.trace_block_size
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
                 trace_format=trace_format,
-                trace_block_size=spec.workload.get(
-                    "trace_block_size", self.trace_block_size
+                weka_nested_timestamp_basis=spec.workload.get(
+                    "weka_nested_timestamp_basis"
                 ),
+                trace_block_size=trace_block_size,
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
                 agentic_lanes=agentic_lanes,
+                execution_model=execution_model,
                 extra_engine_args=self._engine_args(deployment.agg_engine_args),
                 num_workers=deployment.num_workers,
                 **common,
@@ -301,11 +369,13 @@ class DynamoReplayRunner:
         return run_trace_replay(
             trace_files=trace_files,
             trace_format=trace_format,
-            trace_block_size=spec.workload.get(
-                "trace_block_size", self.trace_block_size
+            weka_nested_timestamp_basis=spec.workload.get(
+                "weka_nested_timestamp_basis"
             ),
+            trace_block_size=trace_block_size,
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
             agentic_lanes=agentic_lanes,
+            execution_model=execution_model,
             prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
             decode_engine_args=self._engine_args(deployment.decode_engine_args),
             num_prefill_workers=deployment.num_prefill_workers,
@@ -425,6 +495,14 @@ class DynamoReplayRunner:
         else:
             trace_report = dict(report)
 
+        for name in ("agentic_graph", "agentic_model_projection"):
+            value = trace_report.get(name)
+            if isinstance(value, dict):
+                metadata[name] = value
+        resolved_weka_basis = trace_report.get("weka_nested_timestamp_basis")
+        if isinstance(resolved_weka_basis, str):
+            metadata["weka_nested_timestamp_basis"] = resolved_weka_basis
+
         metrics: dict[str, float] = {}
         for name, value in trace_report.items():
             if isinstance(value, Real):
@@ -440,6 +518,8 @@ class DynamoReplayRunner:
             else:
                 native_report = dict(report)
             metadata["native_report"] = native_report
+        if output_requirements.capture_telemetry:
+            metadata["telemetry"] = report.telemetry.to_dict()
         return metrics, metadata
 
     @staticmethod

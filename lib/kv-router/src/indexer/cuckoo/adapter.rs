@@ -150,7 +150,31 @@ impl LocalCkfAdapter {
         lease: LaneLease,
         ingestion: Arc<GlobalCkfIngestionPool>,
     ) -> Result<Self, LocalCkfAdapterBuildError> {
-        let mut state = DcCkfState::new(config)?;
+        Self::from_state(DcCkfState::new(config)?, identity, lease, ingestion)
+    }
+
+    /// Construct an adapter with a fixed delegate on its exact ownership producer.
+    pub fn new_with_delegate(
+        config: CkfConfig,
+        identity: ProducerIdentity,
+        lease: LaneLease,
+        ingestion: Arc<GlobalCkfIngestionPool>,
+        delegate: Arc<dyn crate::indexer::KvIndexerDelegate<super::CanonicalSequenceBlockHash>>,
+    ) -> Result<Self, LocalCkfAdapterBuildError> {
+        Self::from_state(
+            DcCkfState::new_with_delegate(config, delegate)?,
+            identity,
+            lease,
+            ingestion,
+        )
+    }
+
+    fn from_state(
+        mut state: DcCkfState,
+        identity: ProducerIdentity,
+        lease: LaneLease,
+        ingestion: Arc<GlobalCkfIngestionPool>,
+    ) -> Result<Self, LocalCkfAdapterBuildError> {
         if state.format() != identity.format() {
             return Err(LocalCkfAdapterBuildError::ProducerFormatMismatch);
         }

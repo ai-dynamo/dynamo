@@ -35,6 +35,8 @@ pub struct SglangGenerateRequest {
     pub stream: bool,
     #[serde(default)]
     pub priority: Option<i32>,
+    #[serde(default)]
+    pub cache_salt: Option<String>,
     #[serde(flatten)]
     passthrough: Map<String, Value>,
 }
@@ -84,9 +86,16 @@ impl SglangGenerateRequest {
         sampling_field(self.sampling_params.as_ref(), "ignore_eos")
     }
 
+    pub fn cache_namespace(&self) -> Option<&str> {
+        self.cache_salt.as_deref().filter(|salt| !salt.is_empty())
+    }
+
     /// Move the native request into its routed input and opaque worker envelope.
     pub fn into_worker_envelope(self, request_id: &str) -> (Vec<u32>, Value) {
         let mut envelope = self.passthrough;
+        if let Some(salt) = self.cache_salt.filter(|salt| !salt.is_empty()) {
+            envelope.insert("cache_salt".to_string(), Value::String(salt));
+        }
         envelope.insert(
             "sampling_params".to_string(),
             self.sampling_params
@@ -102,6 +111,16 @@ impl SglangGenerateRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_rejects_non_string_cache_salt() {
+        assert!(
+            serde_json::from_value::<SglangGenerateRequest>(serde_json::json!({
+                "input_ids": [1], "cache_salt": 42
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn request_preserves_native_body_opaquely() {
