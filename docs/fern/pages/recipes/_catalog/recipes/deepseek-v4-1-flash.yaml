@@ -18,7 +18,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-98213eef844662894ea157fde8292adc90df783a-vllm-runtime
   topology: aggregated
   techniques:
   - kv-aware-routing
@@ -29,30 +29,32 @@ targets:
   - prefix-caching
   - mxfp4-indexer-kv
   - 1m-context
+  - sparse-indexer-logits
   workload:
     type: trace-replay
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse'
     sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
   deploy:
-    asset: recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic/deploy-generic.yaml
+    asset: recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic/kustomization.yaml
   benchmark:
     tool: aiperf
     asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
   expected_performance:
     available: true
-    summary: c88 = 533.2 output tok/s/GPU @ user 54.23 tok/s, TTFT p50 296 ms.
+    summary: 'Measured original configuration: c168, 953.08 output tok/s/GPU, user p50 51.83 tok/s, TTFT p50/p99 286.75/26793.16
+      ms, per-request mean ITL p50/p99 19.29/110.46 ms. Authored-render runtime qualification pending.'
 - id: vllm-disagg-gb200
   recommended: false
   hardware:
     gpu: GB200
-    count: 12
+    count: 8
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
-  - 2p1d
+  - 1p1d
   - pd-kv-transfer
   - kv-aware-routing
   - dspark-speculative-decoding
@@ -62,18 +64,20 @@ targets:
   - prefix-caching
   - mxfp4-indexer-kv
   - 1m-context
+  - sparse-indexer-logits
   workload:
     type: trace-replay
-    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 2P1D over NIXL/UCX, one NVLink clique'
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 1P1D over NIXL/UCX, one NVLink clique'
     sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
   deploy:
-    asset: recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-generic.yaml
+    asset: recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/kustomization.yaml
   benchmark:
     tool: aiperf
     asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
   expected_performance:
     available: true
-    summary: c168 = 694.7 output tok/s/GPU @ user 59.86 tok/s, TTFT p50 3,237 ms; highest measured per GPU.
+    summary: 'Measured original configuration: c168, 1154.87 output tok/s/GPU, user p50 80.85 tok/s, TTFT p50/p99 169.02/124167.34
+      ms, per-request mean ITL p50/p99 12.37/30.59 ms. Authored-render runtime qualification pending.'
 - id: vllm-agg-b200
   recommended: false
   hardware:
@@ -81,7 +85,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-98213eef844662894ea157fde8292adc90df783a-vllm-runtime
   topology: aggregated
   techniques:
   - kv-aware-routing
@@ -92,30 +96,32 @@ targets:
   - prefix-caching
   - mxfp4-indexer-kv
   - 1m-context
+  - sparse-indexer-logits
   workload:
     type: trace-replay
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse'
     sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
   deploy:
-    asset: recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/deploy-generic.yaml
+    asset: recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/kustomization.yaml
   benchmark:
     tool: aiperf
     asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
   expected_performance:
     available: true
-    summary: c88 = 488.9 output tok/s/GPU @ user 54.65 tok/s, TTFT p50 210 ms.
+    summary: 'Measured original configuration: c168, 990.57 output tok/s/GPU, user p50 54.69 tok/s, TTFT p50/p99 178.66/26864.62
+      ms, per-request mean ITL p50/p99 18.28/120.94 ms. Authored-render runtime qualification pending.'
 - id: vllm-disagg-b200
   recommended: false
   hardware:
     gpu: B200
-    count: 12
+    count: 8
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
-  - 2p1d
+  - 1p1d
   - pd-kv-transfer
   - kv-aware-routing
   - dspark-speculative-decoding
@@ -125,18 +131,20 @@ targets:
   - prefix-caching
   - mxfp4-indexer-kv
   - 1m-context
+  - sparse-indexer-logits
   workload:
     type: trace-replay
-    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 2P1D over NIXL/UCX on InfiniBand'
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 1P1D over NIXL/UCX on InfiniBand'
     sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
   deploy:
-    asset: recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-generic.yaml
+    asset: recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/kustomization.yaml
   benchmark:
     tool: aiperf
     asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
   expected_performance:
     available: true
-    summary: c160 = 610.8 output tok/s/GPU @ user 52.14 tok/s, TTFT p50 2,389 ms.
+    summary: 'Measured original configuration: c184, 1087.71 output tok/s/GPU, user p50 82.12 tok/s, TTFT p50/p99 135.12/168049.68
+      ms, per-request mean ITL p50/p99 12.18/25.03 ms. Authored-render runtime qualification pending. Selected operating points are not a controlled topology-only comparison.'
 - id: sglang-agg-gb200
   recommended: false
   hardware:
@@ -192,3 +200,5 @@ maintainer: null
 gaps:
 - The SGLang targets are day-0 and carry no benchmark or performance claim.
 - maintainer unknown
+- Runtime validation of the refreshed manifests is pending.
+- Performance reports selected operating points, not a controlled topology-only comparison.

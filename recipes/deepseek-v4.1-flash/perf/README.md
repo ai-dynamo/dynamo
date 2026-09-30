@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
 [`perf.yaml`](perf.yaml) — covers all four vLLM DGDs. It waits for the target
 model on the DGD frontend, replays the trace at one `CONCURRENCY` value, and
-writes raw artifacts to the shared `shared-model-cache` PVC.
+writes raw artifacts to the shared `shared-model-cache` PVC. It pins AIPerf
+0.10.0 to match the recorded client version.
 
 ## Targeting a variant
 
@@ -16,21 +17,22 @@ Edit the `env` block in [`perf.yaml`](perf.yaml). The `podAffinity` already
 lists every deployment name, so it needs no edit: only one target is deployed
 at a time and the Job lands beside whichever frontend exists.
 
-| Variant | `ENDPOINT` | Validated `CONCURRENCY` |
-| --- | --- | --- |
-| B200 aggregated | `dsv41-flash-vllm-b200-agg-frontend:8000` | `88` |
-| B200 disaggregated | `dsv41-flash-vllm-b200-disagg-frontend:8000` | `160` |
-| GB200 aggregated | `dsv41-flash-vllm-gb200-agg-frontend:8000` | `88` |
-| GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-frontend:8000` | `168` |
+| Variant | `ENDPOINT` |
+| --- | --- |
+| B200 aggregated | `dsv41-flash-vllm-b200-agg-frontend:8000` |
+| B200 disaggregated | `dsv41-flash-vllm-b200-disagg-frontend:8000` |
+| GB200 aggregated | `dsv41-flash-vllm-gb200-agg-frontend:8000` |
+| GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-frontend:8000` |
 
-Each concurrency is that variant's best SLO-clearing rung, not the peak of the
-throughput curve. Running more than one benchmark in the same namespace needs a
-distinct `metadata.name` and `labels.app`, so Jobs and artifact directories
-stay separate.
+Set `CONCURRENCY` for the operating point being measured. The Job's default
+of 168 matches the recorded B200 aggregated point. The recorded B200
+disaggregated point uses 184; both GB200 replay points use 168. These are
+measured points, not a claim that every other concurrency was worse. Running more than one benchmark in the same namespace needs a
+distinct `metadata.name` and `labels.app` so Jobs and artifacts remain separate.
 
 ## SLO
 
-The recipes were tuned against two floors, both measured at p50:
+Evaluate each operating point against both p50 requirements:
 
 | Metric | Floor |
 | --- | --- |
@@ -41,16 +43,11 @@ The recipes were tuned against two floors, both measured at p50:
 > `total_output_tokens` counts the non-reasoning subset only. Add
 > `total_reasoning_tokens` to get what the GPU actually produced.
 
-> [!IMPORTANT]
-> Throughput on this workload repeats to about 3 percent across identical runs.
-> Do not read a throughput difference smaller than that as a result. Latency
-> percentiles are far more stable and resolve differences throughput cannot.
-
 ## Dataset
 
 The benchmark replays a
 [Mooncake-format](https://github.com/kvcache-ai/Mooncake) trace through
-`--custom-dataset-type mooncake_trace`. Each JSONL line describes one request
+the AIPerf 0.10.0 `mooncake_trace` dataset format with sequential sampling. Each JSONL line describes one request
 with `input_length`, `output_length`, and `hash_ids`.
 
 This is the same 64K-ISL / 400-OSL / 90%-KV-reuse agentic trace the other
@@ -62,12 +59,8 @@ traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
   -> ../../../deepseek-v4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
 ```
 
-The trace contains 3,541 requests. Its SHA-256 is
-`f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0`.
-
-Measured against this corpus, the input median is about 67,600 tokens and the
-output median is about 400. The input p99 is above 450,000 and the longest row
-exceeds 900,000.
+The trace contains 3,541 requests. The profiling Job saves its resolved
+`client.yaml` and trace checksum with the results.
 
 ## Workflow
 
@@ -112,15 +105,46 @@ kubectl wait --for=condition=Complete job/dsv41-flash-vllm-bench -n ${NAMESPACE}
 
 Results land under `/shared-model-cache/perf/<epoch>_<job-name>/trace_c<CONCURRENCY>/`.
 
-### 4. Between runs
+## Measured Results
 
-Every run replays the same corpus, so a second run against a warm deployment
-inherits the first run's cache instead of the trace's own reuse and the two are
-not comparable. Clear worker and router KV state between independent runs,
-either by deleting and re-applying the DGD or by resetting the prefix cache on
-every worker.
+Measured vLLM configurations on the 64K-input / 400-output agentic workload,
+using eight GPUs per target. Output throughput includes reasoning tokens.
+These are selected operating points, not a controlled topology-only comparison;
+validation of the refreshed manifests is pending.
 
-> [!WARNING]
-> A disaggregated prefill worker may refuse a prefix-cache reset with "some
-> blocks are in use" while a transfer to decode is still outstanding. That is a
-> property of disaggregation, not a fault; retry once the transfer drains.
+Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
+
+| Target | Concurrency | Output tok/s/GPU | Output tok/s/user p50 |
+| --- | ---: | ---: | ---: |
+| B200 aggregated | 168 | 990.57 | 54.69 |
+| B200 disaggregated | 184 | 1,087.71 | 82.12 |
+| GB200 aggregated | 168 | 953.08 | 51.83 |
+| GB200 disaggregated | 168 | 1,154.87 | 80.85 |
+
+### TTFT Distribution
+
+Milliseconds across successful requests:
+
+| Target | Mean | p50 | p75 | p90 | p95 | p99 | Max |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B200 aggregated | 1,408.61 | 178.66 | 775.00 | 3,068.28 | 5,552.72 | 26,864.62 | 59,884.76 |
+| B200 disaggregated | 18,597.21 | 135.12 | 2,002.87 | 90,076.83 | 126,866.47 | 168,049.68 | 256,824.39 |
+| GB200 aggregated | 1,601.63 | 286.75 | 951.37 | 3,524.82 | 6,980.67 | 26,793.16 | 52,808.90 |
+| GB200 disaggregated | 12,149.79 | 169.02 | 1,126.26 | 57,116.54 | 100,309.52 | 124,167.34 | 160,272.44 |
+
+### ITL Distribution
+
+Milliseconds across **per-request average token intervals**. These are not
+percentiles of all individual token gaps pooled together.
+
+| Target | Mean | p50 | p75 | p90 | p95 | p99 | Max |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B200 aggregated | 25.06 | 18.28 | 25.07 | 41.42 | 76.17 | 120.94 | 218.89 |
+| B200 disaggregated | 12.64 | 12.18 | 14.34 | 16.52 | 18.58 | 25.03 | 44.31 |
+| GB200 aggregated | 26.40 | 19.29 | 27.22 | 48.76 | 83.17 | 110.46 | 321.77 |
+| GB200 disaggregated | 13.19 | 12.37 | 14.61 | 17.75 | 21.14 | 30.59 | 81.71 |
+
+At these operating points, disaggregated configurations show higher output
+throughput and lower ITL, with longer TTFT tails. GB200 records 21% higher
+output tok/s/GPU and 56% higher p50 output tok/s/user; TTFT p90 rises from
+3.52 s to 57.12 s.

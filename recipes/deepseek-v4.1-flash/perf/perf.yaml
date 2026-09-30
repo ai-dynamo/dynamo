@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# AIPerf Mooncake trace-replay benchmark for the DeepSeek-V4.1-Flash vLLM DGDs.
-#
-# One Job covers all four vLLM variants (agg/disagg x B200/GB200). Set ENDPOINT
-# and CONCURRENCY in the env block below to pick the target. Stage the trace on
-# the PVC first -- see README.md.
+# AIPerf 0.10.0 sequential Mooncake trace replay for the four vLLM targets.
+# Defaults to B200 aggregated, C168. Configure cache reset and warm-up separately.
+# This Job records the exact client configuration and corpus SHA256 per run.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -32,8 +30,6 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
-                # Only one target is deployed at a time, so the Job lands
-                # beside whichever frontend exists.
                 - dsv41-flash-vllm-b200-agg
                 - dsv41-flash-vllm-b200-disagg
                 - dsv41-flash-vllm-gb200-agg
@@ -85,28 +81,41 @@ spec:
           TRACE_LINES=$(wc -l < "${TRACE_FILE}")
 
           echo "AIPerf trace replay: endpoint=${ENDPOINT} model=${TARGET_MODEL} trace=${TRACE_FILE} lines=${TRACE_LINES} concurrency=${CONCURRENCY}"
-          aiperf profile \
-            -m "${TARGET_MODEL}" \
-            --tokenizer "${TARGET_MODEL}" \
-            --tokenizer-trust-remote-code \
-            --input-file "${TRACE_FILE}" \
-            --custom-dataset-type mooncake_trace \
-            --num-requests "${TRACE_LINES}" \
-            --endpoint-type chat \
-            --url "http://${ENDPOINT}" \
-            --streaming \
-            --use-server-token-count \
-            --extra-inputs ignore_eos:true \
-            --concurrency "${CONCURRENCY}" \
-            --random-seed 42 \
-            --ui simple \
-            --artifact-dir "${RUN_DIR}/artifacts" \
-            --request-timeout-seconds "${REQUEST_TIMEOUT_SECONDS}" \
-            --workers-max "${CONCURRENCY}" \
-            --export-http-trace
+          sha256sum "${TRACE_FILE}" > "${RUN_DIR}/trace.sha256"
+          cat > "${RUN_DIR}/client.yaml" <<EOF
+          endpoint:
+            urls: ["http://${ENDPOINT}/v1/chat/completions"]
+            type: chat
+            streaming: true
+            timeout: ${REQUEST_TIMEOUT_SECONDS}
+            use_server_token_count: true
+            extra: {ignore_eos: true}
+          models:
+            items:
+              - name: "${TARGET_MODEL}"
+          tokenizer:
+            name: "${TARGET_MODEL}"
+            trust_remote_code: true
+          datasets:
+            - name: default
+              type: file
+              path: "${TRACE_FILE}"
+              format: mooncake_trace
+              sampling: sequential
+          phases:
+            - name: profiling
+              type: concurrency
+              concurrency: ${CONCURRENCY}
+              requests: ${TRACE_LINES}
+          artifacts:
+            dir: "${RUN_DIR}/artifacts"
+            summary: [json]
+            records: [jsonl]
+          EOF
+
+          aiperf profile --config "${RUN_DIR}/client.yaml"
           echo "Done. Artifacts: ${RUN_DIR}"
         env:
-        # Defaults target AGG B200 at its validated operating point (C=88).
         - name: ENDPOINT
           value: dsv41-flash-vllm-b200-agg-frontend:8000
         - name: TARGET_MODEL
@@ -114,13 +123,13 @@ spec:
         - name: TRACE_FILE
           value: /shared-model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
         - name: CONCURRENCY
-          value: "88"
+          value: '168'
         - name: REQUEST_TIMEOUT_SECONDS
-          value: "21600"
+          value: '21600'
         - name: AIPERF_VERSION
-          value: "0.12.0"
+          value: 0.10.0
         - name: AIPERF_API_PORT
-          value: "18090"
+          value: '18090'
         - name: JOB_NAME
           valueFrom:
             fieldRef:
@@ -131,7 +140,7 @@ spec:
         - name: HF_HOME
           value: /shared-model-cache
         - name: PYTHONUNBUFFERED
-          value: "1"
+          value: '1'
         volumeMounts:
         - name: shared-model-cache
           mountPath: /shared-model-cache

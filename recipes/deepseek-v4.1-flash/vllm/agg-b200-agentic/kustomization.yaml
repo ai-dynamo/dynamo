@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-source: kustomize/base
-nameTemplate: "${variant}"
-matrix:
-  variant:
-    - name: generic
-      components: []
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- kustomize/base
+sortOptions:
+  order: fifo

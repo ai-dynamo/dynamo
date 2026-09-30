@@ -107,8 +107,8 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
       <div><h3>DeepSeek-V4.1-Flash</h3><p>DeepSeek</p></div>
     </div>
-    <p className="dynamo-model-summary">Benchmarked vLLM recipes on B200 and GB200, aggregated or 2P1D disaggregated over NIXL, with DSpark speculation and KV-aware routing; plus the day-0 SGLang recipes on GB200.</p>
-    <div className="dynamo-model-tags"><span>vLLM · SGLang</span><span>8x–12x B200/GB200</span><span>Agentic · up to 1M context</span></div>
+    <p className="dynamo-model-summary">vLLM Kustomize recipes on B200 and GB200, aggregated or 1P1D disaggregated over NIXL, with sparse-indexer logits, DSpark speculation, and KV-aware routing; plus the day-0 SGLang recipes on GB200.</p>
+    <div className="dynamo-model-tags"><span>vLLM · SGLang</span><span>8x B200/GB200</span><span>Agentic · up to 1M context</span></div>
   <a className="dynamo-card-link" href="deepseek-v4-1-flash.mdx" aria-label="Open the DeepSeek-V4.1-Flash recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="vllm" data-hardware="h200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
