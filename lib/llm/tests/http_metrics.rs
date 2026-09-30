@@ -184,8 +184,7 @@ impl
         let gate = Arc::clone(&self.gate);
 
         let stream = stream! {
-            // Leading data-less metrics frame: the shape the payload-capture
-            // fold forwards ahead of its folded chunk, and the shape the
+            // Leading data-less metrics frame, as legacy engines emit and as the
             // preflight buffers until the first data-bearing event.
             let leading = LLMMetricAnnotation {
                 input_tokens: 5,
@@ -811,8 +810,8 @@ async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
     .await;
 }
 
-/// Non-streaming `/v1/responses` reaches the same fold through the chat
-/// engine and must keep the same order; reverting only that handler fails
+/// Non-streaming `/v1/responses` reaches the same chat engine and must keep
+/// the same order; reverting only that handler fails
 /// this case while the chat case stays green.
 #[tokio::test]
 async fn test_responses_non_streaming_observes_metrics_before_backend_error_preflight() {
