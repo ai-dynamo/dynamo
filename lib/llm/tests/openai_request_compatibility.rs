@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! HTTP regressions for frontend-crates#299 compatibility.
+//! OpenAI HTTP compatibility for Responses text configuration and completion stream options.
 use dynamo_llm::{
     http::service::service_v2::HttpService,
     model_card::ModelDeploymentCard,
@@ -58,7 +58,7 @@ impl
 }
 
 #[tokio::test]
-async fn issue_299_http_compatibility() {
+async fn responses_text_and_completion_stream_options_survive_http_ingress() {
     temp_env::async_with_vars([
         ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("0")),
         ("DYN_ENABLE_FORCE_INCLUDE_USAGE", Some("false")),
@@ -140,7 +140,7 @@ async fn issue_299_http_compatibility() {
 }
 
 #[test]
-fn issue_299_internal_usage_after_ingress_options_are_cleared() {
+fn nonstreaming_usage_is_enabled_after_ingress_options_are_cleared() {
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     let mut chat: NvCreateChatCompletionRequest = serde_json::from_value(json!({
         "model": MODEL, "messages": [{"role": "user", "content": "Say hello"}]
