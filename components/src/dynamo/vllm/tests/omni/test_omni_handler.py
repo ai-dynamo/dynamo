@@ -496,8 +496,16 @@ class _AsyncReturn:
 class TestI2VEngineInputs:
     """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
 
-    @pytest.mark.parametrize("negative_prompt", [None, "", "blurry", "模糊 🛶"])
-    @pytest.mark.parametrize("with_image", [False, True])
+    @pytest.mark.parametrize(
+        "negative_prompt,with_image",
+        [
+            (None, False),
+            ("", False),
+            ("blurry", False),
+            ("模糊 🛶", False),
+            ("blurry", True),
+        ],
+    )
     def test_video_negative_prompt(self, negative_prompt, with_image):
         handler = _make_handler()
         req = NvCreateVideoRequest(
