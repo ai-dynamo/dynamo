@@ -15,7 +15,6 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
-from gpu_memory_service.snapshot.backends.pinned_host import PinnedCopySlot
 from _fake_vmm import FakeVMM
 from blake3 import blake3
 from gpu_memory_service.snapshot.backends.nixl import NixlTransferBackend
@@ -28,6 +27,7 @@ from gpu_memory_service.snapshot.backends.nixl_staging import (
     _NixlPosixStagingTransferSession,
     restore_file_groups_with_nixl_staging,
 )
+from gpu_memory_service.snapshot.backends.pinned_host import PinnedCopySlot
 from gpu_memory_service.snapshot.transfer import (
     FileIntegrity,
     FileTransferSource,
@@ -313,7 +313,9 @@ def test_pinned_copy_slot_skips_unsupported_host_register():
             )
 
         def host_unregister(self, ptr):
-            raise AssertionError("host_unregister should be skipped when registration is unsupported")
+            raise AssertionError(
+                "host_unregister should be skipped when registration is unsupported"
+            )
 
     slot = PinnedCopySlot(HostRegisterUnsupportedVMM())
 
