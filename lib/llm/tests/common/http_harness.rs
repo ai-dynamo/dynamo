@@ -72,6 +72,8 @@ impl HarnessService {
         Self::start_with_engines(engine, None).await
     }
 
+    /// Call `shutdown().await` to wait for service teardown and surface task failures.
+    /// Dropping the harness instead aborts its HTTP task without checking the result.
     pub async fn start_with_engines(
         engine: Arc<ScriptedChatEngine>,
         completions: Option<OpenAICompletionsStreamingEngine>,
