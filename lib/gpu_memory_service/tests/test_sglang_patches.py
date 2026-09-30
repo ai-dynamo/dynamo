@@ -79,3 +79,31 @@ def test_patch_model_runner_leaves_baseline_unchanged_without_preload(monkeypatc
 
     assert runner.alloc_memory_pool() == 10.0
     assert runner.pre_model_load_memory == 10.0
+
+
+def test_patch_model_runner_skips_when_upstream_accounts(monkeypatch):
+    """SGLang >=0.5.21 accounts for preloaded weights itself.
+
+    Applying the legacy patch on top would add the weight bytes to
+    pre_model_load_memory twice and oversize the KV cache.
+    """
+
+    class ModelRunner:
+        def account_preloaded_weights(self, preloaded_weights_bytes):
+            self.pre_model_load_memory += preloaded_weights_bytes / (1 << 30)
+
+        def alloc_memory_pool(self, memory_pool_config=None):
+            return self.pre_model_load_memory
+
+    original_method = ModelRunner.alloc_memory_pool
+    _patch_model_runner(monkeypatch, ModelRunner, 2 << 30)
+
+    assert ModelRunner.alloc_memory_pool is original_method
+    assert not hasattr(ModelRunner, "_gms_patched")
+
+    runner = ModelRunner()
+    runner.pre_model_load_memory = 10.0
+    runner.account_preloaded_weights(2 << 30)
+
+    assert runner.alloc_memory_pool() == 12.0
+    assert runner.pre_model_load_memory == 12.0
