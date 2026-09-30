@@ -298,6 +298,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 #[derive(Default)]
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    token_ids: Vec<u32>,
 }
 
 #[async_trait]
@@ -315,6 +316,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .unwrap()
             .push(instance.expect("selected worker instance").id());
         let output = Annotated::from_data(LLMEngineOutput {
+            token_ids: self.token_ids.clone(),
             finish_reason: Some(FinishReason::Stop),
             ..Default::default()
         });
@@ -3722,6 +3724,80 @@ async fn conditional_route_stages_share_one_cleanup_budget() {
     plan.abort().await;
     drop(router);
     runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn ttft_includes_session_affinity_wait() {
+    for is_kv in [true, false] {
+        let (mut router, _, _, runtime) = router_with_recorded_dispatch_and_affinity(
+            "ttft-affinity-wait",
+            Some(Duration::from_secs(10)),
+        )
+        .await;
+        let client = router.inner.client.clone();
+        let dispatch = Arc::new(CompletedBuiltinDispatch {
+            token_ids: vec![1],
+            ..Default::default()
+        });
+        let mode = if is_kv {
+            RouterMode::KV
+        } else {
+            RouterMode::RoundRobin
+        };
+        let inner = PushRouter::from_client_with_dispatch(client.clone(), mode, dispatch)
+            .await
+            .unwrap();
+        if is_kv {
+            router.inner = inner;
+        } else {
+            router = RoutingHost::new_builtin_with_coordinator(
+                inner,
+                test_load_context(&client).await,
+                router.affinity.clone(),
+            )
+            .unwrap();
+        }
+
+        let model = if is_kv {
+            "ttft-kv-wait"
+        } else {
+            "ttft-builtin-wait"
+        };
+        let metrics = router.request_metrics.clone();
+        let coordinator = router.affinity.as_ref().unwrap().clone();
+        let session_id = SessionAffinityId::new("ttft-contended-session");
+        let Hold::Initialize(holder) = coordinator.acquire(&session_id, None).await.unwrap() else {
+            panic!("the first acquisition must initialize the session");
+        };
+        let mut content = request();
+        content.model = model.to_string();
+        content.tracker = Some(Arc::new(RequestTracker::new()));
+        let mut request = Context::new(content);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+        tokio::time::pause();
+        let router = Arc::new(router);
+        let generate_router = Arc::clone(&router);
+        let generate = tokio::spawn(async move { generate_router.generate(request).await });
+        coordinator.wait_for_initializing_waiter().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        drop(holder);
+        let mut stream = generate.await.unwrap().unwrap();
+        while stream.next().await.is_some() {}
+
+        let ttft = metrics
+            .time_to_first_token_seconds
+            .with_label_values(&["aggregated", model]);
+        assert_eq!(ttft.get_sample_count(), 1);
+        assert!(
+            ttft.get_sample_sum() >= 0.1,
+            "TTFT must include the affinity wait"
+        );
+        drop(router);
+        runtime.shutdown();
+        tokio::time::resume();
+    }
 }
 
 /// The session-affinity wait runs upstream of every stage the cleanup policy

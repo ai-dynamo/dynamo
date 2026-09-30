@@ -26,6 +26,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use tokio::time::Instant;
 use tracing::Instrument;
 
 use crate::{
@@ -309,6 +310,7 @@ pub struct RoutingHost {
 
 /// An admitted KV route awaiting dispatch.
 pub(crate) struct RoutePlan {
+    started_at: Instant,
     pub(crate) signals: RoutePlanSignals,
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
@@ -320,6 +322,7 @@ pub(crate) struct RoutePlan {
 
 /// A KV route selected without scheduler admission.
 pub(crate) struct RoutePreview {
+    started_at: Instant,
     request_id: String,
     phase: RequestPhase,
     pub(crate) signals: RoutePlanSignals,
@@ -830,6 +833,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let started_at = Instant::now();
         // One cleanup budget for this request's whole route through the host.
         let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
@@ -905,7 +909,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .track_selection(&request, &mut selection, phase, false, &budget)
             .await
         {
-            Ok(guard) => guard,
+            Ok(guard) => guard.with_started_at(started_at),
             Err(error) => return Err(error),
         };
         drop(route_guard);

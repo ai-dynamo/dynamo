@@ -585,6 +585,11 @@ pub(super) struct RequestGuard {
 }
 
 impl RequestGuard {
+    pub(super) fn with_started_at(mut self, started_at: Instant) -> Self {
+        self.observability.started_at = started_at;
+        self
+    }
+
     pub(super) fn new_kv(
         chooser: Arc<KvRouter>,
         request_metrics: Arc<RouterRequestMetrics>,

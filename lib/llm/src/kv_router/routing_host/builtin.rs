@@ -283,6 +283,7 @@ impl RoutingHost {
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
+        let started_at = Instant::now();
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(request.content(), phase)?;
@@ -363,7 +364,8 @@ impl RoutingHost {
             occupancy_reservation,
             lora_load,
             &request,
-        );
+        )
+        .with_started_at(started_at);
         let tracker = request.tracker.clone();
         let request_context = request.context().clone();
         guard
