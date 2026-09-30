@@ -20,12 +20,14 @@ the command. Pass supported flags after the script name to override its defaults
 
 ### System One Typed Decisions (Experimental)
 
-To evaluate typed decisions without generating answer tokens, run the [System One launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_systemone.sh). It starts one aggregate SGLang worker and enables `/v1/systemone` on the frontend. The default model is `Qwen/Qwen3-0.6B` and requires one GPU. Use a Dynamo build containing the experimental endpoint and an SGLang runtime that supports zero-output candidate-token scoring.
+To evaluate typed decisions without generating answer tokens, run the [System One launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_systemone.sh). It starts one aggregate SGLang worker and enables `/v1/systemone` on the frontend. The default model is `Qwen/Qwen3-0.6B` and requires one GPU. Use Linux with Bash 4.4 or later, a Dynamo build containing the experimental endpoint, and SGLang 0.5.19.
+
+The supported worker configuration uses `--disable-overlap-schedule --max-running-requests 1` and pipeline parallelism of one. This serialized compatibility mode avoids SGLang 0.5.19 mixed chat/scoring batch failures; it does not enable unrestricted mixed batching. Concurrent HTTP clients queue for the worker, including ordinary chat requests. Keep speculative decoding, LoRA, disaggregation, and frontend request migration disabled.
 
 From `examples/backends/sglang`, start the deployment:
 
 ```bash
-./launch/agg_systemone.sh
+./launch/agg_systemone.sh --disable-overlap-schedule --max-running-requests 1 --pp-size 1
 ```
 
 In a second terminal at the repository root, run the [System One smoke test](https://github.com/ai-dynamo/dynamo/blob/main/examples/systemone/smoke.sh):

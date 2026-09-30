@@ -13,7 +13,7 @@ subtitle: Field reference for the Dynamo-specific CLI flags and environment vari
 
 ## How the config is loaded
 
-For the experimental [System One API](../api/systemone.md), use an aggregate worker with native candidate-token scoring and enable `--enable-systemone-api` on the frontend. No separate System One worker flag is required. The endpoint excludes dependent worker roles, LoRA, speculative decoding, and request migration. See the [System One local example](../../recipes/cli-templates/sglang.mdx#system-one-typed-decisions-experimental) for the shell launch and validation commands.
+For the experimental [System One API](../api/systemone.md), use an aggregate SGLang 0.5.19 worker with native candidate-token scoring, `--disable-overlap-schedule --max-running-requests 1`, and pipeline parallelism of one (`--pp-size 1`). Enable `--enable-systemone-api` on the frontend and disable request migration. No separate System One worker flag is required; only workers with the compatible configuration advertise eligibility. The endpoint excludes dependent worker roles, LoRA, and speculative decoding. Concurrent HTTP requests queue for serialized worker execution; unrestricted mixed chat/scoring batches are not supported. See the [System One local example](../../recipes/cli-templates/sglang.mdx#system-one-typed-decisions-experimental) for the shell launch and validation commands.
 
 Each field is both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--enable-multimodal` sets it on, `--no-enable-multimodal` sets it off.
 

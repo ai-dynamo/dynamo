@@ -9,13 +9,15 @@ subtitle: Typed decisions from native SGLang candidate-token scoring
 
 ## Compatibility
 
-Only aggregate SGLang workers advertising native Generate support are eligible. Workers must have no dependent worker roles, LoRA adapter, speculative decoding, or request migration (`--migration-limit 0`). The frontend must load the model tokenizer and chat template. Each candidate label must append exactly one distinct token at the answer position, and reasoning must be disabled before that position. Known always-on reasoning modes and templates that leave reasoning open are rejected. A tokenizer that splits a label into multiple tokens is rejected rather than approximated.
+Only aggregate SGLang workers advertising System One compatibility and native Generate support are eligible. The supported SGLang 0.5.19 configuration, including versions with a local build suffix such as `0.5.19+local`, requires `--disable-overlap-schedule --max-running-requests 1` and pipeline parallelism of one (`--pp-size 1`). Other SGLang versions do not advertise this capability; requests naming a registered model without it fail closed with 400. Workers must have no dependent worker roles, LoRA adapter, speculative decoding, or request migration (`--migration-limit 0`). The frontend must load the model tokenizer and chat template. Each candidate label must append exactly one distinct token at the answer position, and reasoning must be disabled before that position. Known always-on reasoning modes and templates that leave reasoning open are rejected. A tokenizer that splits a label into multiple tokens is rejected rather than approximated.
+
+This serialized compatibility mode prevents heterogeneous chat and candidate-scoring requests from entering the same SGLang batch. SGLang 0.5.19 can fail while converting candidate log probabilities in such a batch. Concurrent HTTP clients are supported by queueing work, not by unrestricted mixed-batch execution. Ordinary chat requests sharing the worker also run one at a time; account for that throughput and latency tradeoff when deploying the endpoint.
 
 Models configured with always-on reasoning parsers (`deepseek_r1`, `step3`, `gpt_oss`, or `kimi`) are rejected even when template arguments request disabled reasoning. The endpoint requires the model's first answer-position distribution, not a reasoning-channel distribution.
 
 This endpoint sends SGLang native candidate-token scoring requests with `max_new_tokens: 0` and neutral sampling settings. It does not generate an answer token or reasoning text. vLLM and TensorRT-LLM are not supported by this endpoint. Support for a model's ordinary chat/completion endpoint does not imply System One compatibility.
 
-The weight-backed parity test targets SGLang 0.5.19 and compares this endpoint with native `/generate` candidate scoring. This comparison does not establish compatibility with every upstream System One implementation or model.
+The weight-backed parity test targets SGLang 0.5.19 and compares this endpoint with native `/generate` candidate scoring. Local validation also used `Qwen/Qwen3.8-27B` at revision `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` with this serialized configuration, a 2,048-token context and KV budget, and one NVIDIA RTX PRO 6000 GPU. The run passed the shell smoke test, native Generate numerical comparisons, and 100 HTTP requests (50 mixed decision requests and 50 chat requests) with a peak of 32 concurrent HTTP clients and no failures. Peak observed GPU memory was 70,142 MiB. This is a local contract and same-engine parity check, not an independent upstream golden-corpus comparison, decision-quality evaluation, calibration result, or general performance guarantee.
 
 ## Request
 
@@ -108,11 +110,19 @@ For `choice` with `N > 1`, `confidence = (max_i p_i - 1/N) / (1 - 1/N)`. For `sc
 | Score levels per question | 10 |
 | Concurrent admitted branches per frontend | 256 by default; `DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES` can reduce the limit |
 | Cumulative expanded prompt tokens per request | 65,536 by default; `DYN_SYSTEMONE_MAX_INPUT_TOKENS` can reduce the limit |
+| Concurrent preflight jobs per frontend | 4; fixed CPU-work bound, independent of branch admission capacity |
+| Cumulative tokenizer validation work per request | 1,048,576 token-equivalent units; fixed limit |
+| Cumulative tokenizer encoding bytes per request | 16 MiB across repeated prompt and candidate-label encodings; fixed limit |
+| Concurrent sibling branches per request | At most 4 after the first branch establishes placement; worker execution remains serialized |
 | Prompt length per question | Strictly less than the model's effective context length when that length is known |
 
-Admission reserves one permit per question before rendering/tokenization and holds the permits through dispatch. All prompts pass validation before backend dispatch. The first question establishes a worker and data-parallel rank; the remaining questions run concurrently pinned to that placement. Dynamo returns the complete answer set or one error, never partial answers. A failed branch cancels its siblings. Disconnecting the HTTP client cancels dispatched branches; blocking preflight may finish first and retains admission permits while it runs.
+Admission reserves one permit per question before rendering/tokenization and holds the permits through dispatch. A request with more questions than the frontend's total branch capacity cannot fit even when idle and returns 422 without `Retry-After`. A request that fits the total capacity but finds too few free branch permits or no free preflight job returns the configured overload status (529 by default) with `Retry-After: 1`.
 
-Preflight checks a question's prompt size immediately after its initial tokenization, before tokenizing that prompt again for candidate-label checks. The effective limit is the smaller of the remaining request token budget and the model context limit minus one token.
+All prompts pass validation before backend dispatch. The first question establishes a worker and data-parallel rank; the remaining questions are dispatched pinned to that placement. The supported SGLang worker serializes their execution. Dynamo returns the complete answer set or one error, never partial answers. A failed branch cancels its siblings. Disconnecting the HTTP client cancels dispatched branches; blocking preflight may finish first and retains admission permits while it runs.
+
+Before a question's first tokenization, preflight checks its rendered prompt bytes against the remaining cumulative 16 MiB encoding-byte budget. Each question counts `prompt_bytes * (candidate_count + 2) + sum(candidate_label_bytes)`, covering two prompt encodings and the full prompt-and-label encoding for each candidate. Exceeding this budget returns 422 before that question is tokenized.
+
+Preflight checks a question's prompt size immediately after its initial tokenization, before tokenizing that prompt again for candidate-label checks. The effective limit also accounts for remaining tokenizer-validation work, the remaining expanded prompt-token budget, and the model context limit minus one token. The tokenizer-work budget counts two full prompt encodings plus one full prompt-and-label encoding per candidate. Candidate validation retains a full token-prefix comparison; a single-token suffix is not assumed from encoding the label alone. The frontend rejects excess validation work with 422 before running the candidate encodings. These CPU-work budgets are separate from response `usage.input_tokens`.
 
 Each parent request receives a fresh random 128-bit cache salt shared only by its question branches. This permits within-request prefix reuse while isolating prefix-cache reuse between requests. Clients cannot set the salt or pin a worker through this endpoint. Prefix reuse is an engine optimization, not a guarantee that state tokens are processed only once.
 
@@ -126,11 +136,11 @@ System One errors use `{"error":{"message":"..."}}`. The HTTP status carries the
 | `404` | Endpoint disabled, model name not registered/resolvable, or `jev-latest` fallback is ambiguous. |
 | `413` | Request body exceeds the endpoint's 4 MiB cap. |
 | `415` | Unsupported or missing JSON content type. |
-| `422` | Invalid question/state fields, unsupported controls, incompatible tokenizer/chat template, or prompt/token limits exceeded. |
+| `422` | Invalid question/state fields, unsupported controls, incompatible tokenizer/chat template, prompt/token limits exceeded, or question count exceeds the frontend's total branch capacity. These permanent request errors do not include `Retry-After`. |
 | `499` | Parent request cancelled; a disconnected client normally cannot receive this response. |
 | `500` | Internal failure or malformed native scoring response, including missing, reordered, duplicate, nonfinite, or aborted candidate scores. |
-| `503` | Frontend not ready, no live eligible worker, worker unavailable, or inability to preserve worker/rank placement. |
-| `529` by default | Branch admission capacity exhausted. `DYN_HTTP_OVERLOAD_STATUS_CODE` can change the status; admission rejection includes `Retry-After: 1`. |
+| `503` | Frontend not ready, no live eligible worker, worker unavailable, or inability to preserve worker/rank placement. Can also represent temporary admission overload when configured through `DYN_HTTP_OVERLOAD_STATUS_CODE`; that admission response includes `Retry-After: 1`. |
+| `529` by default | Temporary exhaustion of available admission capacity for a request that fits the frontend's total branch capacity. `DYN_HTTP_OVERLOAD_STATUS_CODE` can change the status; this admission rejection includes `Retry-After: 1`. |
 
 ## Related Resources
 
