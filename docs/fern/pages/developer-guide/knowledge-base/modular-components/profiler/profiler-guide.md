@@ -374,10 +374,10 @@ spec:
 
 **Currently supports:**
 - **Backends**: vLLM, SGLang, TensorRT-LLM
-- **Systems**: H100 SXM, H200 SXM, B200 SXM, GB200 SXM, A100 SXM
 - **Models**: Wide range including GPT, Llama, Mixtral, DeepSeek, Qwen, and more
 
-See the [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/) for the full list.
+See the [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
+for current GPU system, backend version, and model coverage.
 
 ### Automatic GPU Discovery
 
