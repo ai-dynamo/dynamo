@@ -13,6 +13,7 @@ use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::{Annotated, codec::create_message_stream};
+use dynamo_llm::types::openai::completions::OpenAICompletionsStreamingEngine;
 use dynamo_runtime::CancellationToken;
 use dynamo_runtime::error::DynamoError;
 use futures::StreamExt;
@@ -67,7 +68,16 @@ impl HarnessService {
         Self::start_with_engine(Arc::new(ScriptedChatEngine::with_generate_error(error))).await
     }
 
+    /// Starts the harness with a scripted chat backend.
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+        Self::start_with_engines(engine, None).await
+    }
+
+    /// Enables legacy completions when a completions backend is supplied.
+    pub async fn start_with_engines(
+        engine: Arc<ScriptedChatEngine>,
+        completions: Option<OpenAICompletionsStreamingEngine>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -77,7 +87,7 @@ impl HarnessService {
             .port(port)
             .host("127.0.0.1")
             .enable_chat_endpoints(true)
-            .enable_cmpl_endpoints(false)
+            .enable_cmpl_endpoints(completions.is_some())
             .enable_responses_endpoints(true)
             .enable_anthropic_endpoints(true)
             .build()
@@ -89,6 +99,13 @@ impl HarnessService {
             .model_manager()
             .add_chat_completions_model(MODEL, card.mdcsum(), engine.clone())
             .expect("failed to register scripted harness model");
+
+        if let Some(completions) = completions {
+            service
+                .model_manager()
+                .add_completions_model(MODEL, card.mdcsum(), completions)
+                .expect("failed to register harness completions model");
+        }
 
         let cancel = CancellationToken::new();
         let join = service.spawn_with_listener(cancel.clone(), listener).await;

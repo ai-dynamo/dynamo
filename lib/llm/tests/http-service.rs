@@ -3568,7 +3568,7 @@ mod zero_top_logprobs {
 mod stream_options {
     use super::*;
     use dynamo_protocols::types::ChatCompletionStreamOptions;
-    use http_harness::{MODEL, load_agent_fixture};
+    use http_harness::{HarnessService, MODEL, load_agent_fixture};
     use serde_json::{Value, json};
     use std::sync::Mutex;
 
@@ -3622,30 +3622,7 @@ mod stream_options {
                 CASES.iter().map(|_| Ok(script.clone())),
             ));
             let completion = Arc::new(CompletionEngine::default());
-            let (listener, port) = bind_random_port().await;
-            let service = HttpService::builder()
-                .port(port)
-                .host("127.0.0.1")
-                .enable_chat_endpoints(true)
-                .enable_cmpl_endpoints(true)
-                .build()
-                .unwrap();
-            let card = ModelDeploymentCard::with_name_only(MODEL);
-            service
-                .model_manager()
-                .add_chat_completions_model(MODEL, card.mdcsum(), chat.clone())
-                .unwrap();
-            service
-                .model_manager()
-                .add_completions_model(MODEL, card.mdcsum(), completion.clone())
-                .unwrap();
-            let cancel = CancellationToken::new();
-            let task = service.spawn_with_listener(cancel.clone(), listener).await;
-            let client = reqwest::Client::builder()
-                .no_proxy()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap();
+            let service = HarnessService::start_with_engines(chat, Some(completion.clone())).await;
 
             for (endpoint, input) in [
                 (
@@ -3665,8 +3642,10 @@ mod stream_options {
                     if let Some(flag) = stream {
                         body["stream"] = json!(flag);
                     }
-                    let response = client
-                        .post(format!("http://127.0.0.1:{port}/v1/{endpoint}"))
+                    let response = service
+                        .client
+                        .post(format!("{}/v1/{endpoint}", service.base_url))
+                        .timeout(std::time::Duration::from_secs(10))
                         .json(&body)
                         .send()
                         .await
@@ -3679,7 +3658,9 @@ mod stream_options {
                         assert_eq!(output["usage"]["total_tokens"], 7);
                     }
                     let captured: Vec<_> = if endpoint == "chat/completions" {
-                        chat.take_requests()
+                        service
+                            .engine
+                            .take_requests()
                             .await
                             .into_iter()
                             .map(|r| r.inner.stream_options)
@@ -3691,12 +3672,7 @@ mod stream_options {
                     assert_eq!(captured, vec![expected], "{body}");
                 }
             }
-            cancel.cancel();
-            timeout(std::time::Duration::from_secs(3), task)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            service.shutdown().await;
         })
         .await;
     }
