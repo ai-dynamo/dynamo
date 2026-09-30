@@ -129,6 +129,7 @@ spec:
             resources:
               limits:
                 hugepages-2Mi: 4Gi
+                lpu.nvidia.com/devices: "1"
                 nvidia.com/lpu: "16"
               requests:
                 cpu: "62"

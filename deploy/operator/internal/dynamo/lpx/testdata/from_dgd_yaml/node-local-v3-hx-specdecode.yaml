@@ -129,6 +129,7 @@ spec:
               timeoutSeconds: 1
             resources:
               limits:
+                lpu.nvidia.com/devices: "1"
                 nvidia.com/lpu: "16"
               requests:
                 nvidia.com/lpu: "16"
@@ -280,6 +281,7 @@ spec:
               timeoutSeconds: 1
             resources:
               limits:
+                lpu.nvidia.com/devices: "1"
                 nvidia.com/lpu: "16"
               requests:
                 nvidia.com/lpu: "16"
@@ -431,6 +433,7 @@ spec:
               timeoutSeconds: 1
             resources:
               limits:
+                lpu.nvidia.com/devices: "1"
                 nvidia.com/lpu: "16"
               requests:
                 nvidia.com/lpu: "16"
