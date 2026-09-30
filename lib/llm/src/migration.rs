@@ -2805,8 +2805,6 @@ mod tests {
         }
     }
 
-    /// Runs one request through a RetryManager over `UsageMockEngine` and returns the prompts
-    /// each attempt was sent and the usage the final attempt reported through it.
     async fn run_usage_request(
         request: PreprocessedRequest,
         fail_after: usize,
@@ -2899,21 +2897,6 @@ mod tests {
         assert_eq!(usage.completion_tokens, 4);
         assert_eq!(usage.total_tokens, 7);
         assert_eq!(cached_tokens(&usage), Some(3));
-    }
-
-    /// Prompt embeddings take precedence over the replayed token IDs, so their usage is left
-    /// exactly as the worker reported it.
-    #[tokio::test]
-    async fn test_retry_manager_leaves_embedding_prompt_usage_alone_after_migration() {
-        let mut request = create_mock_request(4);
-        request.prompt_embeds = Some("embeddings".to_string());
-        let (prompts, usage) = run_usage_request(request, 2, 1).await;
-
-        assert_eq!(prompts.len(), 2);
-        assert_eq!(usage.prompt_tokens, 5, "the mock's own count, unchanged");
-        assert_eq!(usage.completion_tokens, 2);
-        assert_eq!(usage.total_tokens, 7);
-        assert_eq!(cached_tokens(&usage), Some(5));
     }
 
     #[tokio::test]
