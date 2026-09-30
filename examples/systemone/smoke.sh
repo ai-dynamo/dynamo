@@ -15,6 +15,11 @@
 # limitations under the License.
 
 set -euo pipefail
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+    echo "Bash 4.4 or later is required" >&2
+    exit 1
+fi
+
 for tool in curl jq; do
     command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 1; }
 done
@@ -80,7 +85,7 @@ fi
 jq -e --arg model "$MODEL" '
     def unit: type == "number" and . >= 0 and . <= 1;
     def distribution: all(.[]; unit) and (([.[]] | add) - 1 | fabs) < 0.000001;
-    .model == $model and (.answers | keys) == ["route", "severity", "urgent"]
+    .model == $model and (.answers | keys_unsorted) == ["route", "urgent", "severity"]
     and .answers.route.type == "choice"
     and (.answers.route.choice == "billing" or .answers.route.choice == "technical")
     and (.answers.route.probabilities | keys) == ["billing", "technical"]

@@ -16,6 +16,11 @@
 
 set -euo pipefail
 
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+    echo "Bash 4.4 or later is required" >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=../../../common/gpu_utils.sh
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
@@ -94,6 +99,9 @@ DYN_SYSTEM_PORT="$WORKER_PORT" setsid python3 -m dynamo.sglang \
     --context-length "$CONTEXT_LENGTH" \
     --page-size 16 \
     --tp 1 \
+    --pp-size 1 \
+    --disable-overlap-schedule \
+    --max-running-requests 1 \
     --enable-metrics \
     --disable-piecewise-cuda-graph \
     "${GPU_ARGS[@]}" \
