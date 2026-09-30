@@ -660,6 +660,7 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
 	# Post-process duplicate anchors and fields pruned from standalone DCD CRDs.
 	python3 docs/fix-api-anchors.py ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+	python3 ../../docs/fern/scripts/gen_kubernetes_api.py
 
 HELM_CHART_DIR := ../helm/charts/platform
 

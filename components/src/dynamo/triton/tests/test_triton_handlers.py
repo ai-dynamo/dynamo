@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock
 
+import ml_dtypes
 import numpy as np
 import pytest
 
@@ -27,10 +28,16 @@ class _MockModel:
     """Records the request it builds and replays a fixed response stream."""
 
     def __init__(
-        self, output_metadata: list[dict[str, Any]], responses: list[Any]
+        self,
+        output_metadata: list[dict[str, Any]],
+        responses: list[Any],
+        max_batch_size: int = 0,
+        name: str = "mock-model",
     ) -> None:
         self._output_metadata = output_metadata
         self._responses = responses
+        self._max_batch_size = max_batch_size
+        self.name = name
         self.last_request: types.SimpleNamespace | None = None
 
     def create_request(self) -> types.SimpleNamespace:
@@ -39,6 +46,9 @@ class _MockModel:
 
     def metadata(self) -> dict[str, Any]:
         return {"outputs": self._output_metadata}
+
+    def config(self) -> dict[str, Any]:
+        return {"max_batch_size": self._max_batch_size}
 
     def async_infer(self, _inference_request: Any) -> AsyncIterator[Any]:
         async def _stream() -> AsyncIterator[Any]:
@@ -49,7 +59,7 @@ class _MockModel:
 
 
 def build_dynamo_request(
-    *tensor_specs: tuple[str, str, list[int], list[Any]]
+    *tensor_specs: tuple[str, str, list[int], list[Any]],
 ) -> dict[str, Any]:
     """Build a Dynamo request envelope from (name, data_type, shape, values) tensor specs."""
     return {
@@ -78,9 +88,10 @@ def run_handler_generate(
     triton_output_metadata: list[dict[str, Any]],
     triton_responses: list[Any],
     dynamo_request: dict[str, Any],
+    max_batch_size: int = 0,
 ) -> tuple[_MockModel, list[dict[str, Any]]]:
     """Build a RequestHandler over a _MockModel and drive generate to completion."""
-    model = _MockModel(triton_output_metadata, triton_responses)
+    model = _MockModel(triton_output_metadata, triton_responses, max_batch_size)
     handler = handlers.RequestHandler(MagicMock(), model)
 
     async def _collect() -> list[dict[str, Any]]:
@@ -292,6 +303,7 @@ def _make_handler(
     model.ready = _readiness(model_ready)
     model.name = model_name
     model.metadata = MagicMock(return_value={"outputs": output_metadata})
+    model.config = MagicMock(return_value={})
     model.async_infer = MagicMock(
         side_effect=AssertionError("async_infer must not be called")
     )
@@ -319,26 +331,38 @@ def test_generate_rejects_request_missing_tensors_key():
         _run_generate(handler, {"prompt": "hello"})
 
 
-@pytest.mark.parametrize("bad_dtype", ["Float16", "BFloat16"])
-def test_generate_rejects_unsupported_input_dtype(bad_dtype):
-    """Half-precision input tensors are rejected upfront."""
-    handler = _make_handler()
-    request = build_dynamo_request(("IN", bad_dtype, [1], [0.0]))
+@pytest.mark.parametrize(
+    "dynamo_dtype, expected_np_dtype",
+    [
+        ("Float16", np.float16),
+        # BF16 is not a native NumPy dtype; ml_dtypes.bfloat16 is what
+        # tritonclient.utils.triton_to_np_dtype("BF16") returns, so it is what
+        # dynamo_tensor_to_numpy produces from a BFloat16 Dynamo tensor.
+        ("BFloat16", ml_dtypes.bfloat16),
+    ],
+    ids=["fp16", "bf16"],
+)
+def test_generate_accepts_half_precision_input(dynamo_dtype, expected_np_dtype):
+    """FP16 and BF16 input tensors are no longer rejected up front; they flow
+    through as the corresponding half-precision NumPy arrays into tritonserver.
 
-    with pytest.raises(ValueError, match=f"does not support {bad_dtype}"):
-        _run_generate(handler, request)
-
-
-def test_generate_error_message_lists_all_unsupported_dtypes():
-    """When multiple unsupported dtypes are present they're all named in the error."""
-    handler = _make_handler()
-    request = build_dynamo_request(
-        ("IN0", "Float16", [1], [0.0]),
-        ("IN1", "BFloat16", [1], [0.0]),
+    Regression guard for the input path, which became reachable once the tensor
+    protocol grew Float16 / BFloat16 variants."""
+    values = [1.5, -2.25, 0.5]
+    # Use an int32 output so the response path (np.from_dlpack) stays out of
+    # scope of this test — the guard removal is on the input side only.
+    model, _ = run_handler_generate(
+        [{"name": "OUT", "datatype": "INT32"}],
+        [build_triton_response("req-id", "identity", {"OUT": np.array([0], np.int32)})],
+        build_dynamo_request(("IN", dynamo_dtype, [3], values)),
     )
 
-    with pytest.raises(ValueError, match="BFloat16 / Float16"):
-        _run_generate(handler, request)
+    assert model.last_request is not None
+    triton_input = model.last_request.inputs["IN"]
+    assert triton_input.dtype == expected_np_dtype
+    np.testing.assert_array_equal(
+        triton_input, np.array(values, dtype=expected_np_dtype)
+    )
 
 
 # --- Dtype cache ---

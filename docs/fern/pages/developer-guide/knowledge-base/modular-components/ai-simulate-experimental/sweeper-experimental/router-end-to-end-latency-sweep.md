@@ -10,9 +10,9 @@ subtitle: Experimental Sweeper search over KV router settings for MiniMax-M2.5 o
 > treat them as production capacity guidance or a performance commitment. Sweeper's search behavior
 > and output may change without a standard deprecation period.
 
-Reproduce the DynoSim router experiment, then use Sweeper's smart sweep to **find the
-KV-router configuration that minimizes mean end-to-end latency** on the Mooncake toolagent
-trace, and validate the winner against the default-router baseline on the full trace.
+This experiment reproduced the DynoSim router experiment, then used Sweeper's smart sweep to find
+the KV-router configuration that minimized mean end-to-end latency on the Mooncake toolagent trace
+and validated the winner against the default-router baseline on the full trace.
 
 ## Setup
 
@@ -32,9 +32,10 @@ concurrency) so any change in e2e latency is attributable to the **router** alon
 
 ## Sweep config
 
-Searched with `Sweeper.run` (Vizier GP-bandit), `goal.target = e2e_latency`. Search
-runs on a 2k-request subset (fast, representative — same long-context mix); the winner is
-then validated on the full trace.
+The experiment searched with `Sweeper.run` (Vizier GP-bandit) and
+`goal.target = e2e_latency`. It ran on a 2k-request subset with the same long-context mix, then
+validated the winner on the full trace. The configuration below documents the retired
+`aisimulate==0.1.0.dev1` API and is not accepted by AISimulate 0.12.0.
 
 ```yaml
 search_space:

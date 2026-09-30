@@ -51,9 +51,8 @@ XPU_CANCELLATION_MAX_TOKENS = 2096
 DECODE_CANCEL_TEST_TIMEOUT_S = 900
 
 # The streaming read had no bound. STREAM_READ is the per-read socket timeout
-# between chunks; BEHAVIORAL bounds the wait for the next chunk while the
-# chunk-count goal is unmet. Neither caps total read time -- a late final chunk
-# that completes the count still counts. See read_streaming_responses.
+# between chunks; BEHAVIORAL caps total time spent reaching the chunk-count goal.
+# See read_streaming_responses.
 DECODE_CANCEL_STREAM_READ_TIMEOUT_S = 30
 DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S = 90
 
@@ -120,7 +119,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
+                    build_nixl_kv_transfer_config_json("kv_producer"),
                 ]
             )
             health_check_urls = [
@@ -131,7 +130,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
+                    build_nixl_kv_transfer_config_json("kv_consumer"),
                 ]
             )
             health_check_urls = [
