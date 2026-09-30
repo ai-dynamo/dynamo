@@ -12,7 +12,8 @@
 //! - Each worker's TTFT is estimated from its prefill backlog, excluding this request, as
 //!   `ttft_source` selects. When the best sticky worker's estimate trails the best non-sticky
 //!   worker's by more than `max_ttft_penalty_ms`, stickiness breaks and every worker stays in play;
-//!   otherwise only sticky workers do.
+//!   otherwise only sticky workers do. A zero `max_ttft_penalty_ms` disables this gate, as in
+//!   llm-d.
 //!   - `throughput`: in-flight prefill tokens over `peak_prefill_tokens_per_second`, llm-d's
 //!     default. The constant is one calibration point for one model, GPU, and parallelism.
 //!   - `modeled`: the host's modeled prefill backlog, available when the router runs a
@@ -164,12 +165,12 @@ impl WorkerPicker for AffinityPicker {
         let load = input
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let request_blocks = context.request_blocks() as f64;
+        // Like llm-d, measure the share against complete blocks, the only ones a cache holds.
+        let full_blocks = (context.prompt_tokens() / context.block_size().max(1) as usize) as f64;
         let sticky = |row: usize| {
-            request_blocks > 0.0
+            full_blocks > 0.0
                 && cache.get(row).is_some_and(|cache| {
-                    device_overlap_blocks(cache) / request_blocks
-                        >= self.parameters.affinity_threshold
+                    device_overlap_blocks(cache) / full_blocks >= self.parameters.affinity_threshold
                 })
         };
         let modeled_ms = |row: usize| context.modeled_prefill_backlog_ms(candidates[row].worker());

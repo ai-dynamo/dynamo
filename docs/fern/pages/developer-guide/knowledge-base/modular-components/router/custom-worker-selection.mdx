@@ -24,7 +24,7 @@ flowchart LR
     Validate --> Reserve["Accounting and reservation"]
 ```
 
-For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
+For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). The [ported routing policies](https://github.com/ai-dynamo/dynamo/tree/main/lib/router-plugins/builtin/src) show `prefix_hashes()`, `policy_class()`, and `worker_capacity()` in use. Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
 
 ## Use a Built-In Policy First
 
@@ -379,9 +379,9 @@ Routing cache resources start only if a component requests `CACHE`. `serve_index
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
-| `prefix_hashes()` | Optional chained hashes of the prompt's complete KV blocks; entry `i` identifies blocks `0..=i`, so equal entries mean an exactly shared prefix. `None` when the host does not track active blocks, as in disaggregated prefill pools; unique to the request when the host does not assume KV reuse, as in disaggregated decode pools |
-| `policy_class()` | Optional policy class: the caller's value, replaced by a request classifier's override |
-| `worker_capacity(worker)` | Capacity advertised in a worker's runtime config: `total_kv_blocks()` per data-parallel rank and `max_num_batched_tokens()`, each `None` when not advertised or advertised as zero. `None` for a worker the host does not know. Each call looks the worker up, so policies that never call it pay nothing |
+| `prefix_hashes()` | Optional chained hashes of the prompt's complete KV blocks; entry `i` identifies blocks `0..=i`, so equal entries mean an exactly shared prefix. `None` when the frontend does not track active blocks, as in disaggregated prefill pools; unique to the request when the host does not assume KV reuse, as in disaggregated decode pools. The standalone selection service passes a hash-only request's precomputed hashes through unchecked |
+| `policy_class()` | Optional policy class: the caller's value, replaced by a request classifier's override. A caller's value is not validated against the policy profile |
+| `worker_capacity(worker)` | Capacity advertised in a worker's runtime config: `total_kv_blocks()` per data-parallel rank, `None` when not advertised or advertised as zero. `None` for a worker the host does not know. Each call looks the worker up, so policies that never call it pay nothing |
 | `affinity_target()` | Optional advisory worker and data-parallel rank from soft session affinity |
 | `expected_output_tokens()` | Optional expected output length |
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |

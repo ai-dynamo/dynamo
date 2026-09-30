@@ -578,7 +578,7 @@ impl DefaultWorkerPicker {
     }
 }
 
-impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
+impl<C: WorkerConfigLike + Sync> WorkerSelector<C> for DefaultWorkerSelector {
     fn uses_exclusive_affinity_target(&self) -> bool {
         true
     }

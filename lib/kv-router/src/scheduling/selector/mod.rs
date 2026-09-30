@@ -136,7 +136,6 @@ struct MaterializedSelectionInput<'a> {
     cache_snapshot: CacheSnapshot<'a>,
 }
 
-/// Capacity lookup for test inputs built without a worker table.
 #[cfg(test)]
 fn no_worker_capacity(_: WorkerId) -> Option<WorkerCapacityInput> {
     None
@@ -146,7 +145,7 @@ impl<'a> MaterializedSelectionInput<'a> {
     fn new(
         request: &'a SchedulingRequest,
         block_size: u32,
-        worker_capacity: &'a dyn Fn(WorkerId) -> Option<WorkerCapacityInput>,
+        worker_capacity: &'a (dyn Fn(WorkerId) -> Option<WorkerCapacityInput> + Sync),
     ) -> Self {
         Self {
             request,
@@ -348,7 +347,7 @@ fn log_selection<C: WorkerConfigLike>(
 #[inline(always)]
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
-fn select_worker_with_policy<C: WorkerConfigLike>(
+fn select_worker_with_policy<C: WorkerConfigLike + Sync>(
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
     workers: &HashMap<WorkerId, C>,

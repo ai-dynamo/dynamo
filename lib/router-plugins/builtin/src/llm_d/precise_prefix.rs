@@ -7,8 +7,9 @@
 //! scheduler, which weights three scorers 2:1:1 and takes the highest weighted sum. Each scorer
 //! returns a value in `[0, 1]`, higher is better:
 //!
-//! - prefix: `w · min(1, matched_tokens / scale)² + (1 − w) · matched_blocks / request_blocks`,
-//!   with llm-d's defaults `w = 0` and `scale = 8192`;
+//! - prefix: `w · min(1, matched_tokens / scale)² + (1 − w) · matched_blocks / prompt_blocks`,
+//!   with `prompt_blocks` counting complete blocks as llm-d does, and llm-d's defaults `w = 0`
+//!   and `scale = 8192`;
 //! - queue: `(max − q) / (max − min)` over the candidates' active requests, or 1 when all equal;
 //! - KV-cache utilization: `1 − usage`, with usage the projected active KV footprint over the
 //!   worker's advertised capacity. llm-d leaves a worker without metrics unscored; some Dynamo
@@ -132,16 +133,16 @@ impl WorkerScorer for PrefixScorer {
         let parameters = &self.0;
         let weight = parameters.weights_for(context).prefix;
         let length_weight = parameters.prefix_match_length_weight;
-        let request_blocks = context.request_blocks() as f64;
+        let prompt_blocks = (context.prompt_tokens() / context.block_size().max(1) as usize) as f64;
         for (candidate, cost) in candidates.iter().zip(costs) {
             let cache = candidate
                 .cache()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
             let matched_blocks = device_overlap_blocks(cache).max(0.0);
-            let ratio = if request_blocks == 0.0 {
+            let ratio = if prompt_blocks == 0.0 {
                 0.0
             } else {
-                (matched_blocks / request_blocks).min(1.0)
+                (matched_blocks / prompt_blocks).min(1.0)
             };
             let length = (matched_blocks * f64::from(context.block_size())
                 / parameters.prefix_match_length_scale_tokens as f64)

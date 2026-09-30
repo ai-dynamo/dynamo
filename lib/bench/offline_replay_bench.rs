@@ -11,10 +11,11 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, ValueEnum};
+use dynamo_kv_router::WorkerType as RouterRole;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_mocker::common::protocols::{
     EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
@@ -331,21 +332,99 @@ fn canonical_engine_config(args: &Args, engine_args: &MockEngineArgs) -> Result<
     }
 }
 
+/// A router policy file read once, so the replay and its report describe the same bytes.
+struct RouterPolicy {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    config: KvRouterConfig,
+}
+
+impl RouterPolicy {
+    /// Apply the file's `router:` settings the way the frontend and Python bindings do.
+    fn load(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read router policy config at {path:?}"))?;
+        let mut config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..Default::default()
+        };
+        config.apply_policy_config().map_err(anyhow::Error::msg)?;
+        config.validate().map_err(anyhow::Error::msg)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            bytes,
+            config,
+        })
+    }
+
+    fn ensure_unchanged(&self) -> Result<()> {
+        ensure!(
+            std::fs::read(&self.path)? == self.bytes,
+            "router policy config {:?} changed during replay",
+            self.path
+        );
+        Ok(())
+    }
+
+    /// The worker-selection instance and type each replayed role resolved.
+    fn selection(&self, args: &Args) -> Result<Value> {
+        let roles: &[RouterRole] = match args.serving_mode {
+            ServingModeArg::Aggregated => &[RouterRole::Aggregated],
+            ServingModeArg::Disagg => &[RouterRole::Prefill, RouterRole::Decode],
+        };
+        let instances = self.config.worker_selection_config()?;
+        let mut resolved = serde_json::Map::new();
+        for &role in roles {
+            let instance = self
+                .config
+                .selected_worker_selection_policy_instance_for(role)?
+                .filter(|name| name != "default");
+            let policy_type = instance.as_deref().and_then(|name| {
+                instances
+                    .and_then(|config| config.instance(name))
+                    .map(|instance| instance.policy_type().to_string())
+            });
+            resolved.insert(
+                role.as_str().to_string(),
+                json!({ "instance": instance, "type": policy_type }),
+            );
+        }
+        Ok(json!({
+            "router_policy_config_blake3": blake3::hash(&self.bytes).to_hex().to_string(),
+            "worker_selection": resolved,
+        }))
+    }
+}
+
 fn canonical_metadata(
     args: &Args,
     engine_args: &MockEngineArgs,
     workload_digest: &str,
+    router_policy: Option<&RouterPolicy>,
 ) -> Result<Value> {
     let router_config = match args.router_mode {
         RouterModeArg::RoundRobin => Value::Null,
-        RouterModeArg::KvRouter => serde_json::to_value(router_config(args).unwrap_or_default())?,
+        RouterModeArg::KvRouter => {
+            let mut config = router_policy
+                .map(|policy| policy.config.clone())
+                .unwrap_or_default();
+            // The file's settings are already applied and hashed; its path is not portable.
+            config.router_policy_config = None;
+            serde_json::to_value(config)?
+        }
     };
-    let selection = match &args.router_policy_config {
-        None => json!("default_worker_selector_seeded_v1"),
-        Some(path) => json!({
-            "router_policy_config_blake3": blake3::hash(&std::fs::read(path)?).to_hex().to_string(),
-        }),
-    };
+    let mut determinism = json!({
+        "request_ids": "ordinal_u128_v1",
+        "selection": "default_worker_selector_seeded_v1",
+        "seed": 0xd1a0_5eed_u64,
+        "candidate_order": ["worker_id", "dp_rank"],
+    });
+    if let Some(policy) = router_policy {
+        // A catalog policy owns its tie-breaking and randomness; the seed and candidate order
+        // describe only roles that resolve to the default selector.
+        determinism["selection"] = policy.selection(args)?;
+        determinism["seed_scope"] = json!("default_selector_roles");
+    }
     Ok(json!({
         "replay_bench": cfg!(feature = "replay-bench"),
         "byte_identity_scope": "same_target_toolchain_semantic_features",
@@ -377,12 +456,7 @@ fn canonical_metadata(
             "itl_ms": Value::Null,
             "e2e_ms": Value::Null,
         },
-        "determinism": {
-            "request_ids": "ordinal_u128_v1",
-            "selection": selection,
-            "seed": 0xd1a0_5eed_u64,
-            "candidate_order": ["worker_id", "dp_rank"],
-        },
+        "determinism": determinism,
         "semantic_features": {
             "canonical_replay": true,
             "mocker_kvbm_offload": false,
@@ -391,22 +465,15 @@ fn canonical_metadata(
     }))
 }
 
-fn router_config(args: &Args) -> Option<KvRouterConfig> {
-    let path = args.router_policy_config.as_ref()?;
-    Some(KvRouterConfig {
-        router_policy_config: Some(path.display().to_string()),
-        ..Default::default()
-    })
-}
-
 fn canonical_report(
     report: &TraceSimulationReport,
     args: &Args,
     engine_args: &MockEngineArgs,
     workload_digest: &str,
     capture_options: ReplayCaptureOptions,
+    router_policy: Option<&RouterPolicy>,
 ) -> Result<CanonicalReplayRecord> {
-    let metadata = canonical_metadata(args, engine_args, workload_digest)?;
+    let metadata = canonical_metadata(args, engine_args, workload_digest, router_policy)?;
     let coverage = CanonicalReplayCoverage::from_report(report, capture_options);
     CanonicalReplayRecord::build(report, metadata, &coverage, Value::Null)
 }
@@ -427,6 +494,12 @@ fn main() -> Result<()> {
         "--router-policy-config requires --router-mode kv-router"
     );
     let engine_args = build_engine_args(&args)?;
+    let router_policy = args
+        .router_policy_config
+        .as_deref()
+        .map(RouterPolicy::load)
+        .transpose()?;
+    let router_config = || router_policy.as_ref().map(|policy| policy.config.clone());
     let canonical_workload = if args.canonical_reports_jsonl.is_some() {
         let trace_bytes = std::fs::read(&args.trace_file)
             .with_context(|| format!("failed to read trace input at {:?}", args.trace_file))?;
@@ -472,7 +545,7 @@ fn main() -> Result<()> {
             ServingModeArg::Aggregated => {
                 simulate_loaded_trace_with_router_mode_and_capture_options(
                     engine_args.clone(),
-                    router_config(&args),
+                    router_config(),
                     None,
                     trace.clone(),
                     args.num_workers,
@@ -495,7 +568,7 @@ fn main() -> Result<()> {
                         num_prefill_workers: args.num_prefill_workers,
                         num_decode_workers: args.num_decode_workers,
                     },
-                    router_config(&args),
+                    router_config(),
                     None,
                     trace.clone(),
                     args.arrival_speedup_ratio,
@@ -522,6 +595,9 @@ fn main() -> Result<()> {
             writer.write_all(b"\n")?;
         }
         if let Some(writer) = canonical_writer.as_mut() {
+            if let Some(policy) = router_policy.as_ref() {
+                policy.ensure_unchanged()?;
+            }
             let line = canonical_report(
                 &report,
                 &args,
@@ -531,6 +607,7 @@ fn main() -> Result<()> {
                     .expect("canonical writer requires canonical workload identity")
                     .1,
                 capture_options,
+                router_policy.as_ref(),
             )?
             .into_json_line()
             .context("failed to encode canonical replay report")?;
