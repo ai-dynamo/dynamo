@@ -18,7 +18,7 @@ targets:
     count: 2
   runtime:
     framework: vLLM
-    image: nvcr.io/nvstaging/nim/dynamo-vllm:motif-3-4cd9eb4
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
   topology: aggregated
   techniques:
   - tp2

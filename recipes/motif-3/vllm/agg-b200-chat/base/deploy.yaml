@@ -45,7 +45,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-ac350eb6da3b924fbc90c9ec1af5fac5b927b8fb-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -53,12 +53,16 @@ spec:
                 - dynamo.frontend
                 - --dyn-chat-processor
                 - vllm
+                - --model-name
+                - Motif-Technologies/Motif-3-NVFP4
                 - --trust-remote-code
-                - --enable-auto-tool-choice
+                - --http-port
+                - "8000"
                 - --tool-call-parser
                 - motif
                 - --reasoning-parser
                 - motif
+                - --enable-auto-tool-choice
               resources: {}
               env:
                 - name: HF_HUB_OFFLINE
@@ -67,6 +71,8 @@ spec:
                   value: "1"
                 - name: HF_HOME
                   value: /shared-model-cache
+                - name: DYN_ROUTER_MODE
+                  value: round-robin
               volumeMounts:
                 - name: shared-model-cache
                   mountPath: /shared-model-cache
@@ -89,7 +95,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-ac350eb6da3b924fbc90c9ec1af5fac5b927b8fb-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-motif-3-dev.1
               imagePullPolicy: IfNotPresent
               command: [python3, -m, dynamo.vllm]
               args:
@@ -107,6 +113,9 @@ spec:
                 - --max-model-len=262144
                 - --block-size=128
                 - --kv-cache-dtype=fp8
+                - --scheduler-cls
+                - vllm.v1.core.sched.async_scheduler.AsyncScheduler
+                - --dyn-enable-structural-tag
               env:
                 - name: HF_HOME
                   value: /shared-model-cache
@@ -116,10 +125,13 @@ spec:
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
                   value: "1"
-                - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
-                  value: "1"
                 - name: VLLM_USE_V2_MODEL_RUNNER
                   value: "1"
+                - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+                  value: "300"
+                # Keep the portable deployment on actual MTP verification.
+                # For a benchmark-only synthetic-AL trial, change this key to
+                # speculative-config-synthetic.
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
