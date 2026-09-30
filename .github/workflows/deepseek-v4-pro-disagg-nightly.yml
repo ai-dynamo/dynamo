@@ -36,6 +36,7 @@ concurrency:
 
 jobs:
   perf:
+    name: DeepSeek V4 Pro disaggregated perf
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 300
     defaults:
@@ -46,7 +47,7 @@ jobs:
       KUBECONFIG: /teleport/kubeconfig.yaml
       KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-gcp-dev-02
       NAMESPACE: dynamo-nightly-dsv4
-      RUN_KEY: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      RUN_KEY: ci-disagg-${{ github.run_id }}-${{ github.run_attempt }}
       OVERLAY: .github/ci/deepseek-v4-pro-disagg
     steps:
       - timeout-minutes: 5
@@ -180,9 +181,12 @@ jobs:
         if: ${{ success() && !inputs.preflight_only }}
         timeout-minutes: 5
         run: |
-          result=$(find "$ARTIFACTS/perf" -name profile_export_aiperf.json -print -quit)
-          jq -e '.request_count.avg == 1536 and (.error_request_count.avg // 0) == 0 and
-            .output_sequence_length.avg > 0' "$result"
+          concurrencies=$(yq '.spec.template.spec.containers[0].env[] | select(.name == "CONCURRENCIES").value' "$ARTIFACTS/perf.yaml")
+          for concurrency in $concurrencies; do
+            jq -e --argjson requests "$((concurrency * 3))" '
+              .request_count.avg == $requests and (.error_request_count.avg // 0) == 0 and
+              .output_sequence_length.avg > 0' "$ARTIFACTS/perf/c$concurrency/profile_export_aiperf.json"
+          done
       - name: Clean up recipe resources
         if: always()
         timeout-minutes: 20
