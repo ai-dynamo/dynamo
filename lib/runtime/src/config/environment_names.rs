@@ -899,6 +899,7 @@ pub mod testing {
 mod tests {
     use super::*;
 
+    /// Verify that the environment-variable inventory contains no duplicate names.
     #[test]
     fn test_no_duplicate_env_var_names() {
         use std::collections::HashSet;

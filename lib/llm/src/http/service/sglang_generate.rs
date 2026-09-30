@@ -217,6 +217,7 @@ fn preprocessed_request(
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
 
+/// Validate and route SGLang generation requests, monitoring client disconnects.
 async fn handler(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,

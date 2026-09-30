@@ -1982,6 +1982,7 @@ async fn pooling(
     Ok(response)
 }
 
+/// Handle chat completion requests, applying the route template and monitoring client disconnects.
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -4441,6 +4442,7 @@ pub fn images_router(
     (vec![doc, edits_doc], router)
 }
 
+/// Generate video responses as JSON or SSE, monitoring disconnects for streaming requests.
 async fn videos(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -4764,6 +4766,7 @@ fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, S
         .collect()
 }
 
+/// Handle speech generation requests and monitor disconnects while audio is produced.
 async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
