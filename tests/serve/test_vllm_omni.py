@@ -177,7 +177,6 @@ vllm_omni_configs = {
         script_name="agg_omni_audio.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
         ],
