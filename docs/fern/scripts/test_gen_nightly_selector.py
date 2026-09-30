@@ -137,8 +137,8 @@ class TestInstallableWheels:
         assert gen.ledger_version_published(wheel(NIGHTS[0]), published)
 
     def test_optional_package_is_never_required(self):
-        # kvbm left the nightly train in v1.6.0: its wheel missing (or its index
-        # gone) must not cost the ledger a row.
+        # kvbm is deprecated with removal targeted for v1.6.0: its wheel missing
+        # (or its index gone) must not cost the ledger a row.
         published = ledger_index([NIGHTS[0]], kvbm=[])
 
         assert gen.ledger_version_published(wheel(NIGHTS[0]), published)
@@ -184,13 +184,13 @@ class TestLedgerAssembly:
         assert [row.version for row in ledger] == [wheel(n) for n in NIGHTS[1:4]]
 
     def test_ledger_newest_row_is_the_newest_installable_nightly(self):
-        # The #14940 invariant: the ledger and the selectors' latest rows are
-        # two views of one wheel set and must name the same newest version.
+        # Both views resolve from one wheel set, so the ledger can never name an
+        # older nightly than a latest row; it can name a newer one.
         published = ledger_index(NIGHTS)
         wheels = gen.installable_wheels(published)
-        ledger = gen.build_ledger(gen.installable_wheels(published), published)
+        ledger = gen.build_ledger(wheels, published)
 
-        assert ledger[0].version == gen.newest_published(wheels)
+        assert ledger[0].version == gen.newest_published(wheels) == wheel(NIGHTS[0])
 
     def test_ledger_window_is_the_declared_size(self):
         published = ledger_index(ALL_NIGHTS)
@@ -232,6 +232,27 @@ class TestSelectorRows:
 
 class TestMain:
     """The publish-time entry point, with both indexes faked."""
+
+    def test_main_feeds_one_installable_set_to_both_views(
+        self, tmp_path, ngc, monkeypatch
+    ):
+        # The newest night has no ai-dynamo-runtime wheel, and the kvbm index is
+        # down. main() must still write the module, and neither the ledger nor
+        # the selector rows can name the incomplete night. Stubbing
+        # published_wheels() rather than published_nightly_packages() is what
+        # exercises the wiring in main().
+        ngc()
+        published = ledger_index(ALL_NIGHTS, runtime=ALL_NIGHTS[1:])
+        published["kvbm"] = None
+        monkeypatch.setattr(gen, "published_wheels", lambda name: published[name])
+        out = tmp_path / "nightly.generated.ts"
+
+        assert gen.main(["--out", str(out)]) == 0
+
+        module = out.read_text()
+        assert wheel(NIGHTS[0]) not in module
+        assert f'{{ version: "{wheel(NIGHTS[1])}"' in module
+        assert '"kvbm"' not in module
 
     def test_writes_the_module_when_the_ledger_is_complete(self, tmp_path, ngc, index):
         ngc()
