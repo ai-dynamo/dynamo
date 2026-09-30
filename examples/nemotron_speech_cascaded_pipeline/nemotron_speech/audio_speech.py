@@ -19,20 +19,22 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import queue
-import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 
 from riva.client import AudioEncoding
 
+from dynamo._core import Context
 from dynamo.common.protocols.audio_protocol import (
     AudioData,
     NvAudioSpeechResponse,
     NvCreateAudioSpeechRequest,
 )
 from dynamo.runtime import dynamo_endpoint
+
+from .riva_client import cancel_on_context_stop
 
 
 class SpeechNimAudioSpeechBackend:
@@ -68,64 +70,25 @@ class SpeechNimAudioSpeechBackend:
             raise ValueError("Speech NIM TTS does not support instructions")
 
     async def generate(
-        self, request: NvCreateAudioSpeechRequest
+        self, request: NvCreateAudioSpeechRequest, context: Context
     ) -> AsyncGenerator[NvAudioSpeechResponse, None]:
         """Yield each Riva SDK ``SynthesizeOnline`` response as one PCM chunk."""
         self._validate(request)
-        output: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=32)
-        stopped = threading.Event()
-        call_holder = []
         response_id = f"speech_{uuid.uuid4().hex}"
         created = int(time.time())
-
-        def put_output(item: bytes | Exception | None) -> bool:
-            while not stopped.is_set():
-                try:
-                    output.put(item, timeout=0.1)
-                    return True
-                except queue.Full:
-                    continue
-            return False
-
-        def get_output() -> bytes | Exception | None:
-            # A cancelled ``asyncio.to_thread(output.get)`` cannot stop the
-            # underlying blocking thread. Poll so disconnects release it.
-            while not stopped.is_set():
-                try:
-                    return output.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-            return None
-
-        def synthesize() -> None:
-            call = None
-            try:
-                call = self.tts_service.synthesize_online(
-                    request.input,
-                    voice_name=request.voice or self.voice,
-                    language_code=request.language or self.language_code,
-                    encoding=AudioEncoding.LINEAR_PCM,
-                    sample_rate_hz=self.sample_rate_hz,
-                )
-                call_holder.append(call)
-                for response in call:
-                    if stopped.is_set():
-                        break
-                    if not put_output(response.audio):
-                        break
-            except Exception as exc:  # noqa: BLE001 - propagate gRPC failures
-                put_output(exc)
-            finally:
-                if stopped.is_set() and call is not None:
-                    call.cancel()
-                else:
-                    put_output(None)
-
-        task = asyncio.create_task(asyncio.to_thread(synthesize))
-        try:
-            while (item := await asyncio.to_thread(get_output)) is not None:
-                if isinstance(item, Exception):
-                    raise item
+        # Starting the RPC is nonblocking; only reading its responses blocks.
+        call = self.tts_service.synthesize_online(
+            request.input,
+            voice_name=request.voice or self.voice,
+            language_code=request.language or self.language_code,
+            encoding=AudioEncoding.LINEAR_PCM,
+            sample_rate_hz=self.sample_rate_hz,
+        )
+        async with cancel_on_context_stop(context, call.cancel):
+            responses = iter(call)
+            while (
+                response := await asyncio.to_thread(next, responses, None)
+            ) is not None:
                 yield NvAudioSpeechResponse(
                     id=response_id,
                     model=self.model_name,
@@ -133,20 +96,15 @@ class SpeechNimAudioSpeechBackend:
                     data=[
                         AudioData(
                             output_format="pcm",
-                            b64_json=base64.b64encode(item).decode(),
+                            b64_json=base64.b64encode(response.audio).decode(),
                         )
                     ],
                 )
-        finally:
-            stopped.set()
-            if call_holder:
-                call_holder[0].cancel()
-            while not output.empty():
-                output.get_nowait()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
 
     @dynamo_endpoint(NvCreateAudioSpeechRequest, NvAudioSpeechResponse)
-    async def speech_endpoint(self, request: NvCreateAudioSpeechRequest):
-        async for response in self.generate(request):
-            yield response.model_dump()
+    async def speech_endpoint(
+        self, request: NvCreateAudioSpeechRequest, context: Context
+    ):
+        async with aclosing(self.generate(request, context)) as responses:
+            async for response in responses:
+                yield response.model_dump()

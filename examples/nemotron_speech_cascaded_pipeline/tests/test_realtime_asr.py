@@ -18,6 +18,7 @@
 import asyncio
 import base64
 import threading
+from contextlib import aclosing
 from types import SimpleNamespace
 
 import pytest
@@ -34,14 +35,11 @@ from nemotron_speech.realtime_asr import (  # noqa: E402
 )
 from riva.client import ASRService, AudioEncoding  # noqa: E402
 
+from dynamo._core import Context  # noqa: E402
+
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 MODEL = "nemotron-asr-streaming"
-
-
-class _Context:
-    def is_stopped(self) -> bool:
-        return False
 
 
 class _FakeCall:
@@ -105,7 +103,7 @@ async def _drive(handler, events):
         for event in events:
             yield event
 
-    return [event async for event in handler.generate(request_stream(), _Context())]
+    return [event async for event in handler.generate(request_stream(), Context())]
 
 
 def _handler(
@@ -121,8 +119,9 @@ def _handler(
     )
 
 
-@pytest.mark.parametrize("timeout", [False, True])
-async def test_stalled_rpc_is_cancelled_on_disconnect_or_timeout(timeout):
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("stop", ["task", "context", "timeout"])
+async def test_stalled_rpc_is_cancelled_on_disconnect_or_timeout(stop):
     started = threading.Event()
     cancelled = threading.Event()
 
@@ -140,12 +139,17 @@ async def test_stalled_rpc_is_cancelled_on_disconnect_or_timeout(timeout):
     handler = _handler(service)
     handler.timeout_s = 0.01
     turn = _AudioTurn()
-    task = asyncio.create_task(handler._run_turn(turn, _Context()))
+    context = Context()
+    task = asyncio.create_task(handler._run_turn(turn, context))
     try:
         assert await asyncio.to_thread(started.wait, 1)
-        if timeout:
+        if stop == "timeout":
             turn.close()
             await asyncio.wait_for(task, 1)
+        elif stop == "context":
+            context.stop_generating()
+            await asyncio.wait_for(task, 1)
+            assert turn.events.empty()
         else:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -154,6 +158,111 @@ async def test_stalled_rpc_is_cancelled_on_disconnect_or_timeout(timeout):
         cancelled.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.timeout(5)
+async def test_context_stop_closes_uncommitted_turn_after_rpc_finishes():
+    loop = asyncio.get_running_loop()
+    finished = asyncio.Event()
+
+    class FinishedCall(_FakeCall):
+        def __iter__(self):
+            yield _response("hello", final=True)
+            loop.call_soon_threadsafe(finished.set)
+
+    service = _FakeAsrService()
+    service.stub.StreamingRecognize = lambda *args, **kwargs: FinishedCall(())
+    context, turn = Context(), _AudioTurn()
+    task = asyncio.create_task(_handler(service)._run_turn(turn, context))
+    try:
+        await asyncio.wait_for(finished.wait(), 1)
+        assert not task.done()
+        context.stop_generating()
+        await asyncio.wait_for(task, 1)
+        assert turn.closed
+        assert turn.events.empty()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.timeout(5)
+async def test_context_stop_releases_backpressured_transcript_producer():
+    blocked = asyncio.Event()
+
+    class OutputQueue(asyncio.Queue):
+        async def put(self, item):
+            blocked.set()
+            await super().put(item)
+
+    service = _FakeAsrService()
+    service.stub.StreamingRecognize = lambda *args, **kwargs: _FakeCall(
+        [_response("hello", final=False)]
+    )
+    context, turn = Context(), _AudioTurn()
+    turn.events = OutputQueue(maxsize=1)
+    turn.events.put_nowait({"type": "queued_delta"})
+    task = asyncio.create_task(_handler(service)._run_turn(turn, context))
+    try:
+        await asyncio.wait_for(blocked.wait(), 1)
+        context.stop_generating()
+        await asyncio.wait_for(task, 1)
+        assert turn.closed
+        assert turn.events.empty()
+    finally:
+        while not turn.events.empty():
+            turn.events.get_nowait()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.timeout(5)
+async def test_rpc_failure_before_commit_allows_next_turn():
+    class FailedCall(_FakeCall):
+        def __iter__(self):
+            raise RuntimeError("backend unavailable")
+
+    service = _FakeAsrService()
+    recognize = service.stub.StreamingRecognize
+    calls = []
+
+    def fail_first_request(requests, *, metadata):
+        calls.append(None)
+        if len(calls) == 1:
+            return FailedCall(())
+        return recognize(requests, metadata=metadata)
+
+    service.stub.StreamingRecognize = fail_first_request
+    requests = asyncio.Queue()
+
+    async def request_stream():
+        while (event := await requests.get()) is not None:
+            yield event
+
+    append = {
+        "type": "input_audio_buffer.append",
+        "audio": base64.b64encode(b"\x00\x01" * 320).decode(),
+    }
+    async with aclosing(
+        _handler(service).generate(request_stream(), Context())
+    ) as responses:
+        await requests.put({"type": "session.update", "session": _session()})
+        await requests.put(append)
+        assert (await anext(responses))["type"] == "session.updated"
+        failure = await asyncio.wait_for(anext(responses), 1)
+        assert failure["type"] == "conversation.item.input_audio_transcription.failed"
+
+        await requests.put(append)
+        await requests.put({"type": "input_audio_buffer.commit"})
+        await requests.put(None)
+        remaining = [event async for event in responses]
+
+    assert len(calls) == 2
+    assert (
+        remaining[-1]["type"] == "conversation.item.input_audio_transcription.completed"
+    )
+    assert remaining[-1]["transcript"] == "hello world"
+    assert remaining[-1]["item_id"] != failure["item_id"]
 
 
 async def test_streams_pcm_and_emits_canonical_transcription_events():

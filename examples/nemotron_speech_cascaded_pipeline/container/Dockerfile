@@ -23,7 +23,6 @@ ARG RUNTIME_USER=dynamo
 USER root
 COPY --chmod=644 requirements.txt /tmp/speech-nim-requirements.txt
 RUN uv pip install \
-    --system \
     --no-cache \
     --requirement /tmp/speech-nim-requirements.txt
 

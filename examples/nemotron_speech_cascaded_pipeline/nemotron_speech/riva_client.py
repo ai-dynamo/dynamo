@@ -18,12 +18,35 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 import grpc
 from riva.client import ASRService, Auth, SpeechSynthesisService
 
+from dynamo._core import Context
+
 from .config import NimConnectionConfig
+
+
+@asynccontextmanager
+async def cancel_on_context_stop(
+    context: Context, cancel: Callable[[], Any]
+) -> AsyncIterator[None]:
+    """Cancel an RPC on Dynamo's cooperative stop signal and on scope exit."""
+
+    async def watch() -> None:
+        await context.async_killed_or_stopped()
+        cancel()
+
+    watcher = asyncio.create_task(watch())
+    try:
+        yield
+    finally:
+        cancel()
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
 
 
 def build_auth(config: NimConnectionConfig) -> Auth:

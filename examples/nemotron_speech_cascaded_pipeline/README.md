@@ -117,13 +117,20 @@ utterances, matching the direct pipeline endpointing window without a real-time 
 ### Prerequisites
 
 - A Kubernetes cluster with at least three NVIDIA GPUs and the
-  [Dynamo Kubernetes Platform](../../docs/fern/kubernetes/quickstart.mdx)
-  installed.
+  [Dynamo Kubernetes Platform](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
+  installed, with an operator and CRDs that support `nvidia.com/v1beta1`.
 - Docker and `envsubst`, plus access to a registry that the cluster can pull
   from.
 - An NGC API key with access to the ASR and TTS NIM images.
 - A Hugging Face token with access to the Nemotron LLM.
 - A ReadWriteMany storage class for the shared model cache.
+
+The runtime must support realtime transcription, streaming `/v1/audio/speech`,
+and registering external audio models without Hugging Face downloads. The last
+requirement is introduced by this PR. For premerge validation, use branch-built
+runtime images, including this branch's rebuilt Python bindings. Building only
+the adapter image below does not include that Rust registration fix. Use published
+images once a release includes all three capabilities.
 
 Run all commands from the Dynamo repository root. Set the deployment values
 once:
@@ -156,12 +163,10 @@ vLLM, and adds the Riva client and this example's adapter code:
 
 ```bash
 ./examples/nemotron_speech_cascaded_pipeline/container/build.sh
+printf '%s' "${CUSTOM_IMAGE_REGISTRY_PASSWORD}" | docker login "${CUSTOM_IMAGE_REGISTRY}" \
+  --username "${CUSTOM_IMAGE_REGISTRY_USER}" --password-stdin
 docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
 ```
-
-The selected published version must contain the Dynamo realtime and streaming
-speech support required by this example. Use branch-built images only when
-validating changes that have not reached a published release.
 
 ### 2. Create the namespace and credentials
 
@@ -286,6 +291,19 @@ python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py
 The check reports TTS TTFB, ASR first-transcript latency, PCM RMS, and the final
 transcript. It fails on an API error, silent audio, or an empty transcript.
 
+Verify the LLM separately:
+
+```bash
+curl --fail --silent --show-error http://localhost:8000/v1/chat/completions \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "model": "nvidia/nemotron-3-nano",
+    "messages": [{"role": "user", "content": "Reply with one short greeting."}],
+    "max_tokens": 64,
+    "chat_template_kwargs": {"enable_thinking": false}
+  }'
+```
+
 The TTS adapter requires a Dynamo runtime with streaming
 `/v1/audio/speech` support. The realtime ASR adapter disables server VAD
 because Pipecat's local VAD and Smart Turn processors commit the input audio.
@@ -362,14 +380,26 @@ docker compose --profile generic-assistant/dynamo down
 
 Stop the Kubernetes port-forward with `Ctrl-C` in its terminal.
 
+## Clean Up
+
+Remove the model deployment to release its GPUs. The model cache and credentials
+remain available for the next deployment:
+
+```bash
+kubectl delete dgd nemotron-speech-cascaded --namespace "${NAMESPACE}"
+```
+
 ## Tests
+
+Running the adapter workers or unit tests outside the container requires Python
+3.11 or newer.
 
 The unit tests mock the Speech NIM services while exercising the public Dynamo
 event and audio contracts:
 
 ```bash
 python3 -m pip install -r examples/nemotron_speech_cascaded_pipeline/requirements.txt \
-  pytest pytest-asyncio
+  pytest pytest-asyncio pytest-timeout
 PYTHONPATH=components/src:lib/bindings/python/src \
   python3 -m pytest -xvv examples/nemotron_speech_cascaded_pipeline/tests
 bash -n examples/nemotron_speech_cascaded_pipeline/{launch_workers.sh,container/build.sh}
