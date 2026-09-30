@@ -162,7 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-          docker run --rm \
+          docker run --rm -i \
             -v /dev/dri:/dev/dri \
             --device /dev/dri:/dev/dri \
             --group-add "${RENDER_GID}" \
@@ -183,7 +183,7 @@ jobs:
       - name: Run XPU GMS tests
         uses: $/.github/actions/pytest
         with:
-          pytest_marks: 'pre_merge and none and xpu_1 and not cuda_only'
+          pytest_marks: 'pre_merge and none and xpu_1'
           image_tag: ${{ env.TEST_IMAGE_TAG }}
           test_suite_name: 'xpu-gms'
           test_type: 'e2e'
