@@ -9,7 +9,7 @@ mod mooncake_shared;
 use clap::{Parser, Subcommand};
 use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
-use dynamo_bench::kv_router_common::replay::{generate_replay_artifacts, process_mooncake_trace};
+use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer};
@@ -421,14 +421,7 @@ async fn prepare_benchmark(
         return Ok(None);
     };
 
-    let traces = process_mooncake_trace(
-        path,
-        args.common.trace_block_size,
-        args.common.trace_length_factor,
-        args.common.trace_duplication_factor,
-        args.common.num_unique_inference_workers,
-        args.common.seed,
-    )?;
+    let traces = args.common.load_mooncake_trace(path)?;
     let artifacts = generate_replay_artifacts(
         &traces,
         args.common.num_gpu_blocks,

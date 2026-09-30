@@ -835,15 +835,28 @@ struct CommonArgsCli {
 }
 
 #[test]
-fn default_cli_block_sizes_load_the_canonical_512_token_fixture() -> anyhow::Result<()> {
+fn default_cli_args_load_the_canonical_512_token_fixture() -> anyhow::Result<()> {
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let args = CommonArgsCli::try_parse_from(["mooncake_bench", fixture.as_str()])?.common;
-    let load =
-        |trace_block_size| process_mooncake_trace(&fixture, trace_block_size, 1, 1, 2, args.seed);
+    let parse = |extra: &[&str]| {
+        let mut argv = vec![
+            "mooncake_bench",
+            fixture.as_str(),
+            "--num-unique-inference-workers",
+            "2",
+        ];
+        argv.extend_from_slice(extra);
+        CommonArgsCli::try_parse_from(argv).map(|cli| cli.common)
+    };
 
-    assert!(!load(args.trace_block_size)?.is_empty());
-    // The engine/indexer block size cannot expand this trace's 512-token hash_ids.
-    assert!(load(args.block_size).is_err());
+    // The Mooncake, Active Sequences, and approximate-LRU benches all load traces
+    // through `load_mooncake_trace`; default arguments must expand 512-token hash_ids.
+    assert!(!parse(&[])?.load_mooncake_trace(&fixture)?.is_empty());
+    // The 128-token engine block size cannot expand this fixture's prompts.
+    assert!(
+        parse(&["--trace-block-size", "128"])?
+            .load_mooncake_trace(&fixture)
+            .is_err()
+    );
     Ok(())
 }
 

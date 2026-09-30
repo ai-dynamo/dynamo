@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_mocker::loadgen::Trace;
+
+use super::replay::process_mooncake_trace;
+
 /// Shared CLI arguments for trace-based benchmarks.
 #[derive(clap::Args, Debug)]
 pub struct CommonArgs {
@@ -77,4 +81,19 @@ pub struct CommonArgs {
     /// Opt in to runtime warn/error logs from the mocker and sequence tracker.
     #[clap(long)]
     pub sequence_logs: bool,
+}
+
+impl CommonArgs {
+    /// Load and partition the Mooncake trace at `path`, expanding each `hash_id` to
+    /// `--trace-block-size` tokens.
+    pub fn load_mooncake_trace(&self, path: &str) -> anyhow::Result<Vec<Trace>> {
+        process_mooncake_trace(
+            path,
+            self.trace_block_size,
+            self.trace_length_factor,
+            self.trace_duplication_factor,
+            self.num_unique_inference_workers,
+            self.seed,
+        )
+    }
 }
