@@ -31,10 +31,7 @@ pub(super) struct PreparedRequest {
     pub(super) uuid: Uuid,
     pub(super) request_id: String,
     pub(super) session_id: String,
-    /// The session the client presented. Only a decode request has one it
-    /// could name in an `Abort`; a prefill worker's session reaches the client
-    /// inside the terminal event, by which point the request is already gone.
-    pub(super) client_session_id: Option<String>,
+    pub(super) has_kv_session: bool,
     seed: u64,
     /// The context phase's first token, replayed as this leg's first output —
     /// what a real generation worker does with the handoff. The sidecar drops
@@ -62,6 +59,11 @@ impl PreparedRequest {
         request: pb::GenerateRequest,
         config: &MockerServerConfig,
     ) -> BoxedStatusResult<Self> {
+        if request.request_id.is_empty() {
+            return Err(Box::new(Status::invalid_argument(
+                "request_id must be non-empty",
+            )));
+        }
         // Only emptiness is rejected. A real TensorRT-LLM server loads one
         // model and serves it under whatever non-empty name the request names
         // -- verified against 1.3.0rc26, which answers `Generate` and
@@ -115,21 +117,14 @@ impl PreparedRequest {
             ))));
         }
 
-        let request_id = if request.request_id.is_empty() {
-            Uuid::new_v4().to_string()
-        } else {
-            request.request_id
-        };
+        let request_id = request.request_id;
         let uuid = stable_request_uuid(config.seed, &request_id);
         let session_id = handoff::session_id(uuid);
         let response = request.response.unwrap_or_default();
 
         Ok(Self {
             uuid,
-            client_session_id: kv
-                .session
-                .as_ref()
-                .map(|session| session.session_id.clone()),
+            has_kv_session: kv.session.is_some(),
             session_id,
             seed: config.seed,
             replayed_first_token: kv.session.as_ref().and_then(handoff::first_gen_token),

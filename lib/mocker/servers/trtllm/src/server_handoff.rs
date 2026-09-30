@@ -193,8 +193,22 @@ pub(super) fn validate_session(session: &pb::KvSessionRef) -> BoxedStatusResult<
         ));
     }
     if first_gen_token(session).is_none() {
+        let received = match attributes.fields.get(ATTR_FIRST_GEN_TOKENS) {
+            None => "missing attribute".to_string(),
+            Some(value) => match value.kind.as_ref() {
+                Some(Kind::ListValue(list)) => match list.values.first() {
+                    None => "empty list".to_string(),
+                    Some(value) => match value.kind.as_ref() {
+                        Some(Kind::NumberValue(value)) => value.to_string(),
+                        kind => format!("first token {kind:?}"),
+                    },
+                },
+                kind => format!("{kind:?}"),
+            },
+        };
         return invalid(format!(
-            "kv_session attribute '{ATTR_FIRST_GEN_TOKENS}' must be a non-empty list of tokens"
+            "kv_session attribute '{ATTR_FIRST_GEN_TOKENS}' must be a non-empty list whose first token is an integer in 0..={}, got {received}",
+            u32::MAX
         ));
     }
     Ok(())

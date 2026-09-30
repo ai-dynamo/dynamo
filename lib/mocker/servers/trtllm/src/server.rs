@@ -81,9 +81,7 @@ impl Default for MockerServerConfig {
 
 struct InFlight {
     uuid: Uuid,
-    /// The session id the client knows this request by. Only a decode request
-    /// has one it could name in an `Abort`, so this is `None` otherwise.
-    session_id: Option<String>,
+    has_kv_session: bool,
     /// Set by whichever of `Abort` and the response stream reaches the
     /// request's end first. Both then agree on the outcome without a lock:
     /// the winner picks the terminal event, the loser reports that it lost.
@@ -219,7 +217,7 @@ impl TrtllmMockerService {
                 supported_protocols: vec![handoff::KV_PROTOCOL.to_string()],
                 supports_remote_prefill: Some(true),
                 supports_decode_pull: Some(false),
-                supports_abort_cleanup: Some(true),
+                supports_abort_cleanup: Some(false),
                 schema_version: Some(SCHEMA_REVISION),
             }),
             schema_revision: SCHEMA_REVISION,
@@ -346,7 +344,7 @@ impl TrtllmMockerService {
         let claimed = Arc::new(AtomicBool::new(false));
         let entry = InFlight {
             uuid: prepared.uuid,
-            session_id: prepared.client_session_id.clone(),
+            has_kv_session: prepared.has_kv_session,
             claimed: Arc::clone(&claimed),
         };
         match self.inflight.entry(prepared.request_id.clone()) {
@@ -654,7 +652,7 @@ impl pb::control_server::Control for TrtllmMockerService {
             active_kv_sessions: (self.config.mode != ServerMode::Aggregated).then(|| {
                 self.inflight
                     .iter()
-                    .filter(|entry| entry.session_id.is_some())
+                    .filter(|entry| entry.has_kv_session)
                     .count() as u32
             }),
             used_kv_blocks: Some(metrics.active_decode_blocks),
@@ -696,15 +694,8 @@ impl pb::control_server::Control for TrtllmMockerService {
             Some(pb::abort_request::Target::RequestId(request_id)) => {
                 self.abort_uuid(&request_id).await?
             }
-            Some(pb::abort_request::Target::KvSession(session)) => {
-                let request_id = self.inflight.iter().find_map(|entry| {
-                    (entry.session_id.as_deref() == Some(session.session_id.as_str()))
-                        .then(|| entry.key().clone())
-                });
-                match request_id {
-                    Some(request_id) => self.abort_uuid(&request_id).await?,
-                    None => pb::AbortStatus::AlreadyFinished,
-                }
+            Some(pb::abort_request::Target::KvSession(_)) => {
+                return unsupported("Abort by KV session");
             }
             Some(pb::abort_request::Target::AllRequests(_)) => {
                 // Collect first: holding shard guards across the awaits below

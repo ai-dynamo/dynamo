@@ -167,8 +167,12 @@ async fn aggregated_stream_ends_with_exactly_one_finished_and_no_prompt_event() 
 }
 
 #[tokio::test]
-async fn duplicate_request_ids_are_rejected() {
+async fn request_ids_must_be_non_empty_and_unique() {
     let service = slow_service();
+    let error = generate_error(&service, request("", 64)).await;
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(error.message().contains("request_id"), "{error}");
+
     let _first = service
         .generate(Request::new(request("req-dup", 64)))
         .await
@@ -384,6 +388,10 @@ async fn control_reports_server_identity_and_load() {
     assert_eq!(info.engine_role, pb::EngineRole::Aggregated as i32);
     assert_ne!(info.schema_revision, 0, "zero is invalid per the proto");
     assert_eq!(info.supported_models, vec!["mocker-model".to_string()]);
+    assert_eq!(
+        info.kv_connector.unwrap().supports_abort_cleanup,
+        Some(false)
+    );
 
     let load = service
         .get_load(Request::new(pb::GetLoadRequest::default()))

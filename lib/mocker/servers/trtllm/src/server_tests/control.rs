@@ -39,6 +39,16 @@ async fn abort_reports_aborted_then_already_finished() {
         .into_inner();
     let _first = stream.next().await.unwrap().unwrap();
 
+    let error = service
+        .abort(Request::new(pb::AbortRequest {
+            target: Some(pb::abort_request::Target::KvSession(
+                pb::KvSessionRef::default(),
+            )),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::Unimplemented);
+
     let abort = |target| {
         let service = service.clone();
         async move {
@@ -80,6 +90,39 @@ async fn abort_reports_aborted_then_already_finished() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn abort_after_the_terminal_reports_already_finished() {
+    let service = service();
+    let mut stream = service
+        .generate(Request::new(request("req-finished", 1)))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let terminal = loop {
+        let response = stream
+            .next()
+            .await
+            .expect("the request must terminate")
+            .unwrap();
+        if let Some(pb::generate_response::Event::Finished(finished)) = response.event {
+            break finished;
+        }
+    };
+    assert_eq!(terminal.reason, pb::FinishReason::Length as i32);
+    assert_eq!(service.registered_request_count(), 1);
+
+    let status = service
+        .abort(Request::new(pb::AbortRequest {
+            target: Some(pb::abort_request::Target::RequestId("req-finished".into())),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .status;
+    assert_eq!(status, pb::AbortStatus::AlreadyFinished as i32);
 }
 
 /// The real TensorRT-LLM server leaves these unimplemented. A mocker that

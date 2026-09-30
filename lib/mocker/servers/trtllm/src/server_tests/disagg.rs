@@ -149,6 +149,17 @@ async fn decode_rejects_a_handoff_the_sidecar_mangled() {
             ),
         ),
         (
+            "negative token id",
+            with_attribute(
+                handoff::ATTR_FIRST_GEN_TOKENS,
+                Kind::ListValue(prost_types::ListValue {
+                    values: vec![Value {
+                        kind: Some(Kind::NumberValue(-1.0)),
+                    }],
+                }),
+            ),
+        ),
+        (
             "out-of-range token id",
             with_attribute(
                 handoff::ATTR_FIRST_GEN_TOKENS,
@@ -173,6 +184,14 @@ async fn decode_rejects_a_handoff_the_sidecar_mangled() {
         });
         let error = generate_error(&decode, decode_request).await;
         assert_eq!(error.code(), Code::InvalidArgument, "mutation '{label}'");
+        if label == "fractional token id" {
+            assert!(
+                error
+                    .message()
+                    .contains("integer in 0..=4294967295, got 13661.7"),
+                "{error}"
+            );
+        }
     }
 
     // The untouched session still works, so the mutations above are what fail.

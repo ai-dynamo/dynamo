@@ -86,9 +86,7 @@ two legs' token accounting matches a real engine's.
   handoff contract are. The vLLM and SGLang mocker servers model it the same
   way. Use aggregated mode for capacity work until the mocker core grows
   handoff-aware admission.
-- Guided decoding is accepted and ignored: the output is unconstrained. The
-  request is recorded, so a test can still assert the client mapped the guide
-  correctly, but nothing here enforces the grammar.
+- Guided decoding is rejected with `UNIMPLEMENTED`; rejected requests are not recorded.
 
 ## `--context-length` interacts with capacity
 
