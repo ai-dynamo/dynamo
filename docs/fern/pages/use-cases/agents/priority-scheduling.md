@@ -66,7 +66,7 @@ The backend receives the same Dynamo semantic priority, but each engine has its 
 |---------|-------------------------------|-----------------|
 | vLLM | Start vLLM with `--scheduling-policy priority`. | Dynamo forwards the user priority with the polarity vLLM expects. |
 | SGLang | Start SGLang with `--enable-priority-scheduling`. | Dynamo forwards higher Dynamo values as higher SGLang scheduling priority and rejects the inverted SGLang flag. |
-| TensorRT-LLM (PyTorch backend) | Set `scheduler_config.waiting_queue_policy: priority` in the engine config. | Dynamo maps the priority onto TensorRT-LLM's `[0.0, 1.0]` scale: `0` maps to the TensorRT-LLM default `0.5`, higher values approach `1.0`, and lower values approach `0.0`. Order is preserved, and health checks keep `1.0`. TensorRT-LLM priority orders only its waiting queue; it does not preempt running requests. |
+| TensorRT-LLM (PyTorch backend) | Set `scheduler_config.waiting_queue_policy: priority` in the engine config. | Dynamo maps the priority onto TensorRT-LLM's `[0.0, 1.0]` scale: `0` maps to the TensorRT-LLM default `0.5`, higher values approach `1.0`, and lower values approach `0.0`. Order is preserved, and health checks keep `1.0`. TensorRT-LLM applies priority only when admitting requests from its waiting queue, which backs up only once active requests reach `max_batch_size`. It does not reorder requests that are already active but blocked on KV cache capacity, and it does not preempt running requests. |
 
 Do not negate `nvext.agent_hints.priority` in client code for vLLM. If a test shows lower user values receiving better TTFT, first check whether the benchmark harness or endpoint path inverted the value before it reached Dynamo.
 
