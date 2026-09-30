@@ -6,6 +6,8 @@ kind: Job
 metadata:
   name: dsv4-pro-disagg-bench
 spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
   template:
     spec:
       affinity: null
