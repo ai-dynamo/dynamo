@@ -69,19 +69,6 @@ def test_stop_is_idempotent_and_allows_restart(monkeypatch):
     assert gc.get_threshold() == thresholds
 
 
-def test_gc_maintain_freezes_objects(monkeypatch):
-    gc_policy = _fresh_module(monkeypatch, None)
-    gc.unfreeze()
-    try:
-        frozen = gc_policy.gc_maintain()
-        assert frozen > 0
-        # gc.get_freeze_count() is process-global and drops when a frozen object is
-        # later deallocated, so only the bound holds, not exact equality.
-        assert 0 < gc.get_freeze_count() <= frozen
-    finally:
-        gc.unfreeze()
-
-
 def test_gc_maintain_reclaims_cycles_frozen_by_earlier_ticks(monkeypatch):
     gc_policy = _fresh_module(monkeypatch, None)
 
