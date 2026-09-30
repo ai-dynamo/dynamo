@@ -20,6 +20,7 @@ import base64
 import logging
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
+from urllib.parse import quote
 
 import numpy as np
 import pytest
@@ -207,9 +208,12 @@ async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
         await loader.load_image("data:text/plain;base64,aGVsbG8=")
 
 
-async def test_data_url_accepts_exact_byte_limit() -> None:
+@pytest.mark.parametrize("escaped", [False, True])
+async def test_data_url_accepts_exact_byte_limit(escaped: bool) -> None:
     loader = ImageLoader(max_bytes=len(PNG_BYTES))
     encoded = base64.b64encode(PNG_BYTES).decode()
+    if escaped:
+        encoded = quote(encoded, safe="")
 
     image = await loader.load_image(f"data:image/png;base64,{encoded}")
 
