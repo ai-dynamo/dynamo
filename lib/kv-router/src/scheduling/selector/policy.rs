@@ -375,7 +375,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use crate::plugins::worker_selection::WorkerInputView;
+    use crate::plugins::worker_selection::{WorkerCapacityInput, WorkerInputView};
     use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::SessionContext;
     use std::{
@@ -945,5 +945,95 @@ mod tests {
 
         assert!(inputs.contains(WorkerInputs::CACHE));
         assert!(inputs.contains(WorkerInputs::LOAD));
+    }
+
+    #[test]
+    fn request_facts_and_worker_capacity_reach_policy_components() {
+        struct CapacityConfig(Option<u64>, Option<u64>);
+
+        impl WorkerConfigLike for CapacityConfig {
+            fn data_parallel_start_rank(&self) -> u32 {
+                0
+            }
+            fn data_parallel_size(&self) -> u32 {
+                1
+            }
+            fn max_num_batched_tokens(&self) -> Option<u64> {
+                self.1
+            }
+            fn total_kv_blocks(&self) -> Option<u64> {
+                self.0
+            }
+        }
+
+        struct RequestFactsScorer;
+
+        impl WorkerScorer for RequestFactsScorer {
+            fn score(
+                &mut self,
+                context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                assert_eq!(context.prefix_hashes(), Some(&[11, 22][..]));
+                assert_eq!(context.policy_class(), Some("batch"));
+                costs.fill(0.0);
+                assert_eq!(candidates.len(), 2);
+                Ok(())
+            }
+        }
+
+        struct CapacityPicker;
+
+        impl WorkerPicker for CapacityPicker {
+            fn pick(
+                &mut self,
+                context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let capacity = |row: usize| {
+                    context
+                        .worker_capacity(input.candidates()[row].worker())
+                        .expect("known worker")
+                };
+                let advertised = (0..input.candidates().len())
+                    .find(|&row| capacity(row).total_kv_blocks().is_some())
+                    .expect("one worker advertises capacity");
+                assert_eq!(capacity(advertised).max_num_batched_tokens(), Some(8192));
+                // The other worker advertises zero, which backends use for unknown capacity.
+                let unknown = 1 - advertised;
+                assert_eq!(capacity(unknown), WorkerCapacityInput::default());
+                assert!(
+                    context
+                        .worker_capacity(WorkerWithDpRank::from_worker_id(7))
+                        .is_none()
+                );
+                Ok(advertised)
+            }
+        }
+
+        let workers = HashMap::from([
+            (0, CapacityConfig(Some(100), Some(8192))),
+            (1, CapacityConfig(Some(0), None)),
+        ]);
+        let mut request = base_request(32);
+        request.token_seq = Some(vec![11, 22]);
+        request.policy_class = Some("batch".to_string());
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(RequestFactsScorer)],
+            Box::new(CapacityPicker),
+        );
+
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(0));
     }
 }

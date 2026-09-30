@@ -3,7 +3,8 @@
 
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
-use crate::protocols::{SharedCacheHits, WorkerWithDpRank};
+use crate::protocols::{SharedCacheHits, WorkerConfigLike, WorkerWithDpRank};
+use std::num::NonZeroU64;
 use std::ops::BitOr;
 
 /// Host-owned row materialized once for the union of component input requirements.
@@ -230,6 +231,37 @@ pub struct WorkerLoadInput {
     pub(crate) active_prefill_tokens: usize,
     pub(crate) decode_cost_blocks: f64,
     pub(crate) active_requests: usize,
+}
+
+/// Capacity advertised in one worker's runtime config.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkerCapacityInput {
+    total_kv_blocks: Option<NonZeroU64>,
+    max_num_batched_tokens: Option<NonZeroU64>,
+}
+
+impl WorkerCapacityInput {
+    /// Zero is the value some backends advertise when they cannot report capacity.
+    pub(crate) fn from_config(config: &impl WorkerConfigLike) -> Self {
+        Self {
+            total_kv_blocks: config.total_kv_blocks().and_then(NonZeroU64::new),
+            max_num_batched_tokens: config.max_num_batched_tokens().and_then(NonZeroU64::new),
+        }
+    }
+
+    /// Return the KV-cache capacity advertised for each of the worker's data-parallel ranks, in
+    /// blocks of [`WorkerSelectionContext::block_size`](super::WorkerSelectionContext::block_size)
+    /// tokens, or None if it was not advertised. This is configured capacity, not free blocks.
+    /// Some backends derive it from aggregate or representative-rank data, so treat it as an
+    /// estimate.
+    pub fn total_kv_blocks(&self) -> Option<u64> {
+        self.total_kv_blocks.map(NonZeroU64::get)
+    }
+
+    /// Return the worker's per-iteration batched-token budget, or None if it was not advertised.
+    pub fn max_num_batched_tokens(&self) -> Option<u64> {
+        self.max_num_batched_tokens.map(NonZeroU64::get)
+    }
 }
 
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.

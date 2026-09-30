@@ -19,7 +19,9 @@ pub use crate::plugins::worker_selection::{
 #[cfg(any(test, feature = "bench"))]
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
-use crate::plugins::worker_selection::{CacheSnapshot, CandidateData, WorkerCacheData};
+use crate::plugins::worker_selection::{
+    CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacityInput,
+};
 pub use policy::WorkerSelectionPolicy;
 use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
 #[cfg(any(test, feature = "bench"))]
@@ -134,8 +136,18 @@ struct MaterializedSelectionInput<'a> {
     cache_snapshot: CacheSnapshot<'a>,
 }
 
+/// Capacity lookup for test inputs built without a worker table.
+#[cfg(test)]
+fn no_worker_capacity(_: WorkerId) -> Option<WorkerCapacityInput> {
+    None
+}
+
 impl<'a> MaterializedSelectionInput<'a> {
-    fn new(request: &'a SchedulingRequest, block_size: u32) -> Self {
+    fn new(
+        request: &'a SchedulingRequest,
+        block_size: u32,
+        worker_capacity: &'a dyn Fn(WorkerId) -> Option<WorkerCapacityInput>,
+    ) -> Self {
         Self {
             request,
             cache_snapshot: CacheSnapshot {
@@ -146,6 +158,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             },
             context: WorkerSelectionContext {
                 request,
+                worker_capacity,
                 request_blocks: request.request_blocks(block_size),
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
@@ -357,7 +370,12 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
     }
 
-    let mut input = MaterializedSelectionInput::new(request, block_size);
+    let worker_capacity = |worker_id: WorkerId| {
+        workers
+            .get(&worker_id)
+            .map(WorkerCapacityInput::from_config)
+    };
+    let mut input = MaterializedSelectionInput::new(request, block_size, &worker_capacity);
     input.context.pinned_worker = eligibility.pinned_worker();
     let selected = match state {
         #[cfg(any(test, feature = "bench"))]

@@ -3,13 +3,15 @@
 
 //! Request metadata available to worker-selection components.
 
-use super::SessionContext;
-use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
+use super::{SessionContext, WorkerCapacityInput};
+use crate::protocols::{WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
 use crate::scheduling::SchedulingRequest;
 
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
     pub(crate) request: &'a SchedulingRequest,
+    /// Looks up a worker's runtime config, so rows carry no capacity a policy may never read.
+    pub(crate) worker_capacity: &'a dyn Fn(WorkerId) -> Option<WorkerCapacityInput>,
     pub(crate) request_blocks: u64,
     pub(crate) block_size: u32,
     pub(crate) track_prefill_tokens: bool,
@@ -43,6 +45,18 @@ impl WorkerSelectionContext<'_> {
         self.block_size
     }
 
+    /// Chained hashes of the prompt's complete KV blocks, borrowed from this request.
+    ///
+    /// Entry `i` identifies prompt blocks `0..=i`, so two requests share their first `i + 1`
+    /// blocks exactly when their entry `i` is equal. LoRA adapters, cache namespaces, and
+    /// multimodal content hash into separate domains. These are the host's active-sequence
+    /// tracking hashes; do not compare them with engine KV-event hashes. None when the host
+    /// does not track active blocks, as in disaggregated prefill pools. When the host does not
+    /// assume KV reuse, as in disaggregated decode pools, every entry is unique to the request.
+    pub fn prefix_hashes(&self) -> Option<&[u64]> {
+        self.request.token_seq.as_deref()
+    }
+
     /// Return whether this request contributes to prefill-load tracking.
     pub fn tracks_prefill_tokens(&self) -> bool {
         self.track_prefill_tokens
@@ -64,6 +78,20 @@ impl WorkerSelectionContext<'_> {
     /// Return the expected output length, if the request supplies one.
     pub fn expected_output_tokens(&self) -> Option<u32> {
         self.request.expected_output_tokens
+    }
+
+    /// Return the capacity advertised in `worker`'s runtime config, or None if the host does not
+    /// know the worker. Every data-parallel rank of a worker shares one config. Each call looks
+    /// the worker up in the host's worker table.
+    pub fn worker_capacity(&self, worker: WorkerWithDpRank) -> Option<WorkerCapacityInput> {
+        (self.worker_capacity)(worker.worker_id)
+    }
+
+    /// Return the policy class requested for this request: the caller's value, replaced by a
+    /// request classifier's override. This is the requested name; a profile with class
+    /// families may still resolve it to a family member for queueing.
+    pub fn policy_class(&self) -> Option<&str> {
+        self.request.policy_class.as_deref()
     }
 
     /// Return the request's scheduler priority boost.
