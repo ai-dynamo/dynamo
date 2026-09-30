@@ -26,6 +26,18 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      run_deepseek_disagg:
+        description: 'Run only the DeepSeek V4 Pro disaggregated recipe'
+        type: boolean
+        default: false
+      deepseek_image_tag:
+        description: 'Published ACR vLLM nightly tag for the DeepSeek recipe'
+        type: string
+        default: ''
+      deepseek_preflight_only:
+        description: 'Validate the DeepSeek recipe without deploying'
+        type: boolean
+        default: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -33,6 +45,7 @@ env:
 jobs:
 
   init:
+    if: ${{ !inputs.run_deepseek_disagg }}
     runs-on: ubuntu-slim
     outputs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
@@ -211,13 +224,27 @@ jobs:
           done
 
   # ============================================================================
+  # RECIPE-ONLY MANUAL RUN
+  # ============================================================================
+
+  deepseek-disagg-perf:
+    name: DeepSeek V4 Pro disaggregated perf
+    if: ${{ inputs.run_deepseek_disagg }}
+    uses: ./.github/workflows/deepseek-v4-pro-disagg-nightly.yml
+    with:
+      source_ref: ${{ github.sha }}
+      image_tag: ${{ inputs.deepseek_image_tag }}
+      preflight_only: ${{ inputs.deepseek_preflight_only }}
+    secrets: inherit
+
+  # ============================================================================
   # CLEANUP
   # ============================================================================
 
   clean-k8s-builder:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
-    if: always()
+    if: ${{ always() && !inputs.run_deepseek_disagg }}
     needs: [init, vllm-build, sglang-build, trtllm-build, triton-build, operator]
     steps:
     - name: Checkout repository
