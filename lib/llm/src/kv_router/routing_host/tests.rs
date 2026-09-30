@@ -1223,8 +1223,9 @@ async fn output_block_accounting_tracks_grouped_chunks() {
             .find(|load| load.worker_id == 7 && load.dp_rank == 0)
             .unwrap();
         assert_eq!(load.active_requests, 1);
-        // Keep the scheduler's existing prompt accounting unchanged;
-        // this regression checks only the growth caused by output.
+        // This single-request fixture has no shared prompt blocks, so decay applies
+        // to both prompt and output blocks. Check accounting and OSL propagation here;
+        // the sequence tests check the number of local load observations.
         // The last boundary is observed at output length 33; OSL 66 gives 0.5 decay.
         let decay = if expected_output_tokens.is_some() {
             0.5

@@ -787,6 +787,11 @@ where
             .add_output_block(&request_id.to_string(), decay_fraction)
     }
 
+    /// Apply output updates before returning, without waiting for admission.
+    ///
+    /// Zero counts and stale or missing bookings return `Ok(())`. A zero count
+    /// does not mutate state or emit load observations. Queue shutdown is checked
+    /// first, including for zero counts.
     #[doc(hidden)]
     pub async fn add_output_blocks_if_booking(
         &self,
@@ -800,8 +805,10 @@ where
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
-    /// `add_output_blocks_if_booking` applied inline, like `add_output_block`,
-    /// for callers that cannot await.
+    /// Apply output updates directly without checking queue shutdown.
+    ///
+    /// Zero counts and stale or missing bookings return `NoChange`. A zero count
+    /// does not mutate state or emit load observations.
     #[doc(hidden)]
     pub fn add_output_blocks_if_booking_sync(
         &self,

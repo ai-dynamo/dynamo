@@ -1156,11 +1156,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 return Err(self.stale_request_not_found(request_id, worker, "add_output_block"));
             };
             let mut seq = table.slots[idx].sequences.write();
-            let Some(_new_block_hash) = seq.add_output_blocks(request_id, 1, decay_fraction) else {
+            if !seq.add_output_blocks(request_id, 1, decay_fraction) {
                 return Err(SequenceError::RequestNotFound {
                     request_id: request_id.clone(),
                 });
-            };
+            }
             let load = seq.worker_load_snapshot();
             self.prompt_registry.replace_worker_load_state(worker, load);
             load
@@ -1195,11 +1195,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if self.request_index.booking_for(request_id) != Some(expected) {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
-            let Some(_new_block_hash) =
-                seq.add_output_blocks(request_id, num_blocks, decay_fraction)
-            else {
+            if !seq.add_output_blocks(request_id, num_blocks, decay_fraction) {
                 return Ok(LifecycleMutationOutcome::NoChange);
-            };
+            }
             let load = seq.worker_load_snapshot();
             self.prompt_registry.replace_worker_load_state(worker, load);
             load
@@ -2449,6 +2447,20 @@ mod tests {
         assert_eq!(observations[0].0, worker);
         assert_eq!(observations[0].1, 4);
         assert_eq!(sequences.active_blocks().get(&worker), Some(&4));
+        assert!(state.load_batches.lock().unwrap().is_empty());
+        drop(observations);
+
+        state.clear();
+        sequences.add_output_block(&request_id, None).unwrap();
+
+        assert!(state.events.lock().unwrap().is_empty());
+        assert!(state.single_loads.lock().unwrap().is_empty());
+        let observations = state.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].0, worker);
+        assert_eq!(observations[0].1, 5);
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&5));
+        assert!(state.load_batches.lock().unwrap().is_empty());
     }
 
     #[test]
