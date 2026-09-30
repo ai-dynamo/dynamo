@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-This experimental recipe serves [Motif-Technologies/Motif-3-NVFP4](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4) on two NVIDIA B200 GPUs with vLLM tensor parallelism, expert parallelism, Dynamo MTP2 speculative decoding, and a 262K-token context.
+This experimental recipe serves [Motif-Technologies/Motif-3-NVFP4](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4) on two NVIDIA B200 GPUs with vLLM tensor parallelism, expert parallelism, Dynamo MTP2 speculative decoding, and a 262K-token context. Only an aggregated target is provided; there is no disaggregated target for Motif-3 yet.
 
 <div className="dynamo-target-picker static">
 <p className="dynamo-target-picker-title">Deployment target</p>
@@ -56,7 +56,7 @@ kubectl apply -f recipes/motif-3/vllm/agg-b200-chat/base/deploy.yaml -n "${NAMES
 kubectl get dgd motif3-agg-b200 -n "${NAMESPACE}" -w
 ```
 
-For Nscale B200 nodes, apply the [Nscale Kustomization](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/agg-b200-chat/kustomize) with `kubectl apply -k recipes/motif-3/vllm/agg-b200-chat/kustomize -n "${NAMESPACE}"`. It adds amd64 and B200 node selectors and the GPU taint toleration. Reuse an existing `shared-model-cache` PVC, or choose the `vast` storage class when creating one. See the [Nscale setup instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/README.md#nscale-b200).
+The base manifest has no cluster-specific scheduling. To add node selectors, tolerations, or image-pull secrets for your cluster, use the [Kustomization](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/agg-b200-chat/kustomize) described in the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/README.md).
 
 ## Smoke Test
 
@@ -98,11 +98,15 @@ The deployment uses actual MTP verification by default. For benchmark-only synth
 
 ## Expected Performance
 
-The expected-performance row below is the best measured synthetic-AL result for the current deployment, using MTP2 with an acceptance length of 2.13. It meets the SLA of user output throughput P50 ≥ 50 tokens/second/user and TTFT P50 < 5 seconds. Thirty-five requests exceeded the configured 262,144-token context limit. Synthetic rejection sampling is benchmark-only and is not enabled in the portable deployment manifest.
+<Warning>
+This is a benchmark-only synthetic proxy, not the expected performance of the shipped manifests. It was measured with `speculative-config-synthetic` (MTP2, acceptance length 2.13 from SPEED-Bench coding) on the chat trace. The deployment manifest uses real MTP verification, and the AIPerf Job does not select the synthetic configuration, so applying them as shipped will not reproduce these figures. A real-MTP chat-trace result is not yet available.
+</Warning>
+
+Under the synthetic proxy, the run meets user output throughput P50 ≥ 50 tokens/second/user and TTFT P50 < 5 seconds. Thirty-five trace requests exceeded the configured 262,144-token context limit.
 
 | Workload | Recipe | GPU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 |---|---|---|---:|---:|---:|---:|
-| Chat trace | Dynamo MTP2, TP2 | B200 | 11 | 293.96 | 66.27 | 388.18 |
+| Chat trace (synthetic AL 2.13 proxy) | Dynamo MTP2, TP2 | B200 | 11 | 293.96 | 66.27 | 388.18 |
 
 ## Notes
 

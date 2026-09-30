@@ -76,6 +76,8 @@ spec:
               value: "11"
             - name: ARTIFACT_DIR
               value: /shared-model-cache/aiperf-artifacts
+            - name: HF_HOME
+              value: /shared-model-cache
           volumeMounts:
             - name: aiperf-config
               mountPath: /etc/aiperf
