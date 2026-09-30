@@ -44,6 +44,8 @@ from dynamo.common.multimodal.nvdec_decoder import (
 )
 from dynamo.common.utils.runtime import run_async
 
+from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
+
 logger = logging.getLogger(__name__)
 
 
@@ -171,7 +173,10 @@ class VideoLoader:
         # data: and file:// never touch the network, so vLLM can handle them.
         if urlparse(normalized_url).scheme in ("http", "https"):
             content = await fetch_bytes(
-                normalized_url, self._http_timeout, policy=self._url_policy
+                normalized_url,
+                self._http_timeout,
+                policy=self._url_policy,
+                max_bytes=max_media_bytes(),
             )
             return await self._decode_video_bytes(content, media_io)
 

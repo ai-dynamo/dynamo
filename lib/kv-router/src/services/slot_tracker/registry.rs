@@ -15,7 +15,9 @@ use tokio_util::sync::CancellationToken;
 use crate::identity::RoutingPartitionId;
 use crate::protocols::{PrefillLoadHint, WorkerId, WorkerWithDpRank};
 use crate::scheduling::PotentialLoad;
-use crate::sequences::topology::{WorkerDpRange, WorkerTopologyError};
+use crate::sequences::topology::{
+    MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError,
+};
 use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, ReplicaWorkerPolicy, SequenceError,
     SequenceRequest,
@@ -52,6 +54,9 @@ pub enum RegistryError {
 
     #[error("dp_size must be greater than 0")]
     InvalidDpSize,
+
+    #[error("dp_size {dp_size} exceeds the maximum {MAX_DATA_PARALLEL_RANKS_PER_WORKER}")]
+    DpSizeTooLarge { dp_size: u32 },
 
     #[error("dp range overflows u32: start={dp_start} size={dp_size}")]
     InvalidDpRange { dp_start: u32, dp_size: u32 },
@@ -484,6 +489,9 @@ fn validate_block_size(block_size: u32) -> Result<(), RegistryError> {
 fn topology_error(key: &RoutingPartitionId, error: WorkerTopologyError) -> RegistryError {
     match error {
         WorkerTopologyError::InvalidDpSize { .. } => RegistryError::InvalidDpSize,
+        WorkerTopologyError::DpSizeTooLarge { dp_size, .. } => {
+            RegistryError::DpSizeTooLarge { dp_size }
+        }
         WorkerTopologyError::InvalidDpRange {
             dp_start, dp_size, ..
         } => RegistryError::InvalidDpRange { dp_start, dp_size },
@@ -561,6 +569,16 @@ mod tests {
         assert!(matches!(
             registry.register(key("default"), 1, 16, u32::MAX, 1),
             Err(RegistryError::InvalidDpRange { .. })
+        ));
+        assert!(matches!(
+            registry.register(
+                key("default"),
+                1,
+                16,
+                0,
+                MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1
+            ),
+            Err(RegistryError::DpSizeTooLarge { .. })
         ));
     }
 
