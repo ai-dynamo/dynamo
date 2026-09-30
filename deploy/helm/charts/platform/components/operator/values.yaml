@@ -44,6 +44,31 @@ gpuDiscovery:
 controllerManager:
   tolerations: []
   affinity: {}
+  # Soft topology spread for the controller-manager pods: spread replicas
+  # across nodes and zones when possible. Defaults are soft
+  # (ScheduleAnyway) so they never block scheduling on small clusters;
+  # set whenUnsatisfiable: DoNotSchedule when the fleet has enough
+  # eligible nodes to make the spread a hard requirement.
+  # matchLabelKeys scopes the constraint to the incoming pod's revision so
+  # rolling updates spread the new ReplicaSet generation correctly
+  # (requires k8s >= 1.28; the chart already requires >= 1.30).
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          control-plane: controller-manager
+      matchLabelKeys:
+        - pod-template-hash
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          control-plane: controller-manager
+      matchLabelKeys:
+        - pod-template-hash
 
   # -- Extra labels to add to the controller-manager pod template.
   # Useful for unified service tagging conventions
