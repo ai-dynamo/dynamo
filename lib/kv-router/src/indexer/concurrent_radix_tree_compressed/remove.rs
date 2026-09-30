@@ -57,20 +57,28 @@ impl ConcurrentRadixTreeCompressed {
             return Err(KvCacheEventError::BlockNotFound);
         }
 
+        // A group is a contiguous run of hashes that resolve to the same node, so it
+        // is tracked as a sub-slice of the event instead of copied into a buffer.
+        let block_hashes = op.block_hashes;
         let mut group_node: Option<SharedNode> = None;
-        let mut group_hashes: Vec<ExternalSequenceBlockHash> = Vec::new();
+        let mut group_start = 0;
 
-        for block_hash in op.block_hashes {
+        for (index, &block_hash) in block_hashes.iter().enumerate() {
             if group_node
                 .as_ref()
                 .is_some_and(|node| node.contains_edge_hash(block_hash))
             {
-                group_hashes.push(block_hash);
                 continue;
             }
 
-            self.apply_removed_group(lookup, worker, group_node.take(), &group_hashes, id);
-            group_hashes.clear();
+            self.apply_removed_group(
+                lookup,
+                worker,
+                group_node.take(),
+                &block_hashes[group_start..index],
+                id,
+            );
+            group_start = index;
 
             match self.resolve_lookup(
                 lookup,
@@ -80,7 +88,6 @@ impl ConcurrentRadixTreeCompressed {
             ) {
                 Some(node) => {
                     group_node = Some(node);
-                    group_hashes.push(block_hash);
                 }
                 None => {
                     tracing::debug!(
@@ -99,11 +106,12 @@ impl ConcurrentRadixTreeCompressed {
                     // permanently. Mirrors the scrubs in apply_removed_hash's
                     // miss branches.
                     self.remove_lookup_hashes(lookup, worker, [block_hash]);
+                    group_start = index + 1;
                 }
             }
         }
 
-        self.apply_removed_group(lookup, worker, group_node, &group_hashes, id);
+        self.apply_removed_group(lookup, worker, group_node, &block_hashes[group_start..], id);
 
         Ok(())
     }
