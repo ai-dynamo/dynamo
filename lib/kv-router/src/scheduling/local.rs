@@ -623,6 +623,7 @@ where
         }))
     }
 
+    /// Apply completion and notify pending admission before returning.
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
@@ -634,14 +635,12 @@ where
         }
         self.slots.publish_prefill_completed(&request_id);
         if outcome.is_applied() {
-            match worker {
-                Some(worker) => self.queue.update_worker(worker).await,
-                None => self.queue.update().await,
-            }
+            self.queue.capacity_changed(worker);
         }
         Ok(())
     }
 
+    /// Release state and notify pending admission before returning.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
@@ -650,10 +649,7 @@ where
             return Err(SequenceError::RequestNotFound { request_id });
         }
         if outcome.is_applied() {
-            match worker {
-                Some(worker) => self.queue.update_worker(worker).await,
-                None => self.queue.update().await,
-            }
+            self.queue.capacity_changed(worker);
         }
         Ok(())
     }
@@ -672,7 +668,7 @@ where
             .slots
             .free_if_worker(&request_id, worker, Instant::now())?;
         if outcome.is_applied() {
-            self.queue.update_worker(worker).await;
+            self.queue.capacity_changed(Some(worker));
         }
         Ok(())
     }
@@ -698,7 +694,7 @@ where
     }
 
     /// Complete owner cleanup after a successful release (including a stale
-    /// booking's `NoChange`), before the cancellable queue-progress wait.
+    /// booking's `NoChange`), then notify pending admission before returning.
     pub(crate) async fn free_if_booking_with_cleanup(
         &self,
         booking: &SchedulerBookingDescriptor,
@@ -712,7 +708,7 @@ where
         )?;
         cleanup();
         if outcome.is_applied() {
-            self.queue.update_worker(booking.worker).await;
+            self.queue.capacity_changed(Some(booking.worker));
         }
         Ok(outcome)
     }
@@ -723,15 +719,27 @@ where
     }
 
     /// `NoChange` when the booking no longer matches or its prefill was
-    /// already marked complete.
+    /// already marked complete. Success confirms the state mutation and capacity
+    /// notification, not completion of pending admission.
     #[doc(hidden)]
     pub async fn mark_prefill_completed_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
     ) -> Result<LifecycleMutationOutcome, KvSchedulerError> {
-        self.queue
-            .mark_prefill_completed_if_booking(booking.clone())
-            .await
+        self.queue.ensure_running()?;
+        let outcome = self
+            .slots
+            .mark_prefill_completed_if_booking(
+                &booking.request_id,
+                booking.worker,
+                booking.attempt_id,
+                Instant::now(),
+            )
+            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))?;
+        if outcome.is_applied() {
+            self.queue.capacity_changed(Some(booking.worker));
+        }
+        Ok(outcome)
     }
 
     /// Republish the ordered prefill-completion event while `booking` is live.
@@ -741,6 +749,13 @@ where
         booking: &SchedulerBookingDescriptor,
     ) -> bool {
         self.slots.publish_prefill_completed_if_booking(booking)
+    }
+
+    /// Wait for an admission recheck when queueing is enabled and the actor is running.
+    /// This does not wait for blocked requests to finish or for the queue to empty.
+    /// With queueing disabled, return immediately without an admission barrier.
+    pub async fn update_queue(&self) {
+        self.queue.update().await;
     }
 
     pub fn pending_count(&self) -> usize {
@@ -778,9 +793,10 @@ where
         booking: &SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
-        self.queue
-            .add_output_block_if_booking(booking.clone(), decay_fraction)
-            .await
+        self.queue.ensure_running()?;
+        self.add_output_block_if_booking_sync(booking, decay_fraction)
+            .map(|_| ())
+            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
     /// `add_output_block_if_booking` applied inline, like `add_output_block`,
@@ -799,14 +815,14 @@ where
         )
     }
 
+    /// Apply an output update before returning, without waiting for admission.
     #[doc(hidden)]
     pub async fn enqueue_output_block_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
-        self.queue
-            .enqueue_output_block_if_booking(booking.clone(), decay_fraction)
+        self.add_output_block_if_booking(booking, decay_fraction)
             .await
     }
 
@@ -890,6 +906,70 @@ mod tests {
 
     struct FixedPrefillLoadEstimator {
         duration: Duration,
+    }
+
+    fn poll_once<F: std::future::Future>(future: F) -> std::task::Poll<F::Output> {
+        std::pin::pin!(future).poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    #[tokio::test]
+    async fn lifecycle_updates_do_not_wait_for_the_actor_in_either_queueing_mode() {
+        let worker = WorkerWithDpRank::new(0, 0);
+        for threshold in [None, Some(0.5)] {
+            let (scheduler, slots, _configs, cancellation) = make_scheduler(
+                HashMap::from([(0, SimpleWorkerConfig::default())]),
+                threshold,
+                false,
+                None,
+            );
+            let booking = scheduler
+                .add_request_if_registered_guarded(SequenceRequest {
+                    request_id: "output".into(),
+                    token_sequence: None,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: Some(crate::protocols::PrefillLoadHint {
+                        initial_effective_prefill_tokens: 64,
+                        expected_prefill_duration: None,
+                    }),
+                    worker,
+                    lora_name: None,
+                })
+                .unwrap()
+                .commit();
+            let before = slots.active_blocks()[&worker];
+            // A single poll on this current-thread runtime cannot run the actor.
+            assert!(matches!(
+                poll_once(scheduler.enqueue_output_block_if_booking(&booking, None)),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            assert!(slots.active_blocks()[&worker] > before);
+            assert!(matches!(
+                poll_once(scheduler.mark_prefill_completed_if_booking(&booking)),
+                std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
+            ));
+            assert_eq!(slots.active_tokens(Instant::now())[&worker], 0);
+            assert!(matches!(
+                poll_once(scheduler.mark_prefill_completed_if_booking(&booking)),
+                std::task::Poll::Ready(Ok(LifecycleMutationOutcome::NoChange))
+            ));
+            assert!(matches!(
+                poll_once(scheduler.free_if_booking(&booking)),
+                std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
+            ));
+            assert!(matches!(
+                poll_once(scheduler.add_output_block_if_booking(&booking, None)),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            slots.assert_completely_drained(Instant::now());
+            if threshold.is_some() {
+                assert!(poll_once(scheduler.update_queue()).is_pending());
+                scheduler.update_queue().await;
+            } else {
+                assert!(poll_once(scheduler.update_queue()).is_ready());
+            }
+            cancellation.cancel();
+        }
     }
 
     impl PrefillLoadEstimator for FixedPrefillLoadEstimator {
