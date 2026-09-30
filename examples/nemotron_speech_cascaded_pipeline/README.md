@@ -349,15 +349,19 @@ kubectl delete dgd nemotron-speech-cascaded --namespace "${NAMESPACE}"
 Running the adapter workers or unit tests outside the container requires Python
 3.11 or newer.
 
-The unit tests mock the Speech NIM services while exercising the public Dynamo
-event and audio contracts:
+The example's unit tests cover connection configuration and endpoint resolution
+without installing the Riva client. Model-registration regressions are covered
+by `lib/bindings/python/tests/test_runtime_data_discovery.py` in the regular
+Dynamo binding suite. These tests do not cover the Riva adapters' streaming or
+cancellation behavior; use the deployed smoke test for functional validation.
 
 ```bash
-bash examples/nemotron_speech_cascaded_pipeline/container/install.sh
-python3 -m pip install pytest pytest-asyncio pytest-timeout
+python3 -m pip install pytest
 PYTHONPATH=components/src:lib/bindings/python/src \
   python3 -m pytest -xvv examples/nemotron_speech_cascaded_pipeline/tests
-bash -n examples/nemotron_speech_cascaded_pipeline/{launch_workers.sh,container/build.sh}
+bash -n examples/nemotron_speech_cascaded_pipeline/launch_workers.sh
+bash -n examples/nemotron_speech_cascaded_pipeline/container/build.sh
+bash -n examples/nemotron_speech_cascaded_pipeline/container/install.sh
 pre-commit run check-yaml --files examples/nemotron_speech_cascaded_pipeline/deploy/agg.yaml
 ```
 

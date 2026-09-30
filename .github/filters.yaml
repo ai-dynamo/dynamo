@@ -78,9 +78,6 @@ api_docs:
   - 'components/src/dynamo/**'
   - '**/Cargo.toml'
 
-speech_example:
-  - 'examples/nemotron_speech_cascaded_pipeline/**'
-
 examples:
   - 'recipes/**'
   - 'recipes/**/.kustomize-matrix.yaml'
