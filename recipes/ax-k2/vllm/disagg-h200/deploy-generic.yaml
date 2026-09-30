@@ -77,11 +77,13 @@ spec:
           - --speculative-config
           - '{"method":"eagle3","model":"/shared-model-cache/hub/models--skt--A.X-K2-EAGLE3/snapshots/24958e91737d760908f73a8af4b6e06080fc5c1d","num_speculative_tokens":3,"kv_cache_dtype":"auto"}'
           - --kv-cache-dtype
-          - fp8_ds_mla
+          - bfloat16
+          - --attention-backend
+          - FLASH_ATTN_MLA_SPARSE
           - --gpu-memory-utilization
           - "0.90"
           - --max-num-seqs
-          - "32"
+          - "64"
           - --enable-prefix-caching
           - --moe-backend
           - flashinfer_cutlass
@@ -195,16 +197,18 @@ spec:
           - --speculative-config
           - '{"method":"eagle3","model":"/shared-model-cache/hub/models--skt--A.X-K2-EAGLE3/snapshots/24958e91737d760908f73a8af4b6e06080fc5c1d","num_speculative_tokens":3,"kv_cache_dtype":"auto"}'
           - --kv-cache-dtype
-          - fp8_ds_mla
+          - bfloat16
+          - --attention-backend
+          - FLASH_ATTN_MLA_SPARSE
           - --gpu-memory-utilization
           - "0.90"
           - --max-num-seqs
           - "64"
           - --max-num-batched-tokens
-          - "2048"
+          - "8192"
           - --enable-prefix-caching
           - --moe-backend
-          - triton
+          - flashinfer_cutlass
           - --dyn-reasoning-parser
           - deepseek_v3
           - --dyn-tool-call-parser

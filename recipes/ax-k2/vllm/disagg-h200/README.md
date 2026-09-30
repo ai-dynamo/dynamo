@@ -5,7 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # A.X-K2 H200 Disaggregated Serving
 
-Use TP8 workers with expert parallelism, KV-aware routing, EAGLE3 k=3,
+Use TP8 workers with expert parallelism, KV-aware routing, FP8 weights,
+BF16 KV cache, `flashinfer_cutlass`, `FLASH_ATTN_MLA_SPARSE`, EAGLE3 k=3,
 and a 262,144-token context limit. If model initialization runs out of memory,
 lower `--max-model-len` to 32768 on every worker.
 

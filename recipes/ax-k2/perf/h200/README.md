@@ -5,16 +5,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # A.X-K2 H200 EAGLE3 Benchmark
 
-One AIPerf Job runs c16 → c32 → c64 → c128 against an existing deployment.
-Both configurations use 32 H200 GPUs, FP8 weights/KV cache, EAGLE3 k=3 with
-real acceptance, KV-aware routing, and a 262,144-token context limit.
+The checked-in AIPerf Job runs c16 → c32 → c64 → c128 against an existing deployment.
+Both configurations use 32 H200 GPUs, FP8 weights, BF16 KV cache,
+`flashinfer_cutlass`, `FLASH_ATTN_MLA_SPARSE`, EAGLE3 k=3 with real
+acceptance, KV-aware routing, and a 262,144-token context limit.
 If model initialization runs out of memory, lower `--max-model-len` to 32768
 on every worker and record that change with the results.
 
 | Target | Configuration | Sequence Limit per Engine |
 | --- | --- | --- |
 | `agg` | 4 × TP8 + expert parallelism | 64 |
-| `disagg` | 2 prefill × TP8/DP1 + 2 decode × TP8, expert parallelism | 32 prefill / 64 decode |
+| `disagg` | 2 prefill × TP8/DP1 + 2 decode × TP8, expert parallelism | 64 on both roles |
 
 ## Run
 
@@ -73,3 +74,15 @@ TPOT p50/p99, and TTFT p50. Retain the serving manifest and Job YAML with the
 reports, and verify matching input hashes for paired topology runs.
 TPOT is AIPerf's request-average `inter_token_latency`; p99 is across request
 averages, not individual token gaps. Mean user throughput is mean(1000/TPOT_ms).
+
+## H200 W1 Measurements
+
+Both results use 32 shared 10,240-token prefixes plus 6,144 unique
+input tokens per request and 1,024 output tokens. At c16/32/64/128, it sends
+512/1,024/1,024/2,048 requests with input seeds
+20260928/20260929/20260930/20261001. Workers are recreated for the
+configuration; the cache remains warm within the ascending sweep. The serving
+settings are batch 8192, max sequences 64, effective block size 64, and
+465,856 KV tokens per worker. The checked-in `perf.yaml` uses different
+seeds, request counts, and warmup, so its output is a separate measurement
+series.

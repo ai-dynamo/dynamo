@@ -19,7 +19,7 @@ provider: skt
 model:
   name: A.X-K2
   hf_id: skt/A.X-K2-NVFP4
-  precision: NVFP4 (B200) or FP8 (H200) weights, FP8 KV cache
+  precision: NVFP4 weights and FP8 KV cache (B200) or FP8 weights and BF16 KV cache (H200)
 status: experimental
 targets:
 - id: vllm-agg-b200
@@ -84,21 +84,18 @@ targets:
   topology: aggregated
   techniques:
   - fp8
-  - fp8-kv-cache
+  - bf16-kv-cache
   - expert-parallelism
   - eagle3
   - kv-aware-routing
   workload:
     type: chat
-    traffic: W1 shared-prefix and W2 unique-input synthetic traffic, 16K input / 1K output, concurrency 16, 32, 64, and 128; sequential sweep without cache reset
+    traffic: W1 10240 shared-prefix + 6144 unique input, 1024 output; c16/32/64/128, 512/1024/1024/2048 requests with distinct input seeds; fresh workers, cache retained within sweep
   deploy:
     asset: recipes/ax-k2/vllm/agg-h200/deploy-generic.yaml
-  benchmark:
-    tool: aiperf
-    asset: recipes/ax-k2/perf/h200/perf.yaml
   expected_performance:
-    available: false
-    summary: Historical cold-cache results are documented on the recipe page; current 262K sequential sweep is not yet measured.
+    available: true
+    summary: 'W1 c16/32/64/128 TTFT p50: 655.40/652.25/678.50/707.32 ms; TPOT p50: 16.87/22.27/31.64/46.99 ms. One measured sweep with the pinned image and no source patches.'
 - id: vllm-disagg-h200
   recommended: false
   hardware:
@@ -110,24 +107,19 @@ targets:
   topology: disaggregated
   techniques:
   - fp8
-  - fp8-kv-cache
+  - bf16-kv-cache
   - expert-parallelism
   - eagle3
   - kv-aware-routing
   workload:
     type: chat
-    traffic: W1 shared-prefix and W2 unique-input synthetic traffic, 16K input / 1K output, concurrency 16, 32, 64, and 128; sequential sweep without cache reset
+    traffic: W1 10240 shared-prefix + 6144 unique input, 1024 output; c16/32/64/128, 512/1024/1024/2048 requests with distinct input seeds; fresh workers, cache retained within sweep
   deploy:
     asset: recipes/ax-k2/vllm/disagg-h200/deploy-generic.yaml
-  benchmark:
-    tool: aiperf
-    asset: recipes/ax-k2/perf/h200/perf.yaml
   expected_performance:
-    available: false
-    summary: Historical cold-cache results are documented on the recipe page; current 262K sequential sweep is not yet measured.
+    available: true
+    summary: 'W1 c16/32/64/128 TTFT p50: 817.80/902.83/1629.23/28194.28 ms; TPOT p50: 17.09/20.27/26.55/34.22 ms. One measured BF16 2P2D sweep with the pinned image.'
 related_benchmarks: []
 maintainer: Vanshil Shah
 gaps:
 - Published C16 short-trace results predate the published NVCR runtime; no measurements for this image.
-- Disaggregated C16 run had 10 failed requests out of 1765; warmup differed between topologies.
-- H200 page includes historical cold-cache results; current 262K manifests and sequential one-Job sweep have not been remeasured.

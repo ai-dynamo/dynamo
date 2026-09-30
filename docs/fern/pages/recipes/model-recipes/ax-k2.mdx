@@ -10,7 +10,8 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 Deploy SK Telecom's [A.X-K2](https://huggingface.co/skt/A.X-K2) with
 NVIDIA Dynamo and vLLM. B200 targets use NVFP4 weights; H200 targets use FP8
-weights. Both use FP8 KV cache and EAGLE3 with three speculative tokens.
+weights. H200 targets use BF16 KV cache; B200 targets use FP8 KV cache.
+All use EAGLE3 with three speculative tokens.
 
 <div className="dynamo-target-picker">
 
@@ -68,7 +69,7 @@ weights. Both use FP8 KV cache and EAGLE3 with three speculative tokens.
 
 <span><b>Checkpoint</b> skt/A.X-K2</span>
 <span><b>Hardware</b> 32x H200, four TP8 aggregate workers, expert parallelism enabled</span>
-<span><b>Precision</b> FP8 weights, FP8 KV cache</span>
+<span><b>Precision</b> FP8 weights, BF16 KV cache</span>
 <span><b>Speculation</b> EAGLE3, 3 tokens, draft KV dtype auto</span>
 
 </div>
@@ -77,7 +78,7 @@ weights. Both use FP8 KV cache and EAGLE3 with three speculative tokens.
 
 <span><b>Checkpoint</b> skt/A.X-K2</span>
 <span><b>Hardware</b> 32x H200, two TP8/DP1 prefill workers and two TP8 decode workers, expert parallelism enabled</span>
-<span><b>Precision</b> FP8 weights, FP8 KV cache</span>
+<span><b>Precision</b> FP8 weights, BF16 KV cache</span>
 <span><b>Speculation</b> EAGLE3, 3 tokens, draft KV dtype auto</span>
 
 </div>
@@ -310,19 +311,18 @@ Configure the [H200 AIPerf Job](https://github.com/ai-dynamo/dynamo/blob/main/re
 for the running deployment using the
 [benchmark instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/perf/h200/README.md).
 
-Run with 32 H200 GPUs, `1.4.1-a.x-k2-post.1`, FP8 weights/KV cache,
-and EAGLE3 k=3 with real acceptance.
+Run with 32 H200 GPUs, `1.4.1-a.x-k2-post.1`, FP8 weights, BF16 KV cache,
+`flashinfer_cutlass`, `FLASH_ATTN_MLA_SPARSE`, and EAGLE3 k=3 with real
+acceptance. The checked-in AIPerf Job uses different sweep settings from the
+measurements below.
 
-
-| Benchmark Setting        | Value                                                                          |
-| ------------------------ | ------------------------------------------------------------------------------ |
-| Topology                 | 4×TP8 aggregated vs. 2P2D TP8, expert parallelism enabled                      |
-| Workload                 | W1: 32 shared 10,240-token prefixes + 6,144 unique tokens; 1,024 output tokens |
-| Cache / Routing          | Sequential sweep without cache reset / KV-aware on both configurations         |
-| Deployment Context Limit | 262,144 tokens                                                                 |
-| Max Sequences per Engine | 64 aggregate/decode; 32 prefill                                                |
-| Requests / Runs          | c16–64: 1,024 requests, one run; c128: 2,048 requests, mean of three runs      |
-
+| Setting | Value |
+| --- | --- |
+| Topology | 4×TP8 aggregated or 2P2D TP8 (32 H200 GPUs) |
+| Workload | W1: 10,240 shared-prefix + 6,144 unique input; 1,024 output; 32 prefixes |
+| Cache / Routing | KV-aware; fresh workers, cache retained within each sweep |
+| Engine Limits | 262,144 context; batch 8,192; 64 sequences |
+| KV Capacity | 64-token blocks; 465,856 tokens per worker |
 
 ```bash
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply -f recipes/ax-k2/perf/h200/perf.yaml
@@ -333,26 +333,22 @@ kubectl --context "${CONTEXT}" -n "${NAMESPACE}" logs job/axk2-h200-perf -c aipe
 
 ### H200 Performance Results
 
-| Recipe                 | Concurrency | System Output tok/s | System output tok/s/GPU | User output tok/s (mean) | TPOT p50 (ms) | TPOT p99 (ms) | TTFT p50 (seconds) |
-| ---------------------- | -----------: | -------------------: | -----------------------: | ------------------------: | -------------: | -------------: | ------------------: |
-| Aggregated (4 workers) | 16          | 851.0               | 26.59                   | 57.83                    | 17.80         | 22.48         | 0.853              |
-| Disaggregated (2P2D)   | 16          | 847.0               | 26.47                   | 57.84                    | 17.91         | 21.39         | 0.959              |
-| Aggregated (4 workers) | 32          | 1,254.5             | 39.20                   | 42.67                    | 24.51         | 32.21         | 0.850              |
-| Disaggregated (2P2D)   | 32          | 1,305.9             | 40.81                   | 45.08                    | 23.19         | 27.41         | 1.006              |
-| Aggregated (4 workers) | 64          | 1,662.3             | 51.95                   | 28.73                    | 36.71         | 52.15         | 0.875              |
-| Disaggregated (2P2D)   | 64          | 2,003.4             | 62.61                   | 37.54                    | 28.40         | 34.19         | 1.751              |
-| Aggregated (4 workers) | 128         | 2,236.7             | 69.90                   | 19.30                    | 55.20         | 75.11         | 0.913              |
-| Disaggregated (2P2D)   | 128         | 2,428.0             | 75.87                   | 29.19                    | 36.63         | 43.48         | 13.720             |
-
-
-- **PDD throughput:** +20.5% at c64 and +8.6% at c128, using the same 32 GPUs.
-- **PDD decode latency:** TPOT p50 improves from 36.71 to 28.40 ms at c64 and from 55.20 to 36.63 ms at c128.
+| Recipe | Concurrency | System output tok/s | System output tok/s/GPU | User output tok/s (mean) | TPOT p50 (ms) | TPOT p99 (ms) | TTFT p50 (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Aggregated (4 workers) | 16 | 896.09 | 28.00 | 60.84 | 16.87 | 20.87 | 655.40 |
+| Disaggregated (2P2D) | 16 | 883.40 | 27.61 | 60.73 | 17.09 | 20.73 | 817.80 |
+| Aggregated (4 workers) | 32 | 1,388.63 | 43.39 | 46.72 | 22.27 | 27.16 | 652.25 |
+| Disaggregated (2P2D) | 32 | 1,483.08 | 46.35 | 51.14 | 20.27 | 23.58 | 902.83 |
+| Aggregated (4 workers) | 64 | 1,941.52 | 60.67 | 33.21 | 31.64 | 42.08 | 678.50 |
+| Disaggregated (2P2D) | 64 | 2,141.49 | 66.92 | 38.86 | 26.55 | 36.11 | 1,629.23 |
+| Aggregated (4 workers) | 128 | 2,646.13 | 82.69 | 22.59 | 46.99 | 61.10 | 707.32 |
+| Disaggregated (2P2D) | 128 | 2,034.02 | 63.56 | 30.73 | 34.22 | 47.21 | 28,194.28 |
 
 #### Recommendation
 
-- **Low concurrency or TTFT-first:** prefer aggregated serving; PDD provides no throughput gain at c16.
-- **Throughput/TPOT-first:** consider PDD at c64, with TTFT p50 of 1.75 seconds for this W1 workload.
-- **Higher concurrency:** use c128 only if TTFT p50 of 13.72 seconds is acceptable; raising concurrency to c192 adds waiting without improving throughput.
+- **Low concurrency or TTFT-first:** prefer aggregated serving; 2P2D has no throughput gain at c16.
+- **Throughput/TPOT-first:** consider 2P2D at c64, with TTFT p50 of 1.63 seconds.
+- **Higher concurrency:** prefer aggregated at c128; 2P2D has lower throughput and TTFT p50 of 28.19 seconds.
 
 </div>
 
@@ -385,9 +381,11 @@ kubectl --context "${CONTEXT}" -n "${NAMESPACE}" logs job/axk2-h200-perf -c aipe
 | Total GPUs               | 32x H200                                    | 32x H200                                                              |
 | Parallelism              | TP8 + expert parallelism                    | Prefill TP8/DP1 + expert parallelism; decode TP8 + expert parallelism |
 | Checkpoint               | `skt/A.X-K2`, FP8 weights                   | Same                                                                  |
-| KV Cache                 | `fp8_ds_mla`                                | Same                                                                  |
+| KV Cache                 | `bfloat16`                                | Same on both roles                                                    |
 | EAGLE3                   | 3 speculative tokens, draft KV dtype `auto` | Same on both roles                                                    |
-| Max Sequences per Engine | 64                                          | 32 prefill / 64 decode                                                |
+| MoE Backend              | `flashinfer_cutlass`                        | Same on both roles                                                    |
+| Attention Backend        | `FLASH_ATTN_MLA_SPARSE`                     | Same on both roles                                                    |
+| Max Sequences per Engine | 64                                          | 64 on both roles                                                      |
 | Context Length           | 262,144 tokens                              | Same                                                                  |
 | Routing                  | KV-aware                                    | KV-aware                                                              |
 | KV Transfer              | N/A                                         | NIXL/UCX over RDMA                                                    |
