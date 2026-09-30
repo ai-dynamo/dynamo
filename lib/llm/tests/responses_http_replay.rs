@@ -404,7 +404,6 @@ async fn streaming_text_baseline() {
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let raw = response.text().await.unwrap();
-        assert!(!raw.contains("data: [DONE]"));
         let events = parse_responses_sse(&raw).await.unwrap();
         insta::assert_json_snapshot!(
             "responses_streaming_text",
@@ -649,7 +648,6 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
         }
 
         let raw = parser.into_body().expect("response SSE was not UTF-8");
-        assert!(!raw.contains("data: [DONE]"));
         let events = parse_responses_sse(&raw).await.unwrap();
         assert_eq!(
             events

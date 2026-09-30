@@ -871,6 +871,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
     async fn test_responses_terminal_events_have_no_done_sentinel() {
         for terminal in [
             "response.completed",
@@ -916,6 +917,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
     async fn test_responses_stream_error_has_no_done_sentinel() {
         let model = "responses-stream-error";
         let (metrics, _, context, handle) = setup_test(model, "req-stream-error");

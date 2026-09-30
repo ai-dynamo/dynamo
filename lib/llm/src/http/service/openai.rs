@@ -4432,7 +4432,6 @@ async fn responses(
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        // Responses uses typed terminal events and must not append a [DONE] sentinel.
         let stream = monitor_for_responses_disconnects(
             full_stream,
             ctx,
