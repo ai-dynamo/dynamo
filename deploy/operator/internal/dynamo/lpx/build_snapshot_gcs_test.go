@@ -7,11 +7,9 @@ package lpx
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
-	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -24,64 +22,32 @@ func manifestV2Payload(t *testing.T) []byte {
 	return payload
 }
 
-func TestAcquireBuildSnapshotFencesCompilerMetadata(t *testing.T) {
+func TestAcquireBuildSnapshotPreservesReadFailures(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Create two different revision-2 compiler metadata reads for one build")
-	const buildID = "model/build"
-	client := &fakeModelServiceClient{
-		list: &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{
-			{RelativePath: gbuildManifestV2CapnpFile},
-		}},
-		fileStreams: []*fakeModelFileStream{
-			{chunks: modelFileChunks(gbuildManifestV2CapnpFile, "first")},
-			{chunks: modelFileChunks(gbuildManifestV2CapnpFile, "second")},
-		},
-	}
-	registry, err := NewModelRegistry("gs://bucket/registry", client)
-	require.NoError(t, err)
-
-	t.Log("Reject compiler metadata that changes during acquisition")
-	_, err = registry.AcquireBuildSnapshot(t.Context(), buildID)
-	require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
-	require.ErrorContains(t, err, "compiler metadata manifest.v2.capnp.bin changed while acquiring")
-}
-
-func TestAcquireBuildSnapshotClassifiesSelectedMemberDisappearance(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Define definitive and transient failures for both manifest reads")
-	payload := manifestV2Payload(t)
-	for _, testCase := range []struct {
-		name        string
-		failingRead int
-		readErr     error
+	t.Log("Define missing and temporarily unavailable manifest reads")
+	for _, test := range []struct {
+		name    string
+		readErr error
 	}{
-		{name: "gRPC NotFound on first read", failingRead: 1, readErr: status.Error(codes.NotFound, "object disappeared")},
-		{name: "gRPC NotFound on duplicate read", failingRead: 2, readErr: status.Error(codes.NotFound, "object disappeared")},
-		{name: "transient gRPC failure on first read", failingRead: 1, readErr: status.Error(codes.Unavailable, "temporary object-store failure")},
-		{name: "transient gRPC failure on duplicate read", failingRead: 2, readErr: status.Error(codes.Unavailable, "temporary object-store failure")},
+		{name: "not found", readErr: status.Error(codes.NotFound, "manifest missing")},
+		{name: "unavailable", readErr: status.Error(codes.Unavailable, "temporary object-store failure")},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Log("Construct the selected Model Express read sequence")
-			streams := []*fakeModelFileStream{{err: testCase.readErr}}
-			if testCase.failingRead == 2 {
-				streams = append([]*fakeModelFileStream{
-					{chunks: modelFileChunks(gbuildManifestV2CapnpFile, string(payload))},
-				}, streams...)
-			}
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Read the requested manifest without a preceding inventory")
 			client := &fakeModelServiceClient{
-				list:        &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}}},
-				fileStreams: streams,
+				fileStreams: []*fakeModelFileStream{{err: test.readErr}},
 			}
 			registry, err := NewModelRegistry("gs://bucket/registry", client)
 			require.NoError(t, err)
+			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "model/build")
 
-			t.Log("Preserve the transport error while classifying definitive absence as inconsistency")
-			_, err = registry.AcquireBuildSnapshot(t.Context(), "model/build")
-			require.Error(t, err)
-			require.Equal(t, status.Code(testCase.readErr) == codes.NotFound, errors.Is(err, ErrBuildSnapshotInconsistent))
-			require.ErrorIs(t, err, testCase.readErr)
+			t.Log("Preserve the transport failure separately from invalid compiler input")
+			require.ErrorIs(t, err, test.readErr)
+			require.NotErrorIs(t, err, errInvalidBuildManifest)
+			require.Nil(t, snapshot)
+			require.Empty(t, client.listRequests)
+			require.Len(t, client.filesRequests, 1)
 		})
 	}
 }
@@ -107,28 +73,26 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 			client := &fakeModelServiceClient{
 				fileStreams: []*fakeModelFileStream{
 					{chunks: modelFileChunks(gbuildManifestV2CapnpFile, string(payload))},
-					{chunks: modelFileChunks(gbuildManifestV2CapnpFile, string(payload))},
 				},
-				list: &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}}},
 			}
 			registry, err := NewModelRegistry(testCase.registryURL, client)
 			require.NoError(t, err)
 
-			t.Log("Normalize the manifest and retain the current registry locator")
+			t.Log("Read and validate the manifest once, retaining the current registry locator")
 			started := time.Now()
 			build, err := normalizeRegistryFixtureBuild(testCase.ctx, registry, testCase.ref)
 			require.NoError(t, err)
 			require.Equal(t, "gs://bucket/registry/model/build", build.Path)
 			require.Len(t, build.Partitions, 1)
 			require.Equal(t, "part-0", build.Partitions[0].PartPath)
-			require.Len(t, client.listRequests, 2)
-			require.Len(t, client.filesRequests, 2)
+			require.Empty(t, client.listRequests)
+			require.Len(t, client.filesRequests, 1)
 			for _, request := range client.filesRequests {
 				require.Equal(t, []string{gbuildManifestV2CapnpFile}, request.GetFileSelector().GetPaths())
 			}
 
-			t.Log("Share a finite deadline across all metadata RPCs and release only their contexts")
-			require.Len(t, client.metadataContexts, 4)
+			t.Log("Bound the single metadata RPC and release its context")
+			require.Len(t, client.metadataContexts, 1)
 			deadline, ok := client.metadataContexts[0].Deadline()
 			require.True(t, ok)
 			if parentDeadline, hasDeadline := testCase.ctx.Deadline(); hasDeadline {

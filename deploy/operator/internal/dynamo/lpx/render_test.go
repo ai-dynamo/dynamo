@@ -395,7 +395,7 @@ func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *BuildSnapsh
 	t.Helper()
 	intent := ModelProjectionInput{
 		Pipeline: pipeline,
-		Models:   []string{"default"}, RuntimeBuildRef: "model-build", BuildSnapshot: normalizeTestSnapshot(t, snapshot),
+		Models:   []string{"default"}, RuntimeBuildRef: "model-build", BuildSnapshot: snapshot,
 	}
 	projectionBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)

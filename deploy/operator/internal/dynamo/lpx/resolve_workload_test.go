@@ -6,6 +6,8 @@
 package lpx
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -18,6 +20,52 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 )
+
+func TestResolveWorkloadClassifiesSnapshotFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Distinguish missing manifests from malformed bytes and invalid compiler contracts")
+	manifest := newManifestV2ContractFixture(t)
+	manifest.SetContractRevision(0)
+	payload, err := manifest.Message().Marshal()
+	require.NoError(t, err)
+	tests := []struct {
+		name        string
+		manifest    []byte
+		wantInvalid bool
+		wantErr     string
+	}{
+		{name: "missing", wantErr: gbuildManifestV2CapnpFile},
+		{name: "malformed", manifest: []byte("invalid"), wantInvalid: true, wantErr: "parsing manifest.v2.capnp.bin"},
+		{name: "invalid contract", manifest: payload, wantInvalid: true, wantErr: "contractRevision"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Resolve one component through the production snapshot loader")
+			registryDir := t.TempDir()
+			buildDir := filepath.Join(registryDir, "build")
+			require.NoError(t, os.MkdirAll(buildDir, 0o700))
+			if test.manifest != nil {
+				writeManifestV2Payload(t, buildDir, test.manifest)
+			}
+			registry, err := NewModelRegistry(registryDir, nil)
+			require.NoError(t, err)
+			dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build"))
+			workload, err := ResolveWorkload(t.Context(), dgd, []string{"LPX"}, registry)
+
+			t.Log("Preserve failure classification without returning a partial workload")
+			require.Nil(t, workload)
+			require.ErrorContains(t, err, test.wantErr)
+			if test.wantInvalid {
+				require.ErrorIs(t, err, errInvalidBuildManifest)
+				require.NotErrorIs(t, err, ErrBuildSnapshotAcquisition)
+			} else {
+				require.ErrorIs(t, err, ErrBuildSnapshotAcquisition)
+				require.ErrorIs(t, err, os.ErrNotExist)
+			}
+		})
+	}
+}
 
 func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	t.Log("Create one LPX component beside an unrelated conventional decode")

@@ -199,6 +199,11 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 	relativePath string,
 	maxBytes int,
 ) ([]byte, error) {
+	// Honor cancellation before starting either a local read or a metadata RPC.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	switch buildURL.Scheme {
 	case BuildSchemeFile:
 		// Open nonblocking so a FIFO cannot stall before file-type validation.
@@ -316,124 +321,4 @@ func (r *defaultModelRegistry) readBuildFileBounded(
 	default:
 		return nil, fmt.Errorf("unsupported build metadata scheme %q", buildURL.Scheme)
 	}
-}
-
-func (r *defaultModelRegistry) listBuildFiles(ctx context.Context, buildURL *url.URL) ([]string, error) {
-	var (
-		paths []string
-		err   error
-	)
-	switch buildURL.Scheme {
-	case BuildSchemeFile:
-		paths, err = localBuildFilePaths(ctx, buildURL.Path, maxBuildSnapshotMetadataBytes)
-	case BuildSchemeGCS:
-		if r.mxClient == nil {
-			return nil, fmt.Errorf("Model Express client is required for GCS model registry reads of %q", buildURL.String())
-		}
-
-		// List the GCS build files through Model Express before validating the inventory.
-		modelName := buildURL.String()
-		list, listErr := r.mxClient.ListModelFiles(ctx, &modelpb.ModelFilesRequest{
-			ModelName: modelName,
-			Provider:  modelpb.ModelProvider_GCS,
-		})
-		if listErr != nil {
-			return nil, fmt.Errorf("listing files from %q with Model Express: %w", modelName, listErr)
-		}
-		paths = make([]string, 0, len(list.GetFiles()))
-		for _, file := range list.GetFiles() {
-			if path := file.GetRelativePath(); path != "" {
-				paths = append(paths, path)
-			}
-		}
-	default:
-		err = fmt.Errorf("unsupported build metadata scheme %q", buildURL.Scheme)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return normalizeBuildFilePaths(ctx, paths)
-}
-
-// localBuildFilePaths bounds visited relative path bytes; maxBytes must be non-negative.
-// Cancellation is cooperative and cannot interrupt an in-flight filesystem call.
-func localBuildFilePaths(ctx context.Context, root string, maxBytes int) ([]string, error) {
-	// Resolve a symlinked build root only while acquisition is still active.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
-	if err != nil {
-		return nil, fmt.Errorf("resolving build directory %q: %w", root, err)
-	}
-
-	// Reject non-directory roots without opening a potentially blocking FIFO.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(resolvedRoot)
-	if err != nil {
-		return nil, fmt.Errorf("checking build directory %q: %w", root, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("build root %q is not a directory", root)
-	}
-
-	// Charge directories as well as files so pending traversal cannot grow without bound.
-	paths := make([]string, 0)
-	pending := []string{""}
-	remaining := maxBytes
-	for len(pending) > 0 {
-		relativeDir := pending[len(pending)-1]
-		pending[len(pending)-1] = ""
-		pending = pending[:len(pending)-1]
-
-		// Finish and close one directory before opening another, including on failure.
-		err := func() error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			dir, err := os.Open(filepath.Join(resolvedRoot, relativeDir))
-			if err != nil {
-				return err
-			}
-			defer func() { _ = dir.Close() }()
-
-			// Batches avoid WalkDir's whole-directory allocation before entry callbacks.
-			for {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				entries, err := dir.ReadDir(128)
-				if err != nil && !errors.Is(err, io.EOF) {
-					return err
-				}
-
-				// Budget each path before retaining it, without following child symlinks.
-				for _, entry := range entries {
-					relativePath := filepath.Join(relativeDir, entry.Name())
-					if len(relativePath) > remaining {
-						return fmt.Errorf("build inventory exceeds its %d-byte path limit", maxBytes)
-					}
-					remaining -= len(relativePath)
-
-					// Retain malformed manifest directories so the required file read fails.
-					if entry.IsDir() {
-						pending = append(pending, relativePath)
-						if relativePath != gbuildManifestV2CapnpFile {
-							continue
-						}
-					}
-					paths = append(paths, filepath.ToSlash(relativePath))
-				}
-				if errors.Is(err, io.EOF) {
-					return ctx.Err()
-				}
-			}
-		}()
-		if err != nil {
-			return nil, fmt.Errorf("listing build files under %q: %w", root, err)
-		}
-	}
-	return paths, nil
 }

@@ -26,7 +26,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 		Pipeline:        PipelineLPX,
 		Models:          []string{"default"},
 		RuntimeBuildRef: "model-build",
-		BuildSnapshot:   normalizeTestSnapshot(t, snapshot),
+		BuildSnapshot:   snapshot,
 	})
 	require.NoError(t, err)
 	projection := projectionBatch[0]
@@ -96,7 +96,7 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 				fixture.partitions[index].id = uint32(index)
 			}
 			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-			projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineLPX)
+			projection := projectTestBuild(t, snapshot, PipelineLPX)
 			projection.stage = testRenderComponentName
 
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")

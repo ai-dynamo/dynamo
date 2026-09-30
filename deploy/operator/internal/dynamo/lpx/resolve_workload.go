@@ -34,7 +34,8 @@ var ErrBuildSnapshotAcquisition = errors.New("acquiring immutable LPX build snap
 
 // BuildSnapshotSource acquires immutable build inputs by build reference.
 type BuildSnapshotSource interface {
-	// AcquireBuildSnapshot returns a complete snapshot for id or an error.
+	// AcquireBuildSnapshot returns a validated snapshot for id or an error.
+	// Invalid compiler input wraps errInvalidBuildManifest; other errors are acquisition failures.
 	AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error)
 }
 
@@ -61,7 +62,7 @@ func ResolveWorkload(
 
 	// Acquire each build and expand its models in canonical runtime order.
 	var (
-		snapshot NormalizedBuildSnapshot
+		snapshot *BuildSnapshot
 		pipeline Pipeline
 
 		projections = make([]*ModelProjection, 0, len(components))
@@ -73,8 +74,13 @@ func ResolveWorkload(
 
 		// An admitted group has at most two components, so only its preceding component can share a build.
 		if len(projections) == 0 || projections[len(projections)-1].runtimeBuildRef != model.BuildID {
-			rawSnapshot, acquireErr := source.AcquireBuildSnapshot(ctx, model.BuildID)
+			acquired, acquireErr := source.AcquireBuildSnapshot(ctx, model.BuildID)
 			if acquireErr != nil {
+				// Keep compiler validation failures distinct from retryable acquisition failures.
+				if errors.Is(acquireErr, errInvalidBuildManifest) {
+					return nil, fmt.Errorf("invalid LPX build for model %q build %q: %w", configuredModel, model.BuildID, acquireErr)
+				}
+
 				return nil, fmt.Errorf(
 					"%w for model %q build %q: %w",
 					ErrBuildSnapshotAcquisition,
@@ -83,16 +89,7 @@ func ResolveWorkload(
 					acquireErr,
 				)
 			}
-			normalizedSnapshot, normalizeErr := normalizeBuildSnapshot(rawSnapshot)
-			if normalizeErr != nil {
-				return nil, fmt.Errorf(
-					"normalizing immutable LPX build snapshot for model %q build %q: %w",
-					configuredModel,
-					model.BuildID,
-					normalizeErr,
-				)
-			}
-			snapshot = normalizedSnapshot
+			snapshot = acquired
 		}
 
 		// Validated model cardinality fixes one runtime shape for the selected workload.

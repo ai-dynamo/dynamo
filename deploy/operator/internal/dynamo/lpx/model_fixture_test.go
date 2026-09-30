@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/url"
 	"testing"
@@ -27,11 +28,7 @@ func normalizeRegistryFixtureBuild(ctx context.Context, registry ModelRegistry, 
 	if err != nil {
 		return nil, err
 	}
-	normalized, err := normalizeBuildSnapshot(snapshot)
-	if err != nil {
-		return nil, err
-	}
-	return normalized.build, nil
+	return snapshot.build, nil
 }
 
 type fakeModelServiceClient struct {
@@ -43,7 +40,6 @@ type fakeModelServiceClient struct {
 	fileStreams   []*fakeModelFileStream
 	filesErr      error
 	listRequests  []*modelpb.ModelFilesRequest
-	list          *modelpb.ModelFileList
 
 	metadataContexts []context.Context
 }
@@ -83,10 +79,7 @@ func (c *fakeModelServiceClient) ListModelFiles(
 ) (*modelpb.ModelFileList, error) {
 	c.listRequests = append(c.listRequests, request)
 	c.metadataContexts = append(c.metadataContexts, ctx)
-	if c.list != nil {
-		return c.list, nil
-	}
-	return &modelpb.ModelFileList{}, nil
+	return nil, fmt.Errorf("unexpected build inventory request")
 }
 
 type fakeModelDownloadStream struct {

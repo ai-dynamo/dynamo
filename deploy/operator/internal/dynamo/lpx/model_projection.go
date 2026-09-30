@@ -40,8 +40,8 @@ type ModelProjectionInput struct {
 	Models []string
 	// RuntimeBuildRef is the build reference projected into runtime configuration.
 	RuntimeBuildRef string
-	// BuildSnapshot is the normalized immutable build input.
-	BuildSnapshot NormalizedBuildSnapshot
+	// BuildSnapshot is the validated, non-nil immutable build input.
+	BuildSnapshot *BuildSnapshot
 }
 
 // ModelProjection holds scheduler request inputs and runtime rendering state
