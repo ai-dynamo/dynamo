@@ -10575,6 +10575,14 @@ func TestPropagateDGDAnnotations(t *testing.T) {
 			},
 		},
 		{
+			name:           "missing DGD origin removes service origin",
+			dgdAnnotations: nil,
+			serviceAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+			},
+			expectedAnnotation: nil,
+		},
+		{
 			name: "unrelated DGD annotations are not propagated",
 			dgdAnnotations: map[string]string{
 				"some-other-annotation": "value",
