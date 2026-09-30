@@ -22,13 +22,9 @@ pub struct GrpcChannelPool {
 }
 
 impl GrpcChannelPool {
-    /// `bootstrap`: true when called before `dynamo_backend_common::run`
-    /// installs the global tracing subscriber (i.e. from a `bootstrap_discover`
-    /// path during `from_args()`). Tracing events emitted with no subscriber
-    /// installed are silently dropped, so the retry warning must go to raw
-    /// stderr instead on that path. Pass `false` once running inside
-    /// `LLMEngine::start` or later, where the subscriber is live and the
-    /// retry warning should go through `tracing` like everything else.
+    /// `bootstrap`: true for synchronous constructors that run before logging
+    /// initialization and need retry warnings on stderr. Deferred launcher
+    /// discovery and `LLMEngine::start` pass false to use tracing.
     pub async fn connect(
         peer: &str,
         endpoint: &GrpcEndpoint,
@@ -135,12 +131,8 @@ async fn connect_until_ready(
                 let log_interval_elapsed = last_logged_at
                     .is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL);
                 if error_changed || log_interval_elapsed {
-                    // eprintln! on the bootstrap path: tracing events emitted before
-                    // dynamo_backend_common::run() installs the global subscriber are
-                    // silently dropped, which would make this warning exactly as
-                    // invisible as the debug! it replaced. Once running (bootstrap ==
-                    // false), route through tracing like everything else so the line
-                    // gets levels, timestamps, and filtering.
+                    // Synchronous constructors may precede logging setup;
+                    // deferred launcher discovery already has a subscriber.
                     if bootstrap {
                         eprintln!(
                             "{peer} gRPC connection attempt failed; retrying (endpoint={endpoint_label}, pool_slot={pool_slot}, attempt={attempt}, elapsed={:?}, remaining={:?}, retry_interval={:?}, suppressed_attempts={suppressed_attempts}, error={detailed_error})",

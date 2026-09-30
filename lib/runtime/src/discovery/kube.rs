@@ -194,7 +194,7 @@ impl Discovery for KubeDiscoveryClient {
         // or namespace must remain an error (get_opt would suppress NotFound).
         let api: Api<DynamoWorkerMetadata> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
-        api.list(&ListParams::default().limit(1)).await?;
+        api.list_metadata(&ListParams::default().limit(1)).await?;
         Ok(())
     }
 
@@ -618,11 +618,15 @@ mod tests {
                     .split('&')
                     .any(|part| part == "limit=1")
             );
+            assert_eq!(
+                request.headers()["accept"],
+                "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1"
+            );
             let available = resource_available.load(Ordering::Acquire);
             async move {
                 let response = if available {
                     Response::new(Body::from(
-                        r#"{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoWorkerMetadataList","metadata":{"resourceVersion":"1"},"items":[]}"#,
+                        r#"{"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","metadata":{"resourceVersion":"1"},"items":[]}"#,
                     ))
                 } else {
                     Response::builder().status(StatusCode::NOT_FOUND).body(Body::from(

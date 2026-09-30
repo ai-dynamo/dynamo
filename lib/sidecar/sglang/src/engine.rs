@@ -79,7 +79,7 @@ impl SglangSidecarEngine {
     > {
         let args = <Args as clap::Parser>::parse();
         Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args))
+        Ok(Self::from_parsed_async(args, false))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -92,15 +92,16 @@ impl SglangSidecarEngine {
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args))
+        Ok(Self::from_parsed_async(args, false))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        Self::validate_args(&args)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
-        runtime.block_on(Self::from_parsed_async(args))
+        runtime.block_on(Self::from_parsed_async(args, true))
     }
 
     fn validate_args(args: &Args) -> Result<(), DynamoError> {
@@ -112,11 +113,13 @@ impl SglangSidecarEngine {
         Ok(())
     }
 
-    async fn from_parsed_async(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::validate_args(&args)?;
+    async fn from_parsed_async(
+        args: Args,
+        bootstrap: bool,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
-        let discovery = bootstrap_discover(&endpoint, &transport).await?;
+        let discovery = bootstrap_discover(&endpoint, &transport, bootstrap).await?;
         let disaggregation_mode = discovery_mode(&discovery)?;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
             resolve_bootstrap_host(
@@ -554,9 +557,10 @@ impl LLMEngine for SglangSidecarEngine {
 async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
+    bootstrap: bool,
 ) -> Result<Discovery, DynamoError> {
     let deadline = Instant::now() + transport.startup_deadline;
-    let mut grpc_client = client::connect(endpoint, transport, deadline, true).await?;
+    let mut grpc_client = client::connect(endpoint, transport, deadline, bootstrap).await?;
     client::discover(&mut grpc_client, deadline).await
 }
 

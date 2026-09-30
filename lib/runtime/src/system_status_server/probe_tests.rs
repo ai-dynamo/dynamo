@@ -166,7 +166,7 @@ fn reserve_system_port() -> std::net::TcpListener {
 }
 
 #[tokio::test]
-async fn pending_runtime_initialization_does_not_bind_http() {
+async fn pending_runtime_initialization_does_not_bind_http_and_cancels_on_shutdown() {
     temp_env::async_with_vars(http_env(), async {
         let reserved = reserve_system_port();
         let address = reserved.local_addr().unwrap();
@@ -179,19 +179,34 @@ async fn pending_runtime_initialization_does_not_bind_http() {
                 nats_config: Some(nats_config(peer.local_addr().unwrap())),
                 ..DistributedConfig::process_local()
             };
-            drop(reserved);
+            // Keep the port occupied: an early RuntimeOnly bind would fail
+            // before the constructor could reach the pending NATS connection.
             let mut construction = Box::pin(DistributedRuntime::new_with_probe_policy(
-                runtime.clone(), distributed, SystemProbePolicy::RuntimeOnly,
+                runtime.clone(),
+                distributed,
+                SystemProbePolicy::RuntimeOnly,
             ));
             let (_connection, _) = tokio::select! {
                 result = &mut construction => panic!("constructed before NATS INFO: {result:?}"),
-                peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => peer.unwrap().unwrap(),
+                peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => {
+                    peer.unwrap().unwrap()
+                },
             };
-            assert!(tokio::net::TcpListener::bind(address).await.is_ok());
-            drop(construction);
+            runtime.mark_shutting_down();
+            let error = tokio::time::timeout(Duration::from_secs(5), construction)
+                .await
+                .expect("runtime shutdown cancels pending DRT construction")
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("runtime shut down during initialization")
+            );
             runtime.shutdown();
-        }).await;
-    }).await;
+        })
+        .await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -256,7 +271,16 @@ async fn dependency_outage_only_fails_readiness_and_can_recover() {
                 }
                 let (socket, _) = listener.accept().await.unwrap();
                 let (reader, mut writer) = socket.into_split();
-                writer.write_all(b"INFO {\"server_id\":\"probe-test\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n").await.unwrap();
+                writer
+                    .write_all(
+                        concat!(
+                            "INFO {\"server_id\":\"probe-test\",\"version\":\"2.10.0\",",
+                            "\"proto\":1,\"max_payload\":1048576}\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
                 let connection = async {
                     let mut lines = BufReader::new(reader).lines();
                     while let Some(line) = lines.next_line().await.unwrap() {
@@ -277,9 +301,16 @@ async fn dependency_outage_only_fails_readiness_and_can_recover() {
             ..DistributedConfig::process_local()
         };
         let drt = DistributedRuntime::new_with_probe_policy(
-            runtime.clone(), distributed, SystemProbePolicy::RuntimeOnly,
-        ).await.unwrap();
-        let base = format!("http://{}", drt.system_status_server_info().unwrap().socket_addr);
+            runtime.clone(),
+            distributed,
+            SystemProbePolicy::RuntimeOnly,
+        )
+        .await
+        .unwrap();
+        let base = format!(
+            "http://{}",
+            drt.system_status_server_info().unwrap().socket_addr
+        );
         let client = client();
         assert_eq!(status(&client, &base, "/health").await, 200);
         disconnect.notify_one();
@@ -301,7 +332,8 @@ async fn dependency_outage_only_fails_readiness_and_can_recover() {
         .unwrap();
         runtime.shutdown();
         drop(peer);
-        }).await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -316,16 +348,22 @@ async fn stalled_discovery_check_times_out_without_blocking_liveness() {
             .build()
             .unwrap();
         let runtime = Runtime::from_current().unwrap();
-        let drt = tokio::time::timeout(Duration::from_secs(5), DistributedRuntime::new_with_probe_policy(
-            runtime.clone(),
-            DistributedConfig {
-                discovery_backend: crate::distributed::DiscoveryBackend::KvStore(
-                    crate::storage::kv::Selector::Etcd(Box::new(etcd)),
-                ),
-                ..DistributedConfig::process_local()
-            },
-            SystemProbePolicy::RuntimeOnly,
-        )).await.unwrap().unwrap();
+        let drt = tokio::time::timeout(
+            Duration::from_secs(5),
+            DistributedRuntime::new_with_probe_policy(
+                runtime.clone(),
+                DistributedConfig {
+                    discovery_backend: crate::distributed::DiscoveryBackend::KvStore(
+                        crate::storage::kv::Selector::Etcd(Box::new(etcd)),
+                    ),
+                    ..DistributedConfig::process_local()
+                },
+                SystemProbePolicy::RuntimeOnly,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let info = drt.system_status_server_info().unwrap();
         let base = format!("http://{}", info.socket_addr);
         let client = client();
@@ -337,8 +375,12 @@ async fn stalled_discovery_check_times_out_without_blocking_liveness() {
         }));
         let (_connection, _) = tokio::select! {
             biased;
-            result = &mut health => panic!("health completed before discovery connected: {result:?}"),
-            peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => peer.unwrap().unwrap(),
+            result = &mut health => {
+                panic!("health completed before discovery connected: {result:?}")
+            },
+            peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => {
+                    peer.unwrap().unwrap()
+                },
         };
         assert_eq!(status(&client, &base, "/live").await, 200);
         // The HTTP client has a longer deadline than the one-second handler.
@@ -348,7 +390,8 @@ async fn stalled_discovery_check_times_out_without_blocking_liveness() {
         assert!(started.elapsed() >= Duration::from_millis(900));
         runtime.shutdown();
         wait_closed(info.socket_addr).await;
-    }).await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -389,7 +432,8 @@ async fn etcd_readiness_requires_an_elected_leader() {
                             // Unary gRPC frame: uncompressed, two-byte protobuf payload.
                             // etcd StatusResponse.leader is uint64 field 4 (tag 0x20).
                             // IDs 0 and 1 each fit in one protobuf varint byte.
-                            let frame = vec![0, 0, 0, 0, 2, 0x20, response_leader.load(Ordering::SeqCst)];
+                            let leader_id = response_leader.load(Ordering::SeqCst);
+                            let frame = vec![0, 0, 0, 0, 2, 0x20, leader_id];
                             body.send_data(bytes::Bytes::from(frame), false).unwrap();
                             let mut trailers = axum::http::HeaderMap::new();
                             trailers.insert("grpc-status", "0".parse().unwrap());

@@ -620,14 +620,19 @@ impl Worker {
                             format!("distributed runtime config: {e}"),
                         )
                     })?;
-                DistributedRuntime::new(runtime, config)
-                    .await
-                    .map_err(|e| {
-                        err(
-                            ErrorType::Backend(BackendError::CannotConnect),
-                            format!("distributed runtime: {e}"),
-                        )
-                    })?
+                let result = DistributedRuntime::new(runtime, config).await;
+                // A signal cancels DRT initialization through the runtime token.
+                // Preserve the clean pre-start shutdown contract before mapping
+                // independent connection failures to CannotConnect.
+                if shutdown.is_cancelled() {
+                    return Ok(());
+                }
+                result.map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::CannotConnect),
+                        format!("distributed runtime: {e}"),
+                    )
+                })?
             }
         };
         tracing::debug!("distributed runtime connected");
@@ -2958,6 +2963,7 @@ mod tests {
     /// `start` success/failure via a flag.
     struct StateMockEngine {
         start_should_fail: bool,
+        start_calls: AtomicUsize,
         cleanup_calls: Arc<AtomicUsize>,
     }
 
@@ -2966,6 +2972,7 @@ mod tests {
             let cleanup_calls = Arc::new(AtomicUsize::new(0));
             let eng = Arc::new(Self {
                 start_should_fail,
+                start_calls: AtomicUsize::new(0),
                 cleanup_calls: cleanup_calls.clone(),
             });
             (eng, cleanup_calls)
@@ -2975,6 +2982,7 @@ mod tests {
     #[async_trait]
     impl LLMEngine for StateMockEngine {
         async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
             if self.start_should_fail {
                 Err(err(
                     ErrorType::Backend(BackendError::EngineShutdown),
@@ -3019,6 +3027,66 @@ mod tests {
                 ..WorkerConfig::default()
             },
         )
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_runtime_connection_distinguishes_signals_from_failure() {
+        // Hold a real etcd connection before its first RPC can complete.
+        let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let etcd_url = format!("http://{}", peer.local_addr().unwrap());
+        temp_env::async_with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", Some("etcd")),
+                ("DYN_REQUEST_PLANE", Some("tcp")),
+                ("DYN_EVENT_PLANE", Some("zmq")),
+                ("DYN_SYSTEM_PORT", None),
+                ("NATS_SERVER", None),
+                ("ETCD_ENDPOINTS", Some(etcd_url.as_str())),
+                ("ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS", Some("30")),
+                ("ETCD_AUTH_USERNAME", None),
+                ("ETCD_AUTH_PASSWORD", None),
+                ("ETCD_AUTH_CA", None),
+                ("ETCD_AUTH_CLIENT_CERT", None),
+                ("ETCD_AUTH_CLIENT_KEY", None),
+            ],
+            async {
+                for signal in [false, true] {
+                    let runtime = Runtime::from_current().unwrap();
+                    let shutdown = CancellationToken::new();
+                    let (engine, cleanup_calls) = StateMockEngine::new(false);
+                    let mut run = Box::pin(worker_with(engine.clone()).run_with_shutdown(
+                        runtime.clone(), None, shutdown.clone(),
+                    ));
+                    let (_connection, _) = tokio::select! {
+                        result = &mut run => panic!("worker completed before etcd replied: {result:?}"),
+                        peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => {
+                            peer.unwrap().unwrap()
+                        }
+                    };
+                    if signal {
+                        // Exercise the same token as Worker's SIGTERM handler.
+                        shutdown.cancel();
+                    } else {
+                        runtime.mark_shutting_down();
+                    }
+                    let result = tokio::time::timeout(Duration::from_secs(5), run)
+                        .await
+                        .expect("pending runtime connection is cancelled");
+                    if signal {
+                        result.expect("SIGTERM before engine start exits cleanly");
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().error_type(),
+                            ErrorType::Backend(BackendError::CannotConnect),
+                        );
+                    }
+                    assert_eq!(engine.start_calls.load(Ordering::SeqCst), 0);
+                    assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+                    runtime.shutdown();
+                }
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

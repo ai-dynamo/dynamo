@@ -102,7 +102,7 @@ impl VllmSidecarEngine {
     > {
         let args = <Args as clap::Parser>::parse();
         Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args))
+        Ok(Self::from_parsed_async(args, false))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -115,15 +115,16 @@ impl VllmSidecarEngine {
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args))
+        Ok(Self::from_parsed_async(args, false))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        Self::validate_args(&args)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
-        runtime.block_on(Self::from_parsed_async(args))
+        runtime.block_on(Self::from_parsed_async(args, true))
     }
 
     fn validate_args(args: &Args) -> Result<(), DynamoError> {
@@ -137,8 +138,10 @@ impl VllmSidecarEngine {
         Ok(())
     }
 
-    async fn from_parsed_async(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::validate_args(&args)?;
+    async fn from_parsed_async(
+        args: Args,
+        bootstrap: bool,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
         let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
@@ -154,11 +157,16 @@ impl VllmSidecarEngine {
             .transpose()?;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
-        eprintln!(
-            "Discovering vLLM model metadata from {endpoint}; startup deadline: {:?}",
-            transport.startup_deadline
-        );
-        let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline).await?;
+        if bootstrap {
+            eprintln!(
+                "Discovering vLLM model metadata from {endpoint}; startup deadline: {:?}",
+                transport.startup_deadline
+            );
+        } else {
+            tracing::info!(%endpoint, startup_deadline = ?transport.startup_deadline,
+                "Discovering vLLM model metadata");
+        }
+        let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline, bootstrap).await?;
         let mode = args.sidecar.common.disaggregation_mode;
         if mode.is_encode() && !model.supports_multimodal {
             return Err(client::invalid_argument(format!(
@@ -1391,12 +1399,14 @@ async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: GrpcTransportConfig,
     startup_deadline: Instant,
+    bootstrap: bool,
 ) -> Result<DiscoveredModel, DynamoError> {
     let bootstrap_transport = GrpcTransportConfig {
         connections: std::num::NonZeroUsize::MIN,
         ..transport
     };
-    let client = VllmClient::connect(endpoint, bootstrap_transport, startup_deadline, true).await?;
+    let client =
+        VllmClient::connect(endpoint, bootstrap_transport, startup_deadline, bootstrap).await?;
     client
         .wait_for_services(
             &[CONTROL_SERVICE],

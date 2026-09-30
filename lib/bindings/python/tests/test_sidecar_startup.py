@@ -7,9 +7,6 @@ import os
 import socket
 import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
 
 import pytest
 
@@ -48,7 +45,12 @@ def sidecar_env():
 
 @pytest.mark.parametrize("engine", ["vllm", "sglang", "trtllm"])
 @pytest.mark.timeout(40)
-def test_python_sidecar_probes_during_initialization(engine, sidecar_env, tmp_path):
+def test_python_sidecar_probes_during_initialization(
+    engine, sidecar_env, tmp_path, monkeypatch
+):
+    # ManagedProcess checks health in this process; bypass ambient proxies.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     # All launchers must serve probes independently of engine initialization.
     with socket.socket() as engine_listener, reserved_ports(1, 10000) as ports:
         engine_listener.bind(("127.0.0.1", 0))
@@ -73,27 +75,16 @@ def test_python_sidecar_probes_during_initialization(engine, sidecar_env, tmp_pa
             log_dir=str(tmp_path),
             display_name=f"{engine}-sidecar",
             terminate_all_matching_process_names=False,
+            health_check_urls=[
+                f"http://127.0.0.1:{port}/{path}" for path in ("live", "health")
+            ],
+            timeout=15,
         ) as child:
-            # Accept TCP but withhold the gRPC handshake: bootstrap has started,
-            # and probes must work while it is still waiting for the engine.
+            # The listener never completes gRPC, including during the helper's
+            # health checks. Accept confirms that engine bootstrap has started.
             connection, _ = engine_listener.accept()
             with connection:
-                http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                for path in ("live", "health"):
-                    deadline = time.monotonic() + 15
-                    while time.monotonic() < deadline:
-                        assert child.proc.poll() is None, child.read_logs()
-                        try:
-                            with http.open(
-                                f"http://127.0.0.1:{port}/{path}", timeout=0.5
-                            ) as response:
-                                if response.status == 200:
-                                    break
-                        except (OSError, urllib.error.URLError):
-                            pass
-                        time.sleep(0.025)
-                    else:
-                        pytest.fail(f"/{path} did not return 200: {child.read_logs()}")
+                assert child.proc.poll() is None, child.read_logs()
 
 
 @pytest.mark.parametrize(

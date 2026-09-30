@@ -60,6 +60,39 @@ mod unit_tests {
     use super::parse_tcp_response_stream_port;
     use crate::pipeline::PipelineError;
 
+    #[tokio::test]
+    async fn completed_runtime_initialization_rejects_shutdown_before_http_bind() {
+        use super::{DistributedConfig, DistributedRuntime, Runtime};
+        use crate::system_status_server::SystemProbePolicy;
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_HOST", Some("127.0.0.1")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+            ],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                runtime.mark_shutting_down();
+                // Exercise the final bind guard directly: the public constructor
+                // would reject shutdown before polling build at all.
+                let result = DistributedRuntime::build(
+                    runtime.clone(),
+                    DistributedConfig::process_local(),
+                    SystemProbePolicy::RuntimeOnly,
+                )
+                .await;
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("runtime shut down during initialization")
+                );
+                runtime.shutdown();
+            },
+        )
+        .await;
+    }
+
     #[test]
     fn response_stream_port_trims_and_treats_empty_as_unset() {
         for value in [None, Some(""), Some(" \t ")] {

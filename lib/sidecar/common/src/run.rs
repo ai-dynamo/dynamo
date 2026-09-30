@@ -70,18 +70,24 @@ async fn run_until_shutdown<E: LLMEngine + 'static>(
         Ok::<_, anyhow::Error>((drt, engine, config))
     };
     let runtime_shutdown = runtime.shutdown_started_token();
-    let (drt, engine, config) = tokio::select! {
+    let result = tokio::select! {
         biased;
         _ = shutdown.cancelled() => return Ok(()),
         _ = runtime_shutdown.cancelled() => {
-            anyhow::bail!("runtime shut down during sidecar initialization");
+            Err(anyhow::anyhow!("runtime shut down during sidecar initialization"))
         },
-        result = startup => result?,
+        result = startup => result,
     };
-    anyhow::ensure!(
-        !runtime.is_shutting_down(),
-        "runtime shut down during sidecar initialization"
-    );
+    // The signal can arrive after its select arm was polled, including while
+    // startup completes. Read runtime state before the signal token: the signal
+    // handler always cancels that token before marking the runtime shutting down.
+    if runtime.is_shutting_down() {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+        anyhow::bail!("runtime shut down during sidecar initialization");
+    }
+    let (drt, engine, config) = result?;
     Worker::new(Arc::new(engine), config)
         .run_with_drt(drt, shutdown)
         .await
@@ -117,10 +123,10 @@ mod tests {
         }
     }
 
-    // Regression: losing the runtime while metadata discovery waits must cancel
-    // bootstrap; a completed bootstrap must never start a worker on that runtime.
+    // Cancellation and bootstrap completion may occur in the same poll. A
+    // process signal is clean shutdown; independent runtime failure is an error.
     #[tokio::test]
-    async fn runtime_shutdown_cancels_pending_and_completed_bootstrap() {
+    async fn shutdown_during_bootstrap_distinguishes_signals_from_runtime_failure() {
         temp_env::async_with_vars(
             [
                 ("DYN_SYSTEM_PORT", None),
@@ -130,28 +136,40 @@ mod tests {
                 ("NATS_SERVER", None),
             ],
             async {
-                for complete in [false, true] {
-                    let runtime = Runtime::from_current().unwrap();
-                    let bootstrap = async {
-                        runtime.mark_shutting_down();
-                        if !complete {
-                            std::future::pending::<()>().await;
+                for signal in [false, true] {
+                    for outcome in ["pending", "success", "error"] {
+                        let runtime = Runtime::from_current().unwrap();
+                        let shutdown = CancellationToken::new();
+                        let bootstrap = async {
+                            if signal {
+                                shutdown.cancel();
+                            }
+                            runtime.mark_shutting_down();
+                            match outcome {
+                                "pending" => std::future::pending().await,
+                                "success" => Ok((UnstartedEngine, WorkerConfig::default())),
+                                "error" => Err(DynamoError::msg("bootstrap failed")),
+                                _ => unreachable!(),
+                            }
+                        };
+                        let result = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            run_until_shutdown(bootstrap, &runtime, shutdown.clone()),
+                        )
+                        .await
+                        .expect("runtime shutdown cancels metadata discovery");
+                        if signal {
+                            result.expect("a process signal exits cleanly");
+                        } else {
+                            assert!(
+                                result
+                                    .unwrap_err()
+                                    .to_string()
+                                    .contains("runtime shut down")
+                            );
                         }
-                        Ok((UnstartedEngine, WorkerConfig::default()))
-                    };
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        run_until_shutdown(bootstrap, &runtime, CancellationToken::new()),
-                    )
-                    .await
-                    .expect("runtime shutdown cancels metadata discovery");
-                    assert!(
-                        result
-                            .unwrap_err()
-                            .to_string()
-                            .contains("runtime shut down")
-                    );
-                    runtime.shutdown();
+                        runtime.shutdown();
+                    }
                 }
             },
         )

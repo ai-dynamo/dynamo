@@ -79,4 +79,55 @@ mod tests {
             .await
             .expect("pending transport initialization must be dropped");
     }
+
+    #[tokio::test]
+    async fn cancelled_build_drops_sent_but_unread_runtime() {
+        use std::task::{Context, Wake, Waker};
+
+        struct ResultReady(tokio::sync::Notify);
+        impl Wake for ResultReady {
+            fn wake(self: Arc<Self>) {
+                self.0.notify_one();
+            }
+        }
+
+        let runtime_dropped = tokio_util::sync::CancellationToken::new();
+        let guard = runtime_dropped.clone().drop_guard();
+        let (release, proceed) = tokio::sync::oneshot::channel();
+        let mut construction = Box::pin(build_in_runtime(
+            async move {
+                proceed.await.unwrap();
+                // This task belongs to the dedicated runtime, not the caller.
+                // Its guard is released only when that runtime shuts down.
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                });
+                Ok(())
+            },
+            1,
+        ));
+        let ready = Arc::new(ResultReady(tokio::sync::Notify::new()));
+        let waker = Waker::from(ready.clone());
+        assert!(
+            construction
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), ready.0.notified())
+            .await
+            .expect("producer queues the result and wakes its receiver");
+        // Never poll again: the successful result stays in the oneshot channel
+        // until cancellation drops its value, runtime Arc, and receipt sender.
+        assert!(!runtime_dropped.is_cancelled());
+        drop(construction);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            runtime_dropped.cancelled(),
+        )
+        .await
+        .expect("unread result must not retain the dedicated runtime");
+    }
 }
