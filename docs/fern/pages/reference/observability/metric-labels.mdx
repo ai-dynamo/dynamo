@@ -48,7 +48,7 @@ Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric regi
 Passed via `metrics_labels=` when the worker calls `serve_endpoint()`. Not auto-injected, so presence depends on the backend.
 
 <ParamField path="model" type="string">
-  `[Shared]` The model being served (OpenAI-style label). Added by vLLM, SGLang, and TRT-LLM workers on inference endpoints; absent on internal endpoints like `worker_kv_indexer_query_dp{N}`. Example: `Qwen/Qwen3-0.6B`.
+  `[Shared]` The model being served (OpenAI-style label). Added by vLLM, SGLang, and TRT-LLM workers on inference endpoints, and by the router on its per-attempt histograms; absent on internal endpoints like `worker_kv_indexer_query_dp{N}`. Example: `Qwen/Qwen3-0.6B`.
 </ParamField>
 
 <ParamField path="model_name" type="string">
@@ -70,7 +70,7 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="phase" type="string">
-  `[Shared]` On `dynamo_frontend_stage_requests` — the serving phase. See [Phase values](#phase-values). The empty value is used when the stage does not distinguish phases (e.g. `preprocess`).
+  `[Shared]` On `dynamo_frontend_stage_requests` and the per-attempt router histograms (`dynamo_component_router_time_to_first_token_seconds`, `_inter_token_latency_seconds`, `_input_sequence_tokens`, `_output_sequence_tokens`, and `_kv_hit_rate`) — the serving phase. See [Phase values](#phase-values). The empty value is used when the stage does not distinguish phases (e.g. `preprocess`).
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>aggregated</Badge> <Badge intent="note" minimal>"" (empty)</Badge></span>
 </ParamField>
@@ -224,7 +224,7 @@ The `dynamo_component_errors_total` counter is labeled with `error_type`, identi
 
 ### Phase values
 
-The `phase` label on `dynamo_frontend_stage_requests`.
+The `phase` label on `dynamo_frontend_stage_requests` and the per-attempt `dynamo_component_router_*` histograms. The router histograms never use the empty value.
 
 | Phase | Meaning |
 |-------|---------|

@@ -366,7 +366,8 @@ impl RoutingHost {
         );
         let tracker = request.tracker.clone();
         let request_context = request.context().clone();
-        self.request_metrics
+        guard
+            .attempt_metrics()
             .input_sequence_tokens
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
