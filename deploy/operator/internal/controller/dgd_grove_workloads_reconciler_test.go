@@ -796,7 +796,7 @@ func TestGroveServiceDoesNotPreserveDisaggregatedSetSelector(t *testing.T) {
 		Namespace: dgd.Namespace,
 	}}
 	setDGDControllerOwnerReference(dgd, service)
-	setDisaggregatedSetServiceSelector(service, "graph", "frontend", "old12345")
+	setDisaggregatedSetServiceSelector(service, "graph", "frontend", "old12345", true)
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 		WithObjects(dgd, service).

@@ -219,7 +219,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		// provider is selected. Standalone/component DCDs retain this path.
 		serviceModified, err = r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
 			dynamoComponentDeployment: dynamoComponentDeployment,
-			serviceTargetReady:        componentReconcileResult.status == metav1.ConditionTrue,
 		})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to create or update the service: %w", err)
@@ -804,11 +803,7 @@ func getResourceAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoCo
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx context.Context, opt generateResourceOption) (bool, error) {
 	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-		service, deleted, err := r.generateService(ctx, opt)
-		if err != nil || deleted || service == nil || opt.serviceTargetReady {
-			return service, deleted, err
-		}
-		return service, false, nil
+		return r.generateService(ctx, opt)
 	})
 	if err != nil {
 		return false, err
@@ -983,7 +978,6 @@ func getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations map[string]
 
 type generateResourceOption struct {
 	dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment
-	serviceTargetReady        bool
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {

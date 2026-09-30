@@ -67,7 +67,7 @@ const (
 
 	// DisaggregatedSet enables the opt-in DisaggregatedSet workload pathway.
 	//
-	// Owner: @kay-yan
+	// Owner: @yankay
 	// Experimental since: v1.4.0
 	// Beta since: N/A
 	// GA since: N/A

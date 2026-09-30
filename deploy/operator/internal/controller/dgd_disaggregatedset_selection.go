@@ -41,15 +41,20 @@ var disaggregatedSetGVK = schema.GroupVersionKind{
 }
 
 const (
-	maxDisaggregatedSetRoles            = 10
-	disaggregatedSetRevisionLength      = 8
-	maxDisaggregatedSetNameLength       = 31
-	maxDisaggregatedSetSliceIndexLength = len("99")
-	disaggregatedSetServiceSuffixLength = len("-prv")
-	maxDisaggregatedSetRoleNameLength   = 63 - maxDisaggregatedSetNameLength - maxDisaggregatedSetSliceIndexLength - disaggregatedSetRevisionLength - 3 - disaggregatedSetServiceSuffixLength
-	disaggregatedSetNameHashLength      = 8
-	dynamoGraphDeploymentKind           = "DynamoGraphDeployment"
-	dynamoComponentDeploymentKind       = "DynamoComponentDeployment"
+	maxDisaggregatedSetRoles                    = 10
+	disaggregatedSetRevisionLength              = 8
+	maxDisaggregatedSetGeneratedNameLength      = 63
+	maxDisaggregatedSetRoleNameLength           = 10
+	maxDisaggregatedSetSliceIndexLength         = len("99")
+	maxDisaggregatedSetGroupIndexLength         = len("2147483647")
+	maxDisaggregatedSetWorkerRevisionHashLength = 10
+	disaggregatedSetChildNameSeparatorLength    = 3 * len("-")
+	disaggregatedSetWorkerRevisionSuffixLength  = 2*len("-") + maxDisaggregatedSetGroupIndexLength + maxDisaggregatedSetWorkerRevisionHashLength
+	maxDisaggregatedSetNameLength               = maxDisaggregatedSetGeneratedNameLength - maxDisaggregatedSetRoleNameLength - maxDisaggregatedSetSliceIndexLength - disaggregatedSetRevisionLength - disaggregatedSetChildNameSeparatorLength - disaggregatedSetWorkerRevisionSuffixLength
+	disaggregatedSetServiceSuffixLength         = len("-prv")
+	disaggregatedSetNameHashLength              = 8
+	dynamoGraphDeploymentKind                   = "DynamoGraphDeployment"
+	dynamoComponentDeploymentKind               = "DynamoComponentDeployment"
 )
 
 type disaggregatedSetSelection struct {
@@ -81,6 +86,18 @@ func disaggregatedSetEligibilityReason(
 	}
 	if len(selection.componentToRole) < 2 {
 		return "DisaggregatedSet requires at least two eligible multinode worker roles"
+	}
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		if _, selected := selection.componentToRole[component.ComponentName]; !selected {
+			return fmt.Sprintf(
+				"mixed DS/DCD worker rollout unsupported: worker component %q is not selected by DisaggregatedSet",
+				component.ComponentName,
+			)
+		}
 	}
 	if gate == nil || !gate.Enabled(features.LWS) {
 		for i := range dgd.Spec.Components {

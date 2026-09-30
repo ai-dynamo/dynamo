@@ -7,6 +7,7 @@ package controller
 
 import (
 	"maps"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -26,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -38,6 +40,7 @@ import (
 )
 
 const disaggregatedSetUnitTestNamespace = "default"
+const maxInt32GroupIndex = 1<<31 - 1
 
 func TestDisaggregatedSetEligibilityDoesNotSelectAProvider(t *testing.T) {
 	dgd := newEnvtestDSHappyPathDGD("selection-eligibility")
@@ -66,6 +69,29 @@ func TestDisaggregatedSetEligibilityDoesNotSelectAProvider(t *testing.T) {
 			require.Contains(t, disaggregatedSetEligibilityReason(dgd, tt.gate), tt.wantReason)
 		})
 	}
+}
+
+func TestDisaggregatedSetEligibilityRejectsMixedWorkerRollout(t *testing.T) {
+	t.Log("Add a single-node worker beside the selected multinode DS roles")
+	dgd := newEnvtestDSHappyPathDGD("mixed-workers")
+	dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "extra-worker",
+		ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+		Replicas:      ptr.To(int32(1)),
+	})
+
+	t.Log("Reject mixed DS and DCD worker reconciliation before selecting either path")
+	reason := disaggregatedSetEligibilityReason(dgd, features.Gates{LWS: true})
+	require.Contains(t, reason, "mixed DS/DCD worker rollout unsupported")
+	require.Contains(t, reason, `worker component "extra-worker"`)
+
+	t.Log("Keep non-worker single-node components compatible with DS roles")
+	dgd.Spec.Components = dgd.Spec.Components[:2]
+	dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "frontend",
+		ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+	})
+	require.Empty(t, disaggregatedSetEligibilityReason(dgd, features.Gates{LWS: true}))
 }
 
 func TestSyncDisaggregatedSetPreservesUnmanagedMetadata(t *testing.T) {
@@ -154,14 +180,38 @@ func TestSyncDGDStableServicePrunesManagedMetadataAndPreservesExternalMetadata(t
 }
 
 func TestDisaggregatedSetServiceSelectorIsRevisionScoped(t *testing.T) {
+	t.Log("Build the stable selector for one ready DS-backed component Service")
 	service := &corev1.Service{}
-	setDisaggregatedSetServiceSelector(service, "demo-ds", "prefill", "abc12345")
+	setDisaggregatedSetServiceSelector(service, "demo-ds", "prefill", "abc12345", true)
 
+	t.Log("Select only the current revision's serving leader across every slice")
 	require.Equal(t, map[string]string{
 		disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
 		disaggregatedsetv1.RoleLabelKey:     "prefill",
 		disaggregatedsetv1.RevisionLabelKey: "abc12345",
+		dcdWorkloadRoleLabel:                string(dynamo.RoleLeader),
 	}, service.Spec.Selector, "the stable component Service must aggregate every slice")
+}
+
+func TestStableServiceSelectorAddsLeaderOnlyForMultinode(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		isMultinode bool
+		wantRole    string
+	}{
+		{name: "single-node", isMultinode: false},
+		{name: "multinode", isMultinode: true, wantRole: string(dynamo.RoleLeader)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &corev1.Service{}
+			setDisaggregatedSetServiceSelector(service, "demo-ds", "worker", "abc12345", tt.isMultinode)
+			if tt.wantRole == "" {
+				require.NotContains(t, service.Spec.Selector, dcdWorkloadRoleLabel)
+				return
+			}
+			require.Equal(t, tt.wantRole, service.Spec.Selector[dcdWorkloadRoleLabel])
+		})
+	}
 }
 
 func TestDisaggregatedSetServiceSelectorCutover(t *testing.T) {
@@ -170,6 +220,12 @@ func TestDisaggregatedSetServiceSelectorCutover(t *testing.T) {
 		disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
 		disaggregatedsetv1.RoleLabelKey:     "prefill",
 		disaggregatedsetv1.RevisionLabelKey: "old12345",
+	}
+	newDSSelector := map[string]string{
+		disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
+		disaggregatedsetv1.RoleLabelKey:     "prefill",
+		disaggregatedsetv1.RevisionLabelKey: "new12345",
+		dcdWorkloadRoleLabel:                string(dynamo.RoleLeader),
 	}
 	tests := []struct {
 		name        string
@@ -192,22 +248,14 @@ func TestDisaggregatedSetServiceSelectorCutover(t *testing.T) {
 		},
 		{
 			name: "a new service selects the target revision immediately",
-			want: map[string]string{
-				disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
-				disaggregatedsetv1.RoleLabelKey:     "prefill",
-				disaggregatedsetv1.RevisionLabelKey: "new12345",
-			},
+			want: newDSSelector,
 		},
 		{
 			name:        "a ready target replaces the active selector",
 			hasExisting: true,
 			targetReady: true,
 			existing:    existingDCDSelector,
-			want: map[string]string{
-				disaggregatedsetv1.SetNameLabelKey:  "demo-ds",
-				disaggregatedsetv1.RoleLabelKey:     "prefill",
-				disaggregatedsetv1.RevisionLabelKey: "new12345",
-			},
+			want:        newDSSelector,
 		},
 	}
 
@@ -223,11 +271,65 @@ func TestDisaggregatedSetServiceSelectorCutover(t *testing.T) {
 				"demo-ds",
 				"prefill",
 				"new12345",
+				true,
 				tt.targetReady,
 			)
 
 			require.Equal(t, tt.want, service.Spec.Selector)
 		})
+	}
+}
+
+func TestSingleNodeStableServiceSelectsDeploymentPod(t *testing.T) {
+	t.Log("Build a single-node worker that remains on the Deployment pathway")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "single-node", Namespace: disaggregatedSetUnitTestNamespace},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(1)),
+				PodTemplate:   envtestDSTestPodTemplate(),
+			}},
+		},
+	}
+	rollingUpdateCtx := dynamo.RollingUpdateContext{}
+	normalized, err := dynamo.NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, rollingUpdateCtx)
+	require.NoError(t, err)
+	dcds, err := dynamo.GenerateDynamoComponentsDeploymentsFromNormalized(dgd, normalized, rollingUpdateCtx)
+	require.NoError(t, err)
+	dcd := dcds["worker"]
+	require.NotNil(t, dcd)
+
+	t.Log("Reconcile the stable Service and render its single-node Deployment template")
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	config := &configv1alpha1.OperatorConfiguration{
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+	}
+	renderer := newDCDWorkloadRenderer(
+		kubeClient,
+		config,
+		&commoncontroller.RuntimeConfig{},
+		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+	)
+	stableResources := newDisaggregatedSetStableResourcesReconciler(kubeClient, renderer)
+	_, err = stableResources.Reconcile(
+		t.Context(), dgd, dcds, normalized, disaggregatedSetSelection{}, "", false, rollingUpdateCtx,
+	)
+	require.NoError(t, err)
+	service := &corev1.Service{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), service))
+	podTemplate, err := renderer.generatePodTemplateSpec(t.Context(), dcd, dynamo.RoleMain, noContainerGPUs())
+	require.NoError(t, err)
+
+	t.Log("Verify every stable Service selector matches the single-node Pod labels")
+	require.NotContains(t, service.Spec.Selector, dcdWorkloadRoleLabel)
+	for key, value := range service.Spec.Selector {
+		require.Equal(t, value, podTemplate.Labels[key], "Service selector %q must match its Pod", key)
 	}
 }
 
@@ -398,6 +500,7 @@ func TestSelectDisaggregatedSetComponents(t *testing.T) {
 
 func TestDCDAndDirectDisaggregatedSetRenderingParity(t *testing.T) {
 	dgd := newEnvtestDSHappyPathDGD("render-parity")
+	dgd.Spec.Components[0].Replicas = ptr.To(int32(1))
 	dgd.Spec.Labels = map[string]string{"example.com/graph-label": "value"}
 	dgd.Spec.Annotations = map[string]string{"example.com/graph-annotation": "value"}
 	dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
@@ -468,9 +571,28 @@ func TestDCDAndDirectDisaggregatedSetRenderingParity(t *testing.T) {
 		checkpointInfo,
 	)
 	require.NoError(t, err)
+	dsRole, err := newDisaggregatedSetWorkloadRenderer(renderer).renderRole(
+		t.Context(),
+		dgd,
+		component,
+		"prefill",
+		dcd.Name,
+		dynamo.GetDynamoNamespace(dgd, component),
+		backendFramework,
+		checkpointInfo,
+	)
+	require.NoError(t, err)
+	dsRoleSpec := &leaderworkersetv1.LeaderWorkerSetSpec{}
+	require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(dsRole["spec"].(map[string]any), dsRoleSpec))
+	require.Equal(t, int32(1), *dsRoleSpec.Replicas, "this role has one replica group")
+	require.Equal(t, string(dynamo.RoleLeader), dsRoleSpec.LeaderWorkerTemplate.LeaderTemplate.Labels[dcdWorkloadRoleLabel])
+	stableService := &corev1.Service{}
+	setDisaggregatedSetServiceSelector(stableService, "render-parity", "prefill", "revision1", component.IsMultinode())
+	require.Equal(t, stableService.Spec.Selector[dcdWorkloadRoleLabel], dsRoleSpec.LeaderWorkerTemplate.LeaderTemplate.Labels[dcdWorkloadRoleLabel])
 
 	require.Equal(t, dcdLeader, directLeader)
 	require.Equal(t, dcdWorker, directWorker)
+	require.Equal(t, string(dynamo.RoleLeader), directLeader.Labels[dcdWorkloadRoleLabel])
 	for _, template := range []*corev1.PodTemplateSpec{directLeader, directWorker} {
 		require.Equal(t, "topology.kubernetes.io/zone", template.Annotations[consts.KubeAnnotationTopologyLabelKey])
 		require.Equal(t, "worker123", template.Labels[consts.KubeLabelDynamoWorkerHash])
@@ -505,13 +627,60 @@ func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {
 	require.Len(t, selection.componentToRole, 2)
 	setName := disaggregatedSetName(dgd)
 	require.LessOrEqual(t, len(setName), maxDisaggregatedSetNameLength)
+	revisionHash := strings.Repeat("h", maxDisaggregatedSetWorkerRevisionHashLength)
+	groupIndexes := []string{"9", "10", strconv.Itoa(maxInt32GroupIndex)}
 	for _, roleName := range selection.componentToRole {
 		require.LessOrEqual(t, len(roleName), maxDisaggregatedSetRoleNameLength)
+		require.Empty(t, validation.IsDNS1123Label(roleName), "role name %q must be a DNS label", roleName)
 		childName := disaggregatedsetutils.GenerateName(setName, 99, strings.Repeat("a", disaggregatedSetRevisionLength), roleName)
-		require.LessOrEqual(t, len(childName), 63)
+		require.LessOrEqual(t, len(childName), maxDisaggregatedSetGeneratedNameLength)
 		serviceName := childName + "-prv"
-		require.LessOrEqual(t, len(serviceName), 63)
+		require.LessOrEqual(t, len(serviceName), maxDisaggregatedSetGeneratedNameLength)
+		for _, groupIndex := range groupIndexes {
+			workerRevisionLabel := childName + "-" + groupIndex + "-" + revisionHash
+			require.LessOrEqual(t, len(workerRevisionLabel), maxDisaggregatedSetGeneratedNameLength,
+				"worker StatefulSet revision label for group index %s must fit", groupIndex)
+		}
 	}
+}
+
+func TestDisaggregatedSetNamesRemainStableWhenRoleScalesAcrossTenReplicas(t *testing.T) {
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("d", 63)},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "prefill-worker",
+					ComponentType: nvidiacomv1beta1.ComponentTypePrefill,
+					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					Replicas:      ptr.To(int32(10)),
+				},
+				{
+					ComponentName: "decode-worker",
+					ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
+					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					Replicas:      ptr.To(int32(10)),
+				},
+			},
+		},
+	}
+
+	t.Log("Resolve DS, role, and child names at ten replicas")
+	nameAtTen := disaggregatedSetName(dgd)
+	selectionAtTen, reason := selectDisaggregatedSetComponents(dgd)
+	require.Empty(t, reason)
+	roleAtTen := selectionAtTen.componentToRole["prefill-worker"]
+	revision := strings.Repeat("a", disaggregatedSetRevisionLength)
+	lwsNameAtTen := disaggregatedsetutils.GenerateName(nameAtTen, 0, revision, roleAtTen)
+
+	t.Log("Scale to eleven replicas and verify the workload identity is unchanged")
+	dgd.Spec.Components[0].Replicas = ptr.To(int32(11))
+	selectionAtEleven, reason := selectDisaggregatedSetComponents(dgd)
+	require.Empty(t, reason)
+	roleAtEleven := selectionAtEleven.componentToRole["prefill-worker"]
+	require.Equal(t, nameAtTen, disaggregatedSetName(dgd))
+	require.Equal(t, roleAtTen, roleAtEleven)
+	require.Equal(t, lwsNameAtTen, disaggregatedsetutils.GenerateName(disaggregatedSetName(dgd), 0, revision, roleAtEleven))
 }
 
 func TestCheckDisaggregatedSetReadiness(t *testing.T) {

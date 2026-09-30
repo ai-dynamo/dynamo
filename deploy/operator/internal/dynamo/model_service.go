@@ -126,13 +126,6 @@ func ReconcileModelServicesForComponents(
 	return nil
 }
 
-// GenerateModelServiceForModel returns the stable headless Service for a model.
-// Controllers that need to compose the complete desired Service before writing
-// it can use this without going through the legacy sync-and-then-patch path.
-func GenerateModelServiceForModel(namespace, baseModelName string, annotations map[string]string) *corev1.Service {
-	return generateHeadlessServiceForModel(namespace, baseModelName, annotations)
-}
-
 // GenerateModelServiceForGraph returns a model Service private to one graph.
 // Graph-scoped callers must use this identity because the Service is owned by
 // the graph deployment. The legacy model-only helper remains for DCD/Grove.
@@ -204,7 +197,7 @@ func generateHeadlessServiceForModel(
 func generateHeadlessServiceForGraph(namespace, baseModelName, graphName string, annotations map[string]string) *corev1.Service {
 	service := generateHeadlessServiceForModel(namespace, baseModelName, annotations)
 	modelHash := HashModelName(baseModelName)
-	graphHash := HashGraphName(graphName)
+	graphHash := HashModelName(graphName)
 	service.Name = fmt.Sprintf("dynamo-model-%s-%s", modelHash, graphHash)
 	service.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = graphName
 	service.Spec.Selector[commonconsts.KubeLabelDynamoGraphDeploymentName] = graphName
@@ -216,12 +209,6 @@ func generateHeadlessServiceForGraph(namespace, baseModelName, graphName string,
 func HashModelName(baseModelName string) string {
 	hash := sha256.Sum256([]byte(baseModelName))
 	// Use 8 characters for brevity and consistency
-	return hex.EncodeToString(hash[:])[:8]
-}
-
-// HashGraphName creates a deterministic, label-safe identity for a graph.
-func HashGraphName(graphName string) string {
-	hash := sha256.Sum256([]byte(graphName))
 	return hex.EncodeToString(hash[:])[:8]
 }
 

@@ -97,7 +97,16 @@ func (r *disaggregatedSetStableResourcesReconciler) Reconcile(
 			if existingErr != nil && !apierrors.IsNotFound(existingErr) {
 				return nil, fmt.Errorf("failed to get existing component service for %q: %w", componentName, existingErr)
 			}
-			setDesiredDisaggregatedSetServiceSelector(service, existing, existingErr == nil, disaggregatedSetName(dgd), roleName, targetRevision, targetReady)
+			setDesiredDisaggregatedSetServiceSelector(
+				service,
+				existing,
+				existingErr == nil,
+				disaggregatedSetName(dgd),
+				roleName,
+				targetRevision,
+				component.IsMultinode(),
+				targetReady,
+			)
 		}
 		if err := r.syncDGDStableService(ctx, dgd, service); err != nil {
 			return nil, fmt.Errorf("failed to reconcile component service for %q: %w", componentName, err)
@@ -156,11 +165,14 @@ func (r *disaggregatedSetStableResourcesReconciler) DeleteStale(
 	return nil
 }
 
-func setDisaggregatedSetServiceSelector(service *corev1.Service, setName, roleName, revision string) {
+func setDisaggregatedSetServiceSelector(service *corev1.Service, setName, roleName, revision string, isMultinode bool) {
 	service.Spec.Selector = map[string]string{
 		disaggregatedsetv1.SetNameLabelKey:  setName,
 		disaggregatedsetv1.RoleLabelKey:     roleName,
 		disaggregatedsetv1.RevisionLabelKey: revision,
+	}
+	if isMultinode {
+		service.Spec.Selector[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	}
 }
 
@@ -171,10 +183,11 @@ func setDesiredDisaggregatedSetServiceSelector(
 	setName string,
 	roleName string,
 	revision string,
+	isMultinode bool,
 	targetReady bool,
 ) {
 	if targetReady || !hasExistingService {
-		setDisaggregatedSetServiceSelector(service, setName, roleName, revision)
+		setDisaggregatedSetServiceSelector(service, setName, roleName, revision, isMultinode)
 		return
 	}
 	service.Spec.Selector = maps.Clone(existingService.Spec.Selector)

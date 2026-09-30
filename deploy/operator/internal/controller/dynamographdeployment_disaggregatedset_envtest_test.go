@@ -265,6 +265,67 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(BeEmpty())
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject())).To(Succeed())
 	})
+
+	It("rejects mixed DS and single-node DCD workers without changing existing workloads", func() {
+		ctx := context.Background()
+		dgd := newEnvtestDSHappyPathDGD("demo-ds-mixed-workers")
+		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
+
+		reconciler := newEnvtestDSReconcilers()
+		By("creating and marking the two-role DisaggregatedSet ready")
+		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		baselineDS := fetchTypedDisaggregatedSet(ctx, current)
+		markDisaggregatedSetReady(ctx, current)
+		baselineResult, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(baselineResult.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
+
+		By("seeding the historical four-replica DCD before adding a one-replica worker intent")
+		historicalReplicas := int32(4)
+		historicalComponent := nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "extra-worker",
+			ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+			Replicas:      &historicalReplicas,
+			PodTemplate:   envtestDSTestPodTemplate(),
+		}
+		historicalDCD := &nvidiacomv1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            dynamo.GetDCDResourceName(current, historicalComponent.ComponentName, ""),
+				Namespace:       current.Namespace,
+				OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(current)},
+			},
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				BackendFramework:                    current.Spec.BackendFramework,
+				DynamoComponentDeploymentSharedSpec: historicalComponent,
+			},
+		}
+		Expect(k8sClient.Create(ctx, historicalDCD)).To(Succeed())
+
+		current.Spec.Components = append(current.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "extra-worker",
+			ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+			Replicas:      ptr.To(int32(1)),
+			PodTemplate:   envtestDSTestPodTemplate(),
+		})
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		By("reporting unsupported intent and retaining both the DS spec and old DCD replicas")
+		result, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateFailed))
+		eligibility := apiMeta.FindStatusCondition(result.Status.Conditions, disaggregatedSetEligibleConditionType)
+		Expect(eligibility).NotTo(BeNil())
+		Expect(eligibility.Status).To(Equal(metav1.ConditionFalse))
+		Expect(eligibility.Reason).To(Equal("UnsupportedIntent"))
+		Expect(eligibility.Message).To(ContainSubstring("mixed DS/DCD worker rollout unsupported"))
+
+		currentDS := fetchTypedDisaggregatedSet(ctx, current)
+		Expect(currentDS.Spec).To(Equal(baselineDS.Spec))
+		storedDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(historicalDCD), storedDCD)).To(Succeed())
+		Expect(storedDCD.Spec.Replicas).NotTo(BeNil())
+		Expect(*storedDCD.Spec.Replicas).To(Equal(int32(4)))
+		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(HaveLen(1))
+	})
 })
 
 func newEnvtestDSReconcilers() *DynamoGraphDeploymentReconciler {
