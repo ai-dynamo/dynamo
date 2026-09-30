@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
@@ -315,7 +316,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
-	selected, err := ResolveWorkload(t.Context(), source, singleGroupComponents(t, source), staticModelRegistry{
+	selected, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), source, singleGroupComponents(t, source), staticModelRegistry{
 		"draft-build": draftSnapshot, "target-build": targetSnapshot,
 	})
 	require.NoError(t, err)
