@@ -78,14 +78,7 @@ func acquireTestSnapshot(t *testing.T, buildDir string) *BuildSnapshot {
 	return snapshot
 }
 
-func normalizeTestSnapshot(t *testing.T, snapshot *BuildSnapshot) NormalizedBuildSnapshot {
-	t.Helper()
-	normalized, err := normalizeBuildSnapshot(snapshot)
-	require.NoError(t, err)
-	return normalized
-}
-
-func projectTestBuild(t *testing.T, snapshot NormalizedBuildSnapshot, pipeline Pipeline) *ModelProjection {
+func projectTestBuild(t *testing.T, snapshot *BuildSnapshot, pipeline Pipeline) *ModelProjection {
 	t.Helper()
 
 	t.Log("Project the caller-owned normalized build for the selected pipeline")
