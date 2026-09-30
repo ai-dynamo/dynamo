@@ -21,8 +21,10 @@ Data sources (all authoritative and anonymous):
     so a dead install line is never emitted.
   * the Release Artifacts ledger -- the same wheel indexes, and nothing else. A
     row is one nightly whose required wheels all published, so the ledger names
-    the newest installable nightly -- the same version the selectors' ``latest``
-    rows resolve -- and the two views cannot drift apart.
+    the newest installable nightly. The selectors' ``latest`` rows take their
+    wheel from that same set, so the ledger is never older than they are. It can
+    be newer: a ``latest`` row falls back to the wheel of its own container-tag
+    night when a backend pin moved since that night.
 
 Stable and source-build entries are NOT generated here; they stay in
 ``components/releases.data.ts``, which remains the source of truth for released
@@ -75,7 +77,7 @@ MAX_TAGS = 120
 # be advertised.
 NIGHTLY_LEDGER_REQUIRED_PACKAGES = ["ai-dynamo", "ai-dynamo-runtime"]
 # Packages the ledger advertises when that night published them. Not required:
-# kvbm left the nightly train with its v1.6.0 removal, and a package that stops
+# kvbm is deprecated with removal targeted for v1.6.0, and a package that stops
 # publishing must drop out of the Packages column rather than freeze the ledger.
 NIGHTLY_LEDGER_OPTIONAL_PACKAGES = ["kvbm"]
 # Every package the ledger can advertise, the required ones first.
@@ -241,7 +243,7 @@ def published_nightly_packages() -> dict[str, set[str]] | None:
 
     A required package missing from the index would leave every ledger row
     unverifiable, so that fails the run. An optional package drops out of the
-    Packages column instead: kvbm left the nightly train in v1.6.0, and its index
+    Packages column instead: kvbm's removal is targeted for v1.6.0, and its index
     going away must not stop every docs publish.
     """
     published: dict[str, set[str]] = {}
@@ -358,10 +360,10 @@ def build_ledger(
 ) -> list[NightlyBuild]:
     """The ``NIGHTLY_LEDGER_BUILDS`` newest nights of the installable wheel train.
 
-    ``wheels`` is ``installable_wheels()``: the same set the selectors' latest
-    rows pick their command from, so the two views lead with the same version and
-    the drift #14940 reports cannot recur. ``published`` is here for the Packages
-    column, which names the packages that actually published that night.
+    ``wheels`` is ``installable_wheels()``: the same set the selectors' ``latest``
+    rows pick their wheel from, so the ledger cannot name an older nightly than
+    they do. ``published`` is here for the Packages column, which names the
+    packages that actually published that night.
     """
     ledger: list[NightlyBuild] = []
     for version in sorted(wheels, key=version_key, reverse=True):
@@ -555,9 +557,9 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        # One installable wheel set feeds both views, so their newest nightly is
-        # the same version by construction. NGC tags are not consulted: a
-        # backend's tag list going missing must not cost the ledger a row.
+        # One installable wheel set feeds both views, so the ledger cannot name
+        # an older nightly than the selector rows do. NGC tags are not consulted:
+        # a backend's tag list going missing must not cost the ledger a row.
         wheels = installable_wheels(published)
         rows = build(wheels)
         if not rows:
