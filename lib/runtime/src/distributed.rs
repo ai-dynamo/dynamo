@@ -27,7 +27,7 @@ use crate::runtime::Runtime;
 use async_once_cell::OnceCell;
 
 use std::fmt;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
 
@@ -102,7 +102,7 @@ pub struct DistributedRuntime {
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     quic_response_server:
         Arc<OnceCell<Arc<crate::pipeline::network::quic_response::QuicResponseServer>>>,
-    system_status_server: Option<Arc<system_status_server::SystemStatusServerInfo>>,
+    system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
     response_plane: ResponsePlaneMode,
 
@@ -178,8 +178,8 @@ impl DistributedRuntime {
         .await
     }
 
-    /// Bind runtime HTTP before connecting dependencies, using the selected probe policy.
-    /// Dropping this future or shutting down the runtime closes an unfinished listener.
+    /// Initialize runtime dependencies, then bind HTTP with the selected probe policy.
+    /// Shutdown cancels pending initialization; no listener exists until it completes.
     pub async fn new_with_probe_policy(
         runtime: Runtime,
         config: DistributedConfig,
@@ -213,39 +213,6 @@ impl DistributedRuntime {
                 crate::config::RuntimeConfig::from_settings()?
             }
         };
-        let starting_health_status = config.starting_health_status.clone();
-        let use_endpoint_health_status = config.use_endpoint_health_status.clone();
-        let health_endpoint_path = config.system_health_path.clone();
-        let live_endpoint_path = config.system_live_path.clone();
-        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
-            starting_health_status,
-            use_endpoint_health_status,
-            config.health_check_enabled,
-            health_endpoint_path,
-            live_endpoint_path,
-        )));
-
-        let status_server = if config.system_server_enabled() {
-            match system_status_server::PendingSystemStatusServer::start(
-                &config,
-                &runtime,
-                system_health.clone(),
-                policy,
-            )
-            .await
-            {
-                Ok(server) => Some(server),
-                // Preserve ordinary workers' optional-HTTP failure behavior.
-                Err(error) if policy == system_status_server::SystemProbePolicy::Worker => {
-                    tracing::error!(%error, "System status server startup failed");
-                    None
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            None
-        };
-
         let nats_client = match nats_config {
             Some(nc) => Some(nc.connect().await?),
             None => None,
@@ -289,6 +256,18 @@ impl DistributedRuntime {
             }
         };
 
+        let starting_health_status = config.starting_health_status.clone();
+        let use_endpoint_health_status = config.use_endpoint_health_status.clone();
+        let health_endpoint_path = config.system_health_path.clone();
+        let live_endpoint_path = config.system_live_path.clone();
+        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
+            starting_health_status,
+            use_endpoint_health_status,
+            config.health_check_enabled,
+            health_endpoint_path,
+            live_endpoint_path,
+        )));
+
         let component_registry = component::Registry::new();
 
         // NetworkManager for request plane
@@ -310,7 +289,7 @@ impl DistributedRuntime {
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             quic_response_server: Arc::new(OnceCell::new()),
-            system_status_server: status_server.as_ref().map(|server| server.info()),
+            system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             endpoint_registrations,
             discovery_metadata,
@@ -418,11 +397,43 @@ impl DistributedRuntime {
             !distributed_runtime.runtime.is_shutting_down(),
             "runtime shut down during initialization"
         );
-        if let Some(server) = status_server {
-            server.attach(
-                distributed_runtime.clone(),
+        if config.system_server_enabled() {
+            // Keep sidecar probes alive through unregister/drain. Ordinary workers
+            // retain their existing endpoint-shutdown lifetime.
+            let stop = match policy {
+                system_status_server::SystemProbePolicy::Worker => {
+                    distributed_runtime.runtime.child_token()
+                }
+                system_status_server::SystemProbePolicy::RuntimeOnly => {
+                    distributed_runtime.runtime.primary_token().child_token()
+                }
+            };
+            match system_status_server::spawn_system_status_server(
+                &config.system_host,
+                config.system_port as u16,
+                stop,
+                Arc::new(distributed_runtime.clone()),
                 distributed_runtime.discovery_metadata.clone(),
-            )?;
+                policy,
+            )
+            .await
+            {
+                Ok((address, handle)) => {
+                    distributed_runtime
+                        .system_status_server
+                        .set(Arc::new(system_status_server::SystemStatusServerInfo::new(
+                            address,
+                            Some(handle),
+                        )))
+                        .expect("System status server info should only be set once");
+                    tracing::info!(%address, ?policy, "System HTTP listener started");
+                }
+                // Preserve ordinary workers' optional-HTTP failure behavior.
+                Err(error) if policy == system_status_server::SystemProbePolicy::Worker => {
+                    tracing::error!(%error, "System status server startup failed");
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(distributed_runtime)
     }
@@ -616,7 +627,7 @@ impl DistributedRuntime {
     pub fn system_status_server_info(
         &self,
     ) -> Option<Arc<crate::system_status_server::SystemStatusServerInfo>> {
-        self.system_status_server.clone()
+        self.system_status_server.get().cloned()
     }
 
     /// How the frontend should talk to the backend.

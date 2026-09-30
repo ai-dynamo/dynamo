@@ -53,7 +53,7 @@ fn probe_port() -> u16 {
         .expect("a free probe port")
 }
 
-fn sidecar(port: u16, discovery: &str, engine: u16, etcd: u16) -> Sidecar {
+fn sidecar(port: u16, engine: u16) -> Sidecar {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dynamo-vllm-sidecar"));
     // Keep these subprocess tests independent of the developer's runtime settings.
     for (key, _) in std::env::vars().filter(|(key, _)| {
@@ -71,11 +71,10 @@ fn sidecar(port: u16, discovery: &str, engine: u16, etcd: u16) -> Sidecar {
             ])
             .env("DYN_SYSTEM_HOST", "127.0.0.1")
             .env("DYN_SYSTEM_PORT", port.to_string())
-            .env("DYN_DISCOVERY_BACKEND", discovery)
+            .env("DYN_DISCOVERY_BACKEND", "mem")
             .env("DYN_REQUEST_PLANE", "tcp")
             .env("DYN_EVENT_PLANE", "zmq")
             .env("DYN_ENABLE_OTEL", "false")
-            .env("ETCD_ENDPOINTS", format!("http://127.0.0.1:{etcd}"))
             .spawn()
             .expect("start sidecar"),
     )
@@ -122,7 +121,7 @@ async fn terminate(child: &mut Sidecar) {
 }
 
 #[tokio::test]
-async fn probes_work_before_engine_and_discovery_are_available() {
+async fn probes_work_before_engine_is_available() {
     let blackhole = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let unavailable_port = blackhole.local_addr().unwrap().port();
     let port = probe_port();
@@ -133,16 +132,10 @@ async fn probes_work_before_engine_and_discovery_are_available() {
         .unwrap();
 
     // No engine: runtime readiness must pass without metadata or registration.
-    let mut child = sidecar(port, "mem", unavailable_port, unavailable_port);
+    let mut child = sidecar(port, unavailable_port);
     wait_status(&mut child, &client, &format!("{base}/live"), 200).await;
     wait_status(&mut child, &client, &format!("{base}/health"), 200).await;
     wait_status(&mut child, &client, &format!("{base}/metrics"), 200).await;
-    terminate(&mut child).await;
-
-    // An unresponsive discovery server must not prevent liveness or termination.
-    let mut child = sidecar(port, "etcd", unavailable_port, unavailable_port);
-    wait_status(&mut child, &client, &format!("{base}/live"), 200).await;
-    wait_status(&mut child, &client, &format!("{base}/health"), 503).await;
     terminate(&mut child).await;
 }
 

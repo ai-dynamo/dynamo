@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::{config::HealthStatus, distributed::DistributedConfig};
+use crate::{DistributedRuntime, Runtime, config::HealthStatus, distributed::DistributedConfig};
 
 fn http_env() -> [(&'static str, Option<&'static str>); 4] {
     [
@@ -149,7 +149,7 @@ fn reserve_system_port() -> std::net::TcpListener {
 }
 
 #[tokio::test]
-async fn pending_construction_serves_probes_and_releases_listener_on_cancel_or_error() {
+async fn pending_runtime_initialization_does_not_bind_http() {
     temp_env::async_with_vars(http_env(), async {
         for finish in ["drop", "shutdown", "failure"] {
             let reserved = reserve_system_port();
@@ -172,11 +172,8 @@ async fn pending_construction_serves_probes_and_releases_listener_on_cancel_or_e
                     result = &mut construction => panic!("constructed before NATS INFO: {result:?}"),
                     peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => peer.unwrap().unwrap(),
                 };
-                let base = format!("http://{address}");
-                let client = client();
-                assert_eq!(status(&client, &base, "/live").await, 200);
-                assert_eq!(status(&client, &base, "/health").await, 503);
-                assert_eq!(status(&client, &base, "/metrics").await, 503);
+                // The startup probe cannot pass until runtime initialization completes.
+                assert!(tokio::net::TcpListener::bind(address).await.is_ok());
                 match finish {
                     "drop" => drop(construction),
                     "shutdown" => {

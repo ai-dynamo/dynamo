@@ -19,13 +19,14 @@ Engine protocols and request conversion remain in each engine's crate.
 
 Set `DYN_SYSTEM_PORT` to enable the sidecar HTTP server. The standalone sidecar
 executables and Python module launchers (`python -m dynamo.<engine>.sidecar`)
-bind this listener before connecting to runtime dependencies or
-waiting for engine metadata:
+initialize runtime dependencies, then bind one listener before waiting for
+engine metadata. A startup probe on `/live` remains unsuccessful until the
+listener starts:
 
 - `/live` returns HTTP 200 whenever the listener can respond, including while
-  the engine is absent or loading and while discovery is unavailable.
-- `/health` returns HTTP 503 until runtime initialization completes, while a
-  required discovery or NATS connection is unavailable, and once shutdown starts.
+  the engine is absent or loading and after runtime connectivity is lost.
+- `/health` returns HTTP 503 while a required discovery or NATS connection is
+  unavailable, and once shutdown starts.
   It returns HTTP 200 when those dependencies are reachable, independently of
   engine readiness and model registration. Discovery reads have a one-second
   timeout; NATS readiness follows the client connection state. Neither check
@@ -35,8 +36,8 @@ The distributed runtime owns the listener. Sidecar launchers select runtime-only
 probes; integrated workers retain their existing worker-health probe behavior.
 
 The existing `DYN_SYSTEM_LIVE_PATH` and `DYN_SYSTEM_HEALTH_PATH` settings also
-apply. Metrics, metadata, and engine routes become available on the same listener
-once the runtime connects. Keep a separate engine startup/readiness probe: a
+apply. Metrics, metadata, and engine routes are registered on the same listener
+at startup. Keep a separate engine startup/readiness probe: a
 healthy sidecar alone does not mean the engine can serve requests.
 
 Shutdown withdraws sidecar readiness immediately. Metadata discovery before
