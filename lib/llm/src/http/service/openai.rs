@@ -68,7 +68,7 @@ use crate::protocols::common::input_trigger::{
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     ParsingOptions,
-    audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
+    audios::{AudioDataSource, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -5566,7 +5566,7 @@ async fn handler_audio_speech(
     // Option<String> model field; see below)
     check_ready(&state)?;
 
-    let returns_audio_bytes = request.data_source.as_deref() != Some("url");
+    let returns_audio_bytes = request.data_source != Some(AudioDataSource::Url);
     let streams_audio_chunks = returns_audio_bytes
         && matches!(
             request.response_format.as_deref().unwrap_or("wav"),
