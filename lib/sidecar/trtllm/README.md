@@ -42,6 +42,7 @@ inside the request body.
 > `max_tokens` for requests that omit one) unless `--context-length` supplies it
 > instead. `Control.Abort` cancels an in-flight request; closing the `Generate`
 > stream also aborts it, so cancellation is covered either way.
+> Unclaimed prefill KV handoffs require separate cleanup; see [Known issues](#known-issues).
 >
 > `Control`'s LoRA RPCs (`LoadLora`, `UnloadLora`, `ListLoras`) and KV-event
 > RPCs (`GetKvEventSources`, `SubscribeKvEvents`) return `UNIMPLEMENTED`: the
@@ -178,6 +179,12 @@ this:
 The handoff JSON mirrors `KvSessionRef` field-for-field (`session_id`,
 `transfer_backend`, `endpoints`, `dp_rank`, `attributes`) and is never
 interpreted between the two workers. See `src/disagg.rs`.
+
+## Known issues
+
+In disaggregated serving, decode-side validation can reject a request after prefill has produced a KV handoff, for example when `min_tokens` cannot fit in the decode context window. This rejection happens before the decode `Generate` RPC, so no decode request or KV transfer starts. The unclaimed prefill blocks remain reserved until the engine transfer timeout (60 seconds in the engine version pinned in [Run](#run)), which can delay subsequent valid requests when KV cache capacity is exhausted.
+
+Tracked in [#15404: abort abandoned prefill KV sessions after decode rejection](https://github.com/ai-dynamo/dynamo/issues/15404). The intended fix requires coordinated TensorRT-LLM and sidecar support for `Control.Abort(kv_session)`, with the engine releasing blocks only after transfers can no longer access them. That engine version returns `UNIMPLEMENTED` for session abort; aborting the completed prefill request by request ID does not release its pending handoff. Until that follow-up is delivered, cleanup relies on the engine transfer timeout.
 
 ## Deploy on Kubernetes
 
