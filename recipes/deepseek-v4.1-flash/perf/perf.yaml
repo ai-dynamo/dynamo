@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# AIPerf 0.10.0 sequential Mooncake trace replay for the four vLLM targets.
+# AIPerf 0.10.0 sequential Mooncake trace replay for the five vLLM targets.
 # Defaults to B200 aggregated, C168. Run after the deployment is ready.
 apiVersion: batch/v1
 kind: Job
@@ -33,6 +33,7 @@ spec:
                 - dsv41-flash-vllm-b200-disagg
                 - dsv41-flash-vllm-gb200-agg
                 - dsv41-flash-vllm-gb200-disagg
+                - dsv41-flash-vllm-h200-agg
             topologyKey: kubernetes.io/hostname
       containers:
       - name: perf

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # DeepSeek-V4.1-Flash vLLM benchmark
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
-[`perf.yaml`](perf.yaml) — covers all four vLLM DGDs. It replays the trace
+[`perf.yaml`](perf.yaml) — covers all five vLLM DGDs. It replays the trace
 at one `CONCURRENCY` value against a ready DGD frontend and
 writes raw artifacts to the shared `shared-model-cache` PVC. It uses the AIPerf
 0.10.0 container to match the recorded client version.
@@ -23,10 +23,11 @@ at a time and the Job lands beside whichever frontend exists.
 | B200 disaggregated | `dsv41-flash-vllm-b200-disagg-frontend:8000` |
 | GB200 aggregated | `dsv41-flash-vllm-gb200-agg-frontend:8000` |
 | GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-frontend:8000` |
+| H200 aggregated | `dsv41-flash-vllm-h200-agg-frontend:8000` |
 
 Set `CONCURRENCY` for the operating point being measured. The Job's default
 of 168 matches the recorded B200 aggregated point. The recorded B200
-disaggregated point uses 184; both GB200 replay points use 168. These are
+disaggregated point uses 184; both GB200 replay points use 168; H200 aggregated uses 80. These are
 measured points, not a claim that every other concurrency was worse. Running more than one benchmark in the same namespace needs a
 distinct `metadata.name` and `labels.app` so Jobs and artifacts remain separate.
 
@@ -110,9 +111,10 @@ Results land under `/shared-model-cache/perf/<epoch>_<job-name>/trace_c<CONCURRE
 ## Measured Results
 
 Measured vLLM configurations on the 64K-input / 400-output agentic workload,
-using eight GPUs per target. Output throughput includes reasoning tokens.
+using eight GPUs per Blackwell target and 16 GPUs for H200 aggregated. Output throughput includes reasoning tokens.
 These are selected operating points, not a controlled topology-only comparison;
-validation of the refreshed manifests is pending.
+Blackwell runtime qualification remains pending. H200 P0 passed on one TP4
+worker, including near-1M context; it does not qualify four-worker routing.
 
 Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
 
@@ -122,6 +124,7 @@ Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
 | B200 disaggregated | 184 | 1,087.71 | 82.12 |
 | GB200 aggregated | 168 | 953.08 | 51.83 |
 | GB200 disaggregated | 168 | 1,154.87 | 80.85 |
+| H200 aggregated | 80 | 209.18 | 51.32 |
 
 ### TTFT Distribution
 
@@ -133,6 +136,7 @@ Milliseconds across successful requests:
 | B200 disaggregated | 18,597.21 | 135.12 | 2,002.87 | 90,076.83 | 126,866.47 | 168,049.68 | 256,824.39 |
 | GB200 aggregated | 1,601.63 | 286.75 | 951.37 | 3,524.82 | 6,980.67 | 26,793.16 | 52,808.90 |
 | GB200 disaggregated | 12,149.79 | 169.02 | 1,126.26 | 57,116.54 | 100,309.52 | 124,167.34 | 160,272.44 |
+| H200 aggregated | 2,314.58 | 171.29 | 1,365.00 | 6,368.76 | 11,694.66 | 30,075.76 | 108,304.39 |
 
 ### ITL Distribution
 
@@ -145,6 +149,7 @@ percentiles of all individual token gaps pooled together.
 | B200 disaggregated | 12.64 | 12.18 | 14.34 | 16.52 | 18.58 | 25.03 | 44.31 |
 | GB200 aggregated | 26.40 | 19.29 | 27.22 | 48.76 | 83.17 | 110.46 | 321.77 |
 | GB200 disaggregated | 13.19 | 12.37 | 14.61 | 17.75 | 21.14 | 30.59 | 81.71 |
+| H200 aggregated | 29.33 | 19.49 | 29.90 | 54.01 | 84.55 | 183.57 | 381.82 |
 
 At these operating points, disaggregated configurations show higher output
 throughput and lower ITL, with longer TTFT tails. GB200 records 21% higher

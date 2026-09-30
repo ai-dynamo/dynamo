@@ -145,6 +145,38 @@ targets:
     available: true
     summary: 'Measured original configuration: c184, 1087.71 output tok/s/GPU, user p50 82.12 tok/s, TTFT p50/p99 135.12/168049.68
       ms, per-request mean ITL p50/p99 12.18/25.03 ms. Authored-render runtime qualification pending. Selected operating points are not a controlled topology-only comparison.'
+- id: vllm-agg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vllm
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime@sha256:13ed3609d95c04e868230a30d68371ab73969c6f56c2399ca3a7302e7e0a774b
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - dspark-speculative-decoding
+  - expert-parallel
+  - eplb
+  - tp4
+  - prefix-caching
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse'
+    sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
+  deploy:
+    asset: recipes/deepseek-v4.1-flash/vllm/agg-h200-agentic/kustomization.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'Measured four-TP4 configuration: c80, 209.18 output tok/s/GPU, user
+      p50 51.32 tok/s; TTFT p50/p99 171.29/30075.76 ms, per-request mean ITL p50/p99
+      19.49/183.57 ms. Single-TP4 functional/near-1M P0 passed; not four-worker routing
+      qualification.'
 - id: sglang-agg-gb200
   recommended: false
   hardware:
@@ -200,5 +232,5 @@ maintainer: null
 gaps:
 - The SGLang targets are day-0 and carry no benchmark or performance claim.
 - maintainer unknown
-- Runtime validation of the refreshed manifests is pending.
+- Blackwell runtime qualification is pending; H200 P0 covers one TP4 worker only.
 - Performance reports selected operating points, not a controlled topology-only comparison.

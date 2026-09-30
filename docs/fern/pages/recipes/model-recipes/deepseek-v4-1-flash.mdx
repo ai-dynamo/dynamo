@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "DeepSeek-V4.1-Flash"
-subtitle: "Serve DeepSeek-V4.1-Flash with Dynamo on B200 and GB200 using aggregated or disaggregated workers."
+subtitle: "Serve DeepSeek-V4.1-Flash with Dynamo on B200, GB200, and H200 using aggregated or disaggregated workers."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use eight B200 or GB200 GPUs, sparse-indexer logits, and DSpark speculative decoding. The original SGLang targets provide deployment on GB200 without published performance measurements.
+Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use eight B200 or GB200 GPUs, sparse-indexer logits, and DSpark speculative decoding. H200 aggregated serving uses 16 GPUs with CUTLASS MoE, EPLB, and DSpark-3. The original SGLang targets provide deployment on GB200 without published performance measurements.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -26,6 +26,8 @@ Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use ei
 <label htmlFor="recipe-sku-gb200">GB200</label>
 <input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" />
 <label htmlFor="recipe-sku-b200">B200</label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
@@ -58,6 +60,18 @@ Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use ei
 <span><b>Layout</b> One TP4 prefill worker and one TP4 decode worker</span>
 <span><b>Configuration</b> MXFP4 sparse-indexer KV and sparse-indexer logits</span>
 </div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+<span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>GPUs</b> 16x H200</span>
+<span><b>Layout</b> Four TP4 workers</span>
+<span><b>Configuration</b> CUTLASS MoE, EPLB, DSpark-3</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
+<span><b>Status</b> H200 disaggregated recipe is not yet available.</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="h200" data-variant="agg disagg">
+<span><b>Status</b> No SGLang recipe for H200. Select vLLM aggregated or GB200.</span>
+</div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
 <span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
 <span><b>GPUs</b> 8x GB200</span>
@@ -85,14 +99,14 @@ Experimental. These sources temporarily use Azure CI runtime images and require 
 
 ## Prerequisites
 
-- A Kubernetes cluster with a compatible Dynamo operator and eight GPUs of the selected type.
+- A Kubernetes cluster with a compatible Dynamo operator and eight B200/GB200 GPUs or 16 H200 GPUs.
 - Four GPUs per worker, 512 GiB of host memory per worker, and capacity for its shared-memory volume.
 - A populated ReadWriteMany model-cache PVC, referenced as `shared-model-cache` by the recipes.
 
 <div data-recipe-framework="vllm">
 
 - Kustomize v5.8.1 and a filled [cluster Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/templates/kustomize/README.md) for placement, cache binding, registry credentials, and networking.
-- ARM64 worker nodes for GB200 or AMD64 worker nodes for B200.
+- ARM64 worker nodes for GB200 or AMD64 worker nodes for B200/H200.
 
 </div>
 
@@ -146,6 +160,16 @@ kustomize build recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic
 ```
 
 [Source Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/kustomization.yaml)
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+
+```bash
+kustomize build recipes/deepseek-v4.1-flash/vllm/agg-h200-agentic
+```
+
+[Source Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-h200-agentic/kustomization.yaml)
 
 </div>
 <div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
@@ -218,6 +242,14 @@ kubectl port-forward svc/dsv41-flash-vllm-b200-agg-frontend 8000:8000 -n "${NAME
 
 </div>
 
+<div data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-vllm-h200-agg-frontend 8000:8000 -n "${NAMESPACE}"
+```
+
+</div>
+
 <div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
 
 ```bash
@@ -257,9 +289,10 @@ Verify the response and, for disaggregated serving, a prefill-to-decode KV trans
 <div data-recipe-framework="vllm">
 
 Measured vLLM configurations on the 64K-input / 400-output agentic workload,
-using eight GPUs per target. Output throughput includes reasoning tokens.
+using eight GPUs per Blackwell target and 16 GPUs for H200 aggregated. Output throughput includes reasoning tokens.
 These are selected operating points, not a controlled topology-only comparison;
-validation of the refreshed manifests is pending.
+Blackwell runtime qualification remains pending. H200 P0 passed on one TP4
+worker, including near-1M context; it does not qualify four-worker routing.
 
 | Target | Concurrency | Output tok/s/GPU | Output tok/s/user p50 |
 | --- | ---: | ---: | ---: |
@@ -267,6 +300,7 @@ validation of the refreshed manifests is pending.
 | B200 disaggregated | 184 | 1,087.71 | 82.12 |
 | GB200 aggregated | 168 | 953.08 | 51.83 |
 | GB200 disaggregated | 168 | 1,154.87 | 80.85 |
+| H200 aggregated | 80 | 209.18 | 51.32 |
 
 At these operating points, disaggregated configurations show higher output
 throughput and lower ITL, with longer TTFT tails. GB200 records 21% higher
@@ -291,6 +325,7 @@ No published benchmark results.
 | vLLM | B200 | Disaggregated | 8 | 1P1D, TP4 per role | DSpark, 3 draft tokens |
 | vLLM | GB200 | Aggregated | 8 | 2 × TP4 | DSpark, 3 draft tokens |
 | vLLM | GB200 | Disaggregated | 8 | 1P1D, TP4 per role | DSpark, 3 draft tokens |
+| vLLM | H200 | Aggregated | 16 | 4 × TP4 | DSpark, 3 draft tokens |
 | SGLang | GB200 | Aggregated | 8 | 2 × TP4, EP4 | DSpark |
 | SGLang | GB200 | Disaggregated | 8 | 1P1D, TP4 and EP4 per role | None |
 

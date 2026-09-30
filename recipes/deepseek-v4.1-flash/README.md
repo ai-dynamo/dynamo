@@ -6,8 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # DeepSeek-V4.1-Flash Recipes
 
 Serve `deepseek-ai/DeepSeek-V4.1-Flash` with NVIDIA Dynamo and vLLM on B200 or
-GB200. Each target uses eight GPUs: two TP4 workers for aggregated serving, or
+GB200. These targets use eight GPUs: two TP4 workers for aggregated serving, or
 one TP4 prefill worker and one TP4 decode worker for disaggregated serving.
+H200 aggregated serving uses four TP4 workers (16 GPUs).
 The existing SGLang recipes provide aggregated and disaggregated deployment
 on GB200.
 
@@ -29,13 +30,17 @@ settings. Rendered deployments are not checked in.
 | B200 disaggregated | [disagg-b200-agentic](vllm/disagg-b200-agentic/kustomization.yaml) | 8 | 1P1D, TP4 per role | NIXL/UCX over InfiniBand |
 | GB200 aggregated | [agg-gb200-agentic](vllm/agg-gb200-agentic/kustomization.yaml) | 8 | 2 × TP4 | Not applicable |
 | GB200 disaggregated | [disagg-gb200-agentic](vllm/disagg-gb200-agentic/kustomization.yaml) | 8 | 1P1D, TP4 per role | NIXL/UCX; workers in one NVLink clique |
+| H200 aggregated | [agg-h200-agentic](vllm/agg-h200-agentic/kustomization.yaml) | 16 | 4 × TP4 | Not applicable |
 
-All four targets use expert parallelism, EPLB with the `torch_gloo`
+The four Blackwell targets use expert parallelism, EPLB with the `torch_gloo`
 communicator, `deep_gemm_mega_moe`, MXFP4 sparse-indexer KV, sparse-indexer
 logits, and the `FLASHMLA_MEGA_ATTN_DSV41` attention backend. DSpark uses three
 draft tokens with adaptive verification disabled. Prefix-cache retention is
 1024. The recipes serve text and configure the `deepseek_v41` reasoning and
 tool-call parsers.
+
+H200 uses `flashinfer_cutlass` MoE, EPLB, and DSpark-3 block verification,
+with memory utilization 0.92, 8,192 batched tokens, and 1,024 sequences.
 
 B200 disaggregation uses the runtime's `nvfp4_ds_mla` KV default; the other
 vLLM targets select `fp8_ds_mla`. See each Kustomization for runtime images
@@ -44,8 +49,8 @@ and engine settings.
 ## Prerequisites
 
 - A Kubernetes cluster with a compatible Dynamo operator and Kustomize v5.8.1.
-- Eight GPUs of the selected type, with four GPUs available to each worker.
-  GB200 requires ARM64 nodes; B200 requires AMD64 nodes.
+- Eight B200/GB200 GPUs or 16 H200 GPUs, with four GPUs per worker.
+  GB200 requires ARM64 nodes; B200 and H200 require AMD64 nodes.
 - A populated ReadWriteMany model-cache PVC. Workers reference
   `shared-model-cache` at `/shared-model-cache`; a private cluster
   Kustomization can bind a different physical PVC name.
@@ -110,7 +115,7 @@ kubectl port-forward svc/dsv41-flash-vllm-gb200-agg-frontend 8000:8000 -n "${NAM
 ```
 
 Replace `gb200-agg` in the service name with `b200-agg`, `gb200-disagg`, or
-`b200-disagg` for the other targets. In a separate terminal:
+`b200-disagg`, or `h200-agg` for the other targets. In a separate terminal:
 
 ```bash
 curl -sS http://localhost:8000/v1/chat/completions \
@@ -123,9 +128,10 @@ Verify the response and, for disaggregated serving, a prefill-to-decode KV trans
 ## Performance
 
 Measured vLLM configurations on the 64K-input / 400-output agentic workload,
-using eight GPUs per target. Output throughput includes reasoning tokens.
+using eight GPUs per Blackwell target and 16 GPUs for H200 aggregated. Output throughput includes reasoning tokens.
 These are selected operating points, not a controlled topology-only comparison;
-validation of the refreshed manifests is pending.
+Blackwell runtime qualification remains pending. H200 P0 passed on one TP4
+worker, including near-1M context; it does not qualify four-worker routing.
 
 | Target | Concurrency | Output tok/s/GPU | Output tok/s/user p50 |
 | --- | ---: | ---: | ---: |
@@ -133,6 +139,7 @@ validation of the refreshed manifests is pending.
 | B200 disaggregated | 184 | 1,087.71 | 82.12 |
 | GB200 aggregated | 168 | 953.08 | 51.83 |
 | GB200 disaggregated | 168 | 1,154.87 | 80.85 |
+| H200 aggregated | 80 | 209.18 | 51.32 |
 
 At these operating points, disaggregated configurations show higher output
 throughput and lower ITL, with longer TTFT tails. GB200 records 21% higher
