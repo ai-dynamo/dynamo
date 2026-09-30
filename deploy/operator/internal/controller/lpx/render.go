@@ -38,7 +38,7 @@ func (r *graphReconciler) resolveWorkloads(
 	)
 
 	for _, groupName := range slices.Sorted(maps.Keys(groups)) {
-		workload, err := lpx.ResolveWorkload(ctx, dgd, groups[groupName], r.modelRegistry)
+		workload, err := lpx.ResolveWorkload(ctx, r.Client, dgd, groups[groupName], r.modelRegistry)
 		if err != nil {
 			return nil, nil, err
 		}

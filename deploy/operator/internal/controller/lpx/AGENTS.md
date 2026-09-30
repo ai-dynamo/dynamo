@@ -63,6 +63,10 @@ SPDX-License-Identifier: Apache-2.0
 
 - Read workload dependencies through the cached client and validate them once
   per reconciliation; do not add uncached reads or pre-write revalidation.
+- Cyborg GPU resolution is a validation-only exception to dependency watches.
+  Do not add ResourceClaim, ResourceClaimTemplate, or DeviceClass watches for it:
+  the resolved count does not affect the rendered workload. Lookup failures use
+  ordinary error retries, and DGD edits use the existing watch.
 - Observations are not an atomic snapshot. Publishing previously observed
   intent during a concurrent edit is accepted; watches drive convergence.
   UID/resource-version preconditions and write conflicts protect mutations.

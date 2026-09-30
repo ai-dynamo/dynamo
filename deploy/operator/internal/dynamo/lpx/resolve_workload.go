@@ -13,10 +13,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 )
 
 const (
@@ -35,11 +37,12 @@ var ErrUnsupportedRuntime = errors.New("unsupported LPX runtime")
 var ErrBuildSnapshotAcquisition = errors.New("acquiring immutable LPX build snapshot")
 
 // ResolveWorkload projects one admitted component group against immutable builds.
-// dgd and registry must be non-nil. componentNames must contain exactly the members
+// reader, dgd and registry must be non-nil. componentNames must contain exactly the members
 // of one ComponentGroups entry from the admitted dgd, in any order.
 // Inputs are read without mutation.
 func ResolveWorkload(
 	ctx context.Context,
+	reader client.Reader,
 	dgd *dynamov1beta1.DynamoGraphDeployment,
 	componentNames []string,
 	registry ModelRegistry,
@@ -97,7 +100,7 @@ func ResolveWorkload(
 			}
 		}
 
-		if err := validateWorkloadConductor(stage, pipeline, snapshot.hasCUDAPartitions); err != nil {
+		if err := validateWorkloadConductor(ctx, reader, dgd.Namespace, stage, pipeline, snapshot.hasCUDAPartitions); err != nil {
 			return nil, err
 		}
 
@@ -146,7 +149,11 @@ func ResolveWorkload(
 }
 
 // validateWorkloadConductor checks role requirements that depend on the immutable build.
+// reader and component must be non-nil.
 func validateWorkloadConductor(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
 	component *dynamov1beta1.DynamoComponentDeploymentSharedSpec,
 	pipeline Pipeline,
 	requiresGPU bool,
@@ -159,23 +166,14 @@ func validateWorkloadConductor(
 		}
 		template := conductor.PodTemplate
 		container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
-		count, err := EffectiveCyborgGPUCount(container.Resources)
+		count, err := dra.ResolveGPUCount(ctx, reader, namespace, &template.Spec, container.Resources)
 		if err != nil {
 			return fmt.Errorf("component %q conductor resources: %w", component.ComponentName, err)
 		}
 		if count > 0 {
 			return nil
 		}
-
-		// A Pod claim supplies devices only to containers that reference its local name.
-		for _, claim := range container.Resources.Claims {
-			for _, podClaim := range template.Spec.ResourceClaims {
-				if claim.Name == podClaim.Name {
-					return nil
-				}
-			}
-		}
-		return fmt.Errorf("component %q conductor main container requires a declared resourceClaim or a positive %s request", component.ComponentName, commonconsts.KubeResourceGPUNvidia)
+		return fmt.Errorf("component %q conductor main container requires a positive GPU count from scalar resources or resourceClaims", component.ComponentName)
 	}
 
 	// An LPU-only conductor is a singleton even when the workload replica count is larger.
