@@ -120,9 +120,6 @@ spec:
                   value: "1"
                 - name: VLLM_USE_V2_MODEL_RUNNER
                   value: "1"
-                # Keep the portable deployment on actual MTP verification.
-                # For a benchmark-only synthetic-AL trial, change this key to
-                # speculative-config-synthetic.
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
