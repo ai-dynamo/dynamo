@@ -229,8 +229,8 @@ export DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST='x-request-id,x-tenant-id'
 ```
 
 Header matching is case-insensitive. Dynamo redacts captured values by header name using
-`DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST`. Include custom credential header names in that list;
-values are not scanned for credentials. See [HTTP Header Redaction](../../reference/observability/request-traces.mdx#http-header-redaction)
+`DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST`. Bearer values are always redacted. Include custom
+header names carrying other credential schemes in that list. See [HTTP Header Redaction](../../reference/observability/request-traces.mdx#http-header-redaction)
 for the defaults and override behavior.
 
 ### Export Payloads over OTLP

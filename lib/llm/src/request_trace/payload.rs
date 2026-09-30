@@ -10,6 +10,7 @@ use axum::http::HeaderMap;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
+use crate::sensitive::is_sensitive_metadata;
 
 /// Context key for the allowlisted headers captured at the HTTP layer.
 pub const HTTP_HEADERS_CONTEXT_KEY: &str = "request_trace.http.request.headers";
@@ -49,11 +50,7 @@ fn capture_http_headers_with_lists(
     }
     let mut out = BTreeMap::new();
     for name in capture_list {
-        if headers.contains_key(name.as_str())
-            && redact_list
-                .iter()
-                .any(|redact| name.eq_ignore_ascii_case(redact))
-        {
+        if headers.contains_key(name.as_str()) && is_sensitive_metadata(name, "", redact_list) {
             out.insert(name.clone(), REDACTED_HEADER_VALUE.to_string());
             continue;
         }
@@ -68,7 +65,15 @@ fn capture_http_headers_with_lists(
             continue;
         }
 
-        out.insert(name.clone(), values.join(", "));
+        let value = if values
+            .iter()
+            .any(|value| is_sensitive_metadata(name, value, redact_list))
+        {
+            REDACTED_HEADER_VALUE.to_string()
+        } else {
+            values.join(", ")
+        };
+        out.insert(name.clone(), value);
     }
     (!out.is_empty()).then_some(out)
 }
@@ -304,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_http_headers_redact_override_is_name_based_and_keeps_repeats() {
+    fn capture_http_headers_redact_override_preserves_bearer_detection() {
         let capture_list = vec!["authorization".to_string(), "x-custom".to_string()];
         let mut headers = HeaderMap::new();
         headers.append("authorization", "Bearer secret".parse().unwrap());
@@ -319,19 +324,39 @@ mod tests {
             &["X-Custom".to_string(), "cookie".to_string()],
         )
         .unwrap();
-        assert_eq!(
-            captured["authorization"],
-            "Bearer secret, Basic dXNlcjpwYXNz"
-        );
+        assert_eq!(captured["authorization"], "<redacted>");
         assert_eq!(captured["x-custom"], "<redacted>");
         assert!(!captured.contains_key("cookie"));
 
         let captured = capture_http_headers_with_lists(&headers, &capture_list, &[]).unwrap();
-        assert_eq!(
-            captured["authorization"],
-            "Bearer secret, Basic dXNlcjpwYXNz"
-        );
+        assert_eq!(captured["authorization"], "<redacted>");
         assert_eq!(captured["x-custom"], "first, second");
+    }
+
+    #[test]
+    fn capture_http_headers_scans_each_value_for_bearer_only() {
+        let capture_list = vec!["x-custom".to_string()];
+        for redact_list in [default_redact_list(), vec![]] {
+            let mut headers = HeaderMap::new();
+            headers.append("x-custom", "Basic dXNlcjpwYXNz".parse().unwrap());
+            let captured =
+                capture_http_headers_with_lists(&headers, &capture_list, &redact_list).unwrap();
+            assert_eq!(captured["x-custom"], "Basic dXNlcjpwYXNz");
+
+            headers.append("x-custom", "  bEaReR secret".parse().unwrap());
+            let captured =
+                capture_http_headers_with_lists(&headers, &capture_list, &redact_list).unwrap();
+            assert_eq!(captured["x-custom"], "<redacted>");
+        }
+    }
+
+    #[test]
+    fn capture_http_headers_can_override_name_redaction_for_basic() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
+        let captured =
+            capture_http_headers_with_lists(&headers, &["authorization".to_string()], &[]).unwrap();
+        assert_eq!(captured["authorization"], "Basic dXNlcjpwYXNz");
     }
 
     #[test]

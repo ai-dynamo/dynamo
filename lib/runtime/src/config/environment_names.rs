@@ -670,8 +670,8 @@ pub mod llm {
         /// are replaced with `<redacted>`. Unset defaults to authorization,
         /// proxy-authorization, cookie, set-cookie, x-api-key, api-key, x-auth-token,
         /// and x-access-token. Setting this replaces the defaults; empty disables
-        /// redaction. Only allowlisted headers are captured. Values are not scanned
-        /// for credentials, so operators must include custom credential headers.
+        /// name-based redaction. Only allowlisted headers are captured. Bearer values
+        /// are always redacted; other credential schemes require name-based redaction.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST";
 
