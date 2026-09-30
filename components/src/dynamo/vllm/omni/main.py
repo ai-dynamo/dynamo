@@ -232,20 +232,30 @@ async def worker():
         response_plane=config.response_plane,
     )
 
-    install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
+    wait_for_shutdown = install_signal_handlers(
+        loop, runtime, shutdown_endpoints, shutdown_event
+    )
 
-    if config.stage_id is not None:
-        await init_omni_stage(runtime, config, shutdown_endpoints, shutdown_event)
-        logger.debug("init_omni_stage completed (stage %d)", config.stage_id)
-    elif config.omni_router:
-        await init_omni_stage_router(runtime, config, shutdown_endpoints)
-        logger.debug("init_omni_stage_router completed")
-    elif config.realtime:
-        await init_omni_realtime(runtime, config, shutdown_endpoints, shutdown_event)
-        logger.debug("init_omni_realtime completed, exiting...")
-    else:
-        await init_omni(runtime, config, shutdown_event)
-        logger.debug("Omni worker completed, exiting...")
+    try:
+        if config.stage_id is not None:
+            await init_omni_stage(runtime, config, shutdown_endpoints, shutdown_event)
+            logger.debug("init_omni_stage completed (stage %d)", config.stage_id)
+        elif config.omni_router:
+            await init_omni_stage_router(runtime, config, shutdown_endpoints)
+            logger.debug("init_omni_stage_router completed")
+        elif config.realtime:
+            await init_omni_realtime(
+                runtime, config, shutdown_endpoints, shutdown_event
+            )
+            logger.debug("init_omni_realtime completed, exiting...")
+        else:
+            await init_omni(runtime, config, shutdown_event)
+            logger.debug("Omni worker completed, exiting...")
+    finally:
+        # The serve loop returns as soon as `shutdown_event` is set, which the
+        # shutdown sequence does *before* awaiting the runtime teardown. Without
+        # this join the loop closes here and the teardown is destroyed pending.
+        await wait_for_shutdown()
 
 
 def main():

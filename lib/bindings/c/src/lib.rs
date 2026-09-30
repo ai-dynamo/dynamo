@@ -178,7 +178,23 @@ pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
         }
     };
 
-    wk.runtime().shutdown();
+    // Awaited: `shutdown` alone only spawns the teardown, and a C caller that
+    // returns from here can exit before it runs, skipping the endpoint
+    // inflight drain and leaving transports connected.
+    //
+    // Through the `DistributedRuntime` when there is one: only its
+    // `shutdown_and_wait` deregisters from discovery, so going via the bare
+    // `Runtime` tore down the transports while leaving this instance
+    // advertised. The bare runtime is the fallback for a caller that shuts
+    // down after a partial init, where `DRT` was never populated.
+    let runtime = wk.runtime().clone();
+    let bound = Some(dynamo_runtime::worker::graceful_shutdown_timeout());
+    match DRT.get() {
+        Some(drt) => runtime.secondary().block_on(drt.shutdown_and_wait(bound)),
+        None => runtime
+            .secondary()
+            .block_on(runtime.shutdown_and_wait(bound)),
+    }
 
     DynamoLlmResult::OK
 }

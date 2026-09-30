@@ -66,11 +66,21 @@ fn run_worker(
             .await
             .map_err(anyhow::Error::from);
 
-        // Trigger Phase 1/2/3 token cancellation + NATS/etcd disconnect.
-        // Worker::run has already done discovery unregister, drain, and
-        // engine.cleanup() at this point, so this is purely transport
-        // teardown.
-        runtime.shutdown();
+        // Phase 1/2/3 token cancellation + NATS/etcd disconnect. Worker::run
+        // has already done discovery unregister, drain, and engine.cleanup()
+        // at this point, so this is purely transport teardown.
+        //
+        // Awaited, not fire-and-forget: `Runtime::shutdown` only spawns the
+        // sequence, and `main` returning here kills the process before it
+        // runs — so the endpoint inflight drain would be skipped and the
+        // transports would never be told to tear down.
+        //
+        // The bound is passed *into* Phase 2 rather than wrapped around the
+        // call: `tokio::time::timeout` cancels by dropping, which would skip
+        // Phase 3 and defeat the point of awaiting at all.
+        runtime
+            .shutdown_and_wait(Some(dynamo_runtime::worker::graceful_shutdown_timeout()))
+            .await;
 
         result
     })
