@@ -45,7 +45,10 @@ from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
-from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.multimodal.cache_uuid import (
+    reject_unsupported_json_multimodal_data,
+    reject_unsupported_multimodal_uuids,
+)
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.health_check import HEALTH_CHECK_KEY
@@ -1048,6 +1051,7 @@ class HandlerBase(BaseGenerativeHandler):
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
+        reject_unsupported_json_multimodal_data(request.get("multi_modal_data"))
 
         # With DYN_TOKEN_IDS_AS_BYTES the ingress hands token ids over as a packed
         # little-endian int32 buffer instead of a Python list. Keep it as an int32

@@ -286,6 +286,8 @@ pub enum MultimodalData {
     Decoded(RdmaMediaDataDescriptor),
     /// Payload-free media slot resolved by a backend processor cache.
     UuidOnly(String),
+    /// Opaque JSON for a backend-registered modality processor.
+    Json(serde_json::Value),
 }
 
 impl<'de> Deserialize<'de> for MultimodalData {

@@ -81,6 +81,60 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 - Embeddings are sent as base64-encoded PyTorch tensors via the `prompt_embeds` field in the Completions API
 - NATS must be configured with a 15MB max payload for large embeddings (already set in default deployments)
 
+### Custom JSON Content
+
+**Experimental.** Start an aggregated Python vLLM worker with `--enable-multimodal` to
+accept arbitrary modality payloads through `/v1/chat/completions`. Use a content
+part whose `type` matches its payload field:
+
+```json
+{
+  "model": "your-model",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "Predict this: <chemistry>"},
+      {"type": "chemistry", "chemistry": {"data_base64": "..."}}
+    ]
+  }],
+  "max_tokens": 64
+}
+```
+
+Dynamo forwards the JSON payload through the existing `multi_modal_data`
+field. The vLLM processor receives `{"chemistry": {"data_base64": "..."}}`.
+Install or mount your model's vLLM plugin in the worker environment; no
+modality-specific Dynamo registration or custom Dynamo image is required.
+The processor owns payload validation, decoding, and placeholder expansion.
+Custom payloads are excluded from the chat template. Put any placeholder the
+processor expects, such as `<chemistry>`, in a text content part.
+A single content part retains its payload value; repeated parts of the same
+modality become a list of payload values in request order.
+Part boundaries are not retained: one array-valued payload and repeated scalar
+payloads may produce the same engine value. Put processor metadata inside the
+matching payload field. Other sibling fields round-trip through the HTTP
+protocol but are not forwarded to the model processor; custom `uuid` does not
+provide a Dynamo cache identity.
+
+Existing media tags keep their built-in validation and serving behavior. This
+extension does not add support for previously unsupported `input_audio` paths.
+Custom JSON can accompany
+built-in media when the model supports both. Inputs that resolve to the same
+engine modality are rejected rather than overwriting one another. Dynamo does
+not fetch URLs found inside arbitrary JSON payloads.
+
+For a prompt already rendered by a training client, set
+`nvext.use_raw_prompt: true` and provide exactly one user message. Dynamo
+concatenates its text parts without applying another chat template. To supply
+pre-tokenized prompts, use `nvext.token_data`.
+
+The frontend requires the selected worker set to advertise `json_multimodal`
+support. Missing capability, including older workers, produces a request error.
+Opted-in workers have a separate discovery identity from unsupported workers.
+Custom JSON requires aggregated Python vLLM serving. Disaggregated serving,
+KVBM, SGLang, TensorRT-LLM, and the native vLLM sidecar are unsupported.
+Speculative prefill and the frontend encoder hop are skipped for these requests.
+
 ## Hashing Consistency for KV Events
 
 When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches. Choose one of the following:
