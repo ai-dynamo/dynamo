@@ -2446,22 +2446,23 @@ func appendTopologyLabelVolume(volumes []corev1.Volume, vol corev1.Volume) []cor
 	return append(filtered, vol)
 }
 
-// dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated
-// to component-level annotations (for both the DCD/controller and Grove paths).
-// Service-level annotations take precedence (are never overwritten).
+// dgdPropagatedAnnotationKeys lists DGD metadata annotations that supply
+// component defaults for both the DCD/controller and Grove paths.
 var dgdPropagatedAnnotationKeys = []string{
 	commonconsts.KubeAnnotationEnableMetrics,
 	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
 	commonconsts.KubeAnnotationDynamoKubeDiscoveryMode,
-	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
 	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
 }
 
-// propagateDGDAnnotations copies DGD-level annotations into the component
-// annotations so that downstream logic can read them uniformly.
-// Service-level annotations take precedence (are never overwritten).
+// propagateDGDAnnotations copies DGD-level annotations into the component so
+// downstream logic can read them uniformly. Component annotations override
+// defaults, while the immutable DGD origin remains controller-authoritative.
 func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	for _, podTemplate := range EnsureComponentPodTemplates(component) {
+		if origin, exists := dgdAnnotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+			podTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
+		}
 		for _, key := range dgdPropagatedAnnotationKeys {
 			if val, exists := dgdAnnotations[key]; exists {
 				if _, serviceHas := podTemplate.Annotations[key]; !serviceHas {

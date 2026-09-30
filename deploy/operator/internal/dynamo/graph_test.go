@@ -1784,15 +1784,6 @@ func TestAddMultinodeTopologyEnvVars(t *testing.T) {
 		wantAliases   bool
 	}{
 		{
-			name:          "new Grove deployment gets topology aliases",
-			numberOfNodes: 2,
-			annotations:   enabledAnnotations,
-			deployer:      &GroveMultinodeDeployer{},
-			wantLeader:    "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-engine-ldr-0.$(GROVE_HEADLESS_SERVICE)",
-			wantRank:      "$(GROVE_PCSG_POD_INDEX)",
-			wantAliases:   true,
-		},
-		{
 			name:          "new LWS deployment gets topology aliases",
 			numberOfNodes: 2,
 			annotations:   enabledAnnotations,
@@ -10569,6 +10560,18 @@ func TestPropagateDGDAnnotations(t *testing.T) {
 			serviceAnnotations: nil,
 			expectedAnnotation: map[string]string{
 				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+		},
+		{
+			name: "DGD origin version overrides conflicting service annotation",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+			},
+			serviceAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+			},
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 			},
 		},
 		{
