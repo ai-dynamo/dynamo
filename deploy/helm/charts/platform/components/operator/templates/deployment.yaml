@@ -32,7 +32,16 @@ metadata:
 spec:
   replicas: {{ .Values.controllerManager.replicas }}
   strategy:
-    type: Recreate
+    # RollingUpdate with zero allowed unavailability: the old ReplicaSet pods
+    # are only terminated after new (surge) pods become Ready, so DGD
+    # reconciliation and the CRD conversion webhook stay available across
+    # chart upgrades. The operator is leader-elected, so a brief overlap of
+    # old/new generations is safe. See #15411 for the background (Recreate
+    # took availability to zero on every upgrade).
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       control-plane: controller-manager
