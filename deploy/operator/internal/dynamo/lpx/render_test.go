@@ -46,7 +46,7 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	if err != nil {
 		return nil, err
 	}
-	if workload.Pipeline() == PipelineLPX {
+	if workload.Pipeline() == PipelineHybrid {
 		input.Cyborg = pcs.Spec.Template.Cliques[0]
 	}
 	templates, err := RenderNodeLocal(workload, plan, input)
@@ -90,7 +90,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			snapshot: hxSnapshot, configPath: "/custom",
 		},
 		{
-			name: "HX hybrid storage", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineLPX,
+			name: "HX hybrid storage", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineHybrid,
 			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)), configPath: "/configs",
 		},
 	}
@@ -99,7 +99,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			t.Log("Seed conflicting runtime annotations and a nondefault mount")
 			projection := projectRenderFixture(t, test.pipeline, test.snapshot)
 			require.NotEqual(t, projection.Digest().String(), projection.CompilerSnapshotDigest())
-			pcs := renderTestPCS(test.pipeline == PipelineLPX)
+			pcs := renderTestPCS(test.pipeline == PipelineHybrid)
 			for _, clique := range pcs.Spec.Template.Cliques {
 				clique.Annotations = map[string]string{
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
@@ -131,7 +131,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
 					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: test.configPath})
 			}
-			if test.pipeline == PipelineLPX {
+			if test.pipeline == PipelineHybrid {
 				template.Spec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
 				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = "/model-cache"
 			}
@@ -163,7 +163,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			require.Subset(t, agent.Spec.PodSpec.Volumes, template.Spec.Volumes)
 
 			t.Log("Resolve runtime mounts using the authored storage path")
-			if test.pipeline != PipelineLPX {
+			if test.pipeline != PipelineHybrid {
 				conductor := namedClique(t, rendered, "cond")
 				require.Equal(t, "kept", conductor.Annotations["user"])
 				require.Equal(t, template.Spec.Containers[0].VolumeMounts, conductor.Spec.PodSpec.Containers[0].VolumeMounts)

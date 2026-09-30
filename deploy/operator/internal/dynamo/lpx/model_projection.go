@@ -145,12 +145,12 @@ func (p *ModelProjection) RequestSpec(
 func (p *ModelProjection) schedulerWorkloadMode() lpxv1alpha1.WorkloadMode {
 	// HX and XT have separate wire values for the same two runtime shapes.
 	if p.configuredBuild.Family == BuildFamilyHX {
-		if p.pipeline == PipelineLPX {
+		if p.pipeline == PipelineHybrid {
 			return lpxv1alpha1.WorkloadModeV3HxStrictHybrid
 		}
 		return lpxv1alpha1.WorkloadModeV3HxLPUOnly
 	}
-	if p.pipeline == PipelineLPX {
+	if p.pipeline == PipelineHybrid {
 		return lpxv1alpha1.WorkloadModeV2StrictHybrid
 	}
 	return lpxv1alpha1.WorkloadModeV2LPUOnly

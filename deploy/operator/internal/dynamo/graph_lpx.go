@@ -277,7 +277,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		}
 
 		// The serving role owns its startup independently of the Agent template.
-		if workload.Pipeline() != dynamolpx.PipelineLPX {
+		if workload.Pipeline() != dynamolpx.PipelineHybrid {
 			role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 			input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 				p.discoveryContext, lpuDefaults)

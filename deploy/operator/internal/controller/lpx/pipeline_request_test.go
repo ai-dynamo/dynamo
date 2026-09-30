@@ -74,7 +74,7 @@ func TestGetPipelineRequests(t *testing.T) {
 func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 	t.Log("Publish the implicit hybrid runtime")
 	ctx := t.Context()
-	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, dgd)
 	require.Empty(t, desired.plan.ConductorTemplate)
 	require.NotEmpty(t, desired.plan.CyborgClique)

@@ -83,7 +83,7 @@ func projectV3PropSync(
 	if err != nil {
 		return nil, nil, err
 	}
-	if pipeline != PipelineLPX && len(edgePositions) != len(partitions)-1 {
+	if pipeline != PipelineHybrid && len(edgePositions) != len(partitions)-1 {
 		return nil, nil, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
 	}
 

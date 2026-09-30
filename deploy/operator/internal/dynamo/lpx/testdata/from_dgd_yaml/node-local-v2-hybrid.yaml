@@ -31,7 +31,7 @@ metadata:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c8949c8cc97a48ee49348070f782996b3bcdc31a4c6c66585ef30f085ef2cdaa
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:93ec945022a1709d4331a2a0cf9ec7feedbdb1e33eda4b691c2e33d6214819ed
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: node-local-v2-hybrid
@@ -46,7 +46,7 @@ spec:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
         nvidia.com/extra-resources-hash: 54cc4984adeab14a7040a304caa795d8b89ea4d8be9a2bc7a3a065cb21f7bf2c
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:06a49794501980fdaf5348d990cf1000ac8e2fb8f0a44e6192959a266c8f72b0
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c81421e95f9c131d6e129e9fa1169508c79b10817e84ff04419e3a9dd4654c4c
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:bdc60e13cf0adb5e5e47d7fa32960b9f79c864c28fe12da7483892b594fcde91
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
@@ -205,7 +205,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
         nvidia.com/extra-resources-hash: 734ce683f6b7ea5f7b0c0172b07d5e1ed45773120ab8c7d834967d180c62cea2
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c81421e95f9c131d6e129e9fa1169508c79b10817e84ff04419e3a9dd4654c4c
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:bdc60e13cf0adb5e5e47d7fa32960b9f79c864c28fe12da7483892b594fcde91
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -359,7 +359,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c81421e95f9c131d6e129e9fa1169508c79b10817e84ff04419e3a9dd4654c4c
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:bdc60e13cf0adb5e5e47d7fa32960b9f79c864c28fe12da7483892b594fcde91
       cliqueNames:
       - agt
       - cond

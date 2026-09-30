@@ -56,7 +56,7 @@ func TestProjectModelV2ValidatesPhysicalPartitionsInOrder(t *testing.T) {
 
 	t.Log("Project the invalid physical partition")
 	_, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"},
+		Pipeline: PipelineHybrid, Models: []string{"default"},
 		BuildSnapshot: normalized,
 	})
 
@@ -206,7 +206,7 @@ func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 	build.SelectedPropSyncChains = nil
 
 	t.Log("Keep Cyborg's partition zero independently of Nova's embedding placement")
-	projection := projectTestBuild(t, normalized, PipelineLPX)
+	projection := projectTestBuild(t, normalized, PipelineHybrid)
 	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, spec.WorkloadMode)
 	require.Len(t, spec.Partitions, 2)
@@ -261,7 +261,7 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	build.SelectedPropSyncChains = [][]int{{7, 8}}
 
 	t.Log("Project the selected chain beside an independent third partition")
-	projection := projectTestBuild(t, normalized, PipelineLPX)
+	projection := projectTestBuild(t, normalized, PipelineHybrid)
 
 	t.Log("Project all physical scheduler partitions and only the selected connector")
 	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
@@ -317,7 +317,7 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 	build.SupportsCPUEmbeddings = true
 
 	t.Log("Project without applying Nova's CPU-embedding partition omission")
-	projection := projectTestBuild(t, normalized, PipelineLPX)
+	projection := projectTestBuild(t, normalized, PipelineHybrid)
 
 	t.Log("Keep all physical scheduler partitions while collapsing their Agent runtime projection")
 	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
@@ -350,7 +350,7 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	build.SelectedPropSyncChains = [][]int{{7, 8}}
 
 	t.Log("Project and collapse the selected runtime chain")
-	projection := projectTestBuild(t, normalized, PipelineLPX)
+	projection := projectTestBuild(t, normalized, PipelineHybrid)
 
 	t.Log("Preserve both physical scheduler partitions and Agent replicas")
 	require.Len(t, projection.RequestSpec(&MaterializationPlan{}, "agents").Partitions, 2)

@@ -169,7 +169,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	t.Log("Project two complete hybrid replicas")
 	xt, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 	require.NoError(t, err)
-	require.Equal(t, PipelineLPX, xt.Pipeline())
+	require.Equal(t, PipelineHybrid, xt.Pipeline())
 	require.Equal(t, BuildFamilyXT, xt.BuildFamily())
 	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, xt.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents").WorkloadMode)
 	require.Len(t, xt.modelProjections[0].configuredBuild.Partitions, 2)

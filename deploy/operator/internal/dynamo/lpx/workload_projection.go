@@ -94,7 +94,7 @@ func newModelProjectionTranscripts(intent ModelProjectionInput, projectionVersio
 
 		// Preserve the digest's wire values without storing a second runtime discriminator.
 		mode := "lpuOnly"
-		if intent.Pipeline == PipelineLPX {
+		if intent.Pipeline == PipelineHybrid {
 			mode = "strictHybrid"
 		}
 		transcript.field("workload-mode", []byte(mode))
@@ -111,7 +111,7 @@ func bindHybridRuntimeIO(
 	ioFPGACount int32,
 	ioFanoutFactor int32,
 ) {
-	if pipeline != PipelineLPX {
+	if pipeline != PipelineHybrid {
 		return
 	}
 

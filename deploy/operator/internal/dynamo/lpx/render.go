@@ -60,7 +60,7 @@ func RenderNodeLocal(
 	projections := workload.modelProjections
 
 	// Keep the hybrid GPU clique before the workload's LPU roles.
-	hybrid := projections[0].pipeline == PipelineLPX
+	hybrid := projections[0].pipeline == PipelineHybrid
 	rendered := &WorkloadTemplates{}
 	cyborg := input.Cyborg
 	if hybrid {
@@ -94,7 +94,7 @@ func RenderNodeLocal(
 		return nil, err
 	}
 	v2HybridRuntime := projections[0].configuredBuild.Family == BuildFamilyXT &&
-		projections[0].pipeline == PipelineLPX
+		projections[0].pipeline == PipelineHybrid
 
 	// Render the optional Cyborg config and construct final resource order once.
 	var (
