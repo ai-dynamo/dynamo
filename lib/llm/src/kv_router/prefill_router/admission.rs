@@ -173,9 +173,12 @@ mod tests {
     use futures::stream;
     use serde_json::json;
 
-    use dynamo_runtime::pipeline::{ResponseStream, context::Controller};
+    use dynamo_runtime::pipeline::{
+        AsyncEngineContextProvider, Context, ResponseStream, context::Controller,
+    };
 
     use super::*;
+    use crate::kv_router::prefill_router::cancellation::arm_for;
 
     fn prefill_stream(
         items: Vec<Annotated<LLMEngineOutput>>,
@@ -260,16 +263,27 @@ mod tests {
             let _ = release_rx.await;
             Annotated::from_data(LLMEngineOutput::default())
         }));
-        let response = ResponseStream::new(Box::pin(stream), Arc::new(Controller::default()));
         let teardown = Arc::new(());
         let teardown_weak = Arc::downgrade(&teardown);
         let task_guard: dynamo_runtime::engine::EngineContextGuard = teardown.clone();
+        let client_context = Context::new(());
+        let prefill_context = Context::new(());
+        let client = client_context.context();
+        let prefill = prefill_context.context();
+        let response = ResponseStream::new(Box::pin(stream), prefill.clone());
+        let cancel_guard = arm_for(true, true, client.clone(), Arc::downgrade(&prefill)).unwrap();
+        prefill.retain(cancel_guard);
         drop(teardown);
 
         PrefillRouter::consume_prefill_stream(response, None, Some(task_guard))
             .await
             .unwrap();
         assert!(teardown_weak.upgrade().is_some());
+
+        client.stop_generating();
+        tokio::time::timeout(std::time::Duration::from_secs(1), prefill.stopped())
+            .await
+            .expect("bootstrap drain did not retain cancellation propagation");
 
         release_tx.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
