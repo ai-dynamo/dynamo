@@ -102,3 +102,8 @@
 # vllm/agg-h200, vllm/disagg-h200) do not exist on main until this PR merges, so these
 # tree/blob main URLs 404 during review. Remove after merge.
 ^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/ax-k2/(perf/h200|vllm/(agg|disagg)-h200)
+
+# Motif-3 recipe files land on the release/1.5.0-motif-3-post.1 branch, so their
+# canonical blob/main and tree/main links 404 from CI until they reach main.
+# Remove this entry once the recipe is on main.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/(recipes/motif-3|docs/fern/pages/recipes/model-recipes/motif-3\.mdx)
