@@ -33,7 +33,7 @@ spec:
             - --router-mode
             - kv
             - --request-plane
-            - nats
+            - tcp
           env:
             - name: POD_UID
               valueFrom:
@@ -62,7 +62,7 @@ spec:
             - /config/agg.yaml
             - --publish-events-and-metrics
             - --request-plane
-            - nats
+            - tcp
             - --kv-block-size
             - "32"
             - --dyn-tool-call-parser
