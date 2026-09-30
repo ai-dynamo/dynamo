@@ -350,3 +350,87 @@ async fn stalled_discovery_check_times_out_without_blocking_liveness() {
         wait_closed(info.socket_addr).await;
     }).await;
 }
+
+#[tokio::test]
+async fn etcd_readiness_requires_an_elected_leader() {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    temp_env::async_with_vars(http_env(), async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let leader = Arc::new(AtomicU8::new(1));
+        let response_leader = leader.clone();
+        let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            let mut requests = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    Some(result) = requests.join_next(), if !requests.is_empty() => {
+                        result.unwrap();
+                    }
+                    request = connection.accept() => {
+                        let Some(request) = request else { break };
+                        let (request, mut response) = request.unwrap();
+                        let response_leader = response_leader.clone();
+                        requests.spawn(async move {
+                            assert_eq!(request.method(), axum::http::Method::POST);
+                            assert_eq!(request.uri().path(), "/etcdserverpb.Maintenance/Status");
+                            let mut input = request.into_body();
+                            while let Some(data) = input.data().await {
+                                let data = data.unwrap();
+                                input.flow_control().release_capacity(data.len()).unwrap();
+                            }
+                            let headers = axum::http::Response::builder()
+                                .header("content-type", "application/grpc")
+                                .body(())
+                                .unwrap();
+                            let mut body = response.send_response(headers, false).unwrap();
+                            // Unary gRPC frame: uncompressed, two-byte protobuf payload.
+                            // etcd StatusResponse.leader is uint64 field 4 (tag 0x20).
+                            // IDs 0 and 1 each fit in one protobuf varint byte.
+                            let frame = vec![0, 0, 0, 0, 2, 0x20, response_leader.load(Ordering::SeqCst)];
+                            body.send_data(bytes::Bytes::from(frame), false).unwrap();
+                            let mut trailers = axum::http::HeaderMap::new();
+                            trailers.insert("grpc-status", "0".parse().unwrap());
+                            body.send_trailers(trailers).unwrap();
+                        });
+                    }
+                }
+            }
+        }));
+        let etcd = crate::transports::etcd::ClientOptions::builder()
+            .etcd_url(vec![format!("http://{address}")])
+            .attach_lease(false)
+            .build()
+            .unwrap();
+        let runtime = Runtime::from_current().unwrap();
+        let drt = tokio::time::timeout(
+            Duration::from_secs(5),
+            DistributedRuntime::new_with_probe_policy(
+                runtime.clone(),
+                DistributedConfig {
+                    discovery_backend: crate::distributed::DiscoveryBackend::KvStore(
+                        crate::storage::kv::Selector::Etcd(Box::new(etcd)),
+                    ),
+                    ..DistributedConfig::process_local()
+                },
+                SystemProbePolicy::RuntimeOnly,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let info = drt.system_status_server_info().unwrap();
+        let base = format!("http://{}", info.socket_addr);
+        let client = client();
+        for (leader_id, expected) in [(1, 200), (0, 503), (1, 200)] {
+            leader.store(leader_id, Ordering::SeqCst);
+            assert_eq!(status(&client, &base, "/health").await, expected);
+            assert_eq!(status(&client, &base, "/live").await, 200);
+        }
+        runtime.shutdown();
+        wait_closed(info.socket_addr).await;
+    })
+    .await;
+}

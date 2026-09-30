@@ -2994,6 +2994,7 @@ dependencies = [
  "figment",
  "fs4",
  "futures",
+ "h2 0.4.14",
  "humantime",
  "jsonschema",
  "k8s-openapi",

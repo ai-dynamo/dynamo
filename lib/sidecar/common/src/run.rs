@@ -31,8 +31,8 @@ pub fn run<E: LLMEngine + 'static>(
                 _ = sigterm.recv() => tracing::info!("SIGTERM received"),
                 _ = sigint.recv() => tracing::info!("SIGINT received"),
             }
-            signal_runtime.mark_shutting_down();
             signal_token.cancel();
+            signal_runtime.mark_shutting_down();
         });
 
         let result = run_until_shutdown(bootstrap, &runtime, shutdown.clone()).await;
