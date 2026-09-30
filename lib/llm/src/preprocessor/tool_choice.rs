@@ -18,12 +18,14 @@ use dynamo_protocols::types::{
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
-/// Tool names and parser diagnostics can contain request data, so this helper does not mark its message public.
-fn invalid_argument(message: impl Into<String>) -> DynamoError {
-    DynamoError::builder()
+fn invalid_argument(message: impl Into<String>, public_message: Option<&str>) -> DynamoError {
+    let mut error = DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)
-        .message(message)
-        .build()
+        .message(message);
+    if let Some(public_message) = public_message {
+        error = error.public_message(public_message);
+    }
+    error.build()
 }
 
 impl OpenAIPreprocessor {
@@ -83,17 +85,16 @@ impl OpenAIPreprocessor {
         let has_response_format_constraint = has_response_format_constraint(request);
         let structured_output_schema = response_format_json_schema(request);
 
-        validate::validate_response_format_conflicts(
-            &request.inner.response_format,
-            &request.common,
-        )
-        .map_err(|error| invalid_argument(error.to_string()))?;
+        self.validate_structured_output_composition(request, tool_choice, tools.as_ref())?;
 
         if is_forced_tool_choice && has_explicit_guided_decoding {
-            return Err(invalid_argument(concat!(
-                "guided decoding cannot be used in the same request as ",
-                "tool_choice=\"required\" or a named tool_choice.",
-            )));
+            return Err(invalid_argument(
+                concat!(
+                    "guided decoding cannot be used in the same request as ",
+                    "tool_choice=\"required\" or a named tool_choice.",
+                ),
+                None,
+            ));
         }
 
         // Explicit guided decoding constrains assistant content and cannot be
@@ -136,6 +137,7 @@ impl OpenAIPreprocessor {
                 return Err(invalid_argument(
                     "named tool choice for Kimi K3 requires --dyn-tool-call-parser kimi_k3 \
                      with XTML structural-tag support",
+                    None,
                 ));
             }
 
@@ -168,13 +170,42 @@ impl OpenAIPreprocessor {
             }
             Ok(None) => {}
             Err(err) => {
-                return Err(invalid_argument(err.to_string()));
+                return Err(invalid_argument(err.to_string(), None));
             }
         }
 
         // Auto/None requests can reach here when neither structural tags nor a
         // tool-choice JSON fallback were needed.
         Ok(GuidedToolConstraint::None)
+    }
+
+    fn validate_structured_output_composition(
+        &self,
+        request: &NvCreateChatCompletionRequest,
+        tool_choice: &ChatCompletionToolChoiceOption,
+        tools: &[ChatCompletionTool],
+    ) -> Result<(), DynamoError> {
+        let allow_tool_calls_with_structured_output = self
+            .runtime_config
+            .structural_tag
+            .as_ref()
+            .is_some_and(|config| config.allow_tool_calls_with_structured_output);
+
+        if matches!(tool_choice, ChatCompletionToolChoiceOption::Auto)
+            && !tools.is_empty()
+            && allow_tool_calls_with_structured_output
+        {
+            validate::validate_response_format_conflicts(
+                &request.inner.response_format,
+                &request.common,
+            )
+            .map_err(|error| {
+                let message = error.to_string();
+                invalid_argument(&message, Some(&message))
+            })?;
+        }
+
+        Ok(())
     }
 }
 
@@ -240,7 +271,7 @@ pub(crate) fn effective_tools(
     request: &CreateChatCompletionRequest,
 ) -> Result<Cow<'_, [ChatCompletionTool]>, DynamoError> {
     validate::validated_effective_tools(request)
-        .map_err(|error| invalid_argument(error.to_string()))
+        .map_err(|error| invalid_argument(error.to_string(), None))
 }
 
 pub(crate) fn effective_tool_definitions(
@@ -294,7 +325,7 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
         .as_ref()
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
     validate_openai_tool_choice(Some(tool_choice), Some(tools))
-        .map_err(|error| invalid_argument(error.to_string()))?;
+        .map_err(|error| invalid_argument(error.to_string(), None))?;
     let is_forced_tool_choice = matches!(
         tool_choice,
         ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
@@ -324,7 +355,7 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
     ) {
         Ok(Some(_)) => Ok(installed_json_constraint(tool_choice)),
         Ok(None) => Ok(GuidedToolConstraint::None),
-        Err(e) => Err(invalid_argument(e.to_string())),
+        Err(e) => Err(invalid_argument(e.to_string(), None)),
     }
 }
 
