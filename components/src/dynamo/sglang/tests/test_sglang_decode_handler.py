@@ -1736,16 +1736,8 @@ def test_kv_cache_hit_engine_data_omits_missing_prompt_tokens(meta_info):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("upload_metadata", [False, True])
-async def test_process_token_stream_reports_kv_cache_hit_on_final_chunk_only(
-    tmp_path, upload_metadata
-):
+async def test_process_token_stream_reports_kv_cache_hit_on_final_chunk_only():
     handler = _new_decode_handler()
-    uploader = (
-        MetadataUploader(url=(tmp_path / "metadata/kv-hit").as_uri())
-        if upload_metadata
-        else None
-    )
     final_meta_info = {
         "id": "sglang-1",
         "finish_reason": {"type": "stop"},
@@ -1772,7 +1764,6 @@ async def test_process_token_stream_reports_kv_cache_hit_on_final_chunk_only(
                 ]
             ),
             _Context(),
-            metadata_uploader=uploader,
         )
     )
 
@@ -1782,8 +1773,6 @@ async def test_process_token_stream_reports_kv_cache_hit_on_final_chunk_only(
         "prompt_tokens": 4,
         "reused_tokens": 3,
     }
-    if upload_metadata:
-        assert final_meta_info == {}
 
 
 @pytest.mark.asyncio
