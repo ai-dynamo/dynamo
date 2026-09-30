@@ -19,12 +19,11 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
   - name: worker
     type: worker
-    dynamoSidecar: dynamo
     replicas: 1
     podTemplate:
       spec:
         initContainers:
-        - name: dynamo
+        - name: runtime
           image: <your-registry>/dynamo-sidecar:1.6.0
           command:
           - dynamo-vllm-sidecar

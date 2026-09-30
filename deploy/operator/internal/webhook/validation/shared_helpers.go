@@ -94,14 +94,10 @@ func runtimeVersionImageAndPath(
 	fldPath *field.Path,
 ) (string, *field.Path) {
 	// In sidecar mode the engine image says nothing about Dynamo compatibility.
-	if spec.DynamoSidecar != nil {
-		imagePath := fldPath.Child("podTemplate", "spec", "initContainers")
-		if spec.PodTemplate != nil {
-			if index := containerIndexByName(spec.PodTemplate.Spec.InitContainers, *spec.DynamoSidecar); index >= 0 {
-				return spec.PodTemplate.Spec.InitContainers[index].Image, imagePath.Index(index).Child("image")
-			}
+	if spec.PodTemplate != nil {
+		if index := containerIndexByName(spec.PodTemplate.Spec.InitContainers, consts.RuntimeContainerName); index >= 0 {
+			return spec.PodTemplate.Spec.InitContainers[index].Image, fldPath.Child("podTemplate", "spec", "initContainers").Index(index).Child("image")
 		}
-		return "", imagePath
 	}
 
 	imagePath := fldPath.Child("podTemplate", "spec", "containers")
@@ -117,22 +113,16 @@ func runtimeVersionImageAndPath(
 }
 
 // runtimeVersionImageAndPathV1Alpha1 returns the runtime image and its alpha field path.
-// dynamoSidecar may be nil for a standard worker.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPathV1Alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
-	dynamoSidecar *string,
 ) (string, *field.Path) {
-	// The selector comes from typed hub conversion; init containers are live alpha fields.
-	if dynamoSidecar != nil {
-		imagePath := fldPath.Child("extraPodSpec", "initContainers")
-		if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil {
-			if index := containerIndexByName(spec.ExtraPodSpec.PodSpec.InitContainers, *dynamoSidecar); index >= 0 {
-				return spec.ExtraPodSpec.PodSpec.InitContainers[index].Image, imagePath.Index(index).Child("image")
-			}
+	// Alpha represents init containers directly, so live fields determine the mode.
+	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil {
+		if index := containerIndexByName(spec.ExtraPodSpec.PodSpec.InitContainers, consts.RuntimeContainerName); index >= 0 {
+			return spec.ExtraPodSpec.PodSpec.InitContainers[index].Image, fldPath.Child("extraPodSpec", "initContainers").Index(index).Child("image")
 		}
-		return "", imagePath
 	}
 
 	imagePath := fldPath.Child("extraPodSpec", "mainContainer", "image")

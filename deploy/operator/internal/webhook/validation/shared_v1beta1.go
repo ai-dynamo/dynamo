@@ -265,20 +265,16 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	// Native sidecars select a runtime container and exclude deferred engine layouts.
-	if spec.DynamoSidecar != nil {
-		selectorPath := fldPath.Child("dynamoSidecar")
-		detail := fmt.Sprintf("component %q with dynamoSidecar", spec.ComponentName)
+	// The reserved runtime init container selects sidecar mode regardless of validity.
+	if runtime := dynamo.GetDynamoSidecar(spec); runtime != nil {
+		index := containerIndexByName(spec.PodTemplate.Spec.InitContainers, consts.RuntimeContainerName)
+		runtimePath := fldPath.Child("podTemplate", "spec", "initContainers").Index(index)
+		detail := fmt.Sprintf("component %q with a runtime init container", spec.ComponentName)
 		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
-			allErrs = append(allErrs, field.Forbidden(selectorPath, "is supported only for worker, prefill, and decode components"))
+			allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), "is supported only for worker, prefill, and decode components"))
 		}
-		if *spec.DynamoSidecar == "" {
-			allErrs = append(allErrs, field.Invalid(selectorPath, "", "must not be empty"))
-		} else if runtime := dynamo.GetDynamoContainer(spec); runtime == nil {
-			allErrs = append(allErrs, field.Invalid(selectorPath, *spec.DynamoSidecar, "must match a podTemplate.spec.initContainers name"))
-		} else if runtime.RestartPolicy == nil || *runtime.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-			index := containerIndexByName(spec.PodTemplate.Spec.InitContainers, *spec.DynamoSidecar)
-			allErrs = append(allErrs, field.Invalid(fldPath.Child("podTemplate", "spec", "initContainers").Index(index).Child("restartPolicy"), k8sptr.Deref(runtime.RestartPolicy, ""), "must be Always for "+detail))
+		if runtime.RestartPolicy == nil || *runtime.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+			allErrs = append(allErrs, field.Invalid(runtimePath.Child("restartPolicy"), k8sptr.Deref(runtime.RestartPolicy, ""), "must be Always for "+detail))
 		}
 		if engine := dynamo.GetMainContainer(spec); engine == nil {
 			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate", "spec", "containers"), "main engine container is required for "+detail))
