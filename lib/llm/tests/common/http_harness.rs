@@ -68,12 +68,10 @@ impl HarnessService {
         Self::start_with_engine(Arc::new(ScriptedChatEngine::with_generate_error(error))).await
     }
 
-    /// Starts the harness with a scripted chat backend.
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         Self::start_with_engines(engine, None).await
     }
 
-    /// Enables legacy completions when a completions backend is supplied.
     pub async fn start_with_engines(
         engine: Arc<ScriptedChatEngine>,
         completions: Option<OpenAICompletionsStreamingEngine>,
