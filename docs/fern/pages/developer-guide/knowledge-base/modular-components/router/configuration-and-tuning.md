@@ -250,8 +250,12 @@ see only the policy class the trace supplies, never a classifier's override.
 | `dualmap` | `hash_prefix_blocks` (`4`), `pending_prefill_token_budget` (`65536`) prefill backlog a worker clears within the TTFT target, `window_requests` (`1000`) |
 | `chwbl` | `prefix_tokens` (`256`), `load_factor` (`1.25`) multiple of the average active requests a worker may carry |
 
-Where the host computes no prompt prefix hashes, such as in disaggregated prefill pools, `dualmap`
-and `chwbl` route to the least-loaded worker and `lmetric` skips hot-spot detection.
+`lmetric`, `dualmap`, and `chwbl` key requests on the prompt prefix hashes the host computes for
+active-block tracking, so their prefix affinity holds only in pools that track active blocks and
+assume KV reuse, such as aggregated pools. Where the host computes no prefix hashes, such as in
+disaggregated prefill pools, `dualmap` and `chwbl` route to the least-loaded worker and `lmetric`
+skips hot-spot detection. Where it does not assume KV reuse, such as in disaggregated decode pools,
+the hashes are unique per request, so these policies spread load without prefix affinity.
 
 #### Override the Selection
 
