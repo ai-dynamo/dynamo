@@ -26,6 +26,7 @@ cat > "$fixture_dir/config.json" <<'JSON'
     "kv_overlap_max_age_ms": 30000
   },
   "overlap_max_age_ms": 30000,
+  "kv_aware_token_id_completions": true,
   "pools": [
     {
       "site_id": "ohio",
@@ -96,6 +97,7 @@ check_status 200 GET /pools
 check_status 200 POST /overlap_scores '{"model":"mocker","token_ids":[1,2]}'
 check_status 503 GET /readyz
 check_status 503 POST /v1/completions '{"model":"mocker","prompt":"hello"}'
+check_status 503 POST /v1/completions '{"model":"mocker","prompt":[1,2,3,4]}'
 
 docker stop --timeout 5 "$container" >/dev/null
 exit_code="$(docker inspect "$container" --format '{{.State.ExitCode}}')"
