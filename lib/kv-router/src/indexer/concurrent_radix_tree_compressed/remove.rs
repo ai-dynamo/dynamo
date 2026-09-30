@@ -57,29 +57,12 @@ impl ConcurrentRadixTreeCompressed {
             return Err(KvCacheEventError::BlockNotFound);
         }
 
-        // A group is a contiguous run of hashes that resolve to the same node, so it
-        // is tracked as a sub-slice of the event instead of copied into a buffer.
+        // A group is the resolved node plus the contiguous run of following hashes
+        // in its edge. It is passed as a sub-slice of the event, not copied.
         let block_hashes = op.block_hashes;
-        let mut group_node: Option<SharedNode> = None;
-        let mut group_start = 0;
+        let mut index = 0;
 
-        for (index, &block_hash) in block_hashes.iter().enumerate() {
-            if group_node
-                .as_ref()
-                .is_some_and(|node| node.contains_edge_hash(block_hash))
-            {
-                continue;
-            }
-
-            self.apply_removed_group(
-                lookup,
-                worker,
-                group_node.take(),
-                &block_hashes[group_start..index],
-                id,
-            );
-            group_start = index;
-
+        while let Some(&block_hash) = block_hashes.get(index) {
             match self.resolve_lookup(
                 lookup,
                 worker,
@@ -87,7 +70,9 @@ impl ConcurrentRadixTreeCompressed {
                 LookupRepairDirection::TowardHead,
             ) {
                 Some(node) => {
-                    group_node = Some(node);
+                    let end = index + 1 + node.leading_edge_hash_count(&block_hashes[index + 1..]);
+                    self.apply_removed_group(lookup, worker, &node, &block_hashes[index..end], id);
+                    index = end;
                 }
                 None => {
                     tracing::debug!(
@@ -106,12 +91,10 @@ impl ConcurrentRadixTreeCompressed {
                     // permanently. Mirrors the scrubs in apply_removed_hash's
                     // miss branches.
                     self.remove_lookup_hashes(lookup, worker, [block_hash]);
-                    group_start = index + 1;
+                    index += 1;
                 }
             }
         }
-
-        self.apply_removed_group(lookup, worker, group_node, &block_hashes[group_start..], id);
 
         Ok(())
     }
@@ -120,13 +103,10 @@ impl ConcurrentRadixTreeCompressed {
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
-        node: Option<SharedNode>,
+        cur_node: &SharedNode,
         block_hashes: &[ExternalSequenceBlockHash],
         id: u64,
     ) {
-        let Some(cur_node) = node else {
-            return;
-        };
         if block_hashes.is_empty() {
             return;
         }

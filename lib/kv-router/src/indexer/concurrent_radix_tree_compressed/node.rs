@@ -193,6 +193,15 @@ impl Node {
         self.children.get(&local_hash)
     }
 
+    /// Number of leading `hashes` present in this node's edge, read under one lock.
+    pub(super) fn leading_edge_hash_count(&self, hashes: &[ExternalSequenceBlockHash]) -> usize {
+        let state = self.state.read();
+        hashes
+            .iter()
+            .take_while(|hash| state.edge_index.contains_key(hash))
+            .count()
+    }
+
     pub(super) fn contains_edge_hash(&self, hash: ExternalSequenceBlockHash) -> bool {
         self.state.read().edge_index.contains_key(&hash)
     }
