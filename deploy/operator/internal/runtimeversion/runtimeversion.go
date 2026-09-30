@@ -16,7 +16,7 @@ import (
 
 var imageTagPattern = regexp.MustCompile(`^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$`)
 
-// Version identifies a runtime compatibility version by semver core.
+// Version identifies a runtime version by semver core.
 type Version struct {
 	Major uint64
 	Minor uint64
@@ -38,7 +38,7 @@ func (v Version) Compare(other Version) int {
 	)
 }
 
-// Parse returns the compatibility version represented by an explicit override.
+// Parse returns the runtime version represented by an explicit override.
 func Parse(value string) (Version, error) {
 	version, err := semver.StrictNewVersion(value)
 	if err != nil {
@@ -47,7 +47,7 @@ func Parse(value string) (Version, error) {
 	return fromSemver(version), nil
 }
 
-// ParseImageVersion returns a normalized compatibility version from an image tag.
+// ParseImageVersion returns a normalized runtime version from an image tag.
 func ParseImageVersion(image string) (Version, error) {
 	tag := imageTag(image)
 	if tag == "" {

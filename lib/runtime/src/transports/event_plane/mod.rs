@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use lru::LruCache;
@@ -60,11 +60,17 @@ fn event_plane_host_from_env() -> Result<IpAddr> {
 
 fn event_plane_host_from_env_with_resolver<R: IpResolver>(resolver: &R) -> Result<IpAddr> {
     let Some(host) = host_override_from_env(DYN_EVENT_PLANE_HOST)? else {
-        return Ok(resolve_local_host(resolver));
+        return Ok(resolve_local_host(resolver)?.advertise_ip());
     };
 
     resolve_host_or_interface(&host, resolver)
         .map_err(|error| anyhow::anyhow!("Invalid {DYN_EVENT_PLANE_HOST} value '{host}': {error}"))
+        .and_then(|resolved| {
+            if resolved.bind_ip().to_canonical().is_unspecified() {
+                anyhow::bail!("Invalid {DYN_EVENT_PLANE_HOST} value '{host}': unspecified IP addresses cannot be advertised");
+            }
+            Ok(resolved.advertise_ip())
+        })
 }
 
 fn direct_zmq_public_endpoint(advertised_ip: IpAddr, actual_bind_endpoint: &str) -> Result<String> {
@@ -474,23 +480,24 @@ impl EventPublisher {
                 } else {
                     // DIRECT MODE: Bind PUB socket
                     let advertised_host = event_plane_host_from_env()?;
+                    let bind_endpoint = if advertised_host.is_ipv4() {
+                        "tcp://0.0.0.0:0"
+                    } else {
+                        "tcp://[::]:0"
+                    };
                     let (pub_transport, actual_bind_endpoint) = std::thread::spawn({
                         let topic = topic.clone();
-                        move || {
+                        move || -> Result<(ZmqPubTransport, String)> {
                             let rt = tokio::runtime::Builder::new_current_thread()
                                 .enable_all()
                                 .build()
-                                .expect("Failed to create Tokio runtime for ZMQ");
+                                .context("Failed to create Tokio runtime for ZMQ")?;
 
-                            rt.block_on(async move {
-                                zmq_transport::ZmqPubTransport::bind("tcp://0.0.0.0:0", &topic)
-                                    .await
-                                    .expect("Failed to bind ZMQ publisher")
-                            })
+                            rt.block_on(ZmqPubTransport::bind(bind_endpoint, &topic))
                         }
                     })
                     .join()
-                    .expect("Failed to join ZMQ initialization thread");
+                    .map_err(|_| anyhow::anyhow!("ZMQ initialization thread panicked"))??;
 
                     let public_endpoint =
                         direct_zmq_public_endpoint(advertised_host, &actual_bind_endpoint)?;
@@ -953,6 +960,35 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
+    use crate::utils::ip_resolver::test_support::StubResolver;
+
+    #[test]
+    fn direct_zmq_automatic_host_prefers_non_loopback_then_ipv4() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![
+            ("lo", "127.0.0.1".parse().unwrap()),
+            ("lo", "::1".parse().unwrap()),
+            ("eth0", "2001:db8::20".parse().unwrap()),
+        ];
+
+        assert_eq!(
+            temp_env::with_vars([(DYN_EVENT_PLANE_HOST, None::<&str>)], || {
+                event_plane_host_from_env_with_resolver(&resolver)
+            })
+            .unwrap(),
+            "2001:db8::20".parse::<IpAddr>().unwrap()
+        );
+        resolver
+            .interfaces
+            .push(("eth0", "192.0.2.20".parse().unwrap()));
+        assert_eq!(
+            temp_env::with_vars([(DYN_EVENT_PLANE_HOST, None::<&str>)], || {
+                event_plane_host_from_env_with_resolver(&resolver)
+            })
+            .unwrap(),
+            "192.0.2.20".parse::<IpAddr>().unwrap()
+        );
+    }
 
     struct EventPlaneHostResolver {
         ipv4: Option<std::net::IpAddr>,
@@ -1010,14 +1046,23 @@ mod tests {
             .unwrap(),
             "2001:db8::20".parse::<IpAddr>().unwrap()
         );
+        for host in ["2001:db8::10", "[2001:db8::10]"] {
+            assert_eq!(
+                temp_env::with_vars([(DYN_EVENT_PLANE_HOST, Some(host))], || {
+                    event_plane_host_from_env_with_resolver(&resolver)
+                })
+                .unwrap(),
+                "2001:db8::10".parse::<IpAddr>().unwrap()
+            );
+        }
     }
 
     #[test]
-    fn direct_zmq_advertise_host_preserves_ipv6_fallback_and_rejects_wildcards() {
+    fn direct_zmq_advertise_host_falls_back_to_ipv6_and_rejects_wildcards() {
         let resolver = EventPlaneHostResolver {
             ipv4: None,
             ipv6: Some("2001:db8::1".parse().unwrap()),
-            interfaces: Vec::new(),
+            interfaces: vec![("eth0".to_string(), "2001:db8::1".parse().unwrap())],
         };
         assert_eq!(
             temp_env::with_vars([(DYN_EVENT_PLANE_HOST, None::<&str>)], || {
@@ -1034,7 +1079,13 @@ mod tests {
             "2001:db8::1".parse::<IpAddr>().unwrap()
         );
 
-        for host in ["0.0.0.0", "::"] {
+        for host in [
+            "0.0.0.0",
+            "::",
+            "[::]",
+            "::ffff:0.0.0.0",
+            "[::ffff:0.0.0.0]",
+        ] {
             let error = temp_env::with_vars([(DYN_EVENT_PLANE_HOST, Some(host))], || {
                 event_plane_host_from_env_with_resolver(&resolver)
             })
@@ -1056,17 +1107,19 @@ mod tests {
             "tcp://192.0.2.10:4321"
         );
         assert_eq!(
-            direct_zmq_public_endpoint("2001:db8::10".parse().unwrap(), "tcp://0.0.0.0:4321")
-                .unwrap(),
+            direct_zmq_public_endpoint("2001:db8::10".parse().unwrap(), "tcp://[::]:4321").unwrap(),
             "tcp://[2001:db8::10]:4321"
         );
     }
 
+    #[rstest::rstest]
+    #[case("127.0.0.1")]
+    #[case("[::1]")]
     #[tokio::test]
-    async fn direct_zmq_publisher_advertises_configured_host() {
+    async fn direct_zmq_publisher_serves_advertised_endpoint(#[case] host: &str) {
         temp_env::async_with_vars(
             [
-                (DYN_EVENT_PLANE_HOST, Some("127.0.0.1")),
+                (DYN_EVENT_PLANE_HOST, Some(host)),
                 (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
                 (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
             ],
@@ -1110,12 +1163,49 @@ mod tests {
                     } => endpoint,
                     instance => panic!("expected direct ZMQ event channel, got {instance:?}"),
                 };
-                let port = endpoint
-                    .strip_prefix("tcp://127.0.0.1:")
-                    .expect("configured host should be advertised")
-                    .parse::<u16>()
-                    .expect("advertised endpoint should include a port");
-                assert_ne!(port, 0);
+                let address = endpoint
+                    .strip_prefix("tcp://")
+                    .unwrap()
+                    .parse::<SocketAddr>()
+                    .expect("advertised endpoint should include an IP address and port");
+                assert_eq!(
+                    address.ip(),
+                    host.trim_matches(['[', ']']).parse::<IpAddr>().unwrap()
+                );
+                assert_ne!(address.port(), 0);
+
+                let mut subscriber = EventSubscriber::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("subscribe through discovery");
+
+                let receive = async {
+                    loop {
+                        publisher
+                            .publish_bytes(vec![0x42])
+                            .await
+                            .expect("publish event");
+                        // Retry while the ZMQ subscription reaches the publisher.
+                        if let Ok(event) = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            subscriber.next(),
+                        )
+                        .await
+                        {
+                            let event =
+                                event.expect("event stream is open").expect("receive event");
+                            assert_eq!(event.publisher_id, publisher.publisher_id());
+                            assert_eq!(event.payload.as_ref(), &[0x42]);
+                            break;
+                        }
+                    }
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+                    .await
+                    .expect("subscriber should receive through the advertised address and port");
 
                 drop(publisher);
             },
