@@ -1911,7 +1911,14 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 	// Set backend-specific env var so the engine reads from the mounted cache path.
 	switch backendFramework {
 	case BackendFrameworkVLLM:
-		container.Env = MergeEnvs(container.Env, []corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: mountPath}})
+		cacheEnv := []corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: mountPath}}
+		annotations := GetPodTemplateAnnotations(component)
+		if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
+			container.Env = MergeEnvs(cacheEnv, container.Env)
+		} else {
+			// Older deployments keep the mounted path authoritative and the list sorted.
+			container.Env = mergeEnvsLegacy(container.Env, cacheEnv)
+		}
 	}
 	return nil
 }
@@ -2001,7 +2008,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 
 		// Co-located frontend discovery uses its own identity in both worker layouts.
 		frontendContext := ComponentContext{
-			Annotations: parentContext.Annotations,
+			Annotations:                    parentContext.Annotations,
 			numberOfNodes:                  1,
 			RuntimeContainerName:           sidecarName,
 			ComponentType:                  commonconsts.ComponentTypeFrontend,
@@ -2081,7 +2088,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 
 	// Main hosts the runtime unless the component selects a native Dynamo sidecar.
 	componentContext := ComponentContext{
-		Annotations: GetPodTemplateAnnotations(component),
+		Annotations:                    GetPodTemplateAnnotations(component),
 		numberOfNodes:                  numberOfNodes,
 		RuntimeContainerName:           commonconsts.MainContainerName,
 		ComponentType:                  string(component.ComponentType),

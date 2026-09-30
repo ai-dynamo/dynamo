@@ -60,7 +60,7 @@ func NewDiscoveryContext(defaultBackend configv1alpha1.DiscoveryBackend, annotat
 }
 
 type ComponentContext struct {
-	Annotations map[string]string
+	Annotations                    map[string]string // Includes the authoritative operator origin for compatibility gates.
 	numberOfNodes                  int32
 	RuntimeContainerName           string // Resolved name of the container hosting this component's Dynamo runtime.
 	DynamoNamespace                string
