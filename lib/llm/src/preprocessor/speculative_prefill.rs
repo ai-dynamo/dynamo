@@ -164,7 +164,7 @@ pub(super) fn maybe_wrap_stream(
         .and_then(|hints| hints.speculative_prefill)
         .unwrap_or(false);
 
-    if !enabled {
+    if !enabled || super::has_custom_content(request) {
         return stream;
     }
 

@@ -1266,6 +1266,13 @@ impl ModelDeploymentCard {
                         .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
                 }
 
+                // Opaque JSON cannot be dispatched to older workers that ignore it.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0json_multimodal\0true");
+                }
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -3298,6 +3305,24 @@ mod ownership_tests {
             true.into(),
         );
 
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn json_capability_isolates_opted_in_workers_only() {
+        use crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY;
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled
+            .runtime_config
+            .runtime_data
+            .insert(JSON_MULTIMODAL_CAPABILITY.into(), false.into());
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled
+            .runtime_config
+            .runtime_data
+            .insert(JSON_MULTIMODAL_CAPABILITY.into(), true.into());
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }

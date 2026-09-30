@@ -93,6 +93,10 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// An opted-in worker can consume opaque JSON through `multi_modal_data`.
+/// Absence means unsupported, including workers predating this transport.
+pub const JSON_MULTIMODAL_CAPABILITY: &str = "json_multimodal";
+
 /// Worker-reported Qwen3 video prompt-expansion contract used by vLLM.
 ///
 /// Absence disables exact video routing so a newer frontend remains safe with

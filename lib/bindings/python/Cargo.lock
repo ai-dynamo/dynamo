@@ -2346,9 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "9.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e316d4d0f5082257f1629ca61973eafc17cee3e6ee0c24f7a55a61beeff40d97"
+version = "10.0.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2386,9 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "6.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ef02e31ca224ca8db24b88a990b7db3eb2b99c77697b0d8ae44feaa32709e38"
+version = "7.0.0"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2449,9 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06464b1deb9b6e185476e2e4280cbbbc5f16d0d6fd8732ff8b5732d43ec0567b"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2599,9 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd9116db4a17d4ac186a13719b1eea8b41669cec2d95c8c93363869c9163c8aa"
+version = "1.9.2"
 dependencies = [
  "aho-corasick",
  "anyhow",

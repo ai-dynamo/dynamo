@@ -359,9 +359,27 @@ impl NvExtProvider for NvCreateChatCompletionRequest {
         self.nvext.as_ref()
     }
 
-    /// Returns `None`, as raw prompt extraction is not implemented.
+    /// Preserve a pre-rendered single-user prompt when `use_raw_prompt` is enabled.
     fn raw_prompt(&self) -> Option<String> {
-        None
+        use dynamo_protocols::types::{
+            ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
+            ChatCompletionRequestUserMessageContentPart,
+        };
+        let [ChatCompletionRequestMessage::User(user)] = self.inner.messages.as_slice() else {
+            return None;
+        };
+        Some(match &user.content {
+            ChatCompletionRequestUserMessageContent::Text(text) => text.clone(),
+            ChatCompletionRequestUserMessageContent::Array(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    ChatCompletionRequestUserMessageContentPart::Text(text) => {
+                        Some(text.text.as_str())
+                    }
+                    ChatCompletionRequestUserMessageContentPart::Multimodal(_) => None,
+                })
+                .collect(),
+        })
     }
 
     fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
@@ -610,6 +628,14 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
+        if self
+            .nvext
+            .as_ref()
+            .is_some_and(|ext| ext.use_raw_prompt == Some(true))
+            && self.raw_prompt().is_none()
+        {
+            anyhow::bail!("use_raw_prompt requires exactly one user message");
+        }
         validate::validate_model(&self.inner.model)?;
         // none for store
         validate::validate_reasoning_effort(&self.inner.reasoning_effort)?;
@@ -2128,5 +2154,37 @@ mod tests {
             .extract_stop_conditions()
             .expect("Failed to extract stop conditions");
         assert_eq!(stop_conditions.max_thinking_tokens, None);
+    }
+}
+
+#[cfg(test)]
+mod raw_chat_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn raw_prompt_concatenates_text_and_requires_one_user_message() {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model":"test", "nvext":{"use_raw_prompt":true}, "messages":[
+                    {"role":"user", "content":[
+                        {"type":"text","text":"Predict "},
+                        {"type":"chemistry","chemistry":{"data_base64":"opaque"}},
+                        {"type":"text","text":"<chemistry>"}
+                    ]}
+                ]
+            }))
+            .unwrap();
+        assert_eq!(request.raw_prompt().as_deref(), Some("Predict <chemistry>"));
+        ValidateRequest::validate(&request).unwrap();
+        request
+            .inner
+            .messages
+            .push(request.inner.messages[0].clone());
+        assert!(
+            ValidateRequest::validate(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one user")
+        );
     }
 }

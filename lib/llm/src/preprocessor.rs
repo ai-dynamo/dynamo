@@ -204,20 +204,7 @@ impl ToolProcessingRoute {
 fn tool_content_part_as_user(
     part: &ChatCompletionRequestToolMessageContentPart,
 ) -> Cow<'_, ChatCompletionRequestUserMessageContentPart> {
-    Cow::Owned(match part {
-        ChatCompletionRequestToolMessageContentPart::Text(part) => {
-            ChatCompletionRequestUserMessageContentPart::Text(part.clone())
-        }
-        ChatCompletionRequestToolMessageContentPart::ImageUrl(part) => {
-            ChatCompletionRequestUserMessageContentPart::ImageUrl(part.clone())
-        }
-        ChatCompletionRequestToolMessageContentPart::VideoUrl(part) => {
-            ChatCompletionRequestUserMessageContentPart::VideoUrl(part.clone())
-        }
-        ChatCompletionRequestToolMessageContentPart::AudioUrl(part) => {
-            ChatCompletionRequestUserMessageContentPart::AudioUrl(part.clone())
-        }
-    })
+    Cow::Borrowed(part)
 }
 
 enum MultimodalContentPart<'a> {
@@ -233,45 +220,50 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
-    fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
+    fn generic_part(&self) -> Option<&dynamo_protocols::types::MultimodalContentPart> {
         match self {
-            Self::User(part) => match *part {
-                ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => Some((
-                    "image_url",
-                    part.image_url.as_ref().map(|media| media.url.clone()),
-                    part.uuid.clone(),
-                )),
-                ChatCompletionRequestUserMessageContentPart::VideoUrl(part) => Some((
-                    "video_url",
-                    part.video_url.as_ref().map(|media| media.url.clone()),
-                    part.uuid.clone(),
-                )),
-                ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => Some((
-                    "audio_url",
-                    part.audio_url.as_ref().map(|media| media.url.clone()),
-                    part.uuid.clone(),
-                )),
-                _ => None,
-            },
-            Self::Tool(part) => match *part {
-                ChatCompletionRequestToolMessageContentPart::ImageUrl(part) => Some((
-                    "image_url",
-                    part.image_url.as_ref().map(|media| media.url.clone()),
-                    part.uuid.clone(),
-                )),
-                ChatCompletionRequestToolMessageContentPart::VideoUrl(part) => Some((
-                    "video_url",
-                    part.video_url.as_ref().map(|media| media.url.clone()),
-                    part.uuid.clone(),
-                )),
-                ChatCompletionRequestToolMessageContentPart::AudioUrl(part) => Some((
-                    "audio_url",
-                    part.audio_url.as_ref().map(|media| media.url.clone()),
-                    part.uuid.clone(),
-                )),
-                _ => None,
-            },
+            Self::User(ChatCompletionRequestUserMessageContentPart::Multimodal(part))
+            | Self::Tool(ChatCompletionRequestToolMessageContentPart::Multimodal(part)) => {
+                Some(part)
+            }
+            _ => None,
         }
+    }
+
+    fn media_info(&self) -> Result<Option<(&'static str, Option<url::Url>, Option<String>)>> {
+        let Some(part) = self.generic_part() else {
+            return Ok(None);
+        };
+        let result = match part.kind.as_str() {
+            "image_url" => {
+                let image: dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage =
+                    part.deserialize()?;
+                (
+                    "image_url",
+                    image.image_url.map(|media| media.url),
+                    image.uuid,
+                )
+            }
+            "video_url" => {
+                let video: dynamo_protocols::types::ChatCompletionRequestMessageContentPartVideo =
+                    part.deserialize()?;
+                (
+                    "video_url",
+                    video.video_url.map(|media| media.url),
+                    video.uuid,
+                )
+            }
+            "audio_url" => {
+                let audio: dynamo_protocols::types::ChatCompletionRequestMessageContentPartAudioUrl = part.deserialize()?;
+                (
+                    "audio_url",
+                    audio.audio_url.map(|media| media.url),
+                    audio.uuid,
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(result))
     }
 }
 
@@ -299,10 +291,12 @@ fn multimodal_content_parts(
 fn image_content_part_url(
     content_part: &ChatCompletionRequestUserMessageContentPart,
 ) -> Option<&str> {
-    let ChatCompletionRequestUserMessageContentPart::ImageUrl(part) = content_part else {
+    let ChatCompletionRequestUserMessageContentPart::Multimodal(part) = content_part else {
         return None;
     };
-    part.image_url.as_ref().map(|image| image.url.as_str())
+    (part.kind == "image_url")
+        .then(|| part.fields.get("image_url")?.get("url")?.as_str())
+        .flatten()
 }
 
 /// Decode a base64-encoded little-endian f32 byte string back into a float
@@ -1478,10 +1472,54 @@ fn attach_request_context_metadata(
     attach_image_cache_scope_from_context(request, context);
 }
 
+fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
+    request
+        .typed_messages()
+        .unwrap_or_default()
+        .iter()
+        .any(|message| {
+            multimodal_content_parts(message).is_some_and(|mut parts| {
+                parts.any(|part| {
+                    part.generic_part().is_some_and(|part| {
+                        !dynamo_protocols::types::MultimodalContentPart::is_builtin_kind(&part.kind)
+                    })
+                })
+            })
+        })
+}
+
+fn omit_custom_content_from_template(messages: &mut serde_json::Value) {
+    let Some(messages) = messages.as_array_mut() else {
+        return;
+    };
+    for message in messages {
+        if !matches!(
+            message.get("role").and_then(serde_json::Value::as_str),
+            Some("user" | "tool")
+        ) {
+            continue;
+        }
+        if let Some(parts) = message
+            .get_mut("content")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            parts.retain(|part| {
+                part.get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| {
+                        kind == "text"
+                            || dynamo_protocols::types::MultimodalContentPart::is_builtin_kind(kind)
+                    })
+            });
+        }
+    }
+}
+
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
-/// All other trait methods delegate to the inner request.
+/// Backend JSON payloads stay out of templates; the original typed content
+/// remains available to multimodal preprocessing.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
@@ -1496,6 +1534,7 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     fn messages(&self) -> minijinja::value::Value {
         let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
             .unwrap_or_default();
+        omit_custom_content_from_template(&mut json);
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -1518,7 +1557,15 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
-        self.inner.typed_messages()
+        // Renderers that use typed messages must also use the projected view.
+        if self.normalize_tool_call_args
+            || self.continue_final_message
+            || has_custom_content(self.inner)
+        {
+            None
+        } else {
+            self.inner.typed_messages()
+        }
     }
 
     fn tools(&self) -> Option<minijinja::value::Value> {
@@ -3197,15 +3244,16 @@ impl OpenAIPreprocessor {
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
         let continue_final = request.get_continue_final_message() == Some(true);
-        let formatted_prompt = if self.normalize_tool_call_args || continue_final {
-            self.apply_template_inner(&NormalizedArgsRequest {
-                inner: request,
-                normalize_tool_call_args: self.normalize_tool_call_args,
-                continue_final_message: continue_final,
-            })?
-        } else {
-            self.apply_template_inner(request)?
-        };
+        let formatted_prompt =
+            if self.normalize_tool_call_args || continue_final || has_custom_content(request) {
+                self.apply_template_inner(&NormalizedArgsRequest {
+                    inner: request,
+                    normalize_tool_call_args: self.normalize_tool_call_args,
+                    continue_final_message: continue_final,
+                })?
+            } else {
+                self.apply_template_inner(request)?
+            };
         let Some(prompt) = formatted_prompt else {
             return Ok(None);
         };
@@ -3345,11 +3393,26 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&str>,
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<(Vec<MmRoutingEntry>, Option<usize>)> {
+        if has_custom_content(request)
+            && !self.runtime_config.runtime_flag_enabled(
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+            )
+        {
+            let message = "Selected workers do not support custom JSON multimodal content; use an aggregated Python vLLM worker with --enable-multimodal";
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(message)
+                .public_details(PublicDetails::Message {
+                    message: message.into(),
+                })
+                .build()
+                .into());
+        }
         // `token_ids` is only consumed by exact MM-routing construction below.
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
 
-        let mut media_map: MultimodalDataMap = HashMap::new();
+        let mut media_map = MultimodalDataMap::new();
         let mut uuid_map: MultimodalUuidMap = HashMap::new();
         let mut has_user_uuid = false;
         // Decoded results are written back into these reserved modality slots so
@@ -3404,7 +3467,24 @@ impl OpenAIPreprocessor {
                 continue;
             };
             for content_part in content_parts {
-                let Some((type_str, url, uuid)) = content_part.media_info() else {
+                let Some((type_str, url, uuid)) = content_part.media_info()? else {
+                    if let Some(part) = content_part.generic_part()
+                        && !dynamo_protocols::types::MultimodalContentPart::is_builtin_kind(
+                            &part.kind,
+                        )
+                    {
+                        let payload = part.fields.get(&part.kind).ok_or_else(|| {
+                            invalid_argument_error("custom content is missing its payload")
+                        })?;
+                        media_map
+                            .entry(part.kind.clone())
+                            .or_default()
+                            .push(MultimodalData::Json(payload.clone()));
+                        #[cfg(feature = "mm-routing")]
+                        {
+                            exact_mm_routing_eligible = false;
+                        }
+                    }
                     continue;
                 };
 
@@ -3708,6 +3788,7 @@ impl OpenAIPreprocessor {
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
+            omit_custom_content_from_template(&mut extra_args["messages"]);
 
             // `multi_modal_data` already carries the media (decoded descriptors or
             // original URLs, including inline `data:`). Duplicating those payloads
@@ -8772,15 +8853,15 @@ mod tests {
         let parts: Vec<_> = multimodal_content_parts(&message).unwrap().collect();
         assert!(matches!(
             parts[0].as_user().as_ref(),
-            ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+            ChatCompletionRequestUserMessageContentPart::Multimodal(part) if part.kind == "image_url"
         ));
         assert!(matches!(
             parts[1].as_user().as_ref(),
-            ChatCompletionRequestUserMessageContentPart::VideoUrl(_)
+            ChatCompletionRequestUserMessageContentPart::Multimodal(part) if part.kind == "video_url"
         ));
         assert!(matches!(
             parts[2].as_user().as_ref(),
-            ChatCompletionRequestUserMessageContentPart::AudioUrl(_)
+            ChatCompletionRequestUserMessageContentPart::Multimodal(part) if part.kind == "audio_url"
         ));
     }
 
@@ -12799,5 +12880,40 @@ mod tests {
             image,
             video(2)
         ]));
+    }
+}
+
+#[cfg(test)]
+mod custom_content_template_tests {
+    use super::*;
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+    #[test]
+    fn backend_payloads_are_excluded_only_from_the_template_view() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test", "messages":[{"role":"user", "content":[
+                {"type":"text", "text":"Predict <chemistry>"},
+                {"type":"chemistry", "chemistry":{"data_base64":"must-not-be-tokenized"}},
+                {"type":"image_url", "image_url":{"url":"https://example.com/image.png"}}
+            ]}]
+        }))
+        .unwrap();
+        assert!(has_custom_content(&request));
+        let view = NormalizedArgsRequest {
+            inner: &request,
+            normalize_tool_call_args: false,
+            continue_final_message: false,
+        };
+        assert!(view.typed_messages().is_none());
+        let messages = serde_json::to_value(view.messages()).unwrap();
+        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(messages[0]["content"][0]["text"], "Predict <chemistry>");
+        assert_eq!(messages[0]["content"][1]["type"], "image_url");
+        assert!(!messages.to_string().contains("must-not-be-tokenized"));
+        let original = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            original["messages"][0]["content"][1]["chemistry"]["data_base64"],
+            "must-not-be-tokenized"
+        );
     }
 }

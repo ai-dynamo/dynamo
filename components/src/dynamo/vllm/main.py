@@ -69,7 +69,10 @@ from .embedding_worker_processes import (
     is_embedding_process_child,
     start_embedding_parent_watchdog,
 )
-from .engine_generate import publish_engine_generate_capability
+from .engine_generate import (
+    publish_engine_generate_capability,
+    publish_json_multimodal_capability,
+)
 from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -838,6 +841,9 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_json_multimodal_capability(
+        runtime_config, model_input, worker_type, config.enable_multimodal
+    )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)

@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ipnet::IpNet;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect::Policy;
@@ -527,14 +527,21 @@ impl MediaLoader {
         media_io_kwargs: Option<&MediaDecoder>,
         _hash_video: bool,
     ) -> Result<RdmaMediaDataDescriptor> {
+        let ChatCompletionRequestUserMessageContentPart::Multimodal(part) = oai_content_part else {
+            anyhow::bail!("Unsupported media type");
+        };
+        let image_part = if part.kind == "image_url" {
+            Some(part.deserialize::<dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage>()?)
+        } else {
+            None
+        };
+
         // Image-only fast path: cache lookup keyed by URL/datauri string.
         // Video/audio aren't cached yet (their lifetime/content semantics
         // are different — easy to add later if profiling justifies it).
         // The cache stores the post-decode + NIXL-registered descriptor;
         // a hit short-circuits both the network fetch and the image decode.
-        if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
-            (self.cache.as_ref(), oai_content_part)
-        {
+        if let (Some(cache), Some(image_part)) = (self.cache.as_ref(), image_part.as_ref()) {
             // media_io_kwargs is per-request and could change the decode
             // output (resize, normalisation). When it's set we skip the
             // cache to stay correct; in practice it's None on the common
@@ -551,15 +558,18 @@ impl MediaLoader {
         }
 
         // fetch the media, decode and NIXL-register
-        let decoded = match oai_content_part {
-            ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+        let decoded = match part.kind.as_str() {
+            "image_url" => {
+                let image_part = image_part
+                    .as_ref()
+                    .context("Missing validated image content")?;
                 let mdc_decoder = self
                     .media_decoder
                     .image
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
-                let url = require_image_url(image_part)?;
+                let url = require_image_url(&image_part)?;
                 self.media_fetcher
                     .check_if_url_allowed_with_dns(url)
                     .await?;
@@ -573,7 +583,8 @@ impl MediaLoader {
                 decoder.decode_async(data).await?
             }
             #[allow(unused_variables)]
-            ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
+            "video_url" => {
+                let video_part = part.deserialize::<dynamo_protocols::types::ChatCompletionRequestMessageContentPartVideo>()?;
                 #[cfg(not(feature = "media-ffmpeg"))]
                 anyhow::bail!("Video decoding requires the 'media-ffmpeg' feature to be enabled");
 
@@ -606,7 +617,7 @@ impl MediaLoader {
                         .await?
                 }
             }
-            ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
+            "audio_url" => {
                 anyhow::bail!("Audio decoding is not supported yet");
             }
             _ => anyhow::bail!("Unsupported media type"),
@@ -620,8 +631,7 @@ impl MediaLoader {
         // underlying NIXL registration via `Arc`, so the cached entry stays
         // alive across in-flight requests; eviction just drops the cache's
         // own reference.
-        if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
-            (self.cache.as_ref(), oai_content_part)
+        if let (Some(cache), Some(image_part)) = (self.cache.as_ref(), image_part.as_ref())
             && media_io_kwargs.is_none()
             && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
         {
