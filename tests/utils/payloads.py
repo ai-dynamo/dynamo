@@ -804,44 +804,114 @@ class LoraTestChatPayload(ChatPayload):
                 timeout=self.timeout,
             )
 
-            # Wait for the LoRA model to appear in /v1/models
-            models_url = f"http://{self.host}:{self.port}/v1/models"
-            start_time = time.time()
+            self._wait_for_lora_listing(listed=True)
+            self._lora_loaded = True
 
-            logger.info(
-                f"Waiting for LoRA model '{self.lora_name}' to appear in /v1/models..."
-            )
+    def _wait_for_lora_listing(self, listed: bool) -> None:
+        """Poll /v1/models until the LoRA model is listed, or no longer listed."""
+        models_url = f"http://{self.host}:{self.port}/v1/models"
+        state = "appear in" if listed else "disappear from"
+        start_time = time.time()
 
-            while time.time() - start_time < self.timeout:
-                try:
-                    response = requests.get(models_url, timeout=5)
-                    if response.status_code == 200:
-                        data = response.json()
-                        models = data.get("data", [])
-                        model_ids = [m.get("id", "") for m in models]
+        logger.info(
+            f"Waiting for LoRA model '{self.lora_name}' to {state} /v1/models..."
+        )
 
-                        if self.lora_name in model_ids:
-                            logger.info(
-                                f"LoRA model '{self.lora_name}' is now available"
-                            )
-                            self._lora_loaded = True
-                            return
+        while time.time() - start_time < self.timeout:
+            try:
+                response = requests.get(models_url, timeout=5)
+                if response.status_code == 200:
+                    models = response.json().get("data", [])
+                    model_ids = [m.get("id", "") for m in models]
 
-                        logger.debug(
-                            f"Available models: {model_ids}, waiting for '{self.lora_name}'..."
+                    if (self.lora_name in model_ids) == listed:
+                        logger.info(
+                            f"LoRA model '{self.lora_name}' listed={listed} in /v1/models"
                         )
-                except requests.RequestException as e:
-                    logger.debug(f"Error checking /v1/models: {e}")
+                        return
 
-                time.sleep(1)
+                    logger.debug(
+                        f"Available models: {model_ids}, waiting for '{self.lora_name}' to {state} them..."
+                    )
+            except requests.RequestException as e:
+                logger.debug(f"Error checking /v1/models: {e}")
 
-            raise RuntimeError(
-                f"Timeout: LoRA model '{self.lora_name}' did not appear in /v1/models within {self.timeout}s"
-            )
+            time.sleep(1)
+
+        raise RuntimeError(
+            f"Timeout: LoRA model '{self.lora_name}' did not {state} /v1/models within {self.timeout}s"
+        )
 
     def url(self) -> str:
         """Load LoRA before first request, then return URL"""
         self._ensure_lora_loaded()
+        return super().url()
+
+
+class LoraLifecycleChatPayload(LoraTestChatPayload):
+    """
+    Chat payload that drives a LoRA adapter through load, unload, and reload.
+
+    Before the first harness request it loads the adapter, runs adapter
+    inference, unloads it, checks that the adapter is gone from the worker and
+    the frontend while the base model keeps serving, and then reloads it. The
+    harness requests that follow run against the reloaded adapter.
+    """
+
+    def __init__(self, body: dict, base_model: str, **kwargs: Any):
+        super().__init__(body=body, **kwargs)
+        self.base_model = base_model
+        self._lifecycle_done = False
+
+    def _system_url(self, path: str) -> str:
+        return f"http://{self.host}:{self.system_ports[0]}/{path.lstrip('/')}"
+
+    def _listed_loras(self) -> Dict[str, Any]:
+        response = requests.get(self._system_url("/v1/loras"), timeout=self.timeout)
+        response.raise_for_status()
+        return response.json().get("loras") or {}
+
+    def _post_chat(self, body: Dict[str, Any]) -> Any:
+        return requests.post(BasePayload.url(self), json=body, timeout=self.timeout)
+
+    def _run_lifecycle(self) -> None:
+        if self._lifecycle_done:
+            return
+
+        self._ensure_lora_loaded()
+        assert (
+            self.lora_name in self._listed_loras()
+        ), f"Loaded LoRA '{self.lora_name}' missing from worker /v1/loras"
+        self.process_response(self._post_chat(self.body))
+
+        logger.info(f"Unloading LoRA adapter: {self.lora_name}")
+        response = requests.delete(
+            self._system_url(f"/v1/loras/{self.lora_name}"), timeout=self.timeout
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Failed to unload LoRA adapter: {response.status_code} - {response.text}"
+            )
+        assert (
+            self.lora_name not in self._listed_loras()
+        ), f"Unloaded LoRA '{self.lora_name}' still listed in worker /v1/loras"
+        self._wait_for_lora_listing(listed=False)
+
+        response = self._post_chat(self.body)
+        assert (
+            response.status_code == 404
+        ), f"Request to unloaded LoRA returned {response.status_code}, expected 404: {response.text}"
+
+        response = self._post_chat({**self.body, "model": self.base_model})
+        ChatPayload.extract_content(response)
+
+        # The next url() call reloads the adapter for the harness requests.
+        self._lora_loaded = False
+        self._lifecycle_done = True
+
+    def url(self) -> str:
+        """Run load/unload once, reload the LoRA, then return URL"""
+        self._run_lifecycle()
         return super().url()
 
 
