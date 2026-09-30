@@ -3583,6 +3583,8 @@ mod stream_options {
             Error,
         > for CompletionEngine
     {
+        /// Returns usage regardless of the requested options so the test can detect
+        /// whether unary response aggregation drops engine-provided token counts.
         async fn generate(
             &self,
             request: SingleIn<NvCreateCompletionRequest>,
@@ -3601,6 +3603,8 @@ mod stream_options {
         }
     }
 
+    /// Disables forced usage to make preservation of `include_usage: false` observable.
+    /// Checks both HTTP endpoints because each normalizes options before dispatch.
     #[tokio::test]
     async fn normalizes_options_only_for_nonstreaming_requests() {
         const ENV: [(&str, Option<&str>); 2] = [
