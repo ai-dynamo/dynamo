@@ -266,7 +266,6 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 			return err
 		}
 	}
-	configureAgentIdentity(agentPodSpec)
 
 	return nil
 }

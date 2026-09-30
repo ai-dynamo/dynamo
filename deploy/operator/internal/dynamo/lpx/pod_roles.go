@@ -16,8 +16,7 @@ const (
 	v2LPUResourceName corev1.ResourceName = "lpu.nvidia.com/lpu"
 	v3LPUResourceName corev1.ResourceName = "nvidia.com/lpu"
 
-	lpuAgentContainerName = "agent"
-	allocationEnvVar      = "LPX_ALLOCATION"
+	allocationEnvVar = "LPX_ALLOCATION"
 )
 
 // configureAgentScheduling consumes a fresh, nonnil Agent PodSpec containing main.
