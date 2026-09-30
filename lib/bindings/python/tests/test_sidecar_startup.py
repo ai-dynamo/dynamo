@@ -93,10 +93,10 @@ def test_python_sidecar_probes_during_initialization(
         ("trtllm", ["--help"], "SystemExit", "invalid-backend", ""),
         (
             "trtllm",
-            ["--model-path", "unused", "--context-length", "0"],
+            ["--model-path", ""],
             "ValueError",
             "invalid-backend",
-            "context-length must be greater than zero",
+            "model-path must not be empty",
         ),
         (
             "trtllm",

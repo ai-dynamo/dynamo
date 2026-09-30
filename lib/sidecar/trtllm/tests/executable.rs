@@ -32,21 +32,11 @@ fn invalid_arguments_fail_before_runtime_configuration() {
     }
     // A runtime configuration error must not mask a local argument error.
     let output = command
-        .args([
-            "--grpc-endpoint",
-            "http://127.0.0.1:0",
-            "--model-path",
-            "unused",
-            "--context-length",
-            "0",
-        ])
+        .args(["--grpc-endpoint", "http://127.0.0.1:0", "--model-path", ""])
         .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
         .output()
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("context-length must be greater than zero"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("model-path must not be empty"), "{stderr}");
 }
