@@ -12,9 +12,10 @@
 //! every worker is over the bound, the first worker in hash order takes it.
 //!
 //! The policy reads no cache state, so it routes identically with or without KV events. The key
-//! is block aligned: it covers the prompt's first `prefix_tokens / block_size` full blocks, or
-//! all of them for a shorter prompt. Prompts without a full block, and requests without prefix
-//! hashes such as those in disaggregated prefill pools, go to the least-loaded worker.
+//! is block aligned: it covers the prompt's first `prefix_tokens / block_size` full blocks, at
+//! least one, or all of them for a shorter prompt. Prompts without a full block, and requests
+//! without prefix hashes such as those in disaggregated prefill pools, go to the least-loaded
+//! worker.
 //! Rendezvous hashing stands in for the hash ring.
 
 use std::sync::Arc;
@@ -88,6 +89,8 @@ impl WorkerPicker for ChwblPicker {
         let requests = |row: usize| load[row].active_requests();
         let key_blocks =
             (self.parameters.prefix_tokens / context.block_size().max(1) as usize).max(1);
+        // TODO(prefix-key): key on content-derived block hashes so pools without active-block
+        // tracking or assumed KV reuse keep prefix affinity; DualMap and LMetric share this.
         let key = context
             .prefix_hashes()
             .and_then(|hashes| hashes.get(key_blocks.min(hashes.len()).checked_sub(1)?))
