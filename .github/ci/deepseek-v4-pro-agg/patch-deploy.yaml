@@ -49,7 +49,7 @@ spec:
         annotations:
           nvidia.com/disable-image-pull-secret-discovery: "true"
       envs:
-      # Match the upstream perf request timeout for long prefills and cold JIT.
+      # Allow long prefills and cold JIT before marking workers unhealthy.
       - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
         value: "1200"
       volumeMounts:

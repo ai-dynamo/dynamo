@@ -33,7 +33,8 @@ concurrency:
 jobs:
   perf:
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 300
+    # Allow the 12-hour benchmark plus deployment, diagnostics, and cleanup.
+    timeout-minutes: 900
     defaults:
       run:
         shell: bash
@@ -80,7 +81,8 @@ jobs:
           kubectl kustomize "$OVERLAY" --load-restrictor LoadRestrictionsNone > "$ARTIFACTS/rendered.yaml"
           yq 'select(.kind != "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/deploy.yaml"
           yq 'select(.kind == "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/perf.yaml"
-          yq -i '(.spec.template.spec.containers[0].env[] | select(.name == "ROOT_ARTIFACT_DIR").value) = "/model-cache/perf/" + strenv(RUN_KEY)' "$ARTIFACTS/perf.yaml"
+          yq -i '(.spec.template.spec.containers[0].env[] | select(.name == "ARTIFACT_ROOT").value) = "/opt/models/perf/" + strenv(RUN_KEY) |
+            .spec.template.spec.containers[0].envFrom[0].secretRef.name = "hf-" + strenv(RUN_KEY)' "$ARTIFACTS/perf.yaml"
           git rev-parse HEAD > "$ARTIFACTS/source-sha.txt"
       - name: Preflight and create run credentials
         timeout-minutes: 10
@@ -124,7 +126,6 @@ jobs:
           echo "FRONTEND=$frontend" >> "$GITHUB_ENV"
       - name: Run upstream AIPerf benchmark
         if: ${{ !inputs.preflight_only }}
-        timeout-minutes: 125
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/perf.yaml"
@@ -162,9 +163,12 @@ jobs:
         if: ${{ success() && !inputs.preflight_only }}
         timeout-minutes: 5
         run: |
-          result=$(find "$ARTIFACTS/perf" -name profile_export_aiperf.json -print -quit)
-          jq -e '.request_count.avg == .input_config.phases[0].requests and (.error_request_count.avg // 0) == 0 and
-            .output_sequence_length.avg > 0' "$result"
+          concurrencies=$(yq '.spec.template.spec.containers[0].env[] | select(.name == "CONCURRENCIES").value' "$ARTIFACTS/perf.yaml")
+          for concurrency in $concurrencies; do
+            jq -e --argjson requests "$((concurrency * 3))" '
+              .request_count.avg == $requests and (.error_request_count.avg // 0) == 0 and
+              .output_sequence_length.avg > 0' "$ARTIFACTS/perf/c$concurrency/profile_export_aiperf.json"
+          done
       - name: Clean up recipe resources
         if: always()
         timeout-minutes: 20

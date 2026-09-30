@@ -6,9 +6,10 @@ kind: Job
 metadata:
   name: dsv4-bench
 spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 43200
   template:
     spec:
-      affinity: null
       priorityClassName: ci-nightly-high-priority
       nodeSelector:
         kubernetes.io/arch: amd64
@@ -18,12 +19,12 @@ spec:
         value: user-workload
         effect: NoExecute
       containers:
-      - name: perf
+      - name: bench
         env:
         - name: ENDPOINT
           value: dsv4-pro-agg-frontend:8000
-        - name: TARGET_MODEL
-          value: deepseek-ai/DeepSeek-V4-Pro
+        - name: CONCURRENCIES
+          value: "1 8 64 128 256 512 1024"
       volumes:
       - name: model-cache
         persistentVolumeClaim:
