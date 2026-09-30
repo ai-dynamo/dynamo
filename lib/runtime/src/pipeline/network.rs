@@ -660,6 +660,10 @@ pub struct StreamOptions {
     /// that can be picked up by the Response/Reverse pipeline
     pub enable_response_stream: bool,
 
+    /// Preserve guarded dispatch setup until the worker sends its prologue.
+    #[builder(default)]
+    pub defer_cancellation_until_prologue: bool,
+
     /// The number of frames buffered between the data-plane socket task and the
     /// engine consumer/producer before backpressure kicks in. Drives the mpsc
     /// channel capacity for the per-stream buffer in the TCP transport.

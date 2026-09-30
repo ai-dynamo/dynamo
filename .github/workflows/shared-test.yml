@@ -146,6 +146,11 @@ on:
         required: false
         type: string
         default: ''
+      sidecar_native_artifact:
+        description: 'Artifact containing the direct vLLM native integration test executable'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -253,6 +258,29 @@ jobs:
           if [ ! "${GITHUB_WORKSPACE}" -ef "${CONTAINER_WORKSPACE}" ]; then
             # Replace the test inputs so files deleted by the PR cannot linger.
             for path in lib/sidecar tests examples/common conftest.py pyproject.toml Cargo.toml; do
+              rm -rf "${CONTAINER_WORKSPACE}/${path}"
+              mkdir -p "$(dirname "${CONTAINER_WORKSPACE}/${path}")"
+              cp -r "${GITHUB_WORKSPACE}/${path}" "${CONTAINER_WORKSPACE}/${path}"
+            done
+          fi
+      - name: Download native sidecar test
+        if: ${{ inputs.sidecar_native_artifact != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: ${{ inputs.sidecar_native_artifact }}
+          path: native-sidecar-test
+      - name: Install native sidecar test
+        if: ${{ inputs.sidecar_native_artifact != '' }}
+        shell: bash
+        env:
+          CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+        run: |
+          set -euo pipefail
+          test -n "${CONTAINER_WORKSPACE}"
+          chmod +x native-sidecar-test/native_engine
+          echo "DYNAMO_SIDECAR_NATIVE_TEST=${GITHUB_WORKSPACE}/native-sidecar-test/native_engine" >> "${GITHUB_ENV}"
+          if [ ! "${GITHUB_WORKSPACE}" -ef "${CONTAINER_WORKSPACE}" ]; then
+            for path in tests lib/sidecar/testkit conftest.py pyproject.toml; do
               rm -rf "${CONTAINER_WORKSPACE}/${path}"
               mkdir -p "$(dirname "${CONTAINER_WORKSPACE}/${path}")"
               cp -r "${GITHUB_WORKSPACE}/${path}" "${CONTAINER_WORKSPACE}/${path}"
