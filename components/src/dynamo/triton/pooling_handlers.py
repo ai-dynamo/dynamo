@@ -152,7 +152,7 @@ class ClassifyWorkerHandler:
     async def generate(
         self, request: dict, context: Any = None
     ) -> AsyncGenerator[dict, None]:
-        logger.debug(f"Received classify request: {request}")
+        logger.debug("Received classify request for model %s", self._model.name)
 
         # Health probes short-circuit before inference to match RequestHandler.
         if is_probe(request):
