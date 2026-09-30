@@ -547,9 +547,20 @@ fn serialize_token_ids<S>(ids: &Arc<Vec<TokenIdType>>, serializer: S) -> Result<
 where
     S: serde::Serializer,
 {
-    if *TOKEN_IDS_AS_BYTES && !serializer.is_human_readable() && token_ids_fit_i32(ids) {
+    serialize_token_ids_with(ids, serializer, *TOKEN_IDS_AS_BYTES)
+}
+
+fn serialize_token_ids_with<S>(
+    ids: &[TokenIdType],
+    serializer: S,
+    packed: bool,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if packed && !serializer.is_human_readable() && token_ids_fit_i32(ids) {
         let mut buf = Vec::with_capacity(ids.len() * 4);
-        for id in ids.iter() {
+        for id in ids {
             buf.extend_from_slice(&id.to_le_bytes());
         }
         return serializer.serialize_bytes(&buf);
@@ -774,10 +785,73 @@ mod tests {
         assert_eq!(*decoded.token_ids, ids);
     }
 
+    struct TokenIdsField<'a> {
+        ids: &'a [TokenIdType],
+        packed: bool,
+    }
+
+    impl serde::Serialize for TokenIdsField<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serialize_token_ids_with(self.ids, serializer, self.packed)
+        }
+    }
+
+    struct Request<'a> {
+        ids: &'a [TokenIdType],
+        packed: bool,
+    }
+
+    impl serde::Serialize for Request<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = serializer.serialize_struct("TokenIdsOnly", 1)?;
+            st.serialize_field(
+                "token_ids",
+                &TokenIdsField {
+                    ids: self.ids,
+                    packed: self.packed,
+                },
+            )?;
+            st.end()
+        }
+    }
+
+    fn encode(ids: &[TokenIdType], packed: bool) -> Vec<u8> {
+        rmp_serde::to_vec_named(&Request { ids, packed }).unwrap()
+    }
+
+    // fixmap(1) + fixstr header + the 9 key bytes precede the `token_ids` value.
+    const VALUE_OFFSET: usize = 1 + 1 + "token_ids".len();
+
+    #[test]
+    fn packed_serialization_emits_int32_bytes_that_round_trip() {
+        let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
+        let payload = encode(&ids, true);
+        assert_eq!(payload[VALUE_OFFSET], 0xc4, "msgpack bin8 marker");
+        assert_eq!(&payload[VALUE_OFFSET + 2..], le_bytes(&ids).as_slice());
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
     #[test]
     fn ids_above_i32_max_keep_the_sequence_form() {
-        assert!(token_ids_fit_i32(&[0, i32::MAX as u32]));
-        assert!(!token_ids_fit_i32(&[i32::MAX as u32 + 1]));
+        let ids = vec![7u32, i32::MAX as u32 + 1];
+        let payload = encode(&ids, true);
+        assert_eq!(payload[VALUE_OFFSET], 0x92, "msgpack fixarray(2), not bin");
+        assert_eq!(payload, encode(&ids, false));
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn packed_flag_leaves_json_as_a_sequence() {
+        let ids = vec![1u32, 2];
+        let json = serde_json::to_string(&Request {
+            ids: &ids,
+            packed: true,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"token_ids":[1,2]}"#);
     }
 
     fn request_with_tokens(token_ids: Vec<TokenIdType>) -> PreprocessedRequest {

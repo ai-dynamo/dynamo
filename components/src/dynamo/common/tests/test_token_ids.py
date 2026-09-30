@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import array
-
 import pytest
 
-from dynamo.common.utils.token_ids import normalize_request_token_ids, token_ids_to_list
+from dynamo.common.utils.token_ids import (
+    normalize_request_token_ids,
+    token_ids_len,
+    token_ids_to_list,
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -33,8 +35,24 @@ def test_odd_byte_length_is_rejected():
         token_ids_to_list(_packed(IDS)[:-1])
 
 
-def test_array_like_uses_tolist():
-    assert token_ids_to_list(array.array("i", IDS)) == IDS
+class _ArrayLike:
+    def tolist(self):
+        return list(IDS)
+
+
+def test_array_like_uses_tolist_without_iterating():
+    assert token_ids_to_list(_ArrayLike()) == IDS
+
+
+def test_iterables_fall_back_to_list():
+    assert token_ids_to_list(tuple(IDS)) == IDS
+
+
+@pytest.mark.parametrize("wrap", [bytes, bytearray, memoryview])
+def test_len_counts_packed_ids_without_decoding(wrap):
+    assert token_ids_len(wrap(_packed(IDS))) == len(IDS)
+    assert token_ids_len(list(IDS)) == len(IDS)
+    assert token_ids_len(None) == 0
 
 
 def test_normalize_rewrites_only_packed_values():

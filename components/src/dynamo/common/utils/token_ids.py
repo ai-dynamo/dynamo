@@ -6,7 +6,8 @@
 The frontend sends token ids as a sequence, or, with ``DYN_TOKEN_IDS_AS_BYTES``,
 as one packed little-endian int32 buffer. Python handlers that need a
 ``list[int]`` call :func:`token_ids_to_list` at their entry point; handlers that
-can consume a buffer directly leave the value alone.
+only need the prompt length call :func:`token_ids_len`; handlers that can consume
+a buffer directly leave the value alone.
 """
 
 import array
@@ -46,8 +47,15 @@ def token_ids_to_list(value: Any) -> Optional[list[int]]:
     return list(value)
 
 
+def token_ids_len(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return memoryview(value).nbytes // 4
+    return len(value)
+
+
 def normalize_request_token_ids(request: dict) -> dict:
-    """Rewrite ``request["token_ids"]`` to a list in place when it arrived packed."""
     ids = request.get("token_ids")
     if ids is not None and not isinstance(ids, list):
         request["token_ids"] = token_ids_to_list(ids)
