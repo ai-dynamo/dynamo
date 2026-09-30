@@ -822,7 +822,6 @@ impl GenerateMetricCollector {
             .completion_usage
             .as_ref()
             // RetryManager rebases a migrated attempt's usage onto the client's
-            // prompt and drops its cached count, which describes the replayed
             // prompt. Ignore any usage that still doesn't match this logical
             // request and let the RequestTracker fallback run on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
@@ -3340,8 +3339,10 @@ pub(crate) mod tests {
         );
         let cached_tokens =
             metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels).get_histogram();
+        // The retry's cache hit covers the 3 token prompt, so the rebased backend count wins
+        // over the router's estimate of 1.
         assert_eq!(cached_tokens.get_sample_count(), 1);
-        assert_eq!(cached_tokens.get_sample_sum(), 1.0);
+        assert_eq!(cached_tokens.get_sample_sum(), 3.0);
     }
 
     #[test]

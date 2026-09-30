@@ -787,8 +787,8 @@ where
 
     /// Moves the replayed tokens in a retried attempt's usage from prompt to completion: the
     /// worker counts them as prompt, and its completion count covers only its own attempt. The
-    /// total is unchanged. Its cached-token count is dropped because it was measured against the
-    /// replayed prompt; the `/generate` metrics then fall back to the router's estimate.
+    /// total is unchanged. Prefix-cache hits are prefixes and the client's prompt is a prefix of
+    /// the replayed one, so the cached count is capped at the client's prompt.
     fn rebase_usage(&self, response: &mut Annotated<Resp>) {
         if self.replayed_tokens == 0 {
             return;
@@ -802,8 +802,12 @@ where
         };
         usage.prompt_tokens = usage.prompt_tokens.saturating_sub(self.replayed_tokens);
         usage.completion_tokens = usage.completion_tokens.saturating_add(self.replayed_tokens);
-        if let Some(details) = usage.prompt_tokens_details.as_mut() {
-            details.cached_tokens = None;
+        if let Some(cached) = usage
+            .prompt_tokens_details
+            .as_mut()
+            .and_then(|details| details.cached_tokens.as_mut())
+        {
+            *cached = (*cached).min(usage.prompt_tokens);
         }
     }
 
@@ -2871,8 +2875,8 @@ mod tests {
         assert_eq!(usage.total_tokens, 7);
         assert_eq!(
             cached_tokens(&usage),
-            None,
-            "a cache hit on the replayed prompt is not a count for the client's prompt"
+            Some(3),
+            "the replayed prompt's cache hit, capped at the client's prompt"
         );
     }
 
@@ -2885,7 +2889,7 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 3);
         assert_eq!(usage.completion_tokens, 6);
         assert_eq!(usage.total_tokens, 9);
-        assert_eq!(cached_tokens(&usage), None);
+        assert_eq!(cached_tokens(&usage), Some(3));
     }
 
     #[tokio::test]
