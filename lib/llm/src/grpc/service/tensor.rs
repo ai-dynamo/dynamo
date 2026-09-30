@@ -28,7 +28,7 @@ use crate::http::service::{
 
 use crate::protocols::tensor;
 use crate::protocols::tensor::{
-    NvCreateTensorRequest, NvCreateTensorResponse, Tensor, TensorMetadata,
+    NvCreateTensorRequest, NvCreateTensorResponse, RequestedOutput, Tensor, TensorMetadata,
 };
 
 use crate::grpc::service::kserve::inference;
@@ -115,6 +115,15 @@ pub async fn tensor_response_stream(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
+        // Deadline is checked before overload so a chain carrying both markers
+        // keeps the deadline outcome. RESOURCE_EXHAUSTED mirrors the HTTP
+        // surfaces' 429: the deadline elapsed waiting for capacity, so it is
+        // backpressure rather than a gateway timeout. No rejection accounting.
+        if crate::http::service::metrics::request_deadline_exceeded(e.as_ref()) {
+            return Status::resource_exhausted(
+                crate::http::service::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+            );
+        }
         if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
@@ -303,9 +312,19 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             },
             model: request.model_name.clone(),
             tensors: Vec::new(),
+            outputs: Vec::with_capacity(request.outputs.len()),
             parameters,
             nvext: None,
         };
+
+        // Requested outputs select which model outputs come back and how; their
+        // parameters (e.g. `classification`) are interpreted by the worker.
+        for output in &request.outputs {
+            tensor_request.outputs.push(RequestedOutput {
+                name: output.name.clone(),
+                parameters: convert_kserve_to_dynamo_params(&output.parameters)?,
+            });
+        }
 
         // iterate through inputs
         for (idx, input) in request.inputs.into_iter().enumerate() {
@@ -805,6 +824,50 @@ impl tensor::DataType {
     }
 }
 
+impl DataType {
+    /// The OIP wire name this datatype must be reported as in KServe v2
+    /// `ModelMetadata`, or `None` for `TYPE_INVALID`, which has no wire name.
+    ///
+    /// Not `as_str_name()`, which returns the `model_config.proto` variant name
+    /// (`TYPE_FP32`). That is the config spelling, not the wire spelling the
+    /// `datatype` field carries. Stripping the `TYPE_` prefix is not enough
+    /// either: `TYPE_STRING` is `BYTES` on the wire, the same pairing
+    /// [`tensor::DataType::to_kserve`] already encodes in the other direction.
+    pub fn oip_name(&self) -> Option<&'static str> {
+        Some(match self {
+            DataType::TypeInvalid => return None,
+            DataType::TypeBool => "BOOL",
+            DataType::TypeUint8 => "UINT8",
+            DataType::TypeUint16 => "UINT16",
+            DataType::TypeUint32 => "UINT32",
+            DataType::TypeUint64 => "UINT64",
+            DataType::TypeInt8 => "INT8",
+            DataType::TypeInt16 => "INT16",
+            DataType::TypeInt32 => "INT32",
+            DataType::TypeInt64 => "INT64",
+            DataType::TypeFp16 => "FP16",
+            DataType::TypeFp32 => "FP32",
+            DataType::TypeFp64 => "FP64",
+            DataType::TypeString => "BYTES",
+            DataType::TypeBf16 => "BF16",
+        })
+    }
+}
+
+/// KServe v2 `ModelMetadata` wire shape for a Triton tensor.
+///
+/// Triton's `ModelConfig` stores per-tensor `dims` without the batch dimension.
+/// When `max_batch_size > 0`, native Triton's KServe adapter prepends `-1`
+/// (variable batch) so clients can send batched inputs. Copying `dims`
+/// verbatim drops that axis and KServe v2 clients reject the tensor.
+pub fn kserve_metadata_shape(dims: &[i64], max_batch_size: i32) -> Vec<i64> {
+    if max_batch_size > 0 {
+        std::iter::once(-1).chain(dims.iter().copied()).collect()
+    } else {
+        dims.to_vec()
+    }
+}
+
 impl std::fmt::Display for tensor::DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
@@ -853,6 +916,93 @@ impl FromStr for tensor::DataType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use inference::model_infer_request::InferRequestedOutputTensor;
+    use std::collections::HashMap;
+
+    fn param(choice: Option<ParameterChoice>) -> inference::InferParameter {
+        inference::InferParameter {
+            parameter_choice: choice,
+        }
+    }
+
+    fn classification(k: i64) -> HashMap<String, inference::InferParameter> {
+        HashMap::from([(
+            "classification".to_string(),
+            param(Some(ParameterChoice::Int64Param(k))),
+        )])
+    }
+
+    fn requested_output(
+        name: &str,
+        parameters: HashMap<String, inference::InferParameter>,
+    ) -> InferRequestedOutputTensor {
+        InferRequestedOutputTensor {
+            name: name.to_string(),
+            parameters,
+        }
+    }
+
+    fn infer_request(outputs: Vec<InferRequestedOutputTensor>) -> inference::ModelInferRequest {
+        inference::ModelInferRequest {
+            model_name: "classifier".to_string(),
+            outputs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn requested_outputs_keep_their_parameters() {
+        let converted = NvCreateTensorRequest::try_from(infer_request(vec![
+            requested_output("OUTPUT0", classification(3)),
+            requested_output("OUTPUT1", HashMap::new()),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            converted.outputs,
+            vec![
+                RequestedOutput {
+                    name: "OUTPUT0".to_string(),
+                    parameters: tensor::Parameters::from([(
+                        "classification".to_string(),
+                        tensor::ParameterValue::Int64(3),
+                    )]),
+                },
+                RequestedOutput {
+                    name: "OUTPUT1".to_string(),
+                    parameters: tensor::Parameters::new(),
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&converted.outputs[0]).unwrap(),
+            serde_json::json!({"name": "OUTPUT0", "parameters": {"classification": {"int64": 3}}})
+        );
+    }
+
+    #[test]
+    fn requested_outputs_empty_are_omitted_from_json() {
+        let converted = NvCreateTensorRequest::try_from(infer_request(vec![])).unwrap();
+        assert!(converted.outputs.is_empty());
+        assert!(
+            serde_json::to_value(&converted)
+                .unwrap()
+                .get("outputs")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn requested_outputs_valueless_parameter_is_rejected() {
+        let error = NvCreateTensorRequest::try_from(infer_request(vec![requested_output(
+            "OUTPUT0",
+            HashMap::from([("classification".to_string(), param(None))]),
+        )]))
+        .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("classification"));
+    }
 
     // Golden bytes hardcoded (not derived from to_le_bytes) so a symmetric
     // break in both encode/decode still fires this test.
@@ -1019,5 +1169,89 @@ mod tests {
             tensor::DataType::BFloat16.to_kserve(),
             inference::DataType::TypeBf16 as i32
         );
+    }
+}
+
+#[cfg(test)]
+mod oip_datatype_tests {
+    use super::*;
+
+    /// The two branches of `model_metadata` must name a datatype the same way.
+    ///
+    /// The Dynamo branch emits `tensor::DataType`'s `Display`; the Triton branch
+    /// emits `oip_name`. `to_kserve` already pairs the two enums, so composing it
+    /// with `oip_name` has to land back on the same string. This is what fails if
+    /// `oip_name` is ever written as "strip the `TYPE_` prefix": `TYPE_STRING`
+    /// would become `STRING`, but the wire name is `BYTES`.
+    #[test]
+    fn both_metadata_branches_agree_on_every_datatype_name() {
+        for dt in [
+            tensor::DataType::Bool,
+            tensor::DataType::Uint8,
+            tensor::DataType::Uint16,
+            tensor::DataType::Uint32,
+            tensor::DataType::Uint64,
+            tensor::DataType::Int8,
+            tensor::DataType::Int16,
+            tensor::DataType::Int32,
+            tensor::DataType::Int64,
+            tensor::DataType::Float32,
+            tensor::DataType::Float64,
+            tensor::DataType::Bytes,
+        ] {
+            let triton = DataType::try_from(dt.to_kserve())
+                .expect("to_kserve must yield a valid model_config DataType");
+            let expected = dt.to_string();
+            assert_eq!(
+                triton.oip_name(),
+                Some(expected.as_str()),
+                "{dt} reports a different name through the Triton branch"
+            );
+        }
+    }
+
+    /// `datatype` carries the OIP wire name, never the `model_config.proto`
+    /// variant name that `as_str_name()` returns.
+    #[test]
+    fn oip_names_are_wire_names_not_protobuf_variant_names() {
+        assert_eq!(DataType::TypeString.oip_name(), Some("BYTES"));
+        assert_eq!(DataType::TypeFp32.oip_name(), Some("FP32"));
+        assert_eq!(DataType::TypeBf16.oip_name(), Some("BF16"));
+        assert_eq!(DataType::TypeInvalid.oip_name(), None);
+
+        for dt in [
+            DataType::TypeBool,
+            DataType::TypeUint8,
+            DataType::TypeInt64,
+            DataType::TypeFp16,
+            DataType::TypeFp64,
+            DataType::TypeString,
+            DataType::TypeBf16,
+        ] {
+            let name = dt.oip_name().expect("a valid datatype has a wire name");
+            assert!(
+                !name.starts_with("TYPE_"),
+                "{name} is the model_config spelling, not the wire spelling"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod kserve_metadata_shape_tests {
+    use super::kserve_metadata_shape;
+
+    #[test]
+    fn prepends_variable_batch_dim_when_batching_enabled() {
+        assert_eq!(kserve_metadata_shape(&[-1], 4), vec![-1, -1]);
+        assert_eq!(kserve_metadata_shape(&[768], 8), vec![-1, 768]);
+        assert_eq!(kserve_metadata_shape(&[], 1), vec![-1]);
+    }
+
+    #[test]
+    fn leaves_dims_unchanged_when_batching_disabled() {
+        assert_eq!(kserve_metadata_shape(&[-1], 0), vec![-1]);
+        assert_eq!(kserve_metadata_shape(&[3, 224, 224], 0), vec![3, 224, 224]);
+        assert_eq!(kserve_metadata_shape(&[], 0), Vec::<i64>::new());
     }
 }

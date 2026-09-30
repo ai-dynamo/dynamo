@@ -277,6 +277,36 @@ mod tests {
     }
 
     #[test]
+    fn audio_request_cfg_scale_reaches_the_worker() {
+        // Unknown nvext keys are dropped silently, so a missing cfg_scale field
+        // would disable guidance without any error surfacing to the client.
+        let json = r#"{"input":"hi","nvext":{"cfg_scale":1.5}}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.nvext.as_ref().and_then(|n| n.cfg_scale), Some(1.5));
+
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains("\"cfg_scale\":1.5"));
+    }
+
+    #[test]
+    fn audio_request_cfg_scale_omitted_when_absent() {
+        let json = r#"{"input":"hi","nvext":{}}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.nvext.as_ref().and_then(|n| n.cfg_scale), None);
+        assert!(!serde_json::to_string(&req).unwrap().contains("cfg_scale"));
+    }
+
+    #[test]
+    fn audio_request_top_level_cfg_scale_is_not_a_typed_field() {
+        // A top-level cfg_scale is a client mistake: it lands in passthrough
+        // (and so in extra_args for the worker), never in the Audex contract.
+        let json = r#"{"input":"hi","cfg_scale":1.5}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert!(req.nvext.is_none());
+        assert_eq!(req.passthrough["cfg_scale"], serde_json::json!(1.5));
+    }
+
+    #[test]
     fn audio_request_captures_unknown_top_level_fields() {
         // The OpenAI client's extra_body option merges into the top level of
         // the body, so that is where backend knobs arrive.
