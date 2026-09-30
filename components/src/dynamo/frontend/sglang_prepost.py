@@ -1050,6 +1050,7 @@ class SglangStreamingPostProcessor:
         stop_strings: set[str] | None = None,
         stop_token_ids: set[int] | None = None,
         skip_special_tokens: bool | None = None,
+        guided_json_is_content: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1066,6 +1067,12 @@ class SglangStreamingPostProcessor:
         self._skip_special_tokens = resolve_skip_special_tokens(
             skip_special_tokens, has_parser=not self._fast_plain_text
         )
+        # Bare answer JSON is already structured by generation. Keep the original
+        # decoding policy, and retain the parser for forced tool-call JSON arrays.
+        if guided_json_is_content and not isinstance(tool_call_parser, JsonArrayParser):
+            self.tool_call_parser = tool_call_parser = None
+            self.reasoning_parser = reasoning_parser = None
+            self._fast_plain_text = True
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading
