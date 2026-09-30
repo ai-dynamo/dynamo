@@ -2050,14 +2050,6 @@ jobs:
           namespace: default
           storage_class: azurefile-csi
           storage_size: 64Gi
-      # Match worker/helper libcuda; remove host-driver overrides once CI
-      # adopts the fix for https://github.com/ai-dynamo/snapshot/issues/412.
-      - name: Use the host CUDA library for TRTLLM checkpoints
-        env:
-          KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
-        run: |
-          kubectl --request-timeout=10s -n default set env daemonset/snapshot-agent --containers=agent 'LD_PRELOAD=/usr/$LIB/libcuda.so.1'
-          kubectl -n default rollout status daemonset/snapshot-agent --timeout=90s
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
