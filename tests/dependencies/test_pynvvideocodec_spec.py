@@ -16,15 +16,18 @@ validated, and this is what keeps it one.
 
 The template half only runs where the templates are on disk. `.dockerignore`
 excludes `container/**/*.Dockerfile` from every build context except
-`wheel_builder.Dockerfile`, so the component images that run this suite ship
-`container/deps/` but not `container/templates/`, and those cases skip there --
+`wheel_builder.Dockerfile`, so the dynamo-runtime image that runs this suite in CI
+ships `container/deps/` but not `container/templates/`, and those cases skip there --
 same situation, and the same resolution, as `test_aisimulate_consistency.py`'s
-planner-Dockerfile check. The `pynvvideocodec-spec` pre-commit hook runs this
-module as a script against a real checkout, which is what keeps the template half
-enforced in CI rather than only on a developer's machine.
+planner-Dockerfile check. The vllm, sglang and trtllm runtime-test images ship no
+`container/` at all, so run by hand there, the requirements cases skip too. The
+`pynvvideocodec-spec` pre-commit hook runs this module as a script against a real
+checkout, which is what keeps both halves enforced in CI rather than only on a
+developer's machine.
 """
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -138,8 +141,13 @@ def _requirement(path: str) -> Requirement:
     opaque parse error. Selection is by canonical distribution name rather than
     by prefix, so a differently-named sibling cannot be mistaken for this one.
     """
+    requirements = ROOT / path
+    if not requirements.is_file():
+        # The framework runtime-test images ship no container/ directory at all.
+        # main() still reports this as a failure, where a checkout always has it.
+        pytest.skip(f"{path} is not present in this image")
     found: list[Requirement] = []
-    for raw in (ROOT / path).read_text(encoding="utf-8").splitlines():
+    for raw in requirements.read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line or line.startswith("-"):
             continue
@@ -289,6 +297,42 @@ RUN set -eu; \
     [ "$v" = "2.2.3" ] || { echo "ERROR: wanted 2.2.3, got $v" >&2; exit 1; }
 """
     assert _pinned_versions_in(template) == {"2.2.3"}
+
+
+def test_requirements_missing_from_the_image_skip(tmp_path, monkeypatch) -> None:
+    """The vllm, sglang and trtllm runtime-test images have no container/ at all.
+
+    Run by path inside one of them, the requirements checks used to fail with
+    FileNotFoundError instead of skipping the way the template checks do.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    with pytest.raises(pytest.skip.Exception):
+        test_requirements_declare_the_expected_spec(REQUIREMENTS[0])
+    with pytest.raises(pytest.skip.Exception):
+        test_the_spec_is_bounded_above()
+
+
+def test_script_mode_still_fails_on_missing_requirements(tmp_path, monkeypatch) -> None:
+    """The pre-commit hook runs in a checkout, where a missing file is an error.
+
+    The templates here are minimal but valid, so the requirements files are the
+    only thing missing, and main() must report them rather than skip them.
+    """
+    guard = (
+        "RUN set -eu; \\\n"
+        "    v=$(python3 -c 'import importlib.metadata as m; "
+        'print(m.version("pynvvideocodec"))\'); \\\n'
+        f"    pip install 'PyNvVideoCodec{EXPECTED_SPEC}'; \\\n"
+        f'    [ "$v" = "{EXPECTED_VERSION}" ]\n'
+    )
+    for path in TEMPLATES:
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(guard, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    test_templates_install_the_same_spec()
+    for path in TEMPLATES:
+        test_templates_guard_on_the_same_version(path)
+    assert main() == 1
 
 
 def main() -> int:
