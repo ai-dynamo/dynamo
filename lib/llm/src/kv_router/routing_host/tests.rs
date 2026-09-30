@@ -1155,7 +1155,7 @@ async fn kv_hit_metrics_use_each_attempt_selection() {
     let tracker = Arc::new(RequestTracker::new());
     let mut content = request();
     content.model = "attempt-kv-hit-metrics".to_string();
-    content.token_ids = vec![1; 64];
+    content.token_ids = vec![1; 64].into();
     content.tracker = Some(Arc::clone(&tracker));
     let request = Context::new(content);
     let budget = CleanupBudget::default();
