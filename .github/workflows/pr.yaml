@@ -40,6 +40,7 @@ jobs:
       trtllm: ${{ steps.changes.outputs.trtllm }}
       triton: ${{ steps.changes.outputs.triton }}
       frontend: ${{ steps.changes.outputs.frontend }}
+      speech_example: ${{ steps.changes.outputs.speech_example }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
       efa: ${{ steps.changes.outputs.efa }}
@@ -856,6 +857,7 @@ jobs:
     needs: [changed-files]
     if: |
       needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.speech_example == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
@@ -1107,7 +1109,7 @@ jobs:
   frontend-test:
     name: frontend
     needs: [changed-files, frontend-build]
-    if: needs.changed-files.outputs.frontend == 'true'
+    if: needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.speech_example == 'true'
     # The frontend process hosts the KV router. Validate the experimental
     # --router-prefill-load-model=aic dependency and native prefill predictor in
     # the shipped frontend image on both architectures.
@@ -1141,6 +1143,45 @@ jobs:
       - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
         run: python tests/frontend/router_ais_image_smoke.py
+      - name: Test Nemotron Speech adapters
+        if: matrix.platform == 'amd64'
+        timeout-minutes: 5
+        working-directory: /workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          example=examples/nemotron_speech_cascaded_pipeline
+          test_env="${RUNNER_TEMP}/speech-tests"
+          uv venv --python "$(command -v python)" --system-site-packages "$test_env"
+          test_python="$test_env/bin/python"
+          # The image uses a venv; a nested venv otherwise inherits only system packages.
+          base_site=$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+          test_site=$("$test_python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+          printf '%s\n' "$base_site" > "$test_site/base-runtime.pth"
+          bash "$example/container/install.sh" "$test_python"
+          uv pip install --python "$test_python" 'pytest>=8.0' 'pytest-asyncio>=1.0' 'pytest-timeout==2.4.0'
+          # Do not let importorskip turn missing example dependencies into a green run.
+          "$test_python" -c 'import riva.client; from dynamo._core import Context, InvalidArgument'
+          report="${RUNNER_TEMP}/nemotron-speech.xml"
+          "$test_python" -m pytest -q -c "$example/pytest.ini" --confcutdir="$example" \
+            -o "cache_dir=${RUNNER_TEMP}/speech-pytest-cache" \
+            --timeout=30 --junitxml="$report" "$example/tests"
+          "$test_python" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          report = ET.parse(sys.argv[1]).getroot()
+          if not list(report.iter("testcase")) or list(report.iter("skipped")):
+              raise SystemExit("Speech tests must execute without skips")
+          PY
+      - name: Upload speech test report
+        if: always() && matrix.platform == 'amd64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nemotron-speech-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nemotron-speech.xml
+          retention-days: 7
+          if-no-files-found: warn
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
@@ -1236,6 +1277,7 @@ jobs:
     # audit report, including operator/snapshot/deploy-driven rebuilds.
     if: |
       needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.speech_example == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true' ||

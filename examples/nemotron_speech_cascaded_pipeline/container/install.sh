@@ -1,4 +1,4 @@
-# check=skip=InvalidDefaultArgInFrom
+#!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -14,17 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Required so callers select an available, runtime-compatible published release.
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
+set -euo pipefail
 
-ARG RUNTIME_USER=dynamo
+PYTHON="${1:-python3}"
+EXAMPLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OVERRIDES="$(mktemp)"
+trap 'rm -f "${OVERRIDES}"' EXIT
 
-USER root
-COPY --chmod=644 requirements.txt /tmp/speech-nim/requirements.txt
-COPY --chmod=644 container/install.sh /tmp/speech-nim/container/install.sh
-RUN bash /tmp/speech-nim/container/install.sh
+# Keep the runtime's versions for the adapters' tested gRPC path. Riva 2.26's
+# declared pins conflict; uv pip check still reports these metadata mismatches.
+"${PYTHON}" - <<'PY' > "${OVERRIDES}"
+from importlib.metadata import version
 
-COPY --chown=${RUNTIME_USER}:root nemotron_speech/ /opt/nemotron-speech-cascaded-pipeline/nemotron_speech/
-ENV PYTHONPATH=/opt/nemotron-speech-cascaded-pipeline
-USER ${RUNTIME_USER}
+for package in ("protobuf", "websockets"):
+    print(f"{package}=={version(package)}")
+PY
+uv pip install --python "${PYTHON}" --no-cache \
+    --overrides "${OVERRIDES}" \
+    --requirement "${EXAMPLE_DIR}/requirements.txt"

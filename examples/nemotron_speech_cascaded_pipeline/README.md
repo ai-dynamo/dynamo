@@ -111,19 +111,19 @@ utterances without a real-time wait.
 - A ReadWriteMany storage class for the shared model cache.
 
 The runtime must support realtime transcription, streaming `/v1/audio/speech`,
-and `register_model(skip_model_assets=True)` for external audio models. The last
-option is introduced by this PR and leaves ordinary audio registration unchanged.
-For premerge validation, use branch-built
-runtime images, including this branch's rebuilt Python bindings. Building only
-the adapter image below does not include that Rust registration fix. Use published
-images once a release includes all three capabilities.
+and `register_model(skip_model_assets=True)` for external audio models.
+Published Dynamo **1.5.0 is not compatible** with this example. Until a release
+includes these capabilities, use source-built runtime images with rebuilt Python
+bindings from a revision that provides that registration option. See the
+[frontend image build instructions](../../container/README.md#building-the-frontend-image).
+Building only the adapter image below does not rebuild the Dynamo runtime.
 
 Run all commands from the Dynamo repository root. Set the deployment values
 once:
 
 ```bash
 export NAMESPACE=voice-agent
-export DYNAMO_RUNTIME_VERSION=<compatible-published-version>
+export DYNAMO_RUNTIME_VERSION=<compatible-runtime-version>
 export DYNAMO_FRONTEND_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_RUNTIME_VERSION}"
 export DYNAMO_VLLM_IMAGE="nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_RUNTIME_VERSION}"
 export CUSTOM_IMAGE_REGISTRY=<registry-host>
@@ -136,15 +136,17 @@ export HF_TOKEN=<hugging-face-token>
 export RWX_STORAGE_CLASS=<rwx-storage-class>
 ```
 
-Use the same Dynamo runtime version for the two published images and the custom
-adapter image. Its semantic tag lets the Dynamo operator derive compatibility
+For source builds, replace `DYNAMO_FRONTEND_IMAGE` and `DYNAMO_VLLM_IMAGE` with
+your pushed image references before continuing. Use the same Dynamo runtime
+version for the runtime images and the custom adapter image. Its semantic tag
+lets the Dynamo operator derive compatibility
 directly from each component's main image. The custom image can use any OCI
 registry; the published Dynamo images are pulled directly from NVCR.
 
 ### 1. Build and push the adapter image
 
 The speech worker's main container is a small CPU-only adapter. It derives from
-the published Dynamo frontend image, which provides the Dynamo runtime without
+the selected Dynamo frontend image, which provides the Dynamo runtime without
 vLLM, and adds the Riva client and this example's adapter code:
 
 ```bash
@@ -153,6 +155,11 @@ printf '%s' "${CUSTOM_IMAGE_REGISTRY_PASSWORD}" | docker login "${CUSTOM_IMAGE_R
   --username "${CUSTOM_IMAGE_REGISTRY_USER}" --password-stdin
 docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
 ```
+
+The installer preserves the base image's `protobuf` and `websockets` versions
+using scoped `uv` overrides. These intentionally override Riva 2.26's declared
+constraints, so `uv pip check` still reports those metadata conflicts. Validation
+covers the adapter's gRPC paths, not the Riva client's WebSocket APIs.
 
 ### 2. Create the namespace and credentials
 
@@ -346,8 +353,8 @@ The unit tests mock the Speech NIM services while exercising the public Dynamo
 event and audio contracts:
 
 ```bash
-python3 -m pip install -r examples/nemotron_speech_cascaded_pipeline/requirements.txt \
-  pytest pytest-asyncio pytest-timeout
+bash examples/nemotron_speech_cascaded_pipeline/container/install.sh
+python3 -m pip install pytest pytest-asyncio pytest-timeout
 PYTHONPATH=components/src:lib/bindings/python/src \
   python3 -m pytest -xvv examples/nemotron_speech_cascaded_pipeline/tests
 bash -n examples/nemotron_speech_cascaded_pipeline/{launch_workers.sh,container/build.sh}
