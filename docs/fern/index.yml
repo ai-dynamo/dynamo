@@ -1091,6 +1091,10 @@ navigation:
         path: pages/reference/api/README.mdx
         slug: api
 
+      - page: System One API
+        path: pages/reference/api/systemone.md
+        slug: api/systemone
+
       - section: Python API
         icon: fa-brands fa-python
         path: pages/reference/api/python/README.mdx

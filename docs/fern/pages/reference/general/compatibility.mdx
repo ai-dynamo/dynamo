@@ -41,6 +41,16 @@ Worker count is a capacity approximation, not a measurement of end-to-end servin
 
 <FeatureHeatmap />
 
+### System One Typed Decisions (Experimental)
+
+The opt-in [System One API](../api/systemone.md) has narrower compatibility than chat and completion serving. It is available in development builds containing the endpoint; it is not part of the release feature heatmap above.
+
+| Backend | System One Support | Restrictions |
+| --- | --- | --- |
+| SGLang | Experimental | SGLang 0.5.19 aggregate native Generate workers with `--disable-overlap-schedule --max-running-requests 1` and pipeline parallelism of one; compatible tokenizer/chat template; no dependent worker roles, LoRA, speculative decoding, or request migration. Concurrent HTTP requests use serialized execution, not unrestricted mixed batches. |
+| vLLM | Not supported | A proposed vLLM integration is not implemented by this endpoint. |
+| TensorRT-LLM | Not supported | No System One candidate-scoring integration. |
+
 ### Per-Backend Detail
 
 <Tabs>
