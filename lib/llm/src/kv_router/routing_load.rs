@@ -17,7 +17,6 @@ use dynamo_runtime::pipeline::WorkerLoadMonitor;
 
 use crate::discovery::{KvWorkerMonitor, LoadThresholdHandle};
 use crate::kv_router::KvRouter;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use crate::worker_type::WorkerType;
 
@@ -197,25 +196,16 @@ impl SchedulerLoadShared {
 pub struct SchedulerLoadSender {
     wake_tx: Option<mpsc::Sender<()>>,
     shared: Arc<SchedulerLoadShared>,
-    source: RouterLoadSource,
     cancellation_token: CancellationToken,
 }
 
 impl SchedulerLoadSender {
-    pub(crate) fn disabled(
-        source: RouterLoadSource,
-        cancellation_token: CancellationToken,
-    ) -> Self {
+    pub(crate) fn disabled(cancellation_token: CancellationToken) -> Self {
         Self {
             wake_tx: None,
             shared: Arc::new(SchedulerLoadShared::new(SCHEDULER_LOAD_CHANNEL_CAPACITY)),
-            source,
             cancellation_token,
         }
-    }
-
-    pub(crate) const fn metric_label(&self) -> &'static str {
-        self.source.metric_label()
     }
 
     pub fn publish(&self, snapshot: SchedulerLoadSnapshot) {
@@ -280,18 +270,12 @@ impl SchedulerLoadReceiver {
 }
 
 pub(crate) fn scheduler_load_channel(
-    source: RouterLoadSource,
     cancellation_token: CancellationToken,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
-    scheduler_load_channel_with_capacity(
-        source,
-        cancellation_token,
-        SCHEDULER_LOAD_CHANNEL_CAPACITY,
-    )
+    scheduler_load_channel_with_capacity(cancellation_token, SCHEDULER_LOAD_CHANNEL_CAPACITY)
 }
 
 fn scheduler_load_channel_with_capacity(
-    source: RouterLoadSource,
     cancellation_token: CancellationToken,
     capacity: usize,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
@@ -301,7 +285,6 @@ fn scheduler_load_channel_with_capacity(
         SchedulerLoadSender {
             wake_tx: Some(wake_tx),
             shared: shared.clone(),
-            source,
             cancellation_token,
         },
         SchedulerLoadReceiver { wake_rx, shared },
@@ -334,7 +317,7 @@ impl RoutingLoadContext {
         let cancellation_token = parent_token.child_token();
         let (scheduler_load, monitor) = if source.monitors_sequence_load() {
             let (scheduler_load, scheduler_load_rx) =
-                scheduler_load_channel(source, cancellation_token.child_token());
+                scheduler_load_channel(cancellation_token.child_token());
             let monitor = KvWorkerMonitor::new(
                 client.clone(),
                 source,
@@ -347,7 +330,7 @@ impl RoutingLoadContext {
             (scheduler_load, Some(monitor))
         } else {
             (
-                SchedulerLoadSender::disabled(source, cancellation_token.child_token()),
+                SchedulerLoadSender::disabled(cancellation_token.child_token()),
                 None,
             )
         };
@@ -395,18 +378,12 @@ impl Drop for RoutingLoadContext {
 }
 
 /// Standalone KV selection surface plus the context that owns its load tasks.
-pub struct ManagedKvRouter<Sel = dynamo_kv_router::selector::DefaultWorkerSelector>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
+pub struct ManagedKvRouter {
     load_context: Arc<RoutingLoadContext>,
-    router: Arc<KvRouter<Sel>>,
+    router: Arc<KvRouter>,
 }
 
-impl<Sel> Clone for ManagedKvRouter<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
+impl Clone for ManagedKvRouter {
     fn clone(&self) -> Self {
         Self {
             load_context: self.load_context.clone(),
@@ -415,22 +392,16 @@ where
     }
 }
 
-impl<Sel> std::ops::Deref for ManagedKvRouter<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
-    type Target = KvRouter<Sel>;
+impl std::ops::Deref for ManagedKvRouter {
+    type Target = KvRouter;
 
     fn deref(&self) -> &Self::Target {
         &self.router
     }
 }
 
-impl<Sel> ManagedKvRouter<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
-    pub fn new(load_context: Arc<RoutingLoadContext>, router: Arc<KvRouter<Sel>>) -> Self {
+impl ManagedKvRouter {
+    pub fn new(load_context: Arc<RoutingLoadContext>, router: Arc<KvRouter>) -> Self {
         Self {
             load_context,
             router,
@@ -441,7 +412,7 @@ where
         &self.load_context
     }
 
-    pub fn router(&self) -> &Arc<KvRouter<Sel>> {
+    pub fn router(&self) -> &Arc<KvRouter> {
         &self.router
     }
 }
@@ -462,8 +433,7 @@ mod tests {
     #[tokio::test]
     async fn saturated_channel_coalesces_batch_and_later_absolute_state_converges() {
         let token = CancellationToken::new();
-        let (sender, mut receiver) =
-            scheduler_load_channel_with_capacity(RouterLoadSource::Decode, token, 1);
+        let (sender, mut receiver) = scheduler_load_channel_with_capacity(token, 1);
 
         sender.publish(snapshot(1, 90));
         sender.publish_batch(vec![snapshot(1, 80), snapshot(2, 70)]);
@@ -489,8 +459,7 @@ mod tests {
     #[tokio::test]
     async fn saturated_channel_preserves_queued_updates_before_coalesced_updates() {
         let token = CancellationToken::new();
-        let (sender, mut receiver) =
-            scheduler_load_channel_with_capacity(RouterLoadSource::Decode, token, 2);
+        let (sender, mut receiver) = scheduler_load_channel_with_capacity(token, 2);
 
         sender.publish(snapshot(2, 20));
         sender.publish(snapshot(1, 10));

@@ -61,7 +61,7 @@ spec:
                 capabilities:
                   add: [IPC_LOCK]
 
-    - name: VllmWorker
+    - name: worker
       type: worker
       runtimeVersionOverride: "1.4.1"
       replicas: 1

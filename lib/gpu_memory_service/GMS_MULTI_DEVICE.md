@@ -15,9 +15,14 @@ This design introduces a **device-agnostic VMM abstraction layer** so that Intel
 | G1 | Define a vendor-neutral `VMMDevice` ABC covering all device operations GMS needs | ✅ Phase 1 |
 | G2 | Wrap existing CUDA helpers in a `CudaVMM` class that inherits the ABC | ✅ Phase 1 |
 | G3 | Process-global VMM singleton via `init_vmm()` / `get_vmm()`, CLI `--device-type` | ✅ Phase 1 |
-| G4 | Implement `XpuVMM` | ⬜ Phase 2 |
-| G5 | Add XPU torch mempool dispatch via `torch.xpu` APIs | ⬜ Phase 2 |
-| G6 | Enable snapshot save/load for XPU | ⬜ Phase 2 |
+| G4 | Implement `XpuVMM` | ✅ Phase 2 |
+| G5 | Add XPU torch mempool dispatch via `torch.xpu` APIs | ✅ Phase 2 |
+| G6 | Enable snapshot save/load for XPU (IPC path) | ✅ Phase 2 |
+| G7 | vLLM XPU integration (GMSWorker + XPUWorker) | ✅ Phase 2 |
+| G8 | SGLang XPU integration | ⬜ Phase 3 |
+| G9 | Disk snapshot save/load for XPU (pinned staging) | ⬜ Phase 3 |
+| G10 | NixL staging backend for XPU | ⬜ Phase 3 |
+| G11 | Multi-device XPU (TP > 1, oneCCL + multi-card IPC) | ⬜ Phase 3 |
 
 ---
 

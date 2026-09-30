@@ -66,23 +66,22 @@ pub(crate) fn supports_family(family: &str) -> bool {
     V2_FAMILIES.contains(&family)
 }
 
-/// Families served by the v2 UNIFIED parser (reasoning + content + tool calls in
-/// ONE ordered pass), default-on — no `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` gate.
+/// Parser names served by a v2 UNIFIED parser (reasoning + content + tool calls in
+/// ONE ordered pass), exposed to configuration and Python.
+///
+/// These parsers are default-on — no `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` gate.
 /// Muse has no usable v1 reasoning parser (the v1 crate dropped the variant, so
 /// `get_reasoning_parser_from_name` falls back to `Basic`, which cannot read the
 /// `to=self<|message|>` grammar), so the unified pass is the only correct path.
-/// Strings match dynamo's parser names.
-/// The two names the FRAMEWORKS register, so a card written against either engine
+/// The two Muse names match those the frameworks register, so a card written against either engine
 /// selects the same parser here: vLLM ships `--reasoning-parser muse_glimmer` and
 /// `--tool-call-parser muse_glimmer`, SGLang registers the family as `muse` in both
 /// its reasoning and function-call registries. A hyphenated spelling matches neither
 /// engine, so it is not accepted.
-pub(crate) const UNIFIED_FAMILIES: &[&str] = &["muse_glimmer", "muse"];
+/// DeepSeek V4.1 is selected separately by `unified_parser::configured_family`,
+/// which requires both parser fields to name `deepseek_v41`.
+pub(crate) const UNIFIED_FAMILIES: &[&str] = &["muse_glimmer", "muse", "deepseek_v41"];
 
-/// The parser names that route through the muse unified pass. Public accessor for
-/// [`UNIFIED_FAMILIES`] so the Python bindings can add muse to the selectable
-/// tool-call and reasoning parser names — fc's v1 registries dropped muse, so this
-/// is the only source of truth for the unified names.
 pub fn unified_family_names() -> &'static [&'static str] {
     UNIFIED_FAMILIES
 }
@@ -96,7 +95,7 @@ pub(crate) fn unified_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<String> {
-    let is_muse = |p: Option<&str>| UNIFIED_FAMILIES.contains(&p.unwrap_or_default());
+    let is_muse = |p: Option<&str>| matches!(p, Some("muse_glimmer" | "muse"));
     (is_muse(tool_call_parser) || is_muse(reasoning_parser)).then(|| "muse_glimmer".to_string())
 }
 
@@ -1499,7 +1498,14 @@ mod tests {
     // leaves its byte-for-byte original path untouched.
     #[test]
     fn unified_family_returns_none_for_other_families() {
-        for other in ["deepseek_v4", "qwen3", "glm47", "harmony", "nemotron_deci"] {
+        for other in [
+            "deepseek_v4",
+            "deepseek_v41",
+            "qwen3",
+            "glm47",
+            "harmony",
+            "nemotron_deci",
+        ] {
             assert_eq!(unified_family(Some(other), None), None, "{other} tool");
             assert_eq!(unified_family(None, Some(other)), None, "{other} reasoning");
         }

@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: k-exaone-2
+title: K-EXAONE 2.0
+page: pages/recipes/model-recipes/k-exaone-2.mdx
+provider: lg-ai-research
+model:
+  name: K-EXAONE 2.0 750B-A37B
+  hf_id: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4
+  precision: NVFP4 W4A4 (FP8 KV cache)
+status: experimental
+maintainer: null
+targets:
+- id: vllm-agg-b200-chat
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+  topology: aggregated
+  techniques:
+  - mtp-spec-dec
+  - fp8-kv-cache
+  - prefix-caching
+  - kv-aware-routing
+  workload:
+    type: trace-replay
+    traffic: Mooncake chat trace, 8K ISL / 1K OSL, 1,805 requests, concurrency 7; the trace is designed for ~70% prefix reuse but achieves ~8.8% on this topology (working set oversubscribed against KV capacity)
+  deploy:
+    asset: recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy-generic.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/k-exaone-2.0/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 87 tok/s/GPU at concurrency 7, E2E 51.4 tok/s/user, TTFT p50 291 ms, ITL 19.15 ms, meeting a joint gate of
+      E2E >= 50 tok/s/user and TTFT p50 < 5 s
+- id: vllm-disagg-b200-chat
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+  topology: disaggregated
+  techniques:
+  - disagg-pd
+  - mtp-spec-dec
+  - fp8-kv-cache
+  - prefix-caching
+  - kv-aware-routing
+  - nixl-ucx
+  workload:
+    type: trace-replay
+    traffic: Mooncake chat trace, 8K ISL / 1K OSL, 1,805 requests, concurrency 14; the trace is designed for ~70% prefix reuse but achieves ~8.8% on this topology (working set oversubscribed against KV capacity)
+  deploy:
+    asset: recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-generic.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/k-exaone-2.0/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 85 tok/s/GPU at concurrency 14, E2E 54.9 tok/s/user, TTFT p50 2,230 ms, ITL 15.98 ms, meeting a joint gate
+      of E2E >= 50 tok/s/user and TTFT p50 < 5 s; level with the aggregated target's 87 tok/s/GPU when each is run at its
+      own operating point
+gaps:
+- "KV-aware routing is wired end to end but inert at the shipped single worker replica; raising
+   replicas is sufficient to activate it. Measured at parity with round-robin on this workload
+   (9.494% vs 9.458% prefix hit rate), so it is shipped for correct scale-out behaviour rather
+   than for throughput."
+- 38 of the trace's 1,805 requests exceed the checkpoint's 262,144-token context ceiling and are rejected with HTTP 400 in every run, at every concurrency; throughput is computed over the remainder.
+- The InfiniBand RDMA extended-resource name in the disaggregated manifest is cluster-specific and must be adjusted per cluster.

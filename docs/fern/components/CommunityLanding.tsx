@@ -24,7 +24,7 @@ const MEETING_URL = "https://meet.google.com/heb-demu-qok";
 const NOTES_URL =
   "https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view";
 const INVITE_URL =
-  "https://github.com/ai-dynamo/dynamo/blob/main/docs/assets/dynamo-community-meeting.ics";
+  "https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/assets/dynamo-community-meeting.ics";
 
 const MONTHS = [
   "January",

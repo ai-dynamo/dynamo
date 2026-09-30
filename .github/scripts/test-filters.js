@@ -90,6 +90,21 @@ const testCases = [
     desc: 'trtllm script triggers only trtllm'
   },
   {
+    file: 'examples/backends/tokenspeed/tests/test_validate_disagg.py',
+    expect: { core: true },
+    desc: 'TokenSpeed validator tests trigger the runtime test lane'
+  },
+  {
+    file: 'examples/backends/tokenspeed/launch_disagg.sh',
+    expect: { core: true },
+    desc: 'TokenSpeed example code triggers runtime validation'
+  },
+  {
+    file: 'examples/backends/tokenspeed/README.md',
+    expect: { core: false },
+    desc: 'TokenSpeed documentation alone avoids runtime builds'
+  },
+  {
     file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
     expect: { core: false, examples: true },
     desc: 'recipe matrix dotfile triggers recipe check without core'
@@ -110,6 +125,11 @@ const testCases = [
     desc: 'any docs/tests descendant triggers recipe check without core'
   },
   {
+    file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
+    expect: { core: false, docs: false, examples: true, operator: true },
+    desc: 'every operator CRD base triggers generated recipe OpenAPI checks'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
@@ -122,9 +142,9 @@ const testCases = [
     desc: 'common sidecar source avoids unrelated build and E2E filters'
   },
   {
-    file: 'lib/sidecar/vllm/proto/vllm_grpc.proto',
+    file: 'lib/sidecar/trtllm/proto/openengine/v1/generation.proto',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'vllm sidecar proto triggers Rust checks without backend E2E'
+    desc: 'sidecar proto contracts trigger Rust checks without backend E2E'
   },
   {
     file: 'lib/sidecar/sglang/src/lib.rs',
@@ -156,22 +176,32 @@ const testCases = [
     expect: { sidecar: true },
     desc: 'compliance policy changes validate the sidecar image gate'
   },
+  {
+    file: 'Cargo.toml',
+    expect: { sidecar: true, rust: true },
+    desc: 'root workspace manifest is a sidecar image build input'
+  },
+  {
+    file: 'Cargo.lock',
+    expect: { sidecar: true, rust: true },
+    desc: 'root lockfile is a sidecar image build input'
+  },
 
   // Doc files should be excluded from core (negation patterns)
   {
     file: 'lib/README.md',
-    expect: { core: false, vllm: false, docs: true },
-    desc: 'lib README excluded from core, matches docs'
+    expect: { core: false, vllm: false, docs: false, ignore: true },
+    desc: 'lib README is classification-only and excluded from core'
   },
   {
     file: 'tests/README.md',
-    expect: { core: false, docs: true },
-    desc: 'tests README excluded from core'
+    expect: { core: false, docs: false, ignore: true },
+    desc: 'tests README is classification-only and excluded from core'
   },
   {
     file: 'lib/docs/guide.txt',
-    expect: { core: false, docs: true },
-    desc: 'txt file excluded from core'
+    expect: { core: false, docs: false, ignore: true },
+    desc: 'txt file is classification-only and excluded from core'
   },
   {
     file: 'docs/guide.md',
@@ -271,6 +301,16 @@ const testCases = [
     desc: 'sglang snapshot.py gates only sglang checkpoint tests'
   },
   {
+    file: 'container/context.yaml',
+    expect: {
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: true,
+      snapshot_trtllm: false,
+    },
+    desc: 'runtime tag changes gate the SGLang checkpoint tests'
+  },
+  {
     file: 'components/src/dynamo/trtllm/snapshot.py',
     expect: {
       trtllm: true,
@@ -307,7 +347,7 @@ const testCases = [
     desc: 'Operator CRD changes trigger snapshot contract tests'
   },
   {
-    file: 'deploy/operator/config/rbac/role.yaml',
+    file: 'deploy/helm/charts/platform/components/operator/files/role.yaml',
     expect: { snapshot: true, operator: true },
     desc: 'Operator RBAC changes trigger snapshot contract tests'
   },

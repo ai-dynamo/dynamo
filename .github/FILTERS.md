@@ -6,28 +6,35 @@ The `filters.yaml` file controls which CI jobs run based on changed files.
 
 When you open a PR, CI checks which files changed and runs only relevant jobs:
 
-| Filter | Triggers |
-|--------|----------|
-| `core` | Main test suite (vLLM, SGLang, TRT-LLM containers) |
-| `dev_images` | dev / local-dev image builds only (no runtime or GPU jobs) |
-| `operator` | Kubernetes operator tests |
-| `snapshot` | Checkpoint-placeholder image + all-framework standalone Snapshot deploy tests (github.com/ai-dynamo/snapshot is external; this covers Dynamo's integration surface) |
-| `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's checkpoint deploy suite |
-| `deploy` | Deploy-specific tests |
-| `vllm` / `sglang` / `trtllm` | Backend-specific tests |
-| `sidecar` | Unified multi-architecture sidecar image build, publish, and compliance checks for changes under `lib/sidecar/**` (docs excluded), its shared workflow, and shared compliance inputs |
-| `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
-| `sample` | Sample-backend unified test (piggybacks on vllm image) |
-| `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
-| `docs` | Docs Lint, Fern Configuration, Docs Website Composition, and Fern Broken Links checks; Fern preview or publish workflow |
-| `fern_components` | Parse custom MDX components (a step inside Fern Configuration Check) |
-| `examples` | Recipe Kustomize generation and docs-artifact unit checks |
-| `ignore` | Nothing (classification only) |
-| `rust` | Rust pre merge checks |
+| Filter                                                  | Triggers                                                                                                                                                                             |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `core`                                                  | Main test suite (vLLM, SGLang, TRT-LLM containers)                                                                                                                                   |
+| `dev_images`                                            | dev / local-dev image builds only (no runtime or GPU jobs)                                                                                                                           |
+| `operator`                                              | Kubernetes operator tests                                                                                                                                                            |
+| `snapshot`                                              | Checkpoint-placeholder image + all-framework standalone Snapshot deploy tests (github.com/ai-dynamo/snapshot is external; this covers Dynamo's integration surface)                  |
+| `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's checkpoint deploy suite                                                                                                                                             |
+| `deploy`                                                | Deploy-specific tests                                                                                                                                                                |
+| `vllm` / `sglang` / `trtllm` / `triton`                 | Backend-specific tests                                                                                                                                                               |
+| `sidecar`                                               | Unified multi-architecture sidecar image build, publish, and compliance checks for changes under `lib/sidecar/**` (docs excluded), its shared workflow, and shared compliance inputs |
+| `benchmarks`                                            | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite)                                                                                                                    |
+| `sample`                                                | Sample-backend unified test (piggybacks on vllm image)                                                                                                                               |
+| `efa`                                                   | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change)                                                                                     |
+| `docs`                                                  | Docs Lint, Fern Configuration, Docs Website Composition, and Fern Broken Links checks; Fern preview or publish workflow                                                              |
+| `fern_components`                                       | Parse custom MDX components (a step inside Fern Configuration Check)                                                                                                                 |
+| `examples`                                              | Recipe Kustomize generation and docs-artifact unit checks                                                                                                                            |
+| `ignore`                                                | Nothing (classification only)                                                                                                                                                        |
+| `rust`                                                  | Rust pre merge checks                                                                                                                                                                |
 
-> **Note:** `ignore` doesn't directly trigger CI jobs. It exists to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, so the existing workspace Rust checks cover sidecar tests before the image is built and published. `docs` gates the Docs Lint, Fern Configuration Check, Docs Website Composition Check, and Fern Broken Links Check jobs in `pre-merge.yml`. `examples` gates Recipe Check.
+> [!NOTE]
+> `ignore` doesn't directly trigger CI jobs.
+> It exists to satisfy coverage requirements - every file must match at least one filter.
+> Sidecar source and proto files also match `rust`, so the existing workspace Rust checks cover sidecar tests before the image is built and published.
+> `docs` gates the Docs Lint, Fern Configuration Check, Docs Website Composition Check, and Fern Broken Links Check jobs in `pre-merge.yml`.
+> `examples` gates Recipe Check.
 
-> **TODO:** The sidecar image also consumes root Cargo files, shared libraries, and composite actions. Expanding the filter to cover every remaining build input is deferred until the additional PR CI fan-out is evaluated and agreed.
+> [!TODO]
+> The sidecar image also consumes root Cargo files, shared libraries, and composite actions.
+> Expanding the filter to cover every remaining build input is deferred until the additional PR CI fan-out is evaluated and agreed.
 
 ## Fixing "Uncovered Files" Errors
 

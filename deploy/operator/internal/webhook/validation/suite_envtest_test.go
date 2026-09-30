@@ -111,6 +111,7 @@ type admissionTestCase struct {
 	seedGates          *features.Gates
 	seedWithoutWebhook bool
 	withoutTopology    bool
+	terminating        bool
 	username           string
 
 	wantSchemaError   string
@@ -156,6 +157,9 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 			seedClient = newAdmissionResourceClient(t, env, test.oldObject, legacySeedUsername, warnings)
 		}
 		old := seedAdmissionObject(t, seedClient, test, env.Namespace())
+		if test.terminating {
+			old = beginTermination(t, seedClient, old)
+		}
 
 		t.Log("Submit the update request through the Kubernetes API server")
 		admissionGate.set(test.gates)
@@ -175,6 +179,37 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 		t.Fatalf("warnings = %v, want %v", got, wantWarnings)
 	}
 	return result
+}
+
+// beginTermination deletes the seeded resource and reloads it, so the update
+// under test runs against a deletionTimestamp the API server owns and reports on
+// both the old and the new object. Manufacturing that timestamp on the new object
+// alone does not reach the same request: a client cannot set it, and the old
+// object carries it too once deletion is pending.
+//
+// The seeded object must already hold a finalizer, otherwise the delete removes
+// it outright and there is no terminating state left to update.
+func beginTermination(
+	t *testing.T,
+	resourceClient dynamic.ResourceInterface,
+	seeded *unstructured.Unstructured,
+) *unstructured.Unstructured {
+	t.Helper()
+	if len(seeded.GetFinalizers()) == 0 {
+		t.Fatalf("terminating case needs a finalizer on the seeded object, or the delete completes immediately")
+	}
+	t.Log("Delete the seeded resource so the API server marks it terminating")
+	if err := resourceClient.Delete(t.Context(), seeded.GetName(), metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete seeded resource: %v", err)
+	}
+	terminating, err := resourceClient.Get(t.Context(), seeded.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reload terminating resource: %v", err)
+	}
+	if terminating.GetDeletionTimestamp() == nil {
+		t.Fatalf("API server left %s without a deletionTimestamp", seeded.GetName())
+	}
+	return terminating
 }
 
 func newAdmissionResourceClient(

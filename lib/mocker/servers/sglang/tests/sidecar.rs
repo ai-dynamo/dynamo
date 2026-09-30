@@ -201,8 +201,9 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     decode.start(1).await.unwrap();
 
     let prefill_outputs = collect(&prefill, request(3)).await;
-    assert_eq!(prefill_outputs.len(), 1);
+    assert_eq!(prefill_outputs.len(), 2);
     assert!(prefill_outputs[0].token_ids.is_empty());
+    assert!(prefill_outputs[0].finish_reason.is_none());
     let handoff = prefill_outputs[0]
         .disaggregated_params
         .clone()
@@ -210,6 +211,8 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     assert_eq!(handoff["bootstrap_host"], "127.0.0.1");
     assert_eq!(handoff["bootstrap_port"], 8_998);
     assert!(handoff["bootstrap_room"].is_number());
+    assert_eq!(prefill_outputs[1].finish_reason, Some(FinishReason::Length));
+    assert!(prefill_outputs[1].disaggregated_params.is_none());
 
     let mut decode_request = request(3);
     decode_request.prefill_result = Some(PrefillResult {
@@ -267,4 +270,54 @@ async fn sidecar_abort_releases_mocker_work() {
     .await
     .expect("Abort should release scheduler work promptly");
     consumer.abort();
+}
+
+#[tokio::test]
+async fn request_cancellation_is_isolated_and_shutdown_reaches_grpc_streams() {
+    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let first_context = dynamo_backend_common::testing::mock_context();
+        let mut streams = Vec::new();
+        for context in [
+            first_context.clone(),
+            dynamo_backend_common::testing::mock_context(),
+        ] {
+            let mut stream = engine
+                .generate(request(64), GenerateContext::new(context, None))
+                .await
+                .unwrap();
+            let first = stream.next().await.unwrap().unwrap();
+            assert!(!first.token_ids.is_empty());
+            assert!(first.finish_reason.is_none());
+            streams.push(stream);
+        }
+
+        first_context.stop_generating();
+        assert_eq!(
+            streams[0].next().await.unwrap().unwrap().finish_reason,
+            Some(FinishReason::Cancelled)
+        );
+        assert!(streams[0].next().await.is_none());
+        for stream in &mut streams[1..] {
+            let next = stream.next().await.unwrap().unwrap();
+            assert!(next.finish_reason.is_none());
+        }
+
+        engine.cleanup().await.unwrap();
+        for stream in &mut streams[1..] {
+            assert_eq!(
+                stream.next().await.unwrap().unwrap().finish_reason,
+                Some(FinishReason::Cancelled)
+            );
+            assert!(stream.next().await.is_none());
+        }
+        let late = collect(&engine, request(1)).await;
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].finish_reason, Some(FinishReason::Cancelled));
+    })
+    .await
+    .expect("request cancellation and engine shutdown must finish promptly");
 }

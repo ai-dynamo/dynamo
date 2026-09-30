@@ -125,27 +125,13 @@ impl ActiveSequences {
         Self::new_with_expiry(block_size, Some(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION))
     }
 
-    /// Creates a tracker with an explicit stale-request expiry duration.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `expiry_duration` is zero or `block_size` is zero.
-    pub(super) fn new_with_expiry_duration(block_size: usize, expiry_duration: Duration) -> Self {
+    /// Builds a tracker from an optional stale-request expiry policy.
+    pub(super) fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
+        assert!(block_size > 0, "block_size must be greater than 0");
         assert!(
-            !expiry_duration.is_zero(),
+            expiry_duration.is_none_or(|duration| !duration.is_zero()),
             "expiry_duration must be greater than zero"
         );
-        Self::new_with_expiry(block_size, Some(expiry_duration))
-    }
-
-    /// Creates a tracker that relies only on explicit request lifecycle events.
-    pub(super) fn new_without_expiry(block_size: usize) -> Self {
-        Self::new_with_expiry(block_size, None)
-    }
-
-    /// Builds a tracker from an optional stale-request expiry policy.
-    fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
-        assert!(block_size > 0, "block_size must be greater than 0");
 
         Self {
             requests: HashMap::new(),
@@ -396,7 +382,7 @@ mod tests {
     #[test]
     fn active_worker_teardown_with_a_live_long_chain_is_iterative() {
         const DEPTH: usize = 65_536;
-        let mut sequences = ActiveSequences::new_without_expiry(1);
+        let mut sequences = ActiveSequences::new_with_expiry(1, None);
         sequences.add_request_with_prefill_tracking(
             "long-lived".to_string(),
             Some((1..=DEPTH as u64).collect()),
@@ -810,7 +796,7 @@ mod tests {
     async fn test_force_expiry_uses_custom_duration() {
         let block_size = 4;
         let mut seq_manager =
-            ActiveSequences::new_with_expiry_duration(block_size, Duration::from_secs(60));
+            ActiveSequences::new_with_expiry(block_size, Some(Duration::from_secs(60)));
 
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
@@ -836,13 +822,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "expiry_duration must be greater than zero")]
     fn test_custom_expiry_rejects_zero_duration() {
-        let _ = ActiveSequences::new_with_expiry_duration(4, Duration::ZERO);
+        let _ = ActiveSequences::new_with_expiry(4, Some(Duration::ZERO));
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_force_expiry_reanchors_new_oldest_request() {
-        let mut seq_manager =
-            ActiveSequences::new_with_expiry_duration(4, Duration::from_secs(120));
+        let mut seq_manager = ActiveSequences::new_with_expiry(4, Some(Duration::from_secs(120)));
         let first_decay_now = Instant::now();
 
         seq_manager.add_request_with_prefill_tracking(

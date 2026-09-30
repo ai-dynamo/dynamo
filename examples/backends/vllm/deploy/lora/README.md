@@ -210,7 +210,7 @@ kubectl apply -f agg_lora_updated.yaml -n ${NAMESPACE}
 kubectl get pods -n ${NAMESPACE}
 
 # Watch worker logs
-kubectl logs -f deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE}
+kubectl logs -f deployment/vllm-agg-lora-worker -n ${NAMESPACE}
 ```
 
 Wait for the worker to show "Application startup complete".
@@ -300,7 +300,7 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 1. **Check MinIO connectivity from worker**:
    ```bash
-   kubectl exec -it deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE} -- \
+   kubectl exec -it deployment/vllm-agg-lora-worker -n ${NAMESPACE} -- \
      curl http://minio:9000/minio/health/live
    ```
 
@@ -312,7 +312,7 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 3. **Check worker logs**:
    ```bash
-   kubectl logs deployment/vllm-agg-lora-vllmdecode-worker -n ${NAMESPACE}
+   kubectl logs deployment/vllm-agg-lora-worker -n ${NAMESPACE}
    ```
 
 ### Sync Job Fails

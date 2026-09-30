@@ -73,6 +73,26 @@ func shellQuotePOSIX(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// findEnvVar returns the named environment variable entry, or nil when absent. The
+// entry, not its value, so a valueFrom variable is distinguishable from an absent one.
+func findEnvVar(env []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range env {
+		if env[i].Name == name {
+			return &env[i]
+		}
+	}
+	return nil
+}
+
+func findContainerPort(container *corev1.Container, name string) *corev1.ContainerPort {
+	for i := range container.Ports {
+		if container.Ports[i].Name == name {
+			return &container.Ports[i]
+		}
+	}
+	return nil
+}
+
 // containerHasArg reports whether the container already carries the given
 // flag/value pair in its Args (either as adjacent tokens "flag", "value" or
 // as a single token "flag=value" or "flag value" embedded inside a shell
@@ -82,24 +102,6 @@ func containerHasArg(container *corev1.Container, flag, value string) bool {
 		return false
 	}
 	return hasArg(container.Args, flag, value)
-}
-
-func containerCommandLineHasArg(container *corev1.Container, flag, value string) bool {
-	if container == nil {
-		return false
-	}
-	commandLine := make([]string, 0, len(container.Command)+len(container.Args))
-	commandLine = append(commandLine, container.Command...)
-	commandLine = append(commandLine, container.Args...)
-	if hasArg(commandLine, flag, value) {
-		return true
-	}
-
-	expandedCommandLine := []string{}
-	for _, arg := range commandLine {
-		expandedCommandLine = append(expandedCommandLine, strings.Fields(arg)...)
-	}
-	return hasArg(expandedCommandLine, flag, value)
 }
 
 func hasArg(args []string, flag, value string) bool {

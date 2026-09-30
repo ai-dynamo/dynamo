@@ -40,6 +40,10 @@ pub enum PublicationErrorKind {
     Unavailable,
     /// A bounded Relay publication resource was exhausted.
     ResourceExhausted,
+    /// A subscriber lost contiguous publication frames.
+    SubscriberLagged,
+    /// The subscriber stopped draining its initial snapshot.
+    SnapshotProgressTimeout,
     /// The source produced an invalid identity, format, or sequence transition.
     InvalidPublication,
     /// Internal snapshot encoding failed.
@@ -68,6 +72,10 @@ impl PublicationError {
         Self::new(PublicationErrorKind::ResourceExhausted, message)
     }
 
+    pub(crate) fn snapshot_progress_timeout(message: impl Into<String>) -> Self {
+        Self::new(PublicationErrorKind::SnapshotProgressTimeout, message)
+    }
+
     pub(crate) fn invalid_publication(message: impl Into<String>) -> Self {
         Self::new(PublicationErrorKind::InvalidPublication, message)
     }
@@ -91,8 +99,10 @@ impl From<PublicationHubError> for PublicationError {
             PublicationHubError::ProducerMismatch(_) => PublicationErrorKind::ProducerMismatch,
             PublicationHubError::Unavailable(_) => PublicationErrorKind::Unavailable,
             PublicationHubError::SubscriberLimit { .. }
-            | PublicationHubError::InitializedHubLimit { .. }
-            | PublicationHubError::SubscriberLagged(_) => PublicationErrorKind::ResourceExhausted,
+            | PublicationHubError::InitializedHubLimit { .. } => {
+                PublicationErrorKind::ResourceExhausted
+            }
+            PublicationHubError::SubscriberLagged(_) => PublicationErrorKind::SubscriberLagged,
             PublicationHubError::IdentityChanged { .. }
             | PublicationHubError::LeaseChanged { .. }
             | PublicationHubError::SequenceGap { .. }
@@ -353,6 +363,13 @@ mod tests {
             max_active_streams,
             DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT,
         ))
+    }
+
+    #[test]
+    fn subscriber_lag_is_not_an_admission_limit() {
+        let pool = producer().pool_id();
+        let lag = PublicationError::from(PublicationHubError::SubscriberLagged(pool));
+        assert_eq!(lag.kind(), PublicationErrorKind::SubscriberLagged);
     }
 
     #[tokio::test]
