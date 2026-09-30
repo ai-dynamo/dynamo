@@ -27,6 +27,8 @@ and deep-links to the exact file and line on `main`.
 
 ## Coverage
 
+- **HTTP** — the [frontend endpoint reference](../components/frontend-configuration.mdx#http-endpoints) lists HTTP routes. The manually maintained [System One API reference](systemone.md) describes the experimental typed-decisions contract.
+
 - **Python** — the [Python API landing page](python/README.mdx) indexes every
   curated module. Class methods and function signatures are pulled directly
   from the source; there are no hand-maintained tables.
@@ -39,7 +41,7 @@ and deep-links to the exact file and line on `main`.
   as siblings under the same section so every deep link resolves.
 
 <Note>
-**These pages are generated** and carry a `do not edit` marker. Python and Rust
+**Language API pages are generated** and carry a `do not edit` marker. Python and Rust
 come from docstrings read by [griffe][griffe]: edit the source, then rerun
 `gen_python_api.py` or `gen_rust_api.py` in `docs/fern/scripts/`. Kubernetes
 takes one more hop — `make generate-api-docs` in `deploy/operator/` turns the

@@ -18,6 +18,26 @@ the command. Pass supported flags after the script name to override its defaults
 
 ## Aggregated
 
+### System One Typed Decisions (Experimental)
+
+To evaluate typed decisions without generating answer tokens, run the [System One launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_systemone.sh). It starts one aggregate SGLang worker and enables `/v1/systemone` on the frontend. The default model is `Qwen/Qwen3-0.6B` and requires one GPU. Use a Dynamo build containing the experimental endpoint and an SGLang runtime that supports zero-output candidate-token scoring.
+
+From `examples/backends/sglang`, start the deployment:
+
+```bash
+./launch/agg_systemone.sh
+```
+
+In a second terminal at the repository root, run the [System One smoke test](https://github.com/ai-dynamo/dynamo/blob/main/examples/systemone/smoke.sh):
+
+```bash
+BASE_URL=http://localhost:8000 MODEL=Qwen/Qwen3-0.6B bash examples/systemone/smoke.sh
+```
+
+The smoke test verifies ordered typed answers, normalized candidate probabilities, zero output tokens, and invalid-request rejection. See the [shell example README](https://github.com/ai-dynamo/dynamo/blob/main/examples/systemone/README.md) for model/path overrides and the [System One API reference](../../reference/api/systemone.md) for limits, score semantics, and unsupported configurations.
+
+### Other Aggregated Examples
+
 <AccordionGroup>
 <Accordion title="Single-Worker Text Generation">
 

@@ -76,6 +76,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
 ## System and metrics
 
+For experimental System One enablement (`DYN_ENABLE_SYSTEMONE_API`), branch admission (`DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES`), expanded token limits (`DYN_SYSTEMONE_MAX_INPUT_TOKENS`), and route override (`DYN_HTTP_SVC_SYSTEMONE_PATH`), see [Frontend Configuration](../components/frontend-configuration.mdx#system-one-experimental) and [Endpoint Path Customization](../components/frontend-configuration.mdx#endpoint-path-customization).
+
 <ParamField path="DYN_SYSTEM_PORT" type="integer" default="-1 (disabled)">
   Port for the backend component's system-status server, which serves `/metrics` and the health endpoints. Disabled by default; local examples use `8081`. Must be set explicitly for backend workers and the standalone router to expose metrics.
 
