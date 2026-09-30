@@ -29,7 +29,10 @@
 //!   fetched, so the daemon stays the only thing that touches the network.
 //!
 //! An `oci://` pull therefore needs both the daemon reachable *and* the binary
-//! on `PATH`; each missing piece has its own actionable error.
+//! on `PATH`; each missing piece has its own actionable error. The daemon
+//! exposes neither its store location nor a `--store` flag: the store comes
+//! only from `LLMMAN_MODELS`, which the `resolve` subprocess inherits, so the
+//! daemon and Dynamo must be given the same value.
 //!
 //! An explicit `oci://` scheme is required rather than sniffing a bare
 //! `registry/name:tag`: that shape is indistinguishable from a Hugging Face
@@ -38,6 +41,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::Context;
 use futures::StreamExt;
@@ -54,6 +58,13 @@ const DEFAULT_BIN: &str = "llmman";
 /// `llmman serve`'s own default bind address.
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 17434;
+
+/// Bound on connecting to the daemon.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Longest the daemon may stay silent mid-stream before a pull is treated as
+/// hung. Deliberately generous so a slow but live pull is never cut off.
+const PULL_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// True if `value` uses the `oci://` scheme.
 ///
@@ -177,6 +188,20 @@ struct ResolveOutput {
     format: Option<String>,
 }
 
+/// Build the HTTP client used to talk to the daemon.
+///
+/// There is deliberately no whole-request `timeout`: `/api/pull` holds one
+/// streaming response open for the entire transfer, which can run for far
+/// longer than any fixed deadline. Stalls are caught per read instead, and the
+/// connect phase is bounded separately.
+fn http_client(connect: Duration, idle: Duration) -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .read_timeout(idle)
+        .build()
+        .context("building the HTTP client for the llmman daemon")
+}
+
 /// Confirm a llmman daemon is listening and answering.
 ///
 /// `/api/version` is llmman's own identity endpoint; a response without a
@@ -185,7 +210,7 @@ struct ResolveOutput {
 async fn check_daemon(client: &reqwest::Client, base: &str) -> anyhow::Result<()> {
     let resp = client
         .get(format!("{base}/api/version"))
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
         .send()
         .await
         .with_context(|| {
@@ -311,8 +336,11 @@ async fn resolve(reference: &str) -> anyhow::Result<PathBuf> {
 
     if !output.status.success() {
         anyhow::bail!(
-            "'{bin} resolve --no-pull {reference}' failed with {}. See the error above.",
-            output.status
+            "'{bin} resolve --no-pull {reference}' failed with {}. See the error above. \
+             If it reports the model missing, the daemon and Dynamo are using different \
+             llmman stores: set {} to the daemon's value.",
+            output.status,
+            env_model::oci::LLMMAN_MODELS
         );
     }
 
@@ -370,7 +398,7 @@ pub async fn from_oci(reference: &str) -> anyhow::Result<PathBuf> {
     }
 
     let base = endpoint();
-    let client = reqwest::Client::new();
+    let client = http_client(CONNECT_TIMEOUT, PULL_IDLE_TIMEOUT)?;
     check_daemon(&client, &base).await?;
 
     tracing::info!("Pulling OCI model '{bare}' via llmman daemon at {base}");
@@ -564,6 +592,107 @@ mod tests {
         temp_env::with_var(env_model::oci::DYN_LLMMAN_BIN, Some("  "), || {
             assert_eq!(llmman_bin(), "llmman");
         });
+    }
+
+    /// True once `req` holds a full HTTP request: headers plus `Content-Length`
+    /// bytes of body.
+    fn request_complete(req: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(req);
+        let Some((head, body)) = text.split_once("\r\n\r\n") else {
+            return false;
+        };
+        let len = head
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("content-length")
+                    .then(|| v.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        body.len() >= len
+    }
+
+    /// Serve one request with a chunked NDJSON body, pausing `gap` after each
+    /// chunk. Returns the daemon's base URL.
+    async fn mock_pull_daemon(chunks: &'static [&'static str], gap: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Drain the whole request so closing the socket cannot reset the reply.
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request_complete(&req) {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\n\
+                        transfer-encoding: chunked\r\n\r\n";
+            if sock.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            for c in chunks {
+                let frame = format!("{:x}\r\n{c}\r\n", c.len());
+                if sock.write_all(frame.as_bytes()).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(gap).await;
+            }
+            let _ = sock.write_all(b"0\r\n\r\n").await;
+        });
+        base
+    }
+
+    const PROGRESS: &str = "{\"status\":\"pulling blobs\",\"completed\":1,\"total\":9}\n";
+    const SUCCESS: &str = "{\"status\":\"success\"}\n";
+
+    #[tokio::test]
+    async fn pull_outlasting_the_idle_timeout_succeeds_while_data_flows() {
+        // Whole transfer (~700ms) is longer than the idle timeout (500ms), but
+        // no single gap is: only a whole-request deadline would abort this.
+        let base = mock_pull_daemon(
+            &[
+                PROGRESS, PROGRESS, PROGRESS, PROGRESS, PROGRESS, PROGRESS, PROGRESS, SUCCESS,
+            ],
+            Duration::from_millis(100),
+        )
+        .await;
+        let client = http_client(Duration::from_secs(5), Duration::from_millis(500)).unwrap();
+        pull(&client, &base, "r").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pull_fails_when_the_daemon_goes_silent() {
+        let base = mock_pull_daemon(&[PROGRESS, SUCCESS], Duration::from_millis(1500)).await;
+        let client = http_client(Duration::from_secs(5), Duration::from_millis(300)).unwrap();
+        let err = pull(&client, &base, "r").await.unwrap_err();
+        assert!(
+            err.to_string().contains("reading llmman pull stream"),
+            "{err:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn resolve_failure_points_at_the_shared_store() {
+        // `false` ignores its arguments and exits non-zero, standing in for
+        // `llmman resolve` reporting the model missing from its own store.
+        let err = temp_env::async_with_vars(
+            [(env_model::oci::DYN_LLMMAN_BIN, Some("false"))],
+            resolve("r"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains(env_model::oci::LLMMAN_MODELS),
+            "{err:#}"
+        );
     }
 
     #[tokio::test]

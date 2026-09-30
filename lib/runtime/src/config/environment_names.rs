@@ -700,6 +700,11 @@ pub mod model {
         /// through, as `[scheme://]host[:port]`. Same variable llmman's own
         /// clients read; defaults to `127.0.0.1:17434`.
         pub const LLMMAN_HOST: &str = "LLMMAN_HOST";
+
+        /// Local llmman store directory. The daemon has no store flag, so
+        /// Dynamo's `llmman resolve` only finds what the daemon pulled if it
+        /// inherits the same value the daemon was started with.
+        pub const LLMMAN_MODELS: &str = "LLMMAN_MODELS";
     }
 }
 
