@@ -9,7 +9,7 @@ When Kubernetes terminates a pod (rollout, scale-down, node drain), Dynamo worke
 
 Once shutdown proceeds past the grace period and any backend-specific draining, workers initiate cancellation of unfinished requests. The Frontend can migrate these requests to a healthy worker when migration is enabled and policy permits it; otherwise the client receives an error. Exhausted retries or an exceeded sequence-length cap can prevent recovery.
 
-The knobs are three timeouts plus enabling migration. The default flow: endpoints unregister from discovery immediately, workers serve for a short grace period, then endpoints drain (bounded by a timeout) before resources are cleaned up.
+The knobs set a total deadline, stage caps, and a policy, plus enabling migration. The default flow: endpoints unregister from discovery immediately, workers serve for a short grace period, then endpoints drain before resources are cleaned up, all inside the total deadline.
 
 > **How it works:** the signal handlers, the `graceful_shutdown()` sequence, per-backend `cleanup()` code, and error-initiated shutdown are documented in [Graceful Shutdown Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md).
 
@@ -42,15 +42,29 @@ Rough guidance:
 
 <Step title="Tune the drain windows">
 
-Three environment variables control Dynamo's internal draining. Set the HTTP timeout on the Frontend and the runtime values on worker components:
+Set the HTTP timeout on the Frontend and the shutdown budgets on worker components:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | How long the Frontend waits for admitted HTTP and WebSocket inference requests to finish before it cancels runtime state. |
-| `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` | `5` | How long workers keep serving after endpoints unregister from discovery, before endpoints are invalidated. |
-| `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Upper bound on waiting for in-flight requests to finish. If draining exceeds this, Dynamo logs the remaining endpoint count and tears down anyway. |
+| `DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS` | `30` | Total SIGTERM-to-exit budget, including router grace, draining, engine cleanup, and runtime teardown. Same default in debug and release. |
+| `DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS` | `5` | Time to serve already-routed requests after discovery unregister, before closing local admission. |
+| `DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS` | `30` | Prefill KV-transfer drain cap, bounded by the total after reserving cleanup. |
+| `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Runtime request-drain limit when its caller supplies no explicit timeout. Backend workers and Python's `shutdown_and_wait()` supply a bound derived from `DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS` instead. |
+| `DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS` | uncapped | Cap on a worker waiting for admitted requests to finish, *within* the total budget. Unset means the stage is bounded only by what is left of `DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS` after reserving cleanup; set it to make the barrier give up sooner and leave more of the budget for KV drain and cleanup. Raising it past the total has no effect — raise the total instead. |
+| `DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK` | engine's choice | `wait` or `skip`. What a prefill worker does when its engine cannot report KV-transfer state. Overrides the engine's own declaration. Leave unset unless you know the engine holds no KV a decode peer could still be reading — `skip` can free GPU memory mid-transfer. |
+| `DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS` | `5` | Shared allowance for engine cleanup and runtime teardown, reserved inside the total. Applies to Rust sidecars and Python in-process workers. |
 
-The defaults are sound for most deployments. Raise the relevant timeout only for long generations or sustained high utilization. Keep every internal timeout below `terminationGracePeriodSeconds` so Dynamo can finish its own cleanup before Kubernetes force-kills the pod.
+The legacy names `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`, `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, and `DYN_PREFILL_DRAIN_TIMEOUT_S` remain aliases for total, router grace, and KV drain respectively. A non-empty canonical value takes precedence; an invalid canonical value uses the default, not the alias. Total seconds must be a positive integer no larger than 315360000. Stage caps accept finite seconds, including fractions; negative drain or grace caps clamp to zero, and non-positive cleanup caps use the default. Invalid or oversized values log a warning and use the default. SDK `ShutdownConfig` fields take precedence over environment values.
+
+The total now includes router grace and cleanup: neither is added afterward. Increase an existing total explicitly if the previous additive behavior was required. The default debug total changes from 5 to 30 seconds to leave room for grace, draining, and cleanup.
+
+> [!IMPORTANT]
+> Workers spend one total measured from SIGTERM. Before cleanup, each stage gets at most `min(stage cap, remaining total minus cleanup reserve)`. Engine cleanup and transport teardown then share `min(cleanup cap, remaining total)`. The watchdog does not extend the total. Set `terminationGracePeriodSeconds` to at least **total + 5 seconds**, plus any time needed by Kubernetes pre-stop hooks. Defaults give a 30-second worker bound, inside the operator's 60-second pod grace period.
+>
+> The frontend's `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` is separate; it bounds a different process.
+
+The operator validates explicit literal total-budget settings after pod overrides are merged. It rejects an insufficient pod grace period or an unresolved `valueFrom` total. It does not change existing templates to inject a budget. For budgets set through `envFrom`, image defaults, or shell exports, declare a literal total in the pod template as well; otherwise the operator cannot validate the effective value. Programmatic SDK overrides must also be reflected in the pod configuration.
 
 </Step>
 
@@ -80,7 +94,7 @@ Backend workers always drain with `graceful_shutdown=True`; they don't need any 
 
 Trigger a shutdown (for example `kubectl delete pod <worker-pod>` or a rollout) and watch the worker logs for the shutdown sequence:
 
-```
+```text
 INFO  Received shutdown signal, shutting down DistributedRuntime
 INFO  DistributedRuntime shutdown complete
 DEBUG Cleaning up worker
@@ -100,6 +114,8 @@ have time to complete. If a pod receives `SIGKILL` before draining finishes, inc
 </Steps>
 
 ## Custom workers
+
+Stage logs report start, outcome, elapsed time, and remaining total. Inspect `dynamo_component_shutdown_stage_seconds{stage,reason}`, `dynamo_component_shutdown_remaining_seconds`, `dynamo_component_shutdown_inflight_requests`, and `dynamo_component_shutdown_kv_quiescent` during shutdown. Remaining time and inflight counts are snapshots at stage transitions. KV quiescence is `1` for confirmed idle, `0` for confirmed busy, and `-1` for unsupported or unknown status. An `unsupported` outcome denotes the declared fallback, not proof that transfers completed. Collect logs before pod removal; the metrics endpoint disappears with the process.
 
 If you author your own worker with the Dynamo SDK, the `graceful_shutdown` parameter on `serve_endpoint()` controls whether that endpoint waits for in-flight requests (`True`) or returns immediately (`False`). Backend workers default to `True`. For the parameter, the shutdown sequence, and per-backend cleanup patterns, see [Graceful Shutdown Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md) and the [Writing Python Workers](../../developer-guide/advanced-customizations/writing-custom-backends/writing-python-workers.md) guide.
 

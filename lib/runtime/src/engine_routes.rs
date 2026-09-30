@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 /// Callback type for engine routes (async)
 /// Takes JSON body, returns JSON response (or error) wrapped in a Future
@@ -40,7 +42,7 @@ impl EngineRouteRegistry {
     /// it usually signals two registration mechanisms colliding rather than an
     /// intentional replacement.
     pub fn register(&self, route: &str, callback: EngineRouteCallback) {
-        let mut routes = self.routes.write().unwrap();
+        let mut routes = self.routes.write();
         if routes.insert(route.to_string(), callback).is_some() {
             tracing::warn!("Overwriting already-registered engine route: /engine/{route}");
         } else {
@@ -50,13 +52,13 @@ impl EngineRouteRegistry {
 
     /// Get callback for a route
     pub fn get(&self, route: &str) -> Option<EngineRouteCallback> {
-        let routes = self.routes.read().unwrap();
+        let routes = self.routes.read();
         routes.get(route).cloned()
     }
 
     /// List all registered routes
     pub fn routes(&self) -> Vec<String> {
-        let routes = self.routes.read().unwrap();
+        let routes = self.routes.read();
         routes.keys().cloned().collect()
     }
 }

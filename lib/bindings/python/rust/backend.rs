@@ -26,6 +26,10 @@ use dynamo_backend_common::{
     LlmRegistration as RsLlmRegistration, MetricsBindings, MetricsCtx, OnPublisherReady,
     PreprocessedRequest, RawEngine, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
+    shutdown::{
+        KvTransferFallback as RsKvTransferFallback, ShutdownConfig as RsShutdownConfig,
+        is_valid_configured_secs as rs_is_valid_configured_secs,
+    },
 };
 use dynamo_llm::local_model::runtime_config::{
     StructuralTagMode as RsStructuralTagMode, StructuralTagSchemaMode as RsStructuralTagSchemaMode,
@@ -71,6 +75,7 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<EngineConfig>()?;
     m.add_class::<LlmRegistration>()?;
     m.add_class::<RuntimeConfig>()?;
+    m.add_class::<ShutdownConfig>()?;
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
     m.add_class::<PySnapshotPublisher>()?;
@@ -401,6 +406,133 @@ impl RuntimeConfig {
 }
 
 // ---------------------------------------------------------------------------
+// ShutdownConfig
+// ---------------------------------------------------------------------------
+
+/// Shutdown timing overrides. Every field is optional; an unset field falls
+/// back to the corresponding environment variable, then the built-in default.
+///
+/// Nested rather than flattened onto `WorkerConfig` so a new knob costs one
+/// edit here instead of one in each of the Rust struct, this signature and the
+/// Python dataclass.
+#[pyclass(module = "dynamo._core.backend", name = "ShutdownConfig")]
+#[derive(Clone, Default)]
+pub struct ShutdownConfig {
+    inner: RsShutdownConfig,
+}
+
+#[pymethods]
+impl ShutdownConfig {
+    #[new]
+    #[pyo3(signature = (
+        total_secs = None,
+        router_grace_secs = None,
+        inflight_timeout_secs = None,
+        kv_transfer_timeout_secs = None,
+        cleanup_timeout_secs = None,
+        kv_transfer_fallback = None,
+    ))]
+    fn new(
+        total_secs: Option<f64>,
+        router_grace_secs: Option<f64>,
+        inflight_timeout_secs: Option<f64>,
+        kv_transfer_timeout_secs: Option<f64>,
+        cleanup_timeout_secs: Option<f64>,
+        kv_transfer_fallback: Option<String>,
+    ) -> PyResult<Self> {
+        // Parsed here rather than accepted as a free string so a typo fails at
+        // construction, not silently at shutdown time.
+        let kv_transfer_fallback = match kv_transfer_fallback.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(value) => match value.to_ascii_lowercase().as_str() {
+                "wait" => Some(RsKvTransferFallback::WaitFullBudget),
+                "skip" => Some(RsKvTransferFallback::Skip),
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "kv_transfer_fallback must be 'wait' or 'skip', got {other:?}"
+                    )));
+                }
+            },
+        };
+        // Validated here, not at shutdown: `Duration::from_secs_f64` panics on
+        // a value it cannot represent, and a panic while shutting down aborts
+        // the drain. `inf` and `1e30` both reach that call unless rejected.
+        for (name, value) in [
+            ("total_secs", total_secs),
+            ("router_grace_secs", router_grace_secs),
+            ("inflight_timeout_secs", inflight_timeout_secs),
+            ("kv_transfer_timeout_secs", kv_transfer_timeout_secs),
+            ("cleanup_timeout_secs", cleanup_timeout_secs),
+        ] {
+            if let Some(value) = value
+                && !rs_is_valid_configured_secs(value)
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "{name} must be a finite, non-negative number of seconds \
+                     within a sane range, got {value}"
+                )));
+            }
+        }
+        Ok(Self {
+            inner: RsShutdownConfig {
+                total_secs,
+                router_grace_secs,
+                inflight_timeout_secs,
+                kv_transfer_timeout_secs,
+                cleanup_timeout_secs,
+                kv_transfer_fallback,
+            },
+        })
+    }
+
+    // Getters exist so Python can observe what was actually forwarded across
+    // the boundary. Without them the only assertion a test could make was
+    // `isinstance(forwarded, ShutdownConfig)`, which passes just as well when
+    // the forwarding code is replaced by a bare `ShutdownConfig()` — i.e. it
+    // could not catch a silently dropped setting, the one failure it existed
+    // to catch.
+    #[getter]
+    fn total_secs(&self) -> Option<f64> {
+        self.inner.total_secs
+    }
+
+    #[getter]
+    fn router_grace_secs(&self) -> Option<f64> {
+        self.inner.router_grace_secs
+    }
+
+    #[getter]
+    fn inflight_timeout_secs(&self) -> Option<f64> {
+        self.inner.inflight_timeout_secs
+    }
+
+    #[getter]
+    fn kv_transfer_timeout_secs(&self) -> Option<f64> {
+        self.inner.kv_transfer_timeout_secs
+    }
+
+    #[getter]
+    fn cleanup_timeout_secs(&self) -> Option<f64> {
+        self.inner.cleanup_timeout_secs
+    }
+
+    #[getter]
+    fn kv_transfer_fallback(&self) -> Option<&'static str> {
+        match self.inner.kv_transfer_fallback {
+            Some(RsKvTransferFallback::WaitFullBudget) => Some("wait"),
+            Some(RsKvTransferFallback::Skip) => Some("skip"),
+            // `Undeclared` is the engine's own default, never something a
+            // caller can construct here, so it maps to "unset" like `None`.
+            Some(RsKvTransferFallback::Undeclared) | None => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.inner)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkerConfig
 // ---------------------------------------------------------------------------
 
@@ -439,6 +571,7 @@ impl WorkerConfig {
         media_fetcher = None,
         kv_state_endpoint = None,
         default_thinking_mode = None,
+        shutdown = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -468,6 +601,7 @@ impl WorkerConfig {
         media_fetcher: Option<MediaFetcher>,
         kv_state_endpoint: Option<String>,
         default_thinking_mode: Option<String>,
+        shutdown: Option<ShutdownConfig>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -548,6 +682,7 @@ impl WorkerConfig {
                 structural_tag_scope: st_scope,
                 structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
+                shutdown: shutdown.map(|c| c.inner).unwrap_or_default(),
                 route_to_encoder,
                 // Python vLLM owns and serves its existing `.rl` endpoint.
                 // The shared Rust endpoint is opt-in for Rust sidecars only.
@@ -677,15 +812,11 @@ impl Worker {
                 RsWorker::new(Arc::new(py_engine), config)
             };
 
-            let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
-
             // runtime_from_existing() shares Tokio but creates independent
             // cancellation tokens and a graceful-shutdown tracker. This run
             // owns that wrapper, including cleanup on engine startup failure;
             // shutting it down does not cancel another DistributedRuntime.
-            runtime.shutdown();
-
-            result
+            worker.run(runtime).await.map_err(to_pyerr)
         })
     }
 }
