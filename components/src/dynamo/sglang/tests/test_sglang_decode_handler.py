@@ -1103,12 +1103,10 @@ def test_build_sampling_params_passes_n_for_token_requests():
 def test_ordered_cancellation_requires_stable_sglang_request_id(
     sampling_params, supported, expected
 ):
-    assert (
-        _ordered_cancellation_request_id(
-            "request-id", sampling_params, supported=supported
-        )
-        == expected
+    request_id = _ordered_cancellation_request_id(
+        "request-id", sampling_params, supported=supported
     )
+    assert request_id == expected
 
 
 @pytest.mark.parametrize(
