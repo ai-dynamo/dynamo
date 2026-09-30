@@ -113,6 +113,8 @@ impl FunctionCallState {
 }
 
 impl ResponseStreamConverter {
+    /// Initialize a response stream with its tool aliases and resolve allowed backend
+    /// names once for use across all chunks.
     pub fn new(model: String, mut params: ResponseParams) -> Self {
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1687,6 +1689,8 @@ mod tests {
         assert_eq!(call.namespace.as_deref(), Some("agents"));
     }
 
+    /// Colliding tool names retain their namespaces from initial stream events
+    /// through the completed response.
     #[test]
     fn test_colliding_namespaces_restore_streamed_tool_identity() {
         let tools = serde_json::from_value(serde_json::json!([

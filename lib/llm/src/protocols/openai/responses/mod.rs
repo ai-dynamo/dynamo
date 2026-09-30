@@ -893,6 +893,8 @@ fn convert_service_tier(tier: &ServiceTier) -> ChatServiceTier {
 impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
+    /// Convert a Responses request using one alias map for tools, history, and choices.
+    /// Return an error for tool types or choices that Chat Completions cannot represent.
     fn try_from(resp: NvCreateResponse) -> Result<Self, Self::Error> {
         let names = ToolNameMap::new(
             resp.inner.tools.as_deref().unwrap_or_default(),
@@ -1103,6 +1105,8 @@ impl ResponseParams {
             .is_some()
     }
 
+    /// Borrow the retained history-aware map, or rebuild from current tool definitions
+    /// when the caller did not retain a map.
     fn tool_name_map(&self) -> std::borrow::Cow<'_, ToolNameMap> {
         match &self.tool_names {
             Some(names) => std::borrow::Cow::Borrowed(names),
@@ -2846,6 +2850,7 @@ mod tests {
         assert_eq!(tools[1].function.name, "spawn_agent");
     }
 
+    /// Equal bare names in different namespaces remain distinct after alias round trips.
     #[test]
     fn test_namespace_function_name_collision_round_trips() {
         let mut req = make_response_with_input("hello");
@@ -2881,6 +2886,7 @@ mod tests {
         );
     }
 
+    /// A bare named choice selects the top-level tool despite a namespaced name collision.
     #[test]
     fn test_top_level_namespace_function_name_collision_round_trips() {
         let mut req = make_response_with_input("hello");
@@ -2918,6 +2924,8 @@ mod tests {
         assert_eq!(choice.function.name, tools[0].function.name);
     }
 
+    /// History and alias-shaped tool names preserve identity without bypassing
+    /// a namespace-specific allowlist.
     #[test]
     fn test_namespace_aliases_preserve_history_and_allowed_tools() {
         let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
@@ -3000,6 +3008,7 @@ mod tests {
         );
     }
 
+    /// Removed historical tools reserve aliases without making current choices ambiguous.
     #[test]
     fn test_named_choice_ignores_removed_historical_tools() {
         let req: NvCreateResponse = serde_json::from_value(serde_json::json!({

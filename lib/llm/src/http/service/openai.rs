@@ -4104,6 +4104,8 @@ async fn handler_responses(
     response
 }
 
+/// Serve Responses requests through Chat Completions, retaining request metadata
+/// and tool identities for unary and streaming response reconstruction.
 #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 async fn responses(
     state: Arc<service_v2::State>,
