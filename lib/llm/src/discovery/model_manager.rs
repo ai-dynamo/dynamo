@@ -21,8 +21,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
-    kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
+    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
+    SystemOneExecutionSelection, WorkerSet, kv_source_watch::KvSourceMembershipCoordinator,
+    runtime_config_watch,
 };
 
 use dynamo_runtime::{
@@ -1498,6 +1499,38 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine_for_capability_with_routing(capability)
+    }
+
+    /// Resolve an alias and select all System One execution inputs from one catalog snapshot.
+    pub(crate) fn get_systemone_execution_selection(
+        &self,
+        requested_model: &str,
+        capability: &str,
+    ) -> Result<SystemOneExecutionSelection, ModelManagerError> {
+        let catalog = self.catalog.load();
+        let canonical_model = catalog
+            .aliases
+            .get(requested_model)
+            .map(String::as_str)
+            .unwrap_or(requested_model);
+        if let Some(model) = catalog.models.get(canonical_model) {
+            return model.get_systemone_execution_selection(capability);
+        }
+
+        // The Jev SDK defaults to `jev-latest`, while a single-engine SGLang
+        // server accepts any model name and reports the served model. Preserve
+        // that behavior only when the target is unambiguous.
+        let mut eligible = catalog
+            .models
+            .values()
+            .filter_map(|model| model.get_systemone_execution_selection(capability).ok());
+        let only = eligible.next();
+        if only.is_some() && eligible.next().is_none() {
+            return Ok(only.expect("checked as some"));
+        }
+        Err(ModelManagerError::ModelNotFound(
+            requested_model.to_string(),
+        ))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --

@@ -2741,6 +2741,64 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Render a System One question through the model's normal chat template and resolve
+    /// candidate labels that each add exactly one distinct token at the answer position.
+    pub(crate) fn render_systemone_question(
+        &self,
+        model: &str,
+        content: &str,
+        chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+        labels: &[String],
+    ) -> anyhow::Result<(Vec<TokenIdType>, Vec<TokenIdType>)> {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": content}],
+                "stream": false,
+                "max_tokens": 0,
+                "thinking": false,
+                "chat_template_kwargs": chat_template_kwargs.cloned().unwrap_or_default()
+            }))?;
+        request.normalize_reasoning_template_args()?;
+        let prompt = self
+            .apply_template(&request)?
+            .ok_or_else(|| anyhow::anyhow!("chat template did not produce a text prompt"))?;
+        if Self::prompt_injected_reasoning_start(
+            self.runtime_config.reasoning_parser.as_deref(),
+            Some(prompt.as_str()),
+        ) {
+            anyhow::bail!(
+                "/v1/systemone requires a chat template that closes or disables reasoning before the answer position"
+            );
+        }
+        let prompt_ids = self.tokenize_rendered_prompt(&prompt)?.token_ids().to_vec();
+        let flat_prompt_ids = self.tokenize(prompt.as_str())?.token_ids().to_vec();
+        if flat_prompt_ids != prompt_ids {
+            anyhow::bail!(
+                "/v1/systemone requires a chat prompt whose rendered text round-trips to the same token IDs"
+            );
+        }
+
+        let mut label_ids = Vec::with_capacity(labels.len());
+        for label in labels {
+            let with_label = format!("{}{label}", prompt.as_str());
+            let encoded = self.tokenize(&with_label)?.token_ids().to_vec();
+            if encoded.len() != prompt_ids.len() + 1 || encoded[..prompt_ids.len()] != prompt_ids {
+                anyhow::bail!(
+                    "answer label {label:?} is not one token after the chat prompt for this tokenizer"
+                );
+            }
+            let label_id = encoded[prompt_ids.len()];
+            if label_ids.contains(&label_id) {
+                anyhow::bail!(
+                    "answer label {label:?} is not a distinct token after the chat prompt"
+                );
+            }
+            label_ids.push(label_id);
+        }
+        Ok((prompt_ids, label_ids))
+    }
+
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
     /// Returns the common completion request, a hashmap of annotations, and a boolean
     /// indicating whether the rendered prompt ends with a reasoning start token (e.g.,

@@ -707,6 +707,9 @@ pub enum Endpoint {
 
     /// Generate (token-in/token-out)
     Generate,
+
+    /// System One typed decisions
+    SystemOne,
 }
 
 /// Metrics for the HTTP service
@@ -1861,6 +1864,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
             Endpoint::Generate => write!(f, "generate"),
+            Endpoint::SystemOne => write!(f, "systemone"),
         }
     }
 }
@@ -1881,6 +1885,7 @@ impl Endpoint {
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
             Endpoint::Generate => "generate",
+            Endpoint::SystemOne => "systemone",
         }
     }
 }

@@ -165,6 +165,7 @@ fn default_reasoning_field() -> ReasoningField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontendApiConfig {
     anthropic: AnthropicApiConfig,
+    systemone_enabled: bool,
     streaming_dispatch: StreamingDispatchConfig,
     reasoning_field: ReasoningField,
 }
@@ -172,11 +173,13 @@ pub struct FrontendApiConfig {
 impl FrontendApiConfig {
     pub fn new(
         anthropic: AnthropicApiConfig,
+        systemone_enabled: bool,
         streaming_dispatch: StreamingDispatchConfig,
         reasoning_field: ReasoningField,
     ) -> Self {
         Self {
             anthropic,
+            systemone_enabled,
             streaming_dispatch,
             reasoning_field,
         }
@@ -184,6 +187,7 @@ impl FrontendApiConfig {
 
     pub fn from_flags(
         enable_anthropic_api: bool,
+        enable_systemone_api: bool,
         strip_anthropic_preamble: bool,
         enable_streaming_tool_dispatch: bool,
         enable_streaming_reasoning_dispatch: bool,
@@ -191,6 +195,7 @@ impl FrontendApiConfig {
     ) -> Self {
         Self {
             anthropic: AnthropicApiConfig::new(enable_anthropic_api, strip_anthropic_preamble),
+            systemone_enabled: enable_systemone_api,
             streaming_dispatch: StreamingDispatchConfig::new(
                 enable_streaming_tool_dispatch,
                 enable_streaming_reasoning_dispatch,
@@ -201,12 +206,14 @@ impl FrontendApiConfig {
 
     pub fn from_optional_flags(
         enable_anthropic_api: Option<bool>,
+        enable_systemone_api: Option<bool>,
         strip_anthropic_preamble: Option<bool>,
         enable_streaming_tool_dispatch: Option<bool>,
         enable_streaming_reasoning_dispatch: Option<bool>,
         reasoning_field: Option<ReasoningField>,
     ) -> Option<Self> {
         if enable_anthropic_api.is_none()
+            && enable_systemone_api.is_none()
             && strip_anthropic_preamble.is_none()
             && enable_streaming_tool_dispatch.is_none()
             && enable_streaming_reasoning_dispatch.is_none()
@@ -218,6 +225,7 @@ impl FrontendApiConfig {
         let defaults = Self::default();
         Some(Self::from_flags(
             enable_anthropic_api.unwrap_or_else(|| defaults.anthropic().enabled()),
+            enable_systemone_api.unwrap_or_else(|| defaults.systemone_enabled()),
             strip_anthropic_preamble.unwrap_or_else(|| defaults.anthropic().strip_preamble()),
             enable_streaming_tool_dispatch
                 .unwrap_or_else(|| defaults.streaming_dispatch().tool_dispatch()),
@@ -233,6 +241,14 @@ impl FrontendApiConfig {
 
     pub fn anthropic_mut(&mut self) -> &mut AnthropicApiConfig {
         &mut self.anthropic
+    }
+
+    pub fn systemone_enabled(&self) -> bool {
+        self.systemone_enabled
+    }
+
+    pub fn set_systemone_enabled(&mut self, enabled: bool) {
+        self.systemone_enabled = enabled;
     }
 
     pub fn streaming_dispatch(&self) -> &StreamingDispatchConfig {
@@ -256,6 +272,7 @@ impl Default for FrontendApiConfig {
     fn default() -> Self {
         Self {
             anthropic: Default::default(),
+            systemone_enabled: env_is_truthy(env_llm::DYN_ENABLE_SYSTEMONE_API),
             streaming_dispatch: Default::default(),
             reasoning_field: default_reasoning_field(),
         }
@@ -268,7 +285,7 @@ mod tests {
 
     #[test]
     fn optional_flags_return_none_when_all_values_are_unspecified() {
-        let config = FrontendApiConfig::from_optional_flags(None, None, None, None, None);
+        let config = FrontendApiConfig::from_optional_flags(None, None, None, None, None, None);
 
         assert_eq!(config, None);
     }
@@ -276,6 +293,7 @@ mod tests {
     #[test]
     fn optional_flags_preserve_explicit_false_values() {
         let config = FrontendApiConfig::from_optional_flags(
+            Some(false),
             Some(false),
             Some(true),
             Some(false),
@@ -285,6 +303,7 @@ mod tests {
         .expect("explicit flags should produce a config");
 
         assert!(!config.anthropic().enabled());
+        assert!(!config.systemone_enabled());
         assert!(config.anthropic().strip_preamble());
         assert!(!config.streaming_dispatch().tool_dispatch());
         assert!(config.streaming_dispatch().reasoning_dispatch());
@@ -296,6 +315,7 @@ mod tests {
         temp_env::with_vars(
             [
                 (env_llm::DYN_ENABLE_ANTHROPIC_API, Some("1")),
+                (env_llm::DYN_ENABLE_SYSTEMONE_API, Some("1")),
                 (env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE, Some("1")),
                 (env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH, Some("1")),
                 (env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH, Some("1")),
@@ -303,6 +323,7 @@ mod tests {
             ],
             || {
                 let config = FrontendApiConfig::from_optional_flags(
+                    Some(false),
                     Some(false),
                     None,
                     None,
@@ -312,6 +333,7 @@ mod tests {
                 .expect("partial flags should produce a config");
 
                 assert!(!config.anthropic().enabled());
+                assert!(!config.systemone_enabled());
                 assert!(config.anthropic().strip_preamble());
                 assert!(config.streaming_dispatch().tool_dispatch());
                 assert!(!config.streaming_dispatch().reasoning_dispatch());

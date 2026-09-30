@@ -102,6 +102,7 @@ half = { version = "2", features = ["serde", "num-traits"] }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 http-body-util = "0.1"
 ipnet = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
 libc = { workspace = true }
 lru = { workspace = true }
 moka = { workspace = true }

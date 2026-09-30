@@ -16,6 +16,8 @@ use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+use crate::model_card::ModelDeploymentCard;
+use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -85,6 +87,15 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) kv_cache_block_size: u32,
     pub(crate) lora_name: Option<String>,
     pub(crate) tower_connector_lora_enabled: bool,
+}
+
+/// Aggregate SGLang engine and model assets selected from one WorkerSet snapshot.
+#[derive(Clone)]
+pub(crate) struct SystemOneExecutionSelection {
+    pub(crate) canonical_model: String,
+    pub(crate) engine: GenerateStreamingEngine,
+    pub(crate) card: ModelDeploymentCard,
+    pub(crate) preprocessor: Arc<OpenAIPreprocessor>,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -652,6 +663,35 @@ impl Model {
                         .card()
                         .runtime_config
                         .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
+                })
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+    }
+
+    pub(crate) fn get_systemone_execution_selection(
+        &self,
+        capability: &str,
+    ) -> Result<SystemOneExecutionSelection, ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            let card = ws.card();
+            let eligible = ws.supports_runtime_capability(capability)
+                && card.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
+                && card.needs.is_empty()
+                && card.lora.is_none()
+                && card.migration_limit == 0
+                && !card.runtime_config.runtime_data.contains_key("spec_decode");
+            eligible
+                .then(|| ws.generate_engine.clone())
+                .flatten()
+                .and_then(|engine| {
+                    ws.systemone_preprocessor.as_ref().map(|preprocessor| {
+                        SystemOneExecutionSelection {
+                            canonical_model: self.name.clone(),
+                            engine,
+                            card: card.clone(),
+                            preprocessor: preprocessor.clone(),
+                        }
+                    })
                 })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))

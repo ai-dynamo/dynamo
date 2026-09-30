@@ -21,6 +21,7 @@ struct NativeControls {
     return_logprob: Option<bool>,
     top_logprobs_num: Option<i64>,
     logprob_start_len: Option<i64>,
+    token_ids_logprob: Option<Vec<u32>>,
 }
 
 /// Response metadata for a native SGLang request, or `None` for every other
@@ -48,11 +49,11 @@ pub(super) fn response_metadata(
     let request_id = controls
         .rid
         .unwrap_or_else(|| fallback_request_id.to_string());
-    Ok(Some(ResponseMetadata::new(
-        request_id,
-        &request.token_ids,
-        logprobs,
-    )))
+    let metadata = ResponseMetadata::new(request_id, &request.token_ids, logprobs);
+    Ok(Some(match controls.token_ids_logprob {
+        Some(token_ids) => metadata.with_candidate_token_ids(token_ids),
+        None => metadata,
+    }))
 }
 
 /// Wrap one canonical chunk in the native response the frontend unwraps.
@@ -184,5 +185,18 @@ mod tests {
             assert_eq!(finish["type"], "abort");
             assert_eq!(finish["message"], expected_message);
         }
+    }
+
+    #[test]
+    fn preserves_requested_candidate_ids() {
+        let metadata = native_metadata(json!({
+            "return_logprob": true,
+            "token_ids_logprob": [17, 4]
+        }));
+        let response = metadata.response(&[42], 1, Some(json!({"type": "length"})));
+        assert_eq!(
+            response["meta_info"]["output_token_ids_logprobs"],
+            json!([[[-0.8, 17, null], [-0.5, 4, null]]])
+        );
     }
 }
