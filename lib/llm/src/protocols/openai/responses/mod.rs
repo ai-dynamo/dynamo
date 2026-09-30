@@ -39,7 +39,7 @@ use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
 /// Request body for `POST /v1/responses`.
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]
 pub struct NvCreateResponse {
     /// Flattened CreateResponse fields (model, input, temperature, etc.).
     ///
@@ -65,6 +65,12 @@ pub struct NvCreateResponse {
     )]
     #[schema(value_type = Object)]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
+
+    /// OpenAI-style reasoning token budget: bounds the number of reasoning
+    /// (thinking) tokens generated per request. Forwarded to the backend's
+    /// `thinking_token_budget` sampling parameter when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_token_budget: Option<u32>,
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -231,6 +237,10 @@ impl OpenAIStopConditionsProvider for NvCreateResponse {
 
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
+    }
+
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        self.thinking_token_budget
     }
 }
 
@@ -1001,6 +1011,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             nvext: resp.nvext,
             chat_template_args: resp.chat_template_args,
             thinking: None,
+            thinking_token_budget: resp.thinking_token_budget,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -1025,6 +1036,7 @@ pub struct ResponseParams {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_output_tokens: Option<u32>,
+    pub metadata: Option<HashMap<String, String>>,
     pub parallel_tool_calls: Option<bool>,
     pub store: Option<bool>,
     pub tools: Option<Vec<Tool>>,
@@ -1301,7 +1313,7 @@ pub fn chat_completion_to_response(
         output,
         // Spec-required defaults (OpenResponses requires these as non-null)
         background: Some(false),
-        metadata: Some(HashMap::new()),
+        metadata: Some(params.metadata.clone().unwrap_or_default()),
         parallel_tool_calls: params.parallel_tool_calls.or(Some(true)),
         temperature: params.temperature.or(Some(1.0)),
         text: Some(params.text.clone().unwrap_or(ResponseTextParam {
@@ -1379,6 +1391,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::protocols::common::StopConditionsProvider;
     use crate::types::openai::chat_completions::NvCreateChatCompletionResponse;
 
     fn make_response_with_input(text: &str) -> NvCreateResponse {
@@ -1397,6 +1410,7 @@ mod tests {
                 ..Default::default()
             }),
             chat_template_args: None,
+            ..Default::default()
         }
     }
 
@@ -1416,6 +1430,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            thinking_token_budget: None,
         }
     }
 
@@ -1547,6 +1562,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1592,6 +1608,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1672,6 +1689,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1714,6 +1732,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1758,6 +1777,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1807,6 +1827,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1847,6 +1868,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1882,6 +1904,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1932,6 +1955,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2059,6 +2083,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2132,6 +2157,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2190,6 +2216,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2246,6 +2273,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2294,6 +2322,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2356,6 +2385,7 @@ mod tests {
                 },
                 nvext: None,
                 chat_template_args: None,
+                thinking_token_budget: None,
             };
 
             let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2406,6 +2436,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2482,6 +2513,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2556,6 +2588,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2626,6 +2659,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2693,6 +2727,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2751,6 +2786,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            ..Default::default()
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -3974,5 +4010,58 @@ mod tests {
 
         // nvext should be omitted when None
         assert!(json.get("nvext").is_none());
+    }
+
+    #[test]
+    fn test_thinking_token_budget_preserved_in_chat_completion_conversion() {
+        let mut req = make_response_with_input("hi there");
+        req.thinking_token_budget = Some(32);
+
+        let nv_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(nv_req.thinking_token_budget, Some(32));
+        assert_eq!(
+            nv_req
+                .extract_stop_conditions()
+                .expect("failed to extract stop conditions")
+                .max_thinking_tokens,
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn test_thinking_token_budget_overrides_nvext_in_response_conversion() {
+        let mut req = make_response_with_input("hi there");
+        req.thinking_token_budget = Some(32);
+        req.nvext = Some(NvExt {
+            max_thinking_tokens: Some(16),
+            ..Default::default()
+        });
+
+        let nv_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(
+            nv_req
+                .extract_stop_conditions()
+                .expect("failed to extract stop conditions")
+                .max_thinking_tokens,
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn test_nvext_max_thinking_tokens_fallback_in_response_conversion() {
+        let mut req = make_response_with_input("hi there");
+        req.nvext = Some(NvExt {
+            max_thinking_tokens: Some(16),
+            ..Default::default()
+        });
+
+        let nv_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(
+            nv_req
+                .extract_stop_conditions()
+                .expect("failed to extract stop conditions")
+                .max_thinking_tokens,
+            Some(16)
+        );
     }
 }

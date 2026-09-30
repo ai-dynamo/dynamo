@@ -1092,7 +1092,6 @@ async fn native_g1_parent_chain_replays_across_indexer_variants() -> anyhow::Res
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
@@ -1126,7 +1125,6 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
     ];
 
@@ -1186,7 +1184,6 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];

@@ -573,6 +573,26 @@ impl Indexer {
         }
     }
 
+    async fn enqueue_session_update_and_wait(
+        &self,
+        mutation: SessionMutation,
+    ) -> Result<(), KvRouterError> {
+        let session_updates = match self {
+            Self::Single {
+                session_updates, ..
+            }
+            | Self::Concurrent {
+                session_updates, ..
+            } => session_updates.as_ref(),
+            Self::Remote { .. } | Self::None => None,
+        };
+        if let Some(session_updates) = session_updates {
+            session_updates.enqueue(mutation)?;
+            session_updates.flush().await?;
+        }
+        Ok(())
+    }
+
     /// Cold-reset one logical rank and wait until every local tier (and the
     /// side indexer) has completed the removal.
     pub async fn reset_worker_dp_rank_and_wait(
@@ -630,21 +650,10 @@ impl Indexer {
             }
             Self::None => {}
         }
-        let session_updates = match self {
-            Self::Single {
-                session_updates, ..
-            }
-            | Self::Concurrent {
-                session_updates, ..
-            } => session_updates.as_ref(),
-            Self::Remote { .. } | Self::None => None,
-        };
-        if let Some(session_updates) = session_updates {
-            session_updates.enqueue(SessionMutation::Cleared {
-                worker: WorkerWithDpRank::new(worker_id, dp_rank),
-            })?;
-            session_updates.flush().await?;
-        }
+        self.enqueue_session_update_and_wait(SessionMutation::Cleared {
+            worker: WorkerWithDpRank::new(worker_id, dp_rank),
+        })
+        .await?;
         Ok(())
     }
 
@@ -675,6 +684,12 @@ impl Indexer {
             }
             Indexer::Remote { .. } | Indexer::None => {}
         }
+        if let Err(error) = self
+            .enqueue_session_update_and_wait(SessionMutation::WorkerRemoved { worker_id })
+            .await
+        {
+            tracing::warn!(%error, worker_id, "failed to clear removed worker from session prefix index");
+        }
     }
 
     pub async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: u32) {
@@ -703,6 +718,14 @@ impl Indexer {
                 primary.remove_worker_dp_rank(worker_id, dp_rank).await;
             }
             Indexer::Remote { .. } | Indexer::None => {}
+        }
+        if let Err(error) = self
+            .enqueue_session_update_and_wait(SessionMutation::Cleared {
+                worker: WorkerWithDpRank::new(worker_id, dp_rank),
+            })
+            .await
+        {
+            tracing::warn!(%error, worker_id, dp_rank, "failed to clear removed worker rank from session prefix index");
         }
     }
 
@@ -1937,6 +1960,87 @@ mod session_tests {
                 .get_session_block_lineage("session-1", retained_rank, None)
                 .unwrap(),
             vec![vec![block_hash]]
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_removal_clears_frontiers_and_invalidates_stale_matches() {
+        let (indexer, session_prefix_index) = make_session_test_indexer();
+        let removed_rank = WorkerWithDpRank::new(7, 0);
+        let retained_rank = WorkerWithDpRank::new(7, 1);
+        let other_worker = WorkerWithDpRank::new(8, 0);
+        let block_hash = ExternalSequenceBlockHash(41);
+
+        for worker in [removed_rank, retained_rank, other_worker] {
+            indexer
+                .try_apply_event(
+                    store_event(
+                        worker.worker_id,
+                        worker.dp_rank,
+                        1,
+                        &[],
+                        &[block_hash.0],
+                        StorageTier::Device,
+                    )
+                    .with_session_id("session-1"),
+                )
+                .await
+                .unwrap();
+        }
+        indexer.flush_session_updates().await.unwrap();
+
+        indexer
+            .remove_worker_dp_rank(removed_rank.worker_id, removed_rank.dp_rank)
+            .await;
+        assert!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", removed_rank, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", retained_rank, None)
+                .unwrap(),
+            vec![vec![block_hash]]
+        );
+
+        indexer.remove_worker(retained_rank.worker_id).await;
+        assert!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", retained_rank, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", other_worker, None)
+                .unwrap(),
+            vec![vec![block_hash]]
+        );
+
+        let dead_worker = WorkerWithDpRank::new(9, 2);
+        let stale_version = indexer.session_residency_version(dead_worker).unwrap();
+        indexer
+            .enqueue_session_match("queued", dead_worker, block_hash, stale_version)
+            .unwrap();
+        indexer.remove_worker(dead_worker.worker_id).await;
+        assert!(
+            session_prefix_index
+                .get_session_block_lineage("queued", dead_worker, None)
+                .unwrap()
+                .is_empty()
+        );
+
+        indexer
+            .enqueue_session_match("delayed", dead_worker, block_hash, stale_version)
+            .unwrap();
+        indexer.flush_session_updates().await.unwrap();
+        assert!(
+            session_prefix_index
+                .get_session_block_lineage("delayed", dead_worker, None)
+                .unwrap()
+                .is_empty()
         );
     }
 }

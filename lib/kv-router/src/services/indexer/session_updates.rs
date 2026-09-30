@@ -12,7 +12,9 @@ use std::{
 use crate::{
     ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
     indexer::{KvIndexer, KvRouterError, ThreadPoolIndexer},
-    protocols::{ExternalSequenceBlockHash, KvCacheEventData, RouterEvent, WorkerWithDpRank},
+    protocols::{
+        ExternalSequenceBlockHash, KvCacheEventData, RouterEvent, WorkerId, WorkerWithDpRank,
+    },
 };
 use dashmap::{DashMap, mapref::entry::Entry};
 use tokio::sync::{mpsc, oneshot};
@@ -25,23 +27,44 @@ pub struct SessionUpdateSender {
 
 #[derive(Default)]
 struct ResidencyVersions {
-    by_worker: DashMap<WorkerWithDpRank, AtomicU64>,
+    next: AtomicU64,
+    by_rank: DashMap<WorkerWithDpRank, AtomicU64>,
+    by_worker_id: DashMap<WorkerId, AtomicU64>,
 }
 
 impl ResidencyVersions {
     fn current(&self, worker: WorkerWithDpRank) -> u64 {
-        self.by_worker
+        let rank_version = self
+            .by_rank
             .get(&worker)
-            .map_or(0, |version| version.load(Ordering::Acquire))
+            .map_or(0, |version| version.load(Ordering::Acquire));
+        let worker_version = self
+            .by_worker_id
+            .get(&worker.worker_id)
+            .map_or(0, |version| version.load(Ordering::Acquire));
+        rank_version.max(worker_version)
     }
 
     fn advance(&self, worker: WorkerWithDpRank) {
-        match self.by_worker.entry(worker) {
-            Entry::Occupied(version) => {
-                version.get().fetch_add(1, Ordering::AcqRel);
+        let next_version = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+        match self.by_rank.entry(worker) {
+            Entry::Occupied(entry) => {
+                entry.get().store(next_version, Ordering::Release);
             }
             Entry::Vacant(entry) => {
-                entry.insert(AtomicU64::new(1));
+                entry.insert(AtomicU64::new(next_version));
+            }
+        }
+    }
+
+    fn advance_worker_id(&self, worker_id: WorkerId) {
+        let next_version = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+        match self.by_worker_id.entry(worker_id) {
+            Entry::Occupied(entry) => {
+                entry.get().store(next_version, Ordering::Release);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(AtomicU64::new(next_version));
             }
         }
     }
@@ -72,6 +95,9 @@ pub(super) enum SessionMutation {
     Cleared {
         worker: WorkerWithDpRank,
     },
+    WorkerRemoved {
+        worker_id: WorkerId,
+    },
 }
 
 impl SessionMutation {
@@ -92,12 +118,13 @@ impl SessionMutation {
         }
     }
 
-    pub(super) fn worker(&self) -> WorkerWithDpRank {
+    pub(super) fn worker(&self) -> Option<WorkerWithDpRank> {
         match self {
             Self::Matched { worker, .. }
             | Self::Stored { worker, .. }
             | Self::Removed { worker, .. }
-            | Self::Cleared { worker } => *worker,
+            | Self::Cleared { worker } => Some(*worker),
+            Self::WorkerRemoved { .. } => None,
         }
     }
 
@@ -160,6 +187,10 @@ impl SessionMutation {
                 residency_versions.advance(worker);
                 index.clear_worker_frontiers(worker);
             }
+            Self::WorkerRemoved { worker_id } => {
+                residency_versions.advance_worker_id(worker_id);
+                index.clear_worker_id_frontiers(worker_id);
+            }
         }
     }
 }
@@ -176,7 +207,10 @@ impl PrimaryBarrier {
                 primary.flush_and_wait().await?;
             }
             Self::Concurrent(primary) => {
-                let workers: HashSet<_> = mutations.iter().map(SessionMutation::worker).collect();
+                let workers: HashSet<_> = mutations
+                    .iter()
+                    .filter_map(SessionMutation::worker)
+                    .collect();
                 for worker in workers {
                     primary.flush_worker_lane_and_wait(worker).await?;
                 }

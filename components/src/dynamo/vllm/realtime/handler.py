@@ -189,7 +189,6 @@ class _TextTurn(RealtimeTurn):
         add_to_conversation: bool,
         items: list[dict[str, Any]],
         conversation_messages: list[dict[str, str]],
-        prefill_task: asyncio.Task[None] | None = None,
         metadata: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
@@ -201,7 +200,6 @@ class _TextTurn(RealtimeTurn):
         self.add_to_conversation = add_to_conversation
         self.items = items
         self.conversation_messages = conversation_messages
-        self.prefill_task = prefill_task
         self.metadata = metadata
         self.previous_item_id = items[-1]["id"] if items else None
         self.text = ""
@@ -293,7 +291,6 @@ class _TextPrefill:
         messages: list[dict[str, str]],
         factory: TextPrefillFactory,
     ) -> None:
-        self.messages = messages
         self.text = ""
         self._text_bytes = 0
         self._updated = asyncio.Event()
@@ -319,11 +316,13 @@ class _TextPrefill:
     def commit(self) -> None:
         # Final generation reuses completed prefix blocks. Finishing another
         # warming generation here would put speculative work on its critical path.
-        self.task.cancel()
+        if not self.task.cancelling():
+            self.task.cancel()
 
     async def cancel(self) -> None:
-        self.task.cancel()
-        await asyncio.gather(self.task, return_exceptions=True)
+        self.commit()
+        # Session cancellation must not interrupt the engine's abort cleanup.
+        await asyncio.shield(asyncio.gather(self.task, return_exceptions=True))
 
 
 class RealtimeTextHandler:
@@ -444,10 +443,6 @@ class RealtimeTextHandler:
         finish_reason = None
         stream = None
         try:
-            if turn.prefill_task is not None:
-                # Join cancelled speculative work before final generation;
-                # neither its output nor its failure changes the final prompt.
-                await asyncio.gather(turn.prefill_task, return_exceptions=True)
             stream = await self._chat_completion_factory(
                 turn.messages, turn.max_output_tokens
             )
@@ -727,12 +722,8 @@ class RealtimeTextHandler:
                 except ValueError as exc:
                     emit_error(event, "invalid_response", str(exc))
                     return
-                prefill_task = None
                 if committed_prefill is not None:
-                    if use_conversation and committed_prefill.messages == prompt[:-1]:
-                        prefill_task = committed_prefill.task
-                    else:
-                        await committed_prefill.cancel()
+                    await committed_prefill.cancel()
                 active_response = await connection.ensure_turn(
                     lambda: _TextTurn(
                         messages=prompt,
@@ -741,7 +732,6 @@ class RealtimeTextHandler:
                         add_to_conversation=add_to_conversation,
                         items=items,
                         conversation_messages=messages,
-                        prefill_task=prefill_task,
                         metadata=metadata,
                     )
                 )

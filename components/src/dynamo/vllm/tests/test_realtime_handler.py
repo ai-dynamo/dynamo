@@ -364,6 +364,59 @@ def test_text_commit_cancels_warming_before_final_generation(monkeypatch, overfl
     assert done["response"]["status"] == "completed"
 
 
+def test_response_cancel_waits_for_committed_prefill_cleanup():
+    async def run():
+        prefill_seen = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        prefill_done = asyncio.Event()
+
+        async def prefill(messages, updates):
+            try:
+                async for _ in updates:
+                    prefill_seen.set()
+            finally:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                prefill_done.set()
+
+        async def chat_completion(messages, max_output_tokens):
+            raise AssertionError("cancelled response must not start generation")
+
+        handler = RealtimeTextHandler(
+            model_name=TEXT_MODEL,
+            chat_completion_factory=chat_completion,
+            text_prefill_factory=prefill,
+        )
+        task = asyncio.create_task(
+            _drive(
+                handler,
+                [
+                    {"type": "session.update", "session": _text_session()},
+                    {"type": "input_text.append", "text": "Hello"},
+                    {"type": "input_text.commit"},
+                    {"type": "response.create"},
+                    {"type": "response.cancel"},
+                ],
+                before_commit=prefill_seen,
+            )
+        )
+        try:
+            await asyncio.wait_for(cleanup_started.wait(), timeout=5)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.01)
+        finally:
+            release_cleanup.set()
+            result = await asyncio.wait_for(task, timeout=5)
+            await asyncio.wait_for(prefill_done.wait(), timeout=5)
+
+        responses = [event for event in result if event["type"] == "response.done"]
+        assert len(responses) == 1
+        assert responses[0]["response"]["status"] == "cancelled"
+
+    asyncio.run(run())
+
+
 def test_text_buffer_clear_discards_input_and_allows_replay():
     prefill_texts = []
     prefill_seen = asyncio.Event()

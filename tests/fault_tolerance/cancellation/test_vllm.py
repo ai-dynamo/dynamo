@@ -119,7 +119,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
+                    build_nixl_kv_transfer_config_json("kv_producer"),
                 ]
             )
             health_check_urls = [
@@ -130,7 +130,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
+                    build_nixl_kv_transfer_config_json("kv_consumer"),
                 ]
             )
             health_check_urls = [

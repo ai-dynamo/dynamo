@@ -101,7 +101,11 @@ def _node_local_rank(
 
 
 def _assign_nixl_prometheus_port(target: Any, args: tuple, kwargs: dict) -> None:
-    """Rewrite this process's exporter port before the NIXL agent is built."""
+    """Rewrite this process's exporter port before the NIXL agent is built.
+
+    Raises ``ValueError`` when the NIXL environment is invalid or the rank's
+    fixed port cannot fit in Dynamo's declared scrape range.
+    """
     base_port = nixl_prometheus_base_port()
     if base_port is None:
         return
@@ -163,8 +167,10 @@ def install_per_rank_nixl_prometheus_ports() -> None:
     """Point SGLang's scheduler launches at the wrapper, when telemetry is on.
 
     A no-op when NIXL Prometheus telemetry is disabled, so a deployment that
-    does not scrape NIXL keeps SGLang's own entry point. Raises ``RuntimeError``
-    when telemetry is on but this SGLang offers no override point.
+    does not scrape NIXL keeps SGLang's own entry point. Raises ``ValueError``
+    for invalid NIXL environment values or an unusable fixed port, and
+    ``RuntimeError`` when telemetry is on but this SGLang offers no override
+    point.
     """
     if nixl_prometheus_base_port() is None:
         return
