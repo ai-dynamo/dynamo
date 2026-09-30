@@ -375,7 +375,9 @@ fn write_open_loop_result(path: &str, result: &OpenLoopResult) -> anyhow::Result
 fn run_provenance(args: &Args, config: &MooncakeIndexerConfig) -> anyhow::Result<RunProvenance> {
     let common = &args.common;
     let file_sha256 = |path: &std::path::Path| -> anyhow::Result<String> {
-        Ok(format!("{:x}", Sha256::digest(std::fs::read(path)?)))
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;
+        Ok(format!("{:x}", hasher.finalize()))
     };
     let trace_sha256 = common
         .mooncake_trace_path
