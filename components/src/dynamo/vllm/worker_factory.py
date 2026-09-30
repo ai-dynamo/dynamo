@@ -950,7 +950,7 @@ class WorkerFactory:
                 "transcription": RealtimeTranscriptionHandler.from_engine(
                     engine_client=engine_client,
                     model_name=model_name,
-                    model_path=config.model,
+                    model_path=config.model_source_path,
                 )
             }
         )
@@ -1025,7 +1025,7 @@ class WorkerFactory:
             ModelInput.Tokens,
             ModelType.Empty,
             generate_endpoint,
-            config.model,
+            config.model_source_path,
             model_name=config.served_model_name or config.model,
             worker_type=WorkerType.Encode,
             needs=[
