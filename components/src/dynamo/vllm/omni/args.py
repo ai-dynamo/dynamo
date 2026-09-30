@@ -48,7 +48,6 @@ class OmniDiffusionKwargs:
     """
 
     enable_layerwise_offload: Optional[bool] = None
-    # Retained only to reject legacy CLI/environment settings during validation.
     layerwise_num_gpu_layers: Optional[int] = None
     vae_use_slicing: Optional[bool] = None
     vae_use_tiling: Optional[bool] = None
@@ -93,6 +92,7 @@ class OmniArgGroup(ArgGroup):
     name = "dynamo-omni"
 
     def add_arguments(self, parser) -> None:
+        """Register Omni CLI options and their environment-variable defaults."""
         g = parser.add_argument_group(
             "Omni Diffusion Options",
             "Diffusion pipeline parameters for vLLM-Omni multi-stage generation.",
@@ -493,6 +493,7 @@ class OmniConfig(DynamoRuntimeConfig):
         return config
 
     def validate(self) -> None:
+        """Reject unsupported options and invalid values before engine startup."""
         DynamoRuntimeConfig.validate(self)
         if self.diffusion.layerwise_num_gpu_layers is not None:
             raise ValueError(

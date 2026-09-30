@@ -243,6 +243,7 @@ class TestDiffusionParallelConfigCoverage:
         assert kwargs["fastvideo_vsa_topk"] == 64
 
     def test_diffusion_only_defaults_not_forwarded_to_async_omni(self):
+        """Unset options stay absent at the native engine boundary."""
         kwargs = _build_kwargs(_make_config())
 
         for field in (
