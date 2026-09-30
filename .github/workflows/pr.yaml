@@ -781,7 +781,8 @@ jobs:
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.planner == 'true' ||
-      needs.changed-files.outputs.operator == 'true'
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.dgdr == 'true'
     uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
