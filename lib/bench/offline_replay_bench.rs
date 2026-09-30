@@ -166,6 +166,12 @@ struct Args {
     #[arg(long, value_enum, default_value_t = RouterModeArg::KvRouter)]
     router_mode: RouterModeArg,
 
+    /// Queue KV-router requests while every worker's active prefill tokens
+    /// exceed this fraction of its batched-token budget. Unset admits every
+    /// request immediately.
+    #[arg(long)]
+    router_queue_threshold: Option<f64>,
+
     /// Compress trace arrival timestamps by this factor
     #[arg(long, default_value_t = 4.0)]
     arrival_speedup_ratio: f64,
@@ -272,6 +278,20 @@ fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
         .normalized()
 }
 
+fn router_config(args: &Args) -> Result<Option<KvRouterConfig>> {
+    let Some(threshold) = args.router_queue_threshold else {
+        return Ok(None);
+    };
+    ensure!(
+        args.router_mode == RouterModeArg::KvRouter,
+        "--router-queue-threshold requires --router-mode kv-router"
+    );
+    Ok(Some(KvRouterConfig {
+        router_queue_threshold: Some(threshold),
+        ..KvRouterConfig::default()
+    }))
+}
+
 fn canonical_capture_options(enabled: bool) -> ReplayCaptureOptions {
     ReplayCaptureOptions {
         capture_per_request: enabled,
@@ -341,7 +361,7 @@ fn canonical_metadata(
 ) -> Result<Value> {
     let router_config = match args.router_mode {
         RouterModeArg::RoundRobin => Value::Null,
-        RouterModeArg::KvRouter => serde_json::to_value(KvRouterConfig::default())?,
+        RouterModeArg::KvRouter => serde_json::to_value(router_config(args)?.unwrap_or_default())?,
     };
     Ok(json!({
         "replay_bench": cfg!(feature = "replay-bench"),
@@ -441,6 +461,7 @@ fn main() -> Result<()> {
         "--canonical-reports-jsonl requires building with --features replay-bench"
     );
     let engine_args = build_engine_args(&args)?;
+    let router_config = router_config(&args)?;
     let canonical_workload = if args.canonical_reports_jsonl.is_some() {
         let trace_bytes = std::fs::read(&args.trace_file)
             .with_context(|| format!("failed to read trace input at {:?}", args.trace_file))?;
@@ -491,7 +512,7 @@ fn main() -> Result<()> {
             ServingModeArg::Aggregated => {
                 simulate_loaded_trace_with_router_mode_and_capture_options(
                     engine_args.clone(),
-                    None,
+                    router_config.clone(),
                     None,
                     trace,
                     args.num_workers,
@@ -514,7 +535,7 @@ fn main() -> Result<()> {
                         num_prefill_workers: args.num_prefill_workers,
                         num_decode_workers: args.num_decode_workers,
                     },
-                    None,
+                    router_config.clone(),
                     None,
                     trace,
                     args.arrival_speedup_ratio,
