@@ -46,12 +46,9 @@ spec:
 - Per-component fields you will use most: `replicas`, `multinode`, `sharedMemorySize`, and `podTemplate` — a standard Kubernetes [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core). The operator injects its defaults into the container named `main` inside `podTemplate.spec.containers`, where you set the `image`, the `command`/`args` that launch the engine, `resources` (CPU/memory/GPU), `envFrom`, `env`, and `volumeMounts`.
 
 > [!NOTE]
-> For DGDs created by Dynamo Operator 1.6.0 or later, the operator preserves the declared order when
-> it combines DGD-level `spec.env` with component `podTemplate` environment variables. Standard
-> component, infrastructure, and inference-backend defaults precede that user list. A user variable
-> can reference an earlier default or user variable with `$(NAME)`, and a later user entry with the
-> same name overrides a default. Older DGDs retain their existing rendered order after an operator
-> upgrade.
+> Environment variable order affects references and overrides. Review the
+> [environment variable order](#environment-variable-order) before setting DGD-level or component
+> environment variables.
 
 For every backend, a component's `name` is its stable identifier within the DGD. The operator
 uses that name to derive Kubernetes resource names and sets it on the
@@ -538,6 +535,26 @@ For a stable external address instead of `port-forward`, see [Expose the Fronten
 ## Put it all together: Qwen3-32B
 
 The following spec assembles the steps above into one aggregated Qwen3-32B deployment, adapted from the [agg-round-robin recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml). It reflects the backend you selected earlier. Comments mark the values you substitute for your model, hardware, and scale:
+
+### Environment variable order
+
+For DGDs created by Dynamo Operator 1.6.0 or later, the operator preserves environment variable
+order and duplicate names. The rendered list contains operator-provided defaults first, including
+component, infrastructure/transport, KV-transfer, and inference-backend variables. DGD-level
+`spec.env` follows, then component `podTemplate.spec.containers[*].env`.
+
+Kubernetes resolves a `$(NAME)` reference only against entries defined earlier in the list. A
+reference uses the value in effect at that position, and a later duplicate does not change the
+already-expanded value. A component variable can override a DGD-level variable, but a DGD-level
+variable cannot reference a component variable. Duplicate names remain visible in the rendered Pod;
+the API server might warn that the later definition `hides previous definition`. This is expected,
+and the later value wins.
+
+DGDs created by an operator older than 1.6.0, or without the
+`nvidia.com/dynamo-operator-origin-version` annotation, retain the legacy sorted and de-duplicated
+output after an operator upgrade. See the
+[Dynamo Platform v1.6.0 upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#environment-variable-order-in-newly-created-dgds)
+for migration guidance.
 
 <Tabs>
 <Tab title="vLLM" language="vllm">
