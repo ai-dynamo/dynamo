@@ -25,8 +25,72 @@ var (
 	betaGVK  = nvidiacomv1beta1.DynamoGraphDeploymentGVK
 )
 
-// Warning describes a non-fatal part of an override that was ignored to
-// preserve the identity or topology of the generated blueprint.
+type deprecatedDGDOverrideTarget struct {
+	backendFramework string
+	replacementHint  string
+	candidates       []string
+}
+
+// Keep migration guidance and topology-aware translation candidates together.
+var deprecatedDGDOverrideTargets = map[string]deprecatedDGDOverrideTarget{
+	"VllmWorker": {
+		backendFramework: "vllm",
+		replacementHint:  "worker",
+		candidates:       []string{"worker"},
+	},
+	"VllmPrefillWorker": {
+		backendFramework: "vllm",
+		replacementHint:  "prefill",
+		candidates:       []string{"prefill"},
+	},
+	"VllmDecodeWorker": {
+		backendFramework: "vllm",
+		replacementHint:  "worker (aggregate) or decode (disaggregated)",
+		candidates:       []string{"worker", "decode"},
+	},
+	"TRTLLMPrefillWorker": {
+		backendFramework: "trtllm",
+		replacementHint:  "prefill",
+		candidates:       []string{"prefill"},
+	},
+	"TRTLLMDecodeWorker": {
+		backendFramework: "trtllm",
+		replacementHint:  "decode",
+		candidates:       []string{"decode"},
+	},
+	"SGLangPrefillWorker": {
+		backendFramework: "sglang",
+		replacementHint:  "prefill",
+		candidates:       []string{"prefill"},
+	},
+	"SGLangDecodeWorker": {
+		backendFramework: "sglang",
+		replacementHint:  "worker (aggregate) or decode (disaggregated)",
+		candidates:       []string{"worker", "decode"},
+	},
+	"SglangPrefillWorker": {
+		backendFramework: "sglang",
+		replacementHint:  "prefill",
+		candidates:       []string{"prefill"},
+	},
+	"SglangDecodeWorker": {
+		backendFramework: "sglang",
+		replacementHint:  "worker (aggregate) or decode (disaggregated)",
+		candidates:       []string{"worker", "decode"},
+	},
+}
+
+// DeprecatedDGDOverrideTargetReplacementHint returns migration guidance for a deprecated target name.
+func DeprecatedDGDOverrideTargetReplacementHint(name string) (string, bool) {
+	target, found := deprecatedDGDOverrideTargets[name]
+	if !found {
+		return "", false
+	}
+	return target.replacementHint, true
+}
+
+// Warning describes a non-fatal compatibility translation or sanitization
+// applied while preserving the generated blueprint identity and topology.
 type Warning struct {
 	Path    string
 	Message string
@@ -207,15 +271,21 @@ func prepareOverride(
 		return nil, warnings, err
 	}
 
+	// Read the generated backend once so legacy aliases cannot cross backend boundaries.
+	backendFramework, _, err := unstructured.NestedString(blueprint.Object, "spec", "backendFramework")
+	if err != nil {
+		return nil, warnings, fmt.Errorf("blueprint spec.backendFramework must be a string: %w", err)
+	}
+
 	switch gvk {
 	case alphaGVK:
-		more, err := prepareAlphaServices(blueprint, partial)
+		more, err := prepareAlphaServices(blueprint, partial, backendFramework)
 		warnings = append(warnings, more...)
 		if err != nil {
 			return nil, warnings, err
 		}
 	case betaGVK:
-		more, err := prepareBetaComponents(blueprint, partial)
+		more, err := prepareBetaComponents(blueprint, partial, backendFramework)
 		warnings = append(warnings, more...)
 		if err != nil {
 			return nil, warnings, err
@@ -367,6 +437,7 @@ func isUntypedPreservedSchema(openAPISchema *apixv1.JSONSchemaProps) bool {
 func prepareAlphaServices(
 	blueprint *unstructured.Unstructured,
 	override *unstructured.Unstructured,
+	backendFramework string,
 ) ([]Warning, error) {
 	baseServices, _, err := unstructured.NestedMap(blueprint.Object, "spec", "services")
 	if err != nil {
@@ -380,31 +451,51 @@ func prepareAlphaServices(
 		return nil, nil
 	}
 
+	// Resolve map keys in deterministic order so warnings and failures are stable.
 	names := make([]string, 0, len(overrideServices))
 	for name := range overrideServices {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	warnings := make([]Warning, 0)
-	for _, name := range names {
-		if _, exists := baseServices[name]; !exists {
-			delete(overrideServices, name)
-			warnings = append(warnings, Warning{
-				Path:    "spec.services." + name,
-				Message: "ignored because the generated blueprint has no such service",
-			})
-			continue
-		}
-		if name == "Frontend" || name == "Planner" {
-			continue
-		}
-		if err := appendAlphaWorkerArgs(baseServices[name], overrideServices[name]); err != nil {
-			return warnings, fmt.Errorf("spec.services.%s.extraPodSpec.mainContainer.args: %w", name, err)
-		}
+	baseNames := make(map[string]struct{}, len(baseServices))
+	for name := range baseServices {
+		baseNames[name] = struct{}{}
 	}
 
-	if err := unstructured.SetNestedMap(override.Object, overrideServices, "spec", "services"); err != nil {
+	// Rebuild the sparse service map with every target matched or translated.
+	resolvedServices := make(map[string]interface{}, len(overrideServices))
+	resolvedSources := make(map[string]string, len(overrideServices))
+	warnings := make([]Warning, 0)
+	for _, name := range names {
+		resolvedName, translated, err := resolveDGDOverrideTarget(baseNames, backendFramework, name)
+		if err != nil {
+			return warnings, fmt.Errorf("spec.services.%s: %w", name, err)
+		}
+		if previous, exists := resolvedSources[resolvedName]; exists {
+			return warnings, fmt.Errorf(
+				"spec.services.%s: override targets %q and %q both resolve to generated service %q",
+				name,
+				previous,
+				name,
+				resolvedName,
+			)
+		}
+
+		service := overrideServices[name]
+		if translated {
+			warnings = append(warnings, deprecatedTargetTranslationWarning("spec.services."+name, name, resolvedName))
+		}
+		if resolvedName != "Frontend" && resolvedName != "Planner" {
+			if err := appendAlphaWorkerArgs(baseServices[resolvedName], service); err != nil {
+				return warnings, fmt.Errorf("spec.services.%s.extraPodSpec.mainContainer.args: %w", name, err)
+			}
+		}
+		resolvedServices[resolvedName] = service
+		resolvedSources[resolvedName] = name
+	}
+
+	if err := unstructured.SetNestedMap(override.Object, resolvedServices, "spec", "services"); err != nil {
 		return warnings, fmt.Errorf("prepare alpha override services: %w", err)
 	}
 	return warnings, nil
@@ -460,6 +551,7 @@ func appendAlphaWorkerArgs(baseValue, overrideValue interface{}) error {
 func prepareBetaComponents(
 	blueprint *unstructured.Unstructured,
 	override *unstructured.Unstructured,
+	backendFramework string,
 ) ([]Warning, error) {
 	baseComponents, _, err := unstructured.NestedSlice(blueprint.Object, "spec", "components")
 	if err != nil {
@@ -473,7 +565,9 @@ func prepareBetaComponents(
 		return nil, nil
 	}
 
+	// Index generated components once for target resolution and merge preparation.
 	baseByName := make(map[string]map[string]interface{}, len(baseComponents))
+	baseNames := make(map[string]struct{}, len(baseComponents))
 	for i, value := range baseComponents {
 		component, ok := value.(map[string]interface{})
 		if !ok {
@@ -484,9 +578,12 @@ func prepareBetaComponents(
 			return nil, fmt.Errorf("beta blueprint spec.components[%d].name must be a non-empty string", i)
 		}
 		baseByName[name] = component
+		baseNames[name] = struct{}{}
 	}
 
+	// Resolve every sparse component entry before structural merge can consume it.
 	filtered := make([]interface{}, 0, len(overrideComponents))
+	resolvedSources := make(map[string]string, len(overrideComponents))
 	warnings := make([]Warning, 0)
 	for i, value := range overrideComponents {
 		component, ok := value.(map[string]interface{})
@@ -497,26 +594,101 @@ func prepareBetaComponents(
 		if !ok || name == "" {
 			return warnings, fmt.Errorf("beta override spec.components[%d].name must be a non-empty string", i)
 		}
-		baseComponent, exists := baseByName[name]
-		if !exists {
-			warnings = append(warnings, Warning{
-				Path:    fmt.Sprintf("spec.components[name=%s]", name),
-				Message: "ignored because the generated blueprint has no such component",
-			})
-			continue
+
+		resolvedName, translated, err := resolveDGDOverrideTarget(baseNames, backendFramework, name)
+		if err != nil {
+			return warnings, fmt.Errorf("spec.components[name=%s]: %w", name, err)
+		}
+		if previous, exists := resolvedSources[resolvedName]; exists {
+			return warnings, fmt.Errorf(
+				"spec.components[name=%s]: override targets %q and %q both resolve to generated component %q",
+				name,
+				previous,
+				name,
+				resolvedName,
+			)
+		}
+		if translated {
+			component["name"] = resolvedName
+			warnings = append(warnings, deprecatedTargetTranslationWarning(
+				fmt.Sprintf("spec.components[name=%s]", name),
+				name,
+				resolvedName,
+			))
 		}
 
 		// Materialize explicit append directives before structural merge consumes them.
-		if err := materializeBetaContainerArgsAppends(component, baseComponent, i); err != nil {
+		if err := materializeBetaContainerArgsAppends(component, baseByName[resolvedName], i); err != nil {
 			return warnings, err
 		}
 		filtered = append(filtered, component)
+		resolvedSources[resolvedName] = name
 	}
 
 	if err := unstructured.SetNestedSlice(override.Object, filtered, "spec", "components"); err != nil {
 		return warnings, fmt.Errorf("prepare beta override components: %w", err)
 	}
 	return warnings, nil
+}
+
+func resolveDGDOverrideTarget(
+	baseNames map[string]struct{},
+	backendFramework string,
+	name string,
+) (string, bool, error) {
+	if _, exists := baseNames[name]; exists {
+		return name, false, nil
+	}
+
+	deprecated, found := deprecatedDGDOverrideTargets[name]
+	if !found {
+		return "", false, fmt.Errorf("override target %q is not present in the generated blueprint", name)
+	}
+	if deprecated.backendFramework != backendFramework {
+		return "", false, fmt.Errorf(
+			"deprecated override target %q belongs to backend %q and cannot be translated for generated backend %q",
+			name,
+			deprecated.backendFramework,
+			backendFramework,
+		)
+	}
+
+	// Match legacy aliases only against targets present in the selected topology.
+	matches := make([]string, 0, len(deprecated.candidates))
+	for _, candidate := range deprecated.candidates {
+		if _, exists := baseNames[candidate]; exists {
+			matches = append(matches, candidate)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", false, fmt.Errorf(
+			"deprecated override target %q cannot be translated because the generated blueprint contains none of the compatible targets: %s",
+			name,
+			strings.Join(deprecated.candidates, ", "),
+		)
+	case 1:
+		return matches[0], true, nil
+	default:
+		return "", false, fmt.Errorf(
+			"deprecated override target %q cannot be translated unambiguously because the generated blueprint contains multiple compatible targets: %s",
+			name,
+			strings.Join(matches, ", "),
+		)
+	}
+}
+
+func deprecatedTargetTranslationWarning(path, oldName, newName string) Warning {
+	return Warning{
+		Path: path,
+		Message: fmt.Sprintf(
+			"deprecated override target %q translated to %q; use %q directly. Legacy-name translation will be removed in a future release",
+			oldName,
+			newName,
+			newName,
+		),
+	}
 }
 
 func materializeBetaContainerArgsAppends(

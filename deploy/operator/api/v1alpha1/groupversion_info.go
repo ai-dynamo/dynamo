@@ -50,8 +50,6 @@ var (
 
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(GroupVersion,
-		&DynamoCheckpoint{},
-		&DynamoCheckpointList{},
 		&DynamoComponentDeployment{},
 		&DynamoComponentDeploymentList{},
 		&DynamoGraphDeployment{},

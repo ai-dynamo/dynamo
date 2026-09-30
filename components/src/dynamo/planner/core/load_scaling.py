@@ -59,7 +59,7 @@ class LoadScalingMixin:
     def _advance_load_single(
         self, obs: FpmObservations, component: str
     ) -> Optional[ScalingDecision]:
-        if self._scaling_in_progress(component):
+        if self._load_scaling_blocked(component):
             logger.info(f"Scaling in progress for {component}, observing only")
             self._diag_load_reason = "scaling_in_progress"
             return None
@@ -92,6 +92,8 @@ class LoadScalingMixin:
         if desired is None:
             return None
 
+        if (self._pending_num_p or self._pending_num_d) and desired > num_workers:
+            return None
         original_desired = desired
         if self._config.enable_throughput_scaling:
             bound = (
@@ -101,9 +103,12 @@ class LoadScalingMixin:
             )
             desired = max(desired, bound)
 
-        desired = self._apply_single_budget(desired, component)
+        desired, budget_reason = self._apply_single_scaling_budget(
+            desired,
+            component,
+        )
 
-        if desired < num_workers:
+        if desired < num_workers + self._pending_startup(component):
             if desired > original_desired:
                 self._diag_load_reason = "scale_down_capped_by_throughput"
             else:
@@ -112,6 +117,8 @@ class LoadScalingMixin:
             self._diag_load_reason = "scale_up"
         else:
             self._diag_load_reason = "no_change"
+        if budget_reason is not None:
+            self._diag_load_reason = budget_reason
 
         return (
             ScalingDecision(num_prefill=desired)
@@ -128,7 +135,9 @@ class LoadScalingMixin:
             self._diag_load_reason_prefill = "no_fpm_data"
             self._diag_load_reason_decode = "no_fpm_data"
             return None
-        if self._scaling_in_progress("prefill") or self._scaling_in_progress("decode"):
+        if self._load_scaling_blocked("prefill") or self._load_scaling_blocked(
+            "decode"
+        ):
             logger.info("Scaling in progress for disagg deployment, observing only")
             self._diag_load_reason = "scaling_in_progress"
             self._diag_load_reason_prefill = "scaling_in_progress"
@@ -181,6 +190,14 @@ class LoadScalingMixin:
             )
             d_reason = self._diag_load_reason
 
+        if self._pending_num_p or self._pending_num_d:
+            # Preserve raw intent before budget clamps can turn an up request
+            # into a ready-equal value that looks like startup cancellation.
+            if p_desired is not None and p_desired > self._num_p_workers:
+                p_desired = None
+            if d_desired is not None and d_desired > self._num_d_workers:
+                d_desired = None
+
         final_p = p_desired if p_desired is not None else self._num_p_workers
         final_d = d_desired if d_desired is not None else self._num_d_workers
 
@@ -201,7 +218,20 @@ class LoadScalingMixin:
 
         final_p = max(final_p, resolve_min_endpoint(self._config, "prefill"))
         final_d = max(final_d, resolve_min_endpoint(self._config, "decode"))
-        final_p, final_d = self._apply_global_budget(final_p, final_d)
+        if self._pending_num_p or self._pending_num_d:
+            return self._startup_disagg_decision(
+                final_p if p_desired is not None else None,
+                final_d if d_desired is not None else None,
+                source="load",
+            )
+        throughput_lifted_proposal = self._config.enable_throughput_scaling and (
+            post_floor_p > original_p or post_floor_d > original_d
+        )
+        if throughput_lifted_proposal:
+            final_p, final_d = self._fit_disagg_throughput_ceiling(final_p, final_d)
+        final_p, final_d, budget_reason = self._apply_disagg_scaling_budget(
+            final_p, final_d, source="load"
+        )
 
         # Per-component reasons
         def _reason(final: int, original: int, post_floor: int, current: int) -> str:
@@ -218,10 +248,10 @@ class LoadScalingMixin:
             return "scale_down_capped_by_throughput" if floor_capped else "no_change"
 
         self._diag_load_reason_prefill = _reason(
-            final_p, original_p, post_floor_p, self._num_p_workers
+            final_p, original_p, post_floor_p, self._num_p_workers + self._pending_num_p
         )
         self._diag_load_reason_decode = _reason(
-            final_d, original_d, post_floor_d, self._num_d_workers
+            final_d, original_d, post_floor_d, self._num_d_workers + self._pending_num_d
         )
 
         # Aggregate reason: prioritise "most interesting" across components.
@@ -235,6 +265,8 @@ class LoadScalingMixin:
             (self._diag_load_reason_prefill, self._diag_load_reason_decode),
             key=lambda r: _PRIORITY.get(r or "", 0),
         )
+        if budget_reason is not None:
+            self._diag_load_reason = budget_reason
 
         if final_p == self._num_p_workers and final_d == self._num_d_workers:
             logger.info("Load-based scaling: no scaling needed")
@@ -248,10 +280,11 @@ class LoadScalingMixin:
                 self._diag_load_reason_decode = d_reason
             # Aggregate reason: surface the most informative of the two
             # so the non-per-component Enum/HTML view also reflects it.
-            for candidate in (p_reason, d_reason):
-                if candidate is not None and candidate != "no_change":
-                    self._diag_load_reason = candidate
-                    break
+            if budget_reason is None:
+                for candidate in (p_reason, d_reason):
+                    if candidate is not None and candidate != "no_change":
+                        self._diag_load_reason = candidate
+                        break
             return None
 
         logger.info(
@@ -267,7 +300,7 @@ class LoadScalingMixin:
             return None
         num_workers = self._num_d_workers
 
-        if self._scaling_in_progress("decode"):
+        if self._load_scaling_blocked("decode"):
             logger.info(
                 f"Scaling in progress ({num_workers} -> {self._expected_num_d}), observing only"
             )
@@ -285,13 +318,18 @@ class LoadScalingMixin:
             if desired is None:
                 return None
 
+            if (self._pending_num_p or self._pending_num_d) and desired > num_workers:
+                return None
             original_desired = desired
             desired = max(desired, resolve_min_endpoint(self._config, "decode"))
             if self._config.enable_throughput_scaling:
                 desired = max(desired, self._throughput_lower_bound_d)
-            desired = self._apply_single_budget(desired, "decode")
+            desired, budget_reason = self._apply_single_scaling_budget(
+                desired,
+                "decode",
+            )
 
-            if desired < num_workers:
+            if desired < num_workers + self._pending_num_d:
                 if desired > original_desired:
                     self._diag_load_reason = "scale_down_capped_by_throughput"
                 else:
@@ -300,6 +338,8 @@ class LoadScalingMixin:
                 self._diag_load_reason = "scale_up"
             else:
                 self._diag_load_reason = "no_change"
+            if budget_reason is not None:
+                self._diag_load_reason = budget_reason
 
             logger.info(f"Agg easy-mode scaling: {num_workers} -> {desired}")
             return ScalingDecision(num_decode=desired)
@@ -353,19 +393,34 @@ class LoadScalingMixin:
             # returning early.
             desired = num_workers
 
+        if (self._pending_num_p or self._pending_num_d) and desired > num_workers:
+            return None
         original_desired = desired
         desired = max(desired, resolve_min_endpoint(self._config, "decode"))
         if self._config.enable_throughput_scaling:
             desired = max(desired, self._throughput_lower_bound_d)
-        desired = self._apply_single_budget(desired, "decode")
+        desired, budget_reason = self._apply_single_scaling_budget(
+            desired,
+            "decode",
+        )
 
         # Preserve "load wanted to scale down but floor lifted it" as a
         # distinct diagnostic reason even when the net result is no change.
         floor_capped = desired > original_desired and original_desired < num_workers
 
-        if desired == num_workers:
+        cancel_startup = (
+            not any_refused
+            and self._pending_num_d > 0
+            and p_desired is not None
+            and d_desired is not None
+            and p_desired <= num_workers
+            and d_desired <= num_workers
+        )
+        if desired == num_workers and not cancel_startup:
             logger.info("Agg scaling: no scaling needed")
-            if any_refused and not floor_capped:
+            if budget_reason is not None:
+                self._diag_load_reason = budget_reason
+            elif any_refused and not floor_capped:
                 # A sub-decision actively vetoed scale-down on consolidation
                 # safety grounds; surface that distinct from "no_change".
                 self._diag_load_reason = "scale_down_refused_consolidation"
@@ -375,12 +430,14 @@ class LoadScalingMixin:
                 )
             return None
 
-        if desired < num_workers:
+        if desired < num_workers + self._pending_num_d:
             self._diag_load_reason = (
                 "scale_down_capped_by_throughput" if floor_capped else "scale_down"
             )
         else:  # desired > num_workers (equality returned above)
             self._diag_load_reason = "scale_up"
+        if budget_reason is not None:
+            self._diag_load_reason = budget_reason
 
         logger.info(f"Agg load-based scaling: {num_workers} -> {desired}")
         return ScalingDecision(num_decode=desired)
@@ -422,7 +479,7 @@ class LoadScalingMixin:
         # ``(SLA - T_own) * sensitivity``. The new request's own forward-pass
         # time (``T_own``) does not shrink with more workers, so it is
         # excluded from the safety-margin budget.
-        can_scale_down = num_workers > 1
+        can_scale_down = num_workers > 1 or self._pending_startup("prefill") > 0
         consolidation_refused = False
         for label, group in self._prefill_regression.query_groups(fpm_stats):
             queued = max(fpm.queued_requests.sum_prefill_tokens for fpm in group)
@@ -515,7 +572,7 @@ class LoadScalingMixin:
         #  2. SLA check: predicted ITL at the survivor's post-consolidation KV
         #     must stay within ``SLA * sensitivity``. Decouples from cache
         #     size -- engines often saturate latency well before cache.
-        can_scale_down = num_workers > 1
+        can_scale_down = num_workers > 1 or self._pending_startup("decode") > 0
         consolidation_refused = False
         for label, group in self._decode_regression.query_groups(fpm_stats):
             sched_kv = max(fpm.scheduled_requests.sum_decode_kv_tokens for fpm in group)
@@ -585,7 +642,7 @@ class LoadScalingMixin:
         # applied only to the queue-induced portion of TTFT -- ``T_own`` (a
         # zero-queue prefill at the post-consolidation decode_kv) is treated
         # as the fixed cost the new request must pay regardless of N.
-        can_scale_down = num_workers > 1
+        can_scale_down = num_workers > 1 or self._pending_startup("decode") > 0
         consolidation_refused = False
         for _label, group in self._agg_regression.query_groups(fpm_stats):
             # Pre-consolidation prediction uses scheduled-only decode load.
@@ -668,7 +725,7 @@ class LoadScalingMixin:
         #     can't model block eviction past the cache).
         #  2. SLA check via ``estimate_scheduled_decode_itl`` at the
         #     post-consolidation combined kv.
-        can_scale_down = num_workers > 1
+        can_scale_down = num_workers > 1 or self._pending_startup("decode") > 0
         consolidation_refused = False
         for _label, group in self._agg_regression.query_groups(fpm_stats):
             sched_kv = max(fpm.scheduled_requests.sum_decode_kv_tokens for fpm in group)
@@ -729,6 +786,17 @@ class LoadScalingMixin:
     # ------------------------------------------------------------------
     # Easy-mode decision methods (optimization_target != "sla")
     # ------------------------------------------------------------------
+
+    def _consolidation_safe_easy_target(
+        self, desired: int, ready: int, values: list[float], up_threshold: float
+    ) -> int:
+        # Do not drain a serving worker if redistributing its load would
+        # immediately trigger scale-up. Keep this guard after startup settles
+        # too; otherwise cancelling pending capacity only delays oscillation.
+        if 0 < desired < ready:
+            if max(values) * ready / desired >= up_threshold:
+                return ready
+        return desired
 
     def _prefill_easy_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
@@ -801,7 +869,7 @@ class LoadScalingMixin:
             return num_workers + 1
 
         # Scale down if ALL engines below threshold
-        if num_workers > 1:
+        if num_workers > 1 or self._pending_startup("prefill"):
             if is_load:
                 if all(v <= down_thresh for v in values):
                     desired = max(
@@ -812,7 +880,9 @@ class LoadScalingMixin:
                         f"Load prefill: all engines at or below scale-down "
                         f"threshold ({down_thresh}), -> {desired}"
                     )
-                    return desired
+                    return self._consolidation_safe_easy_target(
+                        desired, num_workers, values, up_thresh
+                    )
             elif is_latency:
                 # For latency mode, scale down when ALL queues are empty
                 if all(v <= down_thresh for v in values):
@@ -823,7 +893,9 @@ class LoadScalingMixin:
                     logger.info(
                         f"Easy prefill: all engines at zero queue, -> {desired}"
                     )
-                    return desired
+                    return self._consolidation_safe_easy_target(
+                        desired, num_workers, values, up_thresh
+                    )
             else:
                 if all(v < down_thresh for v in values):
                     desired = max(
@@ -834,7 +906,9 @@ class LoadScalingMixin:
                         f"Easy prefill: all engines below scale-down threshold "
                         f"({down_thresh}), -> {desired}"
                     )
-                    return desired
+                    return self._consolidation_safe_easy_target(
+                        desired, num_workers, values, up_thresh
+                    )
 
         self._diag_load_reason = "no_change"
         return None
@@ -904,13 +978,15 @@ class LoadScalingMixin:
             if is_load
             else all(u < down_thresh for u in utils)
         )
-        if num_workers > 1 and scale_down:
+        if (num_workers > 1 or self._pending_startup("decode")) and scale_down:
             desired = max(num_workers - 1, resolve_min_endpoint(self._config, "decode"))
             logger.info(
                 f"Easy decode: all engines below scale-down threshold "
                 f"({down_thresh}), -> {desired}"
             )
-            return desired
+            return self._consolidation_safe_easy_target(
+                desired, num_workers, utils, up_thresh
+            )
 
         self._diag_load_reason = "no_change"
         return None
@@ -982,13 +1058,15 @@ class LoadScalingMixin:
             if is_load
             else all(u < down_thresh for u in utils)
         )
-        if num_workers > 1 and scale_down:
+        if (num_workers > 1 or self._pending_startup("decode")) and scale_down:
             desired = max(num_workers - 1, resolve_min_endpoint(self._config, "decode"))
             logger.info(
                 f"Easy agg: all engines below scale-down threshold "
                 f"({down_thresh}), -> {desired}"
             )
-            return desired
+            return self._consolidation_safe_easy_target(
+                desired, num_workers, utils, up_thresh
+            )
 
         self._diag_load_reason = "no_change"
         return None
@@ -1039,7 +1117,7 @@ class LoadScalingMixin:
             )
             return num_workers + 1
 
-        if num_workers > 1 and can_scale_down:
+        if can_scale_down:
             desired = max(num_workers - 1, min_endpoint)
             logger.info(
                 f"Load-based {label}: post-consolidation prediction within "

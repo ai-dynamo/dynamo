@@ -35,8 +35,8 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Configuration: checkpoint.enabled
-	// Auto-detection: nvidia.com/v1alpha1 PodSnapshot resource
-	// Requires: Snapshot operator serving nvidia.com/v1alpha1 PodSnapshot resources
+	// Auto-detection: nvidia.com/v1alpha1 PodSnapshot and SnapshotJob resources
+	// Requires: Snapshot operator serving nvidia.com/v1alpha1 PodSnapshot and SnapshotJob resources
 	// Default: false
 	Checkpoint Name = "checkpoint"
 
@@ -168,21 +168,22 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
 	var err error
-	// Enable Checkpoint only when explicitly configured and its external API dependency is available.
+	// Enable Checkpoint only when explicitly configured and both standalone
+	// Snapshot APIs used by capture and restore are available.
 	if config.Checkpoint.Enabled {
-		podSnapshotResource := snapshotv1alpha1.GroupVersion.WithResource("podsnapshots")
-		podSnapshotAvailable, detectErr := detectAPIAvailability(
+		snapshotAPIsAvailable, detectErr := detectAPIResourcesAvailability(
 			ctx,
 			mgr.GetConfig(),
-			podSnapshotResource.Group,
-			podSnapshotResource.Version,
-			podSnapshotResource.Resource,
+			snapshotv1alpha1.GroupVersion.Group,
+			snapshotv1alpha1.GroupVersion.Version,
+			"podsnapshots",
+			"snapshotjobs",
 		)
 		if detectErr != nil {
 			return Gates{}, detectErr
 		}
-		if gates.Checkpoint, err = resolve(ptr.To(true), podSnapshotAvailable,
-			"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot API was not detected in the cluster"); err != nil {
+		if gates.Checkpoint, err = resolve(ptr.To(true), snapshotAPIsAvailable,
+			"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot and SnapshotJob APIs were not both detected in the cluster"); err != nil {
 			return Gates{}, err
 		}
 	}
@@ -270,19 +271,17 @@ func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) (boo
 // An empty version checks only the group. An empty resource checks the group and optional version.
 // A nil cfg is supported and returns an error because discovery is unavailable.
 func detectAPIAvailability(ctx context.Context, cfg *rest.Config, group, version, resource string) (bool, error) {
+	if resource != "" {
+		return detectAPIResourcesAvailability(ctx, cfg, group, version, resource)
+	}
+
 	logger := log.FromContext(ctx)
 	logValues := []any{"group", group}
 	if version != "" {
 		logValues = append(logValues, "version", version)
 	}
-	if resource != "" {
-		logValues = append(logValues, "resource", resource)
-	}
 	if cfg == nil {
 		return false, errors.New("API detection failed, no discovery client available")
-	}
-	if resource != "" && version == "" {
-		return false, errors.New("API resource detection requires a version")
 	}
 
 	// Create a client for direct API resource discovery.
@@ -292,14 +291,40 @@ func detectAPIAvailability(ctx context.Context, cfg *rest.Config, group, version
 	}
 
 	// Group-only detection uses the server group index and optionally matches a served version.
-	if resource == "" {
-		apiGroups, err := discoveryClient.ServerGroups()
-		if err != nil {
-			return false, fmt.Errorf("list server API groups: %w", err)
-		}
-		available := apiGroupServesVersion(apiGroups, group, version)
-		logger.Info("API availability detected", append(logValues, "available", available)...)
-		return available, nil
+	apiGroups, err := discoveryClient.ServerGroups()
+	if err != nil {
+		return false, fmt.Errorf("list server API groups: %w", err)
+	}
+	available := apiGroupServesVersion(apiGroups, group, version)
+	logger.Info("API availability detected", append(logValues, "available", available)...)
+	return available, nil
+}
+
+// detectAPIResourcesAvailability reports whether every named resource is
+// discoverable from one group-version response.
+func detectAPIResourcesAvailability(
+	ctx context.Context,
+	cfg *rest.Config,
+	group string,
+	version string,
+	resources ...string,
+) (bool, error) {
+	logger := log.FromContext(ctx)
+	logValues := []any{"group", group, "version", version, "resources", resources}
+	if cfg == nil {
+		return false, errors.New("API detection failed, no discovery client available")
+	}
+	if version == "" {
+		return false, errors.New("API resource detection requires a version")
+	}
+	if len(resources) == 0 {
+		return false, errors.New("API resource detection requires at least one resource")
+	}
+
+	// Query the group version once so related feature prerequisites are observed atomically.
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return false, fmt.Errorf("create API discovery client: %w", err)
 	}
 	// Query the exact group version and distinguish absence from discovery failures.
 	groupVersion := group + "/" + version
@@ -312,15 +337,19 @@ func detectAPIAvailability(ctx context.Context, cfg *rest.Config, group, version
 		return false, fmt.Errorf("discover %s API resources: %w", groupVersion, err)
 	}
 
-	// Match the exact resource within the discovered group version.
+	// Require every requested resource from the same discovery observation.
+	found := make(map[string]struct{}, len(apiResourceList.APIResources))
 	for _, candidate := range apiResourceList.APIResources {
-		if candidate.Name == resource {
-			logger.Info("API availability detected", append(logValues, "available", true)...)
-			return true, nil
+		found[candidate.Name] = struct{}{}
+	}
+	for _, resource := range resources {
+		if _, ok := found[resource]; !ok {
+			logger.Info("API availability detected", append(logValues, "available", false)...)
+			return false, nil
 		}
 	}
-	logger.Info("API availability detected", append(logValues, "available", false)...)
-	return false, nil
+	logger.Info("API availability detected", append(logValues, "available", true)...)
+	return true, nil
 }
 
 // resolve uses auto-detection when unset, disables on false, and requires availability on true.

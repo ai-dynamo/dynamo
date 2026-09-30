@@ -65,3 +65,13 @@ func TestCanaryHealthChecksThreshold(t *testing.T) {
 		t.Fatalf("MinRuntimeVersion = %s, want 1.5.0", got)
 	}
 }
+
+func TestIncreasedWorkerFailureThreshold(t *testing.T) {
+	t.Log("inspect the central worker liveness feature gate")
+	got := IncreasedWorkerFailureThreshold.MinRuntimeVersion.String()
+
+	t.Log("verify the increased failure threshold is introduced by runtime 1.5.0")
+	if got != "1.5.0" {
+		t.Fatalf("MinRuntimeVersion = %s, want 1.5.0", got)
+	}
+}

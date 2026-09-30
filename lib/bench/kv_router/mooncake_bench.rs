@@ -12,9 +12,7 @@ use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
 use dynamo_bench::kv_router_common::replay::{generate_replay_artifacts, process_mooncake_trace};
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
-use dynamo_kv_router::{
-    ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
-};
+use dynamo_kv_router::{ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer};
 use mooncake_open_loop::{
     OpenLoopConfig, OpenLoopResult, parse_cpu_list, prepare_mooncake_corpus,
     prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
@@ -42,13 +40,6 @@ enum IndexerArgs {
         #[clap(long, default_value = "8")]
         jump_size: usize,
 
-        /// Number of OS threads that consume and apply KV cache events.
-        #[clap(long, default_value = "16")]
-        num_event_workers: usize,
-    },
-
-    /// Lock-based concurrent radix tree indexer.
-    ConcurrentRadixTree {
         /// Number of OS threads that consume and apply KV cache events.
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
@@ -89,9 +80,6 @@ impl IndexerArgs {
                 jump_size,
                 num_event_workers,
             } => MooncakeIndexerConfig::nested_map(*jump_size, *num_event_workers),
-            IndexerArgs::ConcurrentRadixTree { num_event_workers } => {
-                MooncakeIndexerConfig::concurrent_radix_tree(*num_event_workers)
-            }
             IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
                 MooncakeIndexerConfig::concurrent_radix_tree_compressed(*num_event_workers)
             }
@@ -149,13 +137,13 @@ struct Args {
 
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
-    /// radix-tree, nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed, branch-sharded-crtc.
+    /// radix-tree, nested-map, concurrent-radix-tree-compressed,
+    /// branch-sharded-crtc.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
     /// Number of OS threads for event processing in compare mode. Applies to
-    /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
+    /// indexers that use a thread pool (nested-map,
     /// concurrent-radix-tree-compressed, branch-sharded-crtc).
     /// Ignored by radix-tree.
     #[clap(long, default_value = "16")]
@@ -230,12 +218,10 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
         };
         if !matches!(
             config.kind,
-            MooncakeIndexerKind::NestedMap
-                | MooncakeIndexerKind::ConcurrentRadixTree
-                | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+            MooncakeIndexerKind::NestedMap | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
         ) {
             anyhow::bail!(
-                "corrected Mooncake replay supports only nested-map, concurrent-radix-tree, and concurrent-radix-tree-compressed; got {name}"
+                "corrected Mooncake replay supports only nested-map and concurrent-radix-tree-compressed; got {name}"
             );
         }
     }
@@ -319,15 +305,6 @@ async fn run_open_loop_for_config(
         MooncakeIndexerKind::NestedMap => {
             let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
                 PositionalIndexer::new(config.jump_size),
-                config.num_event_workers,
-                args.common.block_size,
-                metrics(),
-            ));
-            run_backend(config.short_name(), indexer, trial, open_config).await
-        }
-        MooncakeIndexerKind::ConcurrentRadixTree => {
-            let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
-                ConcurrentRadixTree::new(),
                 config.num_event_workers,
                 args.common.block_size,
                 metrics(),

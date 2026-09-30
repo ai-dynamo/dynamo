@@ -119,7 +119,7 @@ async fn admission_timestamp_is_preserved_when_forwarding_is_delayed() {
         })
         .unwrap();
     drop(recorder_tx);
-    let report = recorder.finish(500.0).await.unwrap();
+    let report = recorder.finish(500.0, None, None).await.unwrap();
     let record = &report.per_request[0];
     assert_eq!(record.first_admit_ms, Some(0.0));
     assert!(record.first_admit_ms <= record.first_token_ms);
@@ -249,7 +249,7 @@ fn online_report_options_populate_request_goodput_and_capacity_metrics() {
     let args = MockEngineArgs::builder()
         .speedup_ratio(1000.0)
         .block_size(64)
-        .aic_tp_size(Some(2))
+        .ais_tp_size(Some(2))
         .build()
         .unwrap();
     let report = simulate_trace_workload(
@@ -298,28 +298,30 @@ fn online_agentic_trace_releases_dependency_after_parent_completion() {
             hash_id_scope: AgenticHashIdScope::Local,
             source: AgenticSourceProvenance {
                 format: "test".to_string(),
-                digest: "online-agentic".to_string(),
+                digest: "online-agentic-dependency".to_string(),
             },
         },
         vec![
             AgenticMooncakeRow {
                 request_id: "root".to_string(),
-                session_id: "root".to_string(),
                 play_id: "play".to_string(),
+                session_id: "root".to_string(),
                 model: "model".to_string(),
                 input_length: Some(64),
                 output_length: Some(2),
                 hash_ids: Some(vec![1]),
+                not_before_ms: 0.0,
                 ..Default::default()
             },
             AgenticMooncakeRow {
                 request_id: "dependent".to_string(),
-                session_id: "dependent".to_string(),
                 play_id: "play".to_string(),
+                session_id: "dependent".to_string(),
                 model: "model".to_string(),
                 input_length: Some(64),
                 output_length: Some(2),
                 hash_ids: Some(vec![2]),
+                not_before_ms: 0.0,
                 dependencies: vec![AgenticDependency {
                     request_id: "root".to_string(),
                     trigger: AgenticDependencyTrigger::Completion,
@@ -342,6 +344,7 @@ fn online_agentic_trace_releases_dependency_after_parent_completion() {
             },
         ),
         trace,
+        None,
     )
     .unwrap();
 
@@ -395,7 +398,7 @@ async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
         &args,
         Some(KvRouterConfig {
             router_track_prefill_tokens: true,
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             ..KvRouterConfig::default()
         }),
         Some(Arc::new(FixedPrefillLoadEstimator {

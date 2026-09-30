@@ -16,10 +16,10 @@ KUBERNETES_OPTIONAL_ENV_NAMES = {"DYN_NAMESPACE_WORKER_SUFFIX"}
 SNAPSHOT_CONTROL_DIR_ENV = "DYN_SNAPSHOT_CONTROL_DIR"
 SNAPSHOT_CONTROL_DIR = "/snapshot-control"
 SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"
-SNAPSHOT_RESTORE_STANDBY_ENV = "DYN_SNAPSHOT_RESTORE_STANDBY"
+SNAPSHOT_RESTORE_STANDBY_ENV = "SNAPSHOT_RESTORE_STANDBY"
 
-# Must match snapshotprotocol.{SnapshotCompleteFile,RestoreCompleteFile,
-# ReadyForSnapshotFile}.
+# Must match the public file-name constants in
+# github.com/ai-dynamo/snapshot/api/podcontract.
 SNAPSHOT_COMPLETE_FILE = "snapshot-complete"
 RESTORE_COMPLETE_FILE = "restore-complete"
 READY_FOR_SNAPSHOT_FILE = "ready-for-snapshot"
@@ -31,6 +31,11 @@ RESTORE_RUNTIME_ENV_NAMES = {
     "DYN_REQUEST_PLANE",
     "DYN_EVENT_PLANE",
     # DistributedRuntime infrastructure env read after restore.
+    "DYN_EVENT_PLANE_HOST",
+    "DYN_TCP_RPC_HOST",
+    "DYN_TCP_RPC_PORT",
+    "DYN_TCP_RESPONSE_STREAM_HOST",
+    "DYN_TCP_RESPONSE_STREAM_PORT",
     "NATS_SERVER",
     "ETCD_ENDPOINTS",
     # Runtime system server/readiness env read after restore.

@@ -114,19 +114,11 @@ impl WorkerLoadSlot {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct WorkerLoadTable {
     // IndexMap gives us the dense full-worker scan plus point lookup shape that was previously
     // hand-rolled as Vec<WorkerLoadSlot> + FxHashMap<WorkerWithDpRank, usize>.
     entries: IndexMap<WorkerWithDpRank, WorkerLoadSlot, FxBuildHasher>,
-}
-
-impl Default for WorkerLoadTable {
-    fn default() -> Self {
-        Self {
-            entries: IndexMap::with_hasher(FxBuildHasher),
-        }
-    }
 }
 
 impl WorkerLoadTable {
@@ -167,6 +159,7 @@ impl WorkerLoadTable {
     }
 }
 
+#[derive(Default)]
 pub(super) struct PromptRegistry {
     // WARNING: prompt membership and worker load are only eventually consistent.
     // Each mutation still starts from one worker-local source of truth: we mutate the chosen
@@ -178,17 +171,6 @@ pub(super) struct PromptRegistry {
     loads: RwLock<WorkerLoadTable>,
     #[cfg(test)]
     cleanup_attempts: AtomicUsize,
-}
-
-impl Default for PromptRegistry {
-    fn default() -> Self {
-        Self {
-            membership: PromptMembershipTrie::new(),
-            loads: RwLock::new(WorkerLoadTable::default()),
-            #[cfg(test)]
-            cleanup_attempts: AtomicUsize::new(0),
-        }
-    }
 }
 
 impl PromptRegistry {
@@ -317,15 +299,17 @@ impl PromptRegistry {
         )
     }
 
-    pub(super) fn project_worker_loads(
+    pub(super) fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
-    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
+        projections.clear();
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         let loads = self.loads.read();
-        let mut projections = FxHashMap::with_capacity_and_hasher(loads.len(), FxBuildHasher);
+        projections.reserve(loads.len());
 
         for (worker, load) in loads.iter() {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
@@ -339,8 +323,6 @@ impl PromptRegistry {
                 },
             );
         }
-
-        projections
     }
 
     pub(super) fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {

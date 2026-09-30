@@ -82,6 +82,7 @@ _PLANNER_PASSTHROUGH = (
     "enable_load_scaling",
     "throughput_adjustment_interval_seconds",
     "load_adjustment_interval_seconds",
+    "max_throughput_scaling_replicas",
     "max_num_fpm_samples",
     "fpm_sample_bucket_size",
     "load_scaling_down_sensitivity",
@@ -412,6 +413,7 @@ class PlannerSearchSpace(BaseModel):
     # ``None`` preserves the legacy provider behavior of inheriting the
     # candidate's GPU budget. The public schema always supplies its default 8.
     max_num_gpus: int | None = Field(default=None, ge=1)
+    max_throughput_scaling_replicas: int = Field(default=8, ge=1)
     public_schema: bool = False
     public_policy: list[str] | None = None
     planner_target: str | None = None
@@ -723,6 +725,7 @@ class DynamoPlannerSweepConfigProvider:
             "enable_load_scaling": public.enable_load_scaling,
             "throughput_adjustment_interval_seconds": public.throughput_adjustment_interval_seconds,
             "load_adjustment_interval_seconds": public.load_adjustment_interval_seconds,
+            "max_throughput_scaling_replicas": public.max_throughput_scaling_replicas,
             "max_num_gpus": public.max_num_gpus,
             "min_workers": public.min_workers,
         }
@@ -1021,6 +1024,9 @@ class DynamoPlannerSweepConfigProvider:
             return AdapterReplaySpec(
                 config=({"policy": "disabled"} if public_schema else candidate_config)
             )
+        candidate_config[
+            "max_throughput_scaling_replicas"
+        ] = space.max_throughput_scaling_replicas
 
         if scaling["enable_throughput_scaling"]:
             fpm_entry = selection["fpm_sampling"]

@@ -98,6 +98,11 @@ areas:
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
+- label: backend-triton
+  github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
+  path_globs:
+  - components/src/dynamo/triton/**
+  - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -227,8 +232,8 @@ areas:
   - components/src/dynamo/common/memory/
   - components/src/dynamo/common/tests/
   - components/src/dynamo/common/utils/
+  - components/src/dynamo/experimental/
   - examples/backends/sample/
-  - examples/backends/tritonserver/
   - examples/common/
   - examples/custom_backend/
   - lib/backend-common/
@@ -344,9 +349,11 @@ areas:
   - dev/sanity_check.py
   - dynamo.code-workspace
   - hatch_build.py
+  - lib/bindings/kvbm/pyproject.toml
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/
+  - tests/wheels/
 - label: docs
   github_team: '@ai-dynamo/dynamo-docs-codeowners'
   path_globs:
@@ -356,7 +363,6 @@ areas:
   - docs/
   - examples/README.md
   - examples/__init__.py
-  - tests/docs/
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
   path_globs:
@@ -393,11 +399,6 @@ areas:
   - deploy/operator/cmd/crd-apply/
   - deploy/operator/config/
   - deploy/operator/config/crd/
-  - deploy/operator/config/default/
-  - deploy/operator/config/manager/
-  - deploy/operator/config/prometheus/
-  - deploy/operator/config/rbac/
-  - deploy/operator/config/samples/
   - deploy/operator/docs/
   - deploy/operator/hack/
   - deploy/operator/internal/
@@ -417,9 +418,6 @@ areas:
   - deploy/operator/internal/secrets/
   - deploy/operator/internal/webhook/
   - deploy/operator/samples/
-  - deploy/operator/test/
-  - deploy/operator/test/e2e/
-  - deploy/operator/test/utils/
   - deploy/pre-deployment/
   - deploy/utils/
   - deploy/utils/manifests/
@@ -434,7 +432,6 @@ areas:
   - components/src/dynamo/common/tests/test_snapshot*
   - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
-  - deploy/operator/internal/checkpointjob/
   - deploy/operator/internal/gms/
   - lib/gpu_memory_service/
   - lib/gpu_memory_service/cli/
@@ -457,10 +454,12 @@ areas:
   path_globs:
   - components/src/dynamo/tokenspeed/
   - components/src/dynamo/tokenspeed/tests/
+  - examples/backends/tokenspeed/
 - label: rl
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
   - components/src/dynamo/common/rl/
+  - examples/rl/
   - lib/rl/
   - tests/rl/
 - label: performance
@@ -472,8 +471,7 @@ areas:
   - benchmarks/frontend/
   - benchmarks/incluster/
   - benchmarks/mocker/README.md
-  - benchmarks/mocker/bench_aic_concurrency.py
-  - benchmarks/mocker/bench_aic_rust_callback.py
+  - benchmarks/mocker/bench_ais_concurrency.py
   - benchmarks/nat_trace/
   - benchmarks/prefix_data_generator/
   - benchmarks/pyproject.toml
@@ -541,45 +539,31 @@ required_owners:
   owners:
   - operator
 shared:
-# CODEOWNERS is a generated artifact, so co-ownership here is about who may
-# approve it, not who reviews its contents. Every area is listed because under
-# "any one approves" any single team satisfies the gate: without this, adding a
-# file in an uncovered location needs an areas.yaml edit (ops) AND the
-# regenerated CODEOWNERS (process), two approvals to land one file. The
-# artifact cannot drift from the reviewed source -- emit_codeowners.py is a
-# pure function of areas.yaml, and the workflow's regenerate-and-diff step
-# fails on any hand-edit -- so widening approval here costs no safety.
-- glob: CODEOWNERS
+- glob: .github/review-prompts/README.md
   owners:
-  - process
-  - agents
-  - backend-sglang
-  - backend-trtllm
-  - backend-vllm
-  - diffusion
-  - docs
-  - epp
-  - fault-tolerance
-  - frontend
-  - gms
-  - kv-memory
-  - multimodal
-  - observability
-  - operator
   - ops
-  - performance
-  - planner
-  - rl
-  - router
+  - frontend
   - runtime
-  - tokenspeed
-  - xpu
-# areas.yaml is the routing decision itself, not a generated artifact, so it
-# does not get the wide list above: nothing stops a rule here from re-routing
-# review authority away from a team, and the strict gate only proves coverage,
-# not that the owner is the right one. Ops and process both hold repo-wide
-# process authority, and under "any one approves" either can unblock a routing
-# change without a third team having to weigh in on paths it does not own.
+- glob: .github/review-prompts/frontend.md
+  owners:
+  - ops
+  - frontend
+- glob: .github/review-prompts/runtime.md
+  owners:
+  - ops
+  - runtime
+# CODEOWNERS stays on the process area alone. GitHub requests every team on
+# the matching line, even when one approval satisfies the gate, so listing
+# every area here pages every codeowner group for a generated-file edit.
+# areas.yaml is already shared by ops and process, so one process review
+# still covers the source and the artifact.
+# areas.yaml is the routing decision itself, not a generated artifact.
+# Nothing stops a rule here from re-routing review authority away from a
+# team, and the strict gate only proves coverage, not that the owner is the
+# right one. Ops and process both hold repo-wide process authority, but a
+# routing change also regenerates CODEOWNERS, which process owns alone, so a
+# process approval is required. No third team has to weigh in on paths it
+# does not own.
 - glob: .github/codeowners/areas.yaml
   owners:
   - ops
@@ -806,10 +790,6 @@ shared:
   owners:
   - backend-vllm
   - observability
-- glob: deploy/operator/config/prometheus/monitor.yaml
-  owners:
-  - operator
-  - observability
 - glob: lib/llm/src/fpm_publisher.rs
   owners:
   - runtime
@@ -972,14 +952,6 @@ shared:
   owners:
   - operator
   - observability
-- glob: deploy/operator/api/v1alpha1/dynamocheckpoint*
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/config/**/*dynamocheckpoint*
-  owners:
-  - operator
-  - gms
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
   - operator
@@ -1064,7 +1036,7 @@ shared:
   owners:
   - router
   - kv-memory
-- glob: lib/llm/src/preprocessor/lightseek_mm.rs
+- glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend
   - multimodal
@@ -1118,10 +1090,30 @@ shared:
   owners:
   - gms
   - operator
-- glob: deploy/operator/internal/checkpointjob/
+- glob: tests/serve/test_vllm.py
   owners:
-  - gms
-  - operator
+  - runtime
+  - backend-vllm
+- glob: tests/serve/test_vllm_omni.py
+  owners:
+  - runtime
+  - backend-vllm
+- glob: tests/serve/test_sglang.py
+  owners:
+  - runtime
+  - backend-sglang
+- glob: tests/serve/test_sglang_mm_hashes_protocol.py
+  owners:
+  - runtime
+  - backend-sglang
+- glob: tests/serve/test_trtllm.py
+  owners:
+  - runtime
+  - backend-trtllm
+- glob: tests/serve/test_trtllm_mm_hashes_protocol.py
+  owners:
+  - runtime
+  - backend-trtllm
 - glob: deploy/operator/internal/gms/
   owners:
   - gms
@@ -1135,14 +1127,6 @@ shared:
   - operator
   - gms
 - glob: deploy/operator/internal/webhook/**/*checkpoint*
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/api/v1alpha1/*checkpoint*
-  owners:
-  - operator
-  - gms
-- glob: deploy/operator/config/**/*checkpoint*
   owners:
   - operator
   - gms
@@ -1264,10 +1248,6 @@ shared:
   owners:
   - ops
   - backend-vllm
-- glob: examples/backends/tritonserver/Dockerfile
-  owners:
-  - runtime
-  - ops
 - glob: examples/diffusers/Dockerfile
   owners:
   - diffusion
@@ -1277,6 +1257,10 @@ shared:
   - performance
   - ops
 - glob: tests/fault_tolerance/hardware/fault_injection_service/**/Dockerfile
+  owners:
+  - fault-tolerance
+  - ops
+- glob: tests/fault_tolerance/hardware/fault_injection_service/**/requirements.txt
   owners:
   - fault-tolerance
   - ops
@@ -1382,10 +1366,35 @@ shared:
   owners:
   - runtime
   - backend-trtllm
+- glob: tests/serve/test_sample_diffusion.py
+  owners:
+  - runtime
+  - diffusion
 - glob: tests/serve/multimodal_profiles/
   owners:
   - runtime
   - multimodal
+# The xpu profile is declared in the xpu area, which emits in the earlier
+# override tier. Shared rules emit after overrides, so the directory glob above
+# would otherwise take this file back; the longer glob wins by last-match.
+- glob: tests/serve/multimodal_profiles/vllm_xpu.py
+  owners:
+  - runtime
+  - multimodal
+  - xpu
+  - backend-vllm
+- glob: tests/test_kustomize_matrix.py
+  owners:
+  - runtime
+  - ops
+- glob: tests/test_generate_kustomize_openapi.py
+  owners:
+  - runtime
+  - ops
+- glob: tests/dependencies/test_kvbm_imports.py
+  owners:
+  - runtime
+  - kv-memory
 - glob: .github/workflows/pr-xpu.yaml
   owners:
   - xpu
@@ -1408,12 +1417,6 @@ shared:
 - glob: tests/serve/test_vllm_xpu.py
   owners:
   - runtime
-  - xpu
-  - backend-vllm
-- glob: tests/serve/multimodal_profiles/vllm_xpu.py
-  owners:
-  - runtime
-  - multimodal
   - xpu
   - backend-vllm
 - glob: dev/observability/*xpu*
@@ -1474,6 +1477,15 @@ shared:
   - backend-vllm
   - xpu
 classify:
+  # File-type defaults sit above the area tier but below explicit path overrides
+  # and shared rules, which emit later and win by last-match. A pyproject.toml or
+  # Dockerfile added under a path carrying its own override or shared declaration
+  # keeps that path's owner instead. Every pyproject.toml in the tree resolves to
+  # ops today; check a new one with who_owns.py rather than assuming this caught it.
   filetype_rules:
   - pattern: '*Dockerfile*'
+    coowner: ops
+  - pattern: pyproject.toml
+    coowner: ops
+  - pattern: requirements.txt
     coowner: ops

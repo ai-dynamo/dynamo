@@ -96,6 +96,7 @@ class PlannerPredictionConfig(BaseModel):
     enable_throughput_scaling: bool = True
     enable_load_scaling: bool = False
     throughput_adjustment_interval_seconds: PositiveInt = 180
+    max_throughput_scaling_replicas: PositiveInt = 8
     load_adjustment_interval_seconds: PositiveInt = 5
     max_num_fpm_samples: PositiveInt = 64
     fpm_sample_bucket_size: PositiveInt = 16
@@ -168,6 +169,7 @@ class PlannerRecommendationConfig(BaseModel):
     enable_load_scaling: bool | Choices[bool] | None = None
     throughput_adjustment_interval_seconds: IntDomain | None = None
     load_adjustment_interval_seconds: IntDomain | None = None
+    max_throughput_scaling_replicas: PositiveInt = 8
     max_num_fpm_samples: IntDomain | None = None
     fpm_sample_bucket_size: IntDomain | None = None
     load_scaling_down_sensitivity: NonNegativeIntDomain | None = None

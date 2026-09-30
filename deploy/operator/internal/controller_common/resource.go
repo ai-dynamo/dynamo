@@ -31,13 +31,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -47,7 +50,21 @@ const (
 	// NvidiaAnnotationGenerationKey indicates annotation name for last applied generation by the operator
 	// This is used to detect manual changes to resources
 	NvidiaAnnotationGenerationKey = "nvidia.com/last-applied-generation"
+	// EventReasonOwnershipConflict identifies a parent resource with a child-resource ownership collision.
+	EventReasonOwnershipConflict = "OwnershipConflict"
 )
+
+type OwnershipConflictError struct {
+	Cause error
+}
+
+func (e *OwnershipConflictError) Error() string {
+	return e.Cause.Error()
+}
+
+func (e *OwnershipConflictError) Unwrap() error {
+	return e.Cause
+}
 
 type Reconciler interface {
 	client.Client
@@ -59,9 +76,74 @@ type Reconciler interface {
 // if the resource should be deleted, the returned resource must contain the necessary information to delete it (name and namespace)
 type ResourceGenerator[T client.Object] func(ctx context.Context) (T, bool, error)
 
+// SyncOption configures an exceptional SyncResource ownership policy.
+type SyncOption func(*syncOptions)
+
+type syncOptions struct {
+	sharedOwnership bool
+}
+
+// WithSharedOwnership permits a caller to reconcile a resource whose controller
+// owner is another resource. Callers must use this only for a documented,
+// intentional shared-resource lifecycle.
+func WithSharedOwnership() SyncOption {
+	return func(options *syncOptions) {
+		options.sharedOwnership = true
+	}
+}
+
+func resolveSyncOptions(opts []SyncOption) syncOptions {
+	var options syncOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	return options
+}
+
+// checkControllerOwnership verifies that existing is controlled by parentResource.
+// A namespaced name is not sufficient evidence of ownership: a resource with no
+// controller owner or one owned by a different parent is a collision.
+func checkControllerOwnership(existing, parentResource client.Object, scheme *runtime.Scheme) error {
+	if parentResource == nil {
+		return nil
+	}
+
+	existingOwner := metav1.GetControllerOf(existing)
+	if existingOwner == nil {
+		return &OwnershipConflictError{Cause: fmt.Errorf(
+			"%T %s/%s has no controller owner; refusing to reconcile it for %T %s/%s",
+			existing,
+			existing.GetNamespace(),
+			existing.GetName(),
+			parentResource,
+			parentResource.GetNamespace(),
+			parentResource.GetName(),
+		)}
+	}
+
+	parentGVK, err := apiutil.GVKForObject(parentResource, scheme)
+	if err != nil {
+		return fmt.Errorf("get parent GVK: %w", err)
+	}
+	existingOwnerGV, err := schema.ParseGroupVersion(existingOwner.APIVersion)
+	if err != nil ||
+		existingOwnerGV.Group != parentGVK.Group ||
+		existingOwner.Kind != parentGVK.Kind ||
+		existingOwner.Name != parentResource.GetName() ||
+		existingOwner.UID != parentResource.GetUID() {
+		return &OwnershipConflictError{Cause: &controllerutil.AlreadyOwnedError{Object: existing, Owner: *existingOwner}}
+	}
+
+	return nil
+}
+
+// SyncResource synchronizes a generated resource with the API server. parentResource may be nil;
+// when it is nil, SyncResource neither sets nor validates controller ownership.
+//
 //nolint:nakedret
-func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource ResourceGenerator[T]) (modified bool, res T, err error) {
+func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource ResourceGenerator[T], opts ...SyncOption) (modified bool, res T, err error) {
 	logs := log.FromContext(ctx)
+	options := resolveSyncOptions(opts)
 
 	resource, toDelete, err := generateResource(ctx)
 	if err != nil {
@@ -108,13 +190,22 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		}
 		logs.Info("Resource not found. Creating a new one.")
 		var observed T
-		return SyncObservedResource(ctx, r, parentResource, observed, resource)
+		return SyncObservedResource(ctx, r, parentResource, observed, resource, opts...)
 	}
 
 	logs.Info(fmt.Sprintf("%s found.", resourceType))
 	if toDelete {
+		if !options.sharedOwnership {
+			err = checkControllerOwnership(oldResource, parentResource, r.Scheme())
+			if err != nil {
+				logs.Error(err, "Refusing to delete a resource with conflicting controller ownership")
+				return
+			}
+		}
 		logs.Info(fmt.Sprintf("%s found. Deleting the existing one.", resourceType))
-		err = r.Delete(ctx, oldResource)
+		uid := oldResource.GetUID()
+		resourceVersion := oldResource.GetResourceVersion()
+		err = r.Delete(ctx, oldResource, client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion})
 		if err != nil {
 			logs.Error(err, fmt.Sprintf("Failed to delete %s.", resourceType))
 			r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeWarning, fmt.Sprintf("Delete%s", resourceType), "Delete", "Failed to delete %s %s: %s", resourceType, resourceNamespace, err)
@@ -126,19 +217,22 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 		return
 	}
 
-	return SyncObservedResource(ctx, r, parentResource, oldResource, resource)
+	return SyncObservedResource(ctx, r, parentResource, oldResource, resource, opts...)
 }
 
 // SyncObservedResource synchronizes a desired resource against the exact
 // object previously observed by its caller. Unlike SyncResource, it does not
-// read from the API server. Create and update conflicts must be retried from a
-// fresh observation so render-time decisions remain tied to the written object.
+// read from the API server. parentResource may be nil; when it is nil,
+// SyncObservedResource neither sets nor validates controller ownership. Create
+// and update conflicts must be retried from a fresh observation so render-time
+// decisions remain tied to the written object.
 func SyncObservedResource[T client.Object](
 	ctx context.Context,
 	r Reconciler,
 	parentResource client.Object,
 	observed T,
 	desired T,
+	opts ...SyncOption,
 ) (bool, T, error) {
 	resourceNamespace := desired.GetNamespace()
 	resourceName := desired.GetName()
@@ -180,6 +274,14 @@ func SyncObservedResource[T client.Object](
 		logs.Info(fmt.Sprintf("%s created.", resourceType))
 		recordResourceEvent(r, desired, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Created %s %s", resourceType, resourceNamespace)
 		return true, desired, nil
+	}
+
+	if !resolveSyncOptions(opts).sharedOwnership {
+		if err := checkControllerOwnership(observed, parentResource, r.Scheme()); err != nil {
+			logs.Error(err, "Refusing to reconcile a resource with conflicting controller ownership")
+			var zero T
+			return false, zero, err
+		}
 	}
 
 	changeResult, err := GetSpecChangeResult(observed, desired)

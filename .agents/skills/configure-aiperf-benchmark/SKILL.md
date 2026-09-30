@@ -28,8 +28,9 @@ Read `agent-docs/rules/execution/user-workload.md`,
 `agent-docs/rules/benchmarking/comparison-uncertainty.md`,
 `agent-docs/rules/benchmarking/concurrency-grid.md`,
 `agent-docs/rules/benchmarking/evidence-eligibility.md`,
-`agent-docs/rules/benchmarking/proxy-workload-selection.md`, and
-`agent-docs/rules/benchmarking/series-boundaries.md` before selecting flags. Also read the user workload, deployment
+`agent-docs/rules/benchmarking/proxy-workload-selection.md`,
+`agent-docs/rules/benchmarking/series-boundaries.md`, and
+`agent-docs/rules/benchmarking/tool-version.md` before selecting flags. Also read the user workload, deployment
 ledger, and the AIPerf documentation matching the pinned source or runtime. Inspect matching Dynamo recipe `perf.yaml`
 files when available.
 
@@ -72,8 +73,10 @@ Require:
    `agent-docs/rules/benchmarking/comparison-uncertainty.md` is pre-authorized; it arrives as a `repeat_decision:
    necessary` from `analyze-aiperf-results` whose rationale names the series pilot, and runs as repetitions of one
    unchanged configuration. Plans stay immutable; no plan marker is involved.
-10. Pin the AIPerf runtime version or source commit. Write the immutable series plan and the run-scoped
-    `<DEPLOY_ROOT>/benchmark/aiperf-config.yaml` and `<DEPLOY_ROOT>/benchmark/perf.yaml`.
+10. Pin the AIPerf runtime version or source commit per `agent-docs/rules/benchmarking/tool-version.md`: resolve
+    the latest stable release (or apply that rule's reference-reproduction/operator-override exceptions) and record
+    the resolution mechanism, its output, and the date in the plan. Write the immutable series plan and the
+    run-scoped `<DEPLOY_ROOT>/benchmark/aiperf-config.yaml` and `<DEPLOY_ROOT>/benchmark/perf.yaml`.
 
 ## Benchmark Plan
 
@@ -98,7 +101,8 @@ The plan must identify:
   needed, and seed;
 - endpoint type, streaming behavior, model, and tokenizer;
 - target metrics, SLOs, goodput thresholds, and optimization direction;
-- AIPerf source commit when available and required runtime version;
+- AIPerf source commit when available and required runtime version, plus the version-resolution mechanism, its
+  output, and the resolution date (`agent-docs/rules/benchmarking/tool-version.md`);
 - proxy rationale and limitations when applicable.
 
 

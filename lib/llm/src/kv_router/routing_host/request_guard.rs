@@ -5,13 +5,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     kv_router::{
-        KvRouter,
-        indexer::ApproximateRequestLease,
-        metrics::RouterRequestMetrics,
-        request_lease::RequestAttemptLease,
-        scheduler::{DefaultWorkerSelector, SchedulerBookingDescriptor},
+        KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
+        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION, request_lease::RequestAttemptLease,
     },
-    local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -26,8 +22,7 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::AdmissionAttempt,
-    selector::WorkerSelector,
+    scheduling::{AbortCause, RequestLifecycle, queue::BookingHandle},
 };
 use dynamo_runtime::{
     error::DynamoError,
@@ -280,10 +275,24 @@ impl RequestObservability {
         self.dispatch_guard = Some(StageGuard::new(STAGE_DISPATCH, phase_label));
     }
 
-    fn record_prefill_start(&self) {
-        if let Some(tracker) = &self.tracker {
-            tracker.record_prefill_start();
+    /// Record prefill start for dispatches that actually run prefill.
+    ///
+    /// Decode normally skips this timestamp. Conditional disaggregation is the
+    /// exception: it labels the request Decode while the selected decode worker
+    /// runs local prefill and decode from the full prompt.
+    fn record_prefill_start(&self, request: &PreprocessedRequest) {
+        let Some(tracker) = &self.tracker else {
+            return;
+        };
+        let includes_prefill = tracker.phase() != RequestPhase::Decode
+            || request
+                .annotations
+                .iter()
+                .any(|annotation| annotation == BYPASS_REMOTE_PREFILL_ANNOTATION);
+        if !includes_prefill {
+            return;
         }
+        tracker.record_prefill_start();
     }
 
     fn mark_dispatched(&mut self) {
@@ -364,6 +373,7 @@ impl RequestObservability {
 }
 
 struct OutputBlockUpdate {
+    num_blocks: usize,
     decay_fraction: Option<f64>,
 }
 
@@ -378,49 +388,37 @@ struct OutputBlockTracker {
 
 /// Owns the shared attempt-scoped scheduler and approximate-LRU lifecycle after
 /// a KV worker is selected.
-pub(super) struct KvRequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    chooser: Arc<KvRouter<Sel>>,
+pub(super) struct KvRequestCleanup {
+    chooser: Arc<KvRouter>,
     context_id: String,
     worker: WorkerWithDpRank,
     approximate_lru: Option<ApproximateRequestLease>,
     lifecycle: Option<RequestAttemptLease>,
+    /// Classifier lifecycle for this attempt. Living here keeps it structurally
+    /// tied to KV routing: builtin and occupancy cleanups cannot hold one.
+    request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
-impl<Sel> KvRequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl KvRequestCleanup {
     pub(super) fn new(
-        chooser: Arc<KvRouter<Sel>>,
+        chooser: Arc<KvRouter>,
         context_id: String,
         worker: WorkerWithDpRank,
-        attempt: AdmissionAttempt,
+        booking: Option<BookingHandle>,
     ) -> Self {
-        let attempt_id = match attempt {
-            AdmissionAttempt::Untracked => None,
-            AdmissionAttempt::Tracked(attempt_id) => Some(attempt_id),
-        };
-        let approximate_lru = attempt_id
-            .and_then(|_| chooser.approximate_lru_rank_registration(worker))
-            .and_then(|registration| {
-                chooser.indexer().begin_approximate_lru_request(
-                    worker,
-                    registration.incarnation,
-                    attempt_id?,
-                )
-            });
-        let lifecycle = attempt_id.map(|attempt_id| {
-            chooser.request_lease_manager().register_local(
-                SchedulerBookingDescriptor {
-                    request_id: context_id.clone(),
-                    worker,
-                    attempt_id,
-                },
-                approximate_lru.clone(),
+        let booking = booking.map(BookingHandle::commit);
+        let approximate_lru = booking.as_ref().and_then(|booking| {
+            let registration = chooser.approximate_lru_rank_registration(worker)?;
+            chooser.indexer().begin_approximate_lru_request(
+                worker,
+                registration.incarnation,
+                booking.attempt_id,
             )
+        });
+        let lifecycle = booking.map(|booking| {
+            chooser
+                .request_lease_manager()
+                .register_local(booking, approximate_lru.clone())
         });
         Self {
             chooser,
@@ -428,6 +426,7 @@ where
             worker,
             approximate_lru,
             lifecycle,
+            request_lifecycle: None,
         }
     }
 
@@ -443,11 +442,8 @@ where
 }
 
 /// Policy-specific state released by the host's common request lifecycle.
-enum RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    Kv(KvRequestCleanup<Sel>),
+enum RequestCleanup {
+    Kv(KvRequestCleanup),
     Stateless {
         worker_id: u64,
     },
@@ -457,10 +453,7 @@ where
     },
 }
 
-impl<Sel> RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RequestCleanup {
     fn worker_id(&self) -> u64 {
         match self {
             Self::Kv(cleanup) => cleanup.worker.worker_id,
@@ -506,6 +499,20 @@ where
         }
     }
 
+    fn request_lifecycle_mut(&mut self) -> Option<&mut RequestLifecycle> {
+        match self {
+            Self::Kv(cleanup) => cleanup.request_lifecycle.as_deref_mut(),
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
+        }
+    }
+
+    fn take_request_lifecycle(&mut self) -> Option<Box<RequestLifecycle>> {
+        match self {
+            Self::Kv(cleanup) => cleanup.request_lifecycle.take(),
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
+        }
+    }
+
     async fn finish(&mut self) {
         match self {
             Self::Kv(cleanup) => cleanup.finish().await,
@@ -541,24 +548,25 @@ impl OutputBlockTracker {
             return None;
         }
 
+        let num_blocks = new_total_blocks - self.current_total_blocks;
         // Advance before returning so a failed scheduler update preserves existing no-retry behavior.
         self.current_total_blocks = new_total_blocks;
         let decay_fraction = self
             .expected_output_tokens
             .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
-        Some(OutputBlockUpdate { decay_fraction })
+        Some(OutputBlockUpdate {
+            num_blocks,
+            decay_fraction,
+        })
     }
 }
 
 /// Coordinates scheduler cleanup, observability, and streamed load tracking.
 ///
-/// Session-affinity lifetime is separate: `AffinityAcquire` and
+/// Session-affinity lifetime is separate: the affinity `Hold` and
 /// `AffinityLease` own binding commit, release, and invalidation.
-pub(super) struct RequestGuard<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    cleanup: RequestCleanup<Sel>,
+pub(super) struct RequestGuard {
+    cleanup: RequestCleanup,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
     approximate_lru: Option<ApproximateRequestLease>,
@@ -569,30 +577,44 @@ where
     _lora_load: Option<LoraLoadGuard>,
 }
 
-impl<Sel> RequestGuard<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RequestGuard {
+    #[cfg(test)]
+    pub(super) fn booking_for_test(
+        &self,
+    ) -> &dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor {
+        self.cleanup
+            .lifecycle()
+            .expect("expected a tracked booking")
+            .booking()
+    }
+
     pub(super) fn new_kv(
-        chooser: Arc<KvRouter<Sel>>,
+        chooser: Arc<KvRouter>,
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         worker: WorkerWithDpRank,
-        attempt: AdmissionAttempt,
+        booking: Option<BookingHandle>,
         request: &PreprocessedRequest,
+        request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
-            KvRequestCleanup::new(chooser, context_id, worker, attempt),
+            KvRequestCleanup::new(chooser, context_id, worker, booking),
             request,
+            request_lifecycle,
         )
     }
 
     pub(super) fn new_kv_with_cleanup(
         request_metrics: Arc<RouterRequestMetrics>,
-        cleanup: KvRequestCleanup<Sel>,
+        mut cleanup: KvRequestCleanup,
         request: &PreprocessedRequest,
+        mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
+        if let Some(lifecycle) = request_lifecycle.as_mut() {
+            lifecycle.observe_context_tokens(request.expanded_prompt_token_count());
+        }
+        cleanup.request_lifecycle = request_lifecycle;
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
         let isl_tokens = request.token_ids.len();
@@ -606,7 +628,7 @@ where
         let track_output_blocks =
             attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
         if attempt_id.is_some() {
-            request_metrics.requests_started_total().inc();
+            request_metrics.requests_started_total.inc();
         }
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
@@ -637,7 +659,7 @@ where
         lora_load: Option<LoraLoadGuard>,
         request: &PreprocessedRequest,
     ) -> Self {
-        request_metrics.requests_started_total().inc();
+        request_metrics.requests_started_total.inc();
         Self {
             cleanup: match occupancy_reservation {
                 Some(reservation) => RequestCleanup::Occupancy {
@@ -677,12 +699,18 @@ where
         self.observability.start_dispatch(phase_label);
     }
 
-    pub(super) fn record_prefill_start(&self) {
-        self.observability.record_prefill_start();
+    pub(super) fn record_prefill_start(&self, request: &PreprocessedRequest) {
+        self.observability.record_prefill_start(request);
     }
 
     pub(super) fn mark_dispatched(&mut self) {
         self.observability.mark_dispatched();
+        if let RequestCleanup::Kv(cleanup) = &mut self.cleanup {
+            let worker = cleanup.worker;
+            if let Some(lifecycle) = cleanup.request_lifecycle.as_mut() {
+                lifecycle.sent(worker);
+            }
+        }
     }
 
     pub(super) fn has_approximate_lru(&self) -> bool {
@@ -720,6 +748,18 @@ where
             && let Some(lifecycle) = self.cleanup.lifecycle()
         {
             lifecycle.touch();
+        }
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.responding();
+            lifecycle.observe_output_tokens(new_tokens);
+            if let Some(total_tokens) = item
+                .data
+                .as_ref()
+                .and_then(|data| data.completion_usage.as_ref())
+                .map(|usage| usage.total_tokens as usize)
+            {
+                lifecycle.observe_context_tokens(total_tokens);
+            }
         }
         if !self.prefill_marked {
             let has_tokens = item
@@ -778,22 +818,30 @@ where
         if let RequestCleanup::Kv(cleanup) = &self.cleanup
             && let Some(lifecycle) = cleanup.lifecycle()
             && lifecycle.is_active()
-            && let Err(error) = cleanup
-                .chooser
-                .enqueue_output_block_if_booking(lifecycle.booking(), update.decay_fraction)
-                .await
         {
-            tracing::warn!(
-                request_id = %cleanup.context_id,
-                %error,
-                "Failed to add output block"
-            );
+            for _ in 0..update.num_blocks {
+                if let Err(error) = cleanup
+                    .chooser
+                    .enqueue_output_block_if_booking(lifecycle.booking(), update.decay_fraction)
+                    .await
+                {
+                    tracing::warn!(
+                        request_id = %cleanup.context_id,
+                        %error,
+                        "Failed to add output block"
+                    );
+                    break;
+                }
+            }
         }
 
         self.observability.observe_output_block_boundary();
     }
 
     pub(super) async fn finish(&mut self) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.complete();
+        }
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability
             .record_metrics(self.record_itl_at_completion);
@@ -801,18 +849,86 @@ where
     }
 
     pub(super) async fn abort(&mut self) {
+        self.abort_with_error(None).await;
+    }
+
+    pub(super) async fn release_for_retry(&mut self) -> bool {
+        let Some(migration_state) = self.migration_state.as_ref() else {
+            return false;
+        };
+        let Some(mut lifecycle) = self.cleanup.take_request_lifecycle() else {
+            return false;
+        };
+        lifecycle.prepare_retry();
+        migration_state.store_request_lifecycle(lifecycle);
+        self.cleanup.finish().await;
+        true
+    }
+
+    pub(super) async fn abort_with_error(&mut self, error: Option<&AbortCause>) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
+        }
         self.cleanup.finish().await;
     }
 }
 
-impl<Sel> Drop for RequestGuard<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.observability
             .record_metrics(self.record_itl_at_completion);
         // RequestCleanup drops immediately afterward and performs resource cleanup.
+    }
+}
+
+#[cfg(test)]
+mod output_block_tests {
+    use super::OutputBlockTracker;
+
+    #[test]
+    fn counts_every_crossed_boundary_once() {
+        let mut tracker = OutputBlockTracker::new(true, 16, 16, None);
+        assert!(tracker.observe(0).is_none());
+        let first = tracker.observe(1).unwrap();
+        assert_eq!(first.num_blocks, 1);
+        assert_eq!(first.decay_fraction, None);
+        assert!(tracker.observe(16).is_none());
+        assert_eq!(tracker.observe(33).unwrap().num_blocks, 2);
+        assert!(tracker.observe(33).is_none());
+        assert!(tracker.observe(48).is_none());
+        assert_eq!(tracker.observe(49).unwrap().num_blocks, 1);
+    }
+
+    #[test]
+    fn accounts_for_a_partial_prompt_block() {
+        let mut tracker = OutputBlockTracker::new(true, 15, 16, None);
+        assert!(tracker.observe(1).is_none());
+        assert_eq!(tracker.observe(34).unwrap().num_blocks, 3);
+        assert!(tracker.observe(49).is_none());
+    }
+
+    #[test]
+    fn preserves_decay_at_the_observed_output_length() {
+        let mut tracker = OutputBlockTracker::new(true, 16, 16, Some(64));
+        let update = tracker.observe(32).unwrap();
+        assert_eq!(update.num_blocks, 2);
+        assert_eq!(update.decay_fraction, Some(0.5));
+        let update = tracker.observe(64).unwrap();
+        assert_eq!(update.num_blocks, 2);
+        assert_eq!(update.decay_fraction, Some(0.0));
+        let update = tracker.observe(96).unwrap();
+        assert_eq!(update.num_blocks, 2);
+        assert_eq!(update.decay_fraction, Some(0.0));
+
+        let mut zero_expected = OutputBlockTracker::new(true, 16, 16, Some(0));
+        assert_eq!(zero_expected.observe(32).unwrap().decay_fraction, Some(0.0));
+    }
+
+    #[test]
+    fn disabled_tracking_emits_no_updates() {
+        let mut tracker = OutputBlockTracker::new(false, 16, 16, None);
+        assert!(tracker.observe(48).is_none());
+        assert_eq!(tracker.current_total_blocks, 1);
     }
 }
 
@@ -955,5 +1071,112 @@ mod output_hash_tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod prefill_start_tests {
+    use super::*;
+
+    fn test_request(tracker: Arc<RequestTracker>, annotations: Vec<String>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .annotations(annotations)
+            .tracker(Some(tracker))
+            .build()
+            .unwrap()
+    }
+
+    fn test_metrics() -> Arc<RouterRequestMetrics> {
+        fn hist(name: &str) -> prometheus::Histogram {
+            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
+        }
+        fn hist_vec(name: &str) -> prometheus::HistogramVec {
+            prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
+                .unwrap()
+        }
+        Arc::new(RouterRequestMetrics {
+            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
+                .unwrap(),
+            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
+            time_to_first_token_seconds: hist("ttft_seconds"),
+            inter_token_latency_seconds: hist("itl_seconds"),
+            input_sequence_tokens: hist("isl_tokens"),
+            output_sequence_tokens: hist("osl_tokens"),
+            kv_hit_rate: hist("kv_hit_rate"),
+            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
+            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
+            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
+            non_max_overlap_selections_total: prometheus::IntCounterVec::new(
+                prometheus::Opts::new("non_max_overlap_selections_total", "test"),
+                &["reason"],
+            )
+            .unwrap(),
+            overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
+        })
+    }
+
+    async fn dispatch_once(phase: RequestPhase, annotations: Vec<String>) -> Arc<RequestTracker> {
+        let tracker = Arc::new(RequestTracker::new());
+        let _permit = tracker.set_phase(phase).await;
+        let request = test_request(tracker.clone(), annotations);
+        RequestObservability::new(request.tracker.clone(), test_metrics())
+            .record_prefill_start(&request);
+        tracker
+    }
+
+    #[tokio::test]
+    async fn prefill_dispatch_records_prefill_start() {
+        let tracker = dispatch_once(RequestPhase::Prefill, Vec::new()).await;
+        assert!(tracker.prefill_wait_time_ms().is_some());
+    }
+
+    #[tokio::test]
+    async fn aggregated_dispatch_records_prefill_start() {
+        let tracker = dispatch_once(RequestPhase::Aggregated, Vec::new()).await;
+        assert!(tracker.prefill_wait_time_ms().is_some());
+    }
+
+    #[tokio::test]
+    async fn decode_only_dispatch_does_not_record_prefill_start() {
+        let tracker = dispatch_once(RequestPhase::Decode, Vec::new()).await;
+        assert!(tracker.prefill_wait_time_ms().is_none());
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_decode_records_local_prefill_start() {
+        let tracker = dispatch_once(
+            RequestPhase::Decode,
+            vec![BYPASS_REMOTE_PREFILL_ANNOTATION.to_string()],
+        )
+        .await;
+        assert!(tracker.prefill_wait_time_ms().is_some());
+    }
+
+    /// Pins `RequestTracker`'s first-write-wins contract, which this fix relies on:
+    /// the decode leg still reaches dispatch and must neither clear nor overwrite the
+    /// timestamp prefill already recorded. Unlike the decode-only case, this passes
+    /// against the previous implementation too — it guards the `OnceLock` semantics
+    /// rather than the phase check.
+    #[tokio::test]
+    async fn decode_after_prefill_retains_the_prefill_timestamp() {
+        let tracker = Arc::new(RequestTracker::new());
+        let metrics = test_metrics();
+        let request = test_request(tracker.clone(), Vec::new());
+
+        let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
+        RequestObservability::new(Some(tracker.clone()), metrics.clone())
+            .record_prefill_start(&request);
+        let recorded_by_prefill = tracker.prefill_wait_time_ms();
+        assert!(recorded_by_prefill.is_some());
+        drop(prefill_permit);
+
+        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+        RequestObservability::new(Some(tracker.clone()), metrics).record_prefill_start(&request);
+        assert_eq!(tracker.prefill_wait_time_ms(), recorded_by_prefill);
     }
 }

@@ -6,6 +6,7 @@
 """Golden parity tests for the Planner adapter's load-predictor pre-sweep."""
 
 import json
+import logging
 import math
 
 import pytest
@@ -169,6 +170,82 @@ def test_evaluate_preset_preserves_one_step_ahead_cadence(monkeypatch) -> None:
         )
         == math.inf
     )
+
+
+class _RaisingPredictor(_LastValuePredictor):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self._exc = exc
+
+    def predict_next(self) -> float:
+        raise self._exc
+
+
+def _raising_predictors(exc: Exception):
+    return lambda _preset, _interval: (
+        _RaisingPredictor(exc),
+        _LastValuePredictor(),
+        _LastValuePredictor(),
+    )
+
+
+def test_evaluate_preset_disqualifies_a_predictor_that_raises(
+    monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr(
+        load_predictor, "_new_predictors", _raising_predictors(ValueError("unfit"))
+    )
+    windows = [Window(2, 100, 10), Window(2, 100, 10), Window(4, 200, 20)]
+    with caplog.at_level(logging.WARNING, logger=load_predictor.__name__):
+        loss = evaluate_preset(
+            windows, {"family": "kalman", "log1p": False}, interval_s=180, warmup=1
+        )
+    assert loss == math.inf
+    assert "scoring as inf" in caplog.text
+
+
+def test_evaluate_preset_propagates_unexpected_errors(monkeypatch) -> None:
+    monkeypatch.setattr(
+        load_predictor, "_new_predictors", _raising_predictors(KeyError("bug"))
+    )
+    with pytest.raises(KeyError):
+        evaluate_preset(
+            [Window(2, 100, 10)],
+            {"family": "kalman", "log1p": False},
+            interval_s=180,
+            warmup=0,
+        )
+
+
+def test_sweep_never_selects_a_preset_that_raises(monkeypatch) -> None:
+    def new_predictors(preset, _interval):
+        if preset["family"] == "kalman":
+            return tuple(_RaisingPredictor(ValueError("unfit")) for _ in range(3))
+        return tuple(_LastValuePredictor() for _ in range(3))
+
+    monkeypatch.setattr(load_predictor, "_new_predictors", new_predictors)
+    monkeypatch.setattr(
+        load_predictor, "build_windows", lambda _path, _iv: [Window(2, 100, 10)] * 4
+    )
+
+    result = sweep_load_predictor(
+        policies=["throughput_180_5"],
+        candidates=["kalman_default_raw", "constant_last"],
+        trace_path="trace.jsonl",
+        show_progress=False,
+    )
+
+    assert result.best_by_interval == {180: "constant_last"}
+    assert math.isinf(result.losses[180]["kalman_default_raw"])
+    assert result.losses[180]["constant_last"] == 0.0
+    assert result.reason == "swept"
+
+
+def test_window_loss_clamps_negative_forecasts_before_products() -> None:
+    # A negative forecast scores as a forecast of zero, and two negative
+    # forecasts must not multiply into a plausible positive token product.
+    assert window_loss(-5, -400, -20, 5, 400, 20) == window_loss(0, 0, 0, 5, 400, 20)
+    assert window_loss(-5, -400, 20, 5, 400, 20) > window_loss(-5, 400, 20, 5, 400, 20)
 
 
 def test_short_trace_falls_back_to_constant_last(monkeypatch) -> None:

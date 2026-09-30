@@ -33,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -231,6 +232,16 @@ func hasContainerNamed(containers []corev1.Container, name string) bool {
 	return false
 }
 
+func containerIndexByName(containers []corev1.Container, name string) int {
+	// Return the first exact match so callers can update that container in place.
+	for i := range containers {
+		if containers[i].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
 func podTemplateContainers(podTemplate *corev1.PodTemplateSpec) []corev1.Container {
 	if podTemplate == nil {
 		return nil
@@ -339,7 +350,7 @@ func groveForExperimental(experimental *nvidiacomv1beta1.ExperimentalSpec) *nvid
 
 func forceScalingGroupFor(experimental *nvidiacomv1beta1.ExperimentalSpec) bool {
 	grove := groveForExperimental(experimental)
-	return grove != nil && grove.ForceScalingGroup
+	return grove != nil && ptr.Deref(grove.ForceScalingGroup, false)
 }
 
 func effectiveGMSMode(mode nvidiacomv1beta1.GPUMemoryServiceMode) nvidiacomv1beta1.GPUMemoryServiceMode {

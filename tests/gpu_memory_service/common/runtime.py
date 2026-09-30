@@ -18,6 +18,7 @@ from tests.gpu_memory_service.common.gms import GMSServer
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DefaultPort
 from tests.utils.engine_process import EngineProcess
 from tests.utils.gpu_args import build_gpu_mem_args
+from tests.utils.http_checks import check_health_ready
 from tests.utils.managed_process import DynamoFrontendProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_ports, deallocate_ports
@@ -157,7 +158,7 @@ class GMSEngineProcess(EngineProcess, ABC):
                 **self.env_updates(),
             },
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", self._is_ready),
+                (f"http://localhost:{system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ],
@@ -188,12 +189,6 @@ class GMSEngineProcess(EngineProcess, ABC):
     def resume_payload(self) -> dict:
         return {}
 
-    def _is_ready(self, response) -> bool:
-        try:
-            return response.json().get("status") == "ready"
-        except ValueError:
-            return False
-
     def _request_engine(
         self,
         route: str,
@@ -201,8 +196,22 @@ class GMSEngineProcess(EngineProcess, ABC):
         timeout: int,
         action: str,
     ) -> dict:
+        return self._post_engine(
+            f"control/{route}",
+            payload,
+            timeout,
+            action,
+        )
+
+    def _post_engine(
+        self,
+        route: str,
+        payload: dict,
+        timeout: int,
+        action: str,
+    ) -> dict:
         response = requests.post(
-            f"http://localhost:{self.system_port}/engine/control/{route}",
+            f"http://localhost:{self.system_port}/engine/{route}",
             json=payload,
             timeout=timeout,
         )
@@ -398,9 +407,6 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
 
 
 class SGLangWithGMSProcess(GMSEngineProcess):
-    pause_route = "release_memory_occupation"
-    resume_route = "resume_memory_occupation"
-
     def __init__(
         self,
         request,
@@ -456,3 +462,32 @@ class SGLangWithGMSProcess(GMSEngineProcess):
 
     def pause_payload(self) -> dict:
         return {}
+
+    def pause(self) -> dict:
+        result = self._post_engine(
+            "pause_generation",
+            {"mode": "retract"},
+            30,
+            "pause generation",
+        )
+        self._post_engine(
+            "release_memory_occupation",
+            self.pause_payload(),
+            30,
+            "release memory occupation",
+        )
+        return result
+
+    def resume(self, timeout: int = 30) -> dict:
+        self._post_engine(
+            "resume_memory_occupation",
+            self.resume_payload(),
+            timeout,
+            "resume memory occupation",
+        )
+        return self._post_engine(
+            "continue_generation",
+            {},
+            timeout,
+            "continue generation",
+        )

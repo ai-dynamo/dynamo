@@ -73,7 +73,7 @@ router-test-support = [
   "dep:tracing-subscriber",
 ]
 satf = ["dep:dynamo-data-gen"]
-request-trace-to-mooncake = ["dep:dynamo-data-gen", "dep:tempfile"]
+request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
 test-support = [
   "router-test-support",
   "dynamo-mocker/test-support",

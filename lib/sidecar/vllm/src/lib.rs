@@ -7,13 +7,11 @@ mod args;
 mod client;
 mod convert;
 mod engine;
-mod json;
+mod lora;
 mod model;
 
-/// Generated vLLM gRPC types, temporarily exposed for the Mocker server until
-/// vLLM publishes its upstream protocol package.
 #[doc(hidden)]
-pub mod proto;
+pub use vllm_proto as proto;
 
 pub use engine::VllmSidecarEngine;
 

@@ -1,0 +1,307 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
+#   scripts/kustomize-matrix.py unfold recipes/deepseek-v4.1-flash/sglang/disagg-gb200/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py render recipes/deepseek-v4.1-flash/sglang/disagg-gb200/.kustomize-matrix.yaml
+# Inspect only this Kustomize overlay (from the repository root):
+#   kustomize build recipes/deepseek-v4.1-flash/sglang/disagg-gb200/kustomize/overlays/generic
+# You may edit a copy before applying it.
+
+# DeepSeek-V4.1-Flash on SGLang, disaggregated. One prefill and one decode
+# worker, TP4 each, 8x GB200. Up to 1M tokens of context.
+#
+# DSpark speculative decoding is absent here. SGLang refuses it under prefill
+# and decode disaggregation for this model. The aggregated recipe ships it.
+#
+# Each worker needs TP4 and a GB200 node holds 4 GPUs. So prefill and decode
+# always sit on different nodes, and KV must cross nodes. Mooncake picks the
+# transport: TCP here, RDMA where the cluster attaches RDMA devices.
+#
+# KV does NOT ride the NVLink fabric. The fabric is faster, but it needs both
+# workers in one NVLink clique, because a fabric memory handle cannot be
+# imported across cliques. A split gives no error: the deployment reports
+# Ready and chat completions return HTTP 200 with content null. This recipe
+# takes the transport that works on any clique layout. To opt into the
+# fabric, read the documentation page.
+#
+# Do not set the attention, MoE, or GEMM backend flags. SGLang resolves them for
+# this model. A hand-set backend flag selects a slower fallback.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v41-flash-sglang-gb200-disagg-sglang-config
+data:
+  decode.yaml: |-
+    model-path: deepseek-ai/DeepSeek-V4.1-Flash
+    served-model-name: deepseek-ai/DeepSeek-V4.1-Flash
+    trust-remote-code: true
+    tp-size: 4
+    ep-size: 4
+    page-size: 256
+    mem-fraction-static: 0.8
+    max-running-requests: 256
+    reasoning-parser: auto
+    enable-metrics: true
+    watchdog-timeout: 3600
+    host: 0.0.0.0
+    port: 30000
+    disaggregation-mode: decode
+    disaggregation-transfer-backend: mooncake
+    disaggregation-bootstrap-port: 30001
+  prefill.yaml: |-
+    model-path: deepseek-ai/DeepSeek-V4.1-Flash
+    served-model-name: deepseek-ai/DeepSeek-V4.1-Flash
+    trust-remote-code: true
+    tp-size: 4
+    ep-size: 4
+    page-size: 256
+    mem-fraction-static: 0.8
+    max-running-requests: 256
+    max-prefill-tokens: 16384
+    # The native parser gates guided decoding. Dynamo builds the response from
+    # --dyn-reasoning-parser. Both are needed.
+    reasoning-parser: auto
+    enable-metrics: true
+    watchdog-timeout: 3600
+    host: 0.0.0.0
+    port: 30000
+    disaggregation-mode: prefill
+    disaggregation-transfer-backend: mooncake
+    disaggregation-bootstrap-port: 30001
+    load-balance-method: round_robin
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: deepseek-v41-flash-sglang-gb200-disagg-compute-domain
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: deepseek-v41-flash-sglang-gb200-disagg-compute-domain-channel
+  # numNodes 0 lets the driver size the domain from the pods that claim it.
+  numNodes: 0
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v41-flash-sglang-gb200-disagg
+spec:
+  backendFramework: sglang
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --http-port
+          - "8000"
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          ports:
+          - containerPort: 8000
+            name: http
+            protocol: TCP
+          resources:
+            requests:
+              cpu: "16"
+              memory: 128Gi
+    replicas: 1
+    type: frontend
+  - name: PrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - /etc/sglang/prefill.yaml
+          - --dyn-reasoning-parser
+          - deepseek_v41
+          - --dyn-tool-call-parser
+          - deepseek_v41
+          - --dyn-enable-structural-tag
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+            value: "0"
+          - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+            value: "1"
+          - name: SGLANG_DEFAULT_THINKING
+            value: "true"
+          - name: MC_FORCE_TCP
+            value: "1"
+          - name: NCCL_MNNVL_ENABLE
+            value: "1"
+          - name: NCCL_NVLS_ENABLE
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: NCCL_STORE_TIMEOUT
+            value: "7200"
+          - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+            value: "1800"
+          - name: DYN_FORWARDPASS_METRIC_PORT
+            value: ""
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+            protocol: TCP
+          - containerPort: 30001
+            name: bootstrap
+            protocol: TCP
+          resources:
+            claims:
+            - name: compute-domain-channel
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              cpu: "16"
+              ephemeral-storage: 64Gi
+              memory: 512Gi
+              nvidia.com/gpu: "4"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+          - mountPath: /etc/sglang
+            name: sglang-config
+            readOnly: true
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: deepseek-v41-flash-sglang-gb200-disagg-compute-domain-channel
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - configMap:
+            name: deepseek-v41-flash-sglang-gb200-disagg-sglang-config
+          name: sglang-config
+    replicas: 1
+    sharedMemorySize: 200Gi
+    type: prefill
+  - name: DecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - /etc/sglang/decode.yaml
+          - --dyn-reasoning-parser
+          - deepseek_v41
+          - --dyn-tool-call-parser
+          - deepseek_v41
+          - --dyn-enable-structural-tag
+          - --prefill-round-robin-balance
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+            value: "0"
+          - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+            value: "1"
+          - name: SGLANG_DEFAULT_THINKING
+            value: "true"
+          - name: MC_FORCE_TCP
+            value: "1"
+          - name: NCCL_MNNVL_ENABLE
+            value: "1"
+          - name: NCCL_NVLS_ENABLE
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: NCCL_STORE_TIMEOUT
+            value: "7200"
+          - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+            value: "1800"
+          - name: DYN_FORWARDPASS_METRIC_PORT
+            value: ""
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+            protocol: TCP
+          - containerPort: 30001
+            name: bootstrap
+            protocol: TCP
+          resources:
+            claims:
+            - name: compute-domain-channel
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              cpu: "16"
+              ephemeral-storage: 64Gi
+              memory: 512Gi
+              nvidia.com/gpu: "4"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+          - mountPath: /etc/sglang
+            name: sglang-config
+            readOnly: true
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: deepseek-v41-flash-sglang-gb200-disagg-compute-domain-channel
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - configMap:
+            name: deepseek-v41-flash-sglang-gb200-disagg-sglang-config
+          name: sglang-config
+    replicas: 1
+    sharedMemorySize: 200Gi
+    type: decode

@@ -78,7 +78,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
 
-	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+	// RuntimeVersionOverride declares the Dynamo runtime version in this component's
 	// main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
 	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
 	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
@@ -160,8 +160,18 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
-	// Multinode is the configuration for multinode components.
+	// Multinode configures worker, prefill, or decode components that span
+	// multiple Pods.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
+	// Roles expose the named Pod-producing parts inside a compound component.
+	// When set for a multinode component, this list must contain exactly one
+	// leader and one worker role. Admission defaults omitted replicas to 1 for
+	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
+	// preserves the implicit multinode role layout.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Roles []ComponentRoleSpec `json:"roles,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
 	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
 	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
@@ -213,17 +223,9 @@ type MultinodeSpec struct {
 	// +kubebuilder:default=2
 	// Indicates the number of nodes to deploy for multinode components.
 	// Total number of GPUs is NumberOfNodes * GPU limit.
-	// Must be greater than 1.
+	// Must be greater than 1 and is immutable after creation.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
-
-	// Leader configures the generated multinode leader unit.
-	// +optional
-	Leader *MultinodeRoleSpec `json:"leader,omitempty"`
-
-	// Worker configures the generated multinode worker unit.
-	// +optional
-	Worker *MultinodeRoleSpec `json:"worker,omitempty"`
 }
 
 type IngressTLSSpec struct {
