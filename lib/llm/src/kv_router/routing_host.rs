@@ -24,6 +24,7 @@ use dynamo_runtime::{
         },
     },
     protocols::annotated::Annotated,
+    telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTrace},
 };
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;

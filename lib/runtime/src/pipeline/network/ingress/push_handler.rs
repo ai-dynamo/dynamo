@@ -478,6 +478,7 @@ trait IngressDispatch: Send + Sync {
         &self,
         control_msg: RequestControlMessage,
         data: Option<Bytes>,
+        failure_outcome: &mut &'static str,
     ) -> Result<ParsedRequest<Self::Request>, PipelineError>;
 }
 
@@ -494,6 +495,7 @@ where
         &self,
         control_msg: RequestControlMessage,
         data: Option<Bytes>,
+        _failure_outcome: &mut &'static str,
     ) -> Result<ParsedRequest<SingleIn<T>>, PipelineError> {
         // The unary path carries the request body in the data half; a
         // header-only envelope means the sender used the bidirectional shape.
@@ -552,6 +554,7 @@ where
         &self,
         control_msg: RequestControlMessage,
         data: Option<Bytes>,
+        failure_outcome: &mut &'static str,
     ) -> Result<ParsedRequest<ManyIn<T>>, PipelineError> {
         // Bidirectional envelopes are header-only — all request frames
         // (including the first) flow on the request-stream socket once it's
@@ -601,6 +604,7 @@ where
         // response-stream open subsequently fails, the forwarder task
         // spawned below exits cleanly when `frame_tx.send` observes the
         // dropped `frame_rx`.
+        *failure_outcome = "failed";
         let request_stream_recv = tcp::client::TcpClient::create_request_stream(
             context_arc.clone(),
             req_stream_conn_info,
@@ -674,12 +678,14 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressResponseEncoder<U> + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     async fn generate_and_publish<P>(
         &self,
         request: Req,
         payload_codec: RequestPlanePayloadCodec,
         start_time: Instant,
         response_modes: ResponsePlaneModes,
+        worker_admission: tracing::Span,
         lifecycle: &LifecycleTrace,
         mut publisher: P,
     ) -> Result<(), PipelineError>
@@ -693,6 +699,7 @@ where
         } = response_modes;
 
         if configured_mode != advertised_mode {
+            worker_admission.record("dynamo.worker.admission.result", "rejected");
             let message = format!(
                 "response plane mismatch: frontend requested {}, worker configured {}",
                 advertised_mode.name(),
@@ -702,6 +709,8 @@ where
             let _ = publisher.finish().await;
             return Err(PipelineError::Generic(message));
         }
+        worker_admission.record("dynamo.worker.admission.result", "accepted");
+        drop(worker_admission);
 
         let request_context = request.context();
         tracing::trace!("calling generate");
@@ -715,8 +724,7 @@ where
                     self.segment
                         .get()
                         .expect("segment not set")
-                        .generate(request)
-                        .instrument(lifecycle.start(LifecycleStage::RequestDispatch)),
+                        .generate(request),
                 )
                 .await
         }
@@ -843,6 +851,7 @@ where
             }
         });
 
+        let payload_bytes = payload.len() as u64;
         let (control_msg, data) = self.decode_control_message(payload)?;
         let lifecycle = match self.registered_lifecycle_role() {
             Some(role)
@@ -861,12 +870,20 @@ where
         // readers capture the current span and live until the request ends.
         // They must inherit handle_payload, not prolong worker.admission.
         let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
+        worker_admission.record("dynamo.worker.admission.payload.bytes", payload_bytes);
+        let admission_result = |result: &'static str| {
+            worker_admission.record("dynamo.worker.admission.result", result);
+        };
+        let mut failure_outcome = "rejected";
         let ParsedRequest {
             request,
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
-        } = self.parse_and_build_request(control_msg, data).await?;
+        } = self
+            .parse_and_build_request(control_msg, data, &mut failure_outcome)
+            .await
+            .inspect_err(|_| admission_result(failure_outcome))?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -876,8 +893,10 @@ where
 
         let advertised_mode =
             ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
+                .inspect_err(|_| admission_result("rejected"))
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
         let configured_mode = ResponsePlaneMode::configured()
+            .inspect_err(|_| admission_result("failed"))
             .map_err(|error| PipelineError::Generic(error.to_string()))?;
         let response_modes = ResponsePlaneModes {
             configured: configured_mode,
@@ -889,6 +908,7 @@ where
 
         match advertised_mode {
             ResponsePlaneMode::Tcp => {
+                worker_admission.record("dynamo.worker.admission.transport", "tcp");
                 tracing::trace!("creating tcp response stream");
                 let publisher = tcp::client::TcpClient::create_response_stream(
                     request.context(),
@@ -897,6 +917,7 @@ where
                 )
                 .await
                 .map_err(|error| {
+                    admission_result("failed");
                     if let Some(metrics) = self.metrics() {
                         metrics
                             .error_counter
@@ -905,20 +926,23 @@ where
                     }
                     PipelineError::Generic(format!("Failed to create response stream: {error}"))
                 })?;
-                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
                     response_modes,
+                    worker_admission,
                     &lifecycle,
                     publisher,
                 )
                 .await?;
             }
             ResponsePlaneMode::Quic => {
+                worker_admission.record("dynamo.worker.admission.transport", "quic");
                 tracing::trace!("creating QUIC response sender");
-                let response_pool = self.quic_response_client_pool()?;
+                let response_pool = self
+                    .quic_response_client_pool()
+                    .inspect_err(|_| admission_result("failed"))?;
                 let publisher = response_pool
                     .sender_with_cancellation_metric(
                         request.context(),
@@ -927,6 +951,7 @@ where
                     )
                     .await
                     .map_err(|error| {
+                        admission_result("failed");
                         if let Some(metrics) = self.metrics() {
                             metrics
                                 .error_counter
@@ -937,12 +962,12 @@ where
                             "Failed to create QUIC response stream: {error}"
                         ))
                     })?;
-                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
                     response_modes,
+                    worker_admission,
                     &lifecycle,
                     publisher,
                 )
@@ -1095,6 +1120,17 @@ mod tests {
     struct AdmissionCapture {
         started: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
+        outcome: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    impl tracing::field::Visit for AdmissionCapture {
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "dynamo.worker.admission.result" {
+                *self.outcome.lock().unwrap() = Some(value.to_owned());
+            }
+        }
     }
 
     impl<S> tracing_subscriber::Layer<S> for AdmissionCapture
@@ -1109,6 +1145,17 @@ mod tests {
         ) {
             if attrs.metadata().name() == "worker.admission" {
                 self.started.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if ctx.span(id).unwrap().metadata().name() == "worker.admission" {
+                values.record(&mut self.clone());
             }
         }
 
@@ -1147,30 +1194,48 @@ mod tests {
         // Configuration is process-scoped. Isolate this enabled-mode test from
         // other tests which may have initialized the disabled default already.
         const CHILD: &str = "DYNAMO_LIFECYCLE_ADMISSION_TEST_CHILD";
+        // The response plane is also process-scoped: QUIC needs its own child.
         if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "pipeline::network::ingress::push_handler::tests::lifecycle_admission_closes_before_generation_and_skips_control_calls",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env("DYN_LIFECYCLE_TRACE_ENABLED", "true")
-                .status()
-                .unwrap();
-            assert!(status.success(), "isolated admission regression failed");
+            for response_plane in ["tcp", "quic"] {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "pipeline::network::ingress::push_handler::tests::lifecycle_admission_closes_before_generation_and_skips_control_calls",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .env("DYN_LIFECYCLE_TRACE_ENABLED", "true")
+                    .env("DYN_RESPONSE_PLANE", response_plane)
+                    .status()
+                    .unwrap();
+                assert!(
+                    status.success(),
+                    "isolated admission regression failed for {response_plane}"
+                );
+            }
             return;
         }
 
+        let response_plane = std::env::var("DYN_RESPONSE_PLANE").unwrap();
+        let plane_mismatch = ResponsePlaneMode::configured().unwrap() == ResponsePlaneMode::Quic;
         temp_env::async_with_vars(
             [
                 ("DYN_LIFECYCLE_TRACE_ENABLED", Some("true")),
-                ("DYN_RESPONSE_PLANE", Some("tcp")),
+                ("DYN_RESPONSE_PLANE", Some(response_plane.as_str())),
             ],
             async {
-                for (inference, rooted) in
-                    [(true, true), (true, false), (false, true), (false, false)]
-                {
+                let cases: &[(bool, bool, bool)] = if plane_mismatch {
+                    &[(true, true, false)]
+                } else {
+                    &[
+                        (true, true, false),
+                        (true, false, false),
+                        (false, true, false),
+                        (false, false, false),
+                        (true, true, true),
+                    ]
+                };
+                for &(inference, rooted, invalid_transport) in cases {
                     let capture = AdmissionCapture::default();
                     let subscriber = tracing_subscriber::registry().with(capture.clone());
                     async {
@@ -1180,7 +1245,7 @@ mod tests {
                             let (mut socket, _) = listener.accept().await.unwrap();
                             let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
                         });
-                        let engine = Arc::new(AdmissionProbe(capture, inference && rooted));
+                        let engine = Arc::new(AdmissionProbe(capture.clone(), inference && rooted));
                         let ingress = if inference {
                             TestIngress::for_engine_with_lifecycle_role(
                                 engine,
@@ -1190,13 +1255,16 @@ mod tests {
                             TestIngress::for_engine(engine)
                         }
                         .unwrap();
-                        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+                        let mut connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
                             address,
                             subject: "admission-probe".to_string(),
                             context: "admission-probe".to_string(),
                             stream_type: crate::pipeline::network::StreamType::Response,
                         }
                         .into();
+                        if invalid_transport {
+                            connection.transport = "invalid".into();
+                        }
                         let metadata = if rooted {
                             std::collections::BTreeMap::from([(
                                 crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY,
@@ -1228,7 +1296,23 @@ mod tests {
                         .await
                         .expect("local admission probe timed out")
                         .unwrap_err();
-                        assert!(error.to_string().contains("admission probe finished"));
+                        assert!(error.to_string().contains(if invalid_transport {
+                            "unsupported response transport"
+                        } else if plane_mismatch {
+                            "response plane mismatch"
+                        } else {
+                            "admission probe finished"
+                        }));
+                        assert_eq!(
+                            capture.outcome.lock().unwrap().as_deref(),
+                            (inference && rooted).then_some(
+                                if invalid_transport || plane_mismatch {
+                                    "rejected"
+                                } else {
+                                    "accepted"
+                                }
+                            ),
+                        );
                         peer.abort();
                         let _ = peer.await;
                     }
@@ -1244,6 +1328,40 @@ mod tests {
     struct MismatchPublisher {
         prologue: Arc<std::sync::Mutex<Option<Option<String>>>>,
         finished: Arc<AtomicBool>,
+    }
+
+    #[tokio::test]
+    async fn lifecycle_bidirectional_admission_distinguishes_transport_failure() {
+        let ingress = Ingress::<ManyIn<TestRequest>, ManyOut<TestResponse>>::new();
+        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+            address: "127.0.0.1:not-a-port".into(),
+            subject: "admission-test".into(),
+            context: "admission-test".into(),
+            stream_type: crate::pipeline::network::StreamType::Request,
+        }
+        .into();
+        for has_stream in [false, true] {
+            let control = serde_json::from_value(serde_json::json!({
+                "id": "admission-test",
+                "request_type": "many_in",
+                "response_type": "many_out",
+                "connection_info": connection,
+                "request_stream_connection_info": has_stream.then_some(&connection),
+            }))
+            .unwrap();
+            let mut outcome = "rejected";
+            let error = ingress
+                .parse_and_build_request(control, None, &mut outcome)
+                .await
+                .err()
+                .expect("invalid setup must fail");
+            assert_eq!(outcome, if has_stream { "failed" } else { "rejected" });
+            assert!(error.to_string().contains(if has_stream {
+                "Failed to create request stream"
+            } else {
+                "missing request_stream_connection_info"
+            }));
+        }
     }
 
     impl ResponsePublisher for MismatchPublisher {
@@ -1287,6 +1405,7 @@ mod tests {
                         configured,
                         advertised,
                     },
+                    tracing::Span::none(),
                     &lifecycle,
                     publisher,
                 )

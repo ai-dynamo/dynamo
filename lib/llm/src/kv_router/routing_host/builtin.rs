@@ -366,6 +366,28 @@ impl RoutingHost {
         );
         let tracker = request.tracker.clone();
         let request_context = request.context().clone();
+        let context_id = request.context().id().to_string();
+        let lifecycle = request
+            .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+            .ok()
+            .flatten()
+            .map(|trace| trace.as_ref().clone())
+            .unwrap_or_else(|| LifecycleTrace::frontend_request_without_session(context_id));
+        let request_dispatch = DispatchSpan {
+            span: lifecycle.start(LifecycleStage::RequestDispatch),
+            target: Default::default(),
+        };
+        request_dispatch.span.record(
+            "dynamo.dispatch.route",
+            self.inner.router_mode().telemetry_label(),
+        );
+        request_dispatch
+            .span
+            .record("dynamo.dispatch.destination.worker.id", initial_worker);
+        let prepare = |request: &mut PreprocessedRequest, target: AffinityTarget| {
+            request_dispatch.record_target(target);
+            prepare(request, target)
+        };
         self.request_metrics
             .input_sequence_tokens
             .observe(request.token_ids.len() as f64);
@@ -381,20 +403,22 @@ impl RoutingHost {
                 staged_kv,
                 "builtin.dispatch_direct",
                 &budget,
-                self.inner.direct_within_prepared(
-                    request,
-                    target.worker_id,
-                    None,
-                    |request, worker_id| {
-                        let occupancy = guard.retarget_worker(worker_id);
-                        let target = AffinityTarget::new(
-                            worker_id,
-                            target.dp_rank.filter(|_| worker_id == target.worker_id),
-                        );
-                        request.routing_mut().dp_rank = target.dp_rank;
-                        prepare(request, target).map(|metadata| (metadata, target, occupancy))
-                    },
-                ),
+                self.inner
+                    .direct_within_prepared(
+                        request,
+                        target.worker_id,
+                        None,
+                        |request, worker_id| {
+                            let occupancy = guard.retarget_worker(worker_id);
+                            let target = AffinityTarget::new(
+                                worker_id,
+                                target.dp_rank.filter(|_| worker_id == target.worker_id),
+                            );
+                            request.routing_mut().dp_rank = target.dp_rank;
+                            prepare(request, target).map(|metadata| (metadata, target, occupancy))
+                        },
+                    )
+                    .instrument(request_dispatch.span.clone()),
             )
             .await
             .and_then(|result| result)
@@ -404,6 +428,7 @@ impl RoutingHost {
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
                 Err(error) => {
+                    request_dispatch.finish("failed");
                     guard.abort().await;
                     return Err(error);
                 }
@@ -414,7 +439,9 @@ impl RoutingHost {
                 staged_kv,
                 "builtin.dispatch_exact",
                 &budget,
-                self.inner.dispatch_exact(request, target.worker_id),
+                self.inner
+                    .dispatch_exact(request, target.worker_id)
+                    .instrument(request_dispatch.span.clone()),
             )
             .await
             .and_then(|result| result)
@@ -426,16 +453,14 @@ impl RoutingHost {
                 staged_kv,
                 "builtin.dispatch_occupancy",
                 &budget,
-                self.inner.dispatch_preselected_prepared(
-                    request,
-                    initial_worker,
-                    |request, worker_id| {
+                self.inner
+                    .dispatch_preselected_prepared(request, initial_worker, |request, worker_id| {
                         let occupancy = guard.retarget_worker(worker_id);
                         let target = target_for_worker(worker_id);
                         request.routing_mut().dp_rank = target.dp_rank;
                         prepare(request, target).map(|metadata| (metadata, target, occupancy))
-                    },
-                ),
+                    })
+                    .instrument(request_dispatch.span.clone()),
             )
             .await
             .and_then(|result| result)
@@ -447,17 +472,19 @@ impl RoutingHost {
                 staged_kv,
                 "builtin.dispatch",
                 &budget,
-                self.inner.direct_within_prepared(
-                    request,
-                    initial_worker,
-                    lora_fallback.as_ref(),
-                    |request, worker_id| {
-                        let occupancy = guard.retarget_worker(worker_id);
-                        let target = target_for_worker(worker_id);
-                        request.routing_mut().dp_rank = target.dp_rank;
-                        prepare(request, target).map(|metadata| (metadata, target, occupancy))
-                    },
-                ),
+                self.inner
+                    .direct_within_prepared(
+                        request,
+                        initial_worker,
+                        lora_fallback.as_ref(),
+                        |request, worker_id| {
+                            let occupancy = guard.retarget_worker(worker_id);
+                            let target = target_for_worker(worker_id);
+                            request.routing_mut().dp_rank = target.dp_rank;
+                            prepare(request, target).map(|metadata| (metadata, target, occupancy))
+                        },
+                    )
+                    .instrument(request_dispatch.span.clone()),
             )
             .await
             .and_then(|result| result)
@@ -467,6 +494,11 @@ impl RoutingHost {
         let (metadata, target, final_occupancy, response_stream) = match dispatch_result {
             Ok(result) => result,
             Err(error) => {
+                request_dispatch.finish(if is_cancelled(&error) {
+                    "cancelled"
+                } else {
+                    "failed"
+                });
                 let expected_target =
                     target_constraint.unwrap_or_else(|| target_for_worker(initial_worker));
                 if self.session_affinity_mode == SessionAffinityMode::Hard
@@ -483,6 +515,7 @@ impl RoutingHost {
                 return Err(error);
             }
         };
+        request_dispatch.finish("accepted");
         guard.retarget_worker(target.worker_id);
         if let Some(telemetry) = device_aware_telemetry {
             let selection_survived_transport = target.worker_id == initial_worker;
@@ -520,6 +553,35 @@ impl RoutingHost {
         guard.mark_dispatched();
         let stream = into_monitored_response(response_stream, guard);
         Ok((metadata, self.bind_affinity(operation, target, stream)?))
+    }
+}
+
+/// Owns the dispatch span and records the last attempted target's DP rank as
+/// it closes, including when dispatch is dropped: a span field cannot be
+/// cleared, so a retry must not inherit the previous target's rank.
+struct DispatchSpan {
+    span: tracing::Span,
+    target: parking_lot::Mutex<Option<AffinityTarget>>,
+}
+
+impl DispatchSpan {
+    fn record_target(&self, target: AffinityTarget) {
+        self.span
+            .record("dynamo.dispatch.destination.worker.id", target.worker_id);
+        *self.target.lock() = Some(target);
+    }
+
+    fn finish(self, result: &'static str) {
+        self.span.record("dynamo.dispatch.result", result);
+    }
+}
+
+impl Drop for DispatchSpan {
+    fn drop(&mut self) {
+        if let Some(dp_rank) = self.target.get_mut().and_then(|target| target.dp_rank) {
+            self.span
+                .record("dynamo.dispatch.destination.dp.rank", dp_rank as u64);
+        }
     }
 }
 

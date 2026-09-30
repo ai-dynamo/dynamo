@@ -42,7 +42,7 @@ pub(super) struct ComposedPolicyState {
     pub(super) filter_inputs: WorkerInputs,
     pub(super) scorer_picker_inputs: WorkerInputs,
     pub(super) picker_inputs: WorkerInputs,
-    unscored_candidates: Vec<CandidateData>,
+    pub(super) unscored_candidates: Vec<CandidateData>,
     score_contributions: Vec<f64>,
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheData>,
@@ -395,6 +395,192 @@ mod tests {
     }
 
     struct FirstPicker;
+
+    #[cfg(feature = "runtime-protocols")]
+    #[test]
+    fn lifecycle_selection_evidence() {
+        use crate::protocols::WorkerAffinityTarget;
+        use crate::scheduling::test_capture::{Capture, isolated};
+        use crate::test_utils::SimpleWorkerConfig;
+        use dynamo_runtime::telemetry::{LifecycleStage, LifecycleTrace};
+
+        if isolated("scheduling::selector::policy::tests::lifecycle_selection_evidence") {
+            return;
+        }
+        let capture = Capture::install();
+        struct Scorer;
+        impl WorkerScorer for Scorer {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT
+            }
+            fn score(
+                &mut self,
+                _: &WorkerSelectionContext<'_>,
+                rows: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (row, cost) in rows.iter().zip(costs) {
+                    *cost = row.preferred_taint_multiplier().unwrap_or(1.0);
+                }
+                Ok(())
+            }
+        }
+        struct CachePicker;
+        impl WorkerPicker for CachePicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CACHE | WorkerInputs::LOAD
+            }
+            fn pick(
+                &mut self,
+                _: &WorkerSelectionContext<'_>,
+                _: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(0)
+            }
+        }
+        struct RejectAll(bool);
+        impl WorkerFilter for RejectAll {
+            fn keep(
+                &mut self,
+                _: &WorkerSelectionContext<'_>,
+                _: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                if self.0 {
+                    Err(WorkerSelectionPolicyError::failed(
+                        "injected filter failure",
+                    ))
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(Scorer)],
+            Box::new(FirstPicker),
+        );
+        for case in [
+            "single",
+            "affinity",
+            "overloaded",
+            "empty",
+            "filtered",
+            "policy_error",
+            "picker",
+        ] {
+            let mut workers = HashMap::from([(
+                0,
+                SimpleWorkerConfig {
+                    data_parallel_size: if case == "affinity" { 4 } else { 1 },
+                    taints: HashSet::from(["preferred".into()]),
+                    ..Default::default()
+                },
+            )]);
+            if case == "empty" {
+                workers.clear();
+            }
+            let mut request = base_request(16);
+            if case == "picker" {
+                request.worker_loads = worker_loads_with_active_decode(
+                    [(WorkerWithDpRank::new(0, 0), 7)].into_iter().collect(),
+                );
+            }
+            request
+                .routing_constraints
+                .preferred_taints
+                .insert("preferred".into(), 0.5);
+            request
+                .overlap
+                .tier_overlap_blocks
+                .device
+                .insert(WorkerWithDpRank::new(0, 0), 1);
+            let overloaded = HashSet::from([0]);
+            let mut eligibility = request.eligibility();
+            if case == "affinity" {
+                eligibility =
+                    eligibility.with_affinity_target(WorkerAffinityTarget::new(0, Some(2)));
+            } else if case == "overloaded" {
+                eligibility = request.eligibility_with_overloaded(Some(&overloaded));
+            }
+            let special = match case {
+                "filtered" | "policy_error" => Some(WorkerSelectionPolicy::new_with_filters(
+                    KvRouterConfig::default(),
+                    "test",
+                    vec![Box::new(RejectAll(case == "policy_error"))],
+                    vec![],
+                    Box::new(FirstPicker),
+                )),
+                "picker" => Some(WorkerSelectionPolicy::new(
+                    KvRouterConfig::default(),
+                    "test",
+                    vec![],
+                    Box::new(CachePicker),
+                )),
+                _ => None,
+            };
+            let span = LifecycleTrace::frontend_request_without_session(case)
+                .start(LifecycleStage::RouterSelection);
+            let result =
+                span.in_scope(|| {
+                    special.as_ref().unwrap_or(&policy).select_worker(
+                        WorkerSelectionInput::configured(&workers, &request, eligibility, 16),
+                    )
+                });
+            drop(span);
+            let fields = capture.fields("router.selection", case);
+            assert!(!fields.contains_key("dynamo.request.attempt"));
+            let expected = match case {
+                "overloaded" => "overloaded",
+                "empty" => "no_endpoints",
+                "filtered" => "filtered",
+                "policy_error" => "failed",
+                _ => "selected",
+            };
+            assert_eq!(fields["dynamo.router.selection.result"], expected);
+            assert_eq!(result.is_ok(), expected == "selected");
+            if case == "policy_error" {
+                assert!(!fields.contains_key("dynamo.router.candidate.count"));
+                assert!(!fields.contains_key("dynamo.router.candidate.filtered.policy"));
+                assert!(!fields.contains_key("dynamo.router.candidates.top_k"));
+                continue;
+            }
+            assert_eq!(
+                fields["dynamo.router.candidate.count"],
+                if result.is_ok() { "1" } else { "0" }
+            );
+            assert_eq!(
+                fields["dynamo.router.candidate.filtered.policy"],
+                if case == "filtered" { "1" } else { "0" }
+            );
+            if case == "affinity" {
+                assert_eq!(fields["dynamo.router.candidate.filtered.constraints"], "3");
+                assert_eq!(fields["dynamo.router.selected.dp.rank"], "2");
+            }
+            if case == "overloaded" {
+                assert_eq!(fields["dynamo.router.candidate.filtered.overloaded"], "1");
+            }
+            if matches!(case, "single" | "picker") {
+                let detail: serde_json::Value =
+                    serde_json::from_str(&fields["dynamo.router.candidates.top_k"]).unwrap();
+                assert_eq!(detail.as_array().unwrap().len(), 1);
+                assert_eq!(detail[0]["device_overlap_blocks"], 1.0);
+                if case == "picker" {
+                    assert_eq!(detail[0]["decode_cost_blocks"], 7.0);
+                } else {
+                    assert!(detail[0].get("active_prefill_tokens").is_none());
+                    assert!(detail[0].get("decode_cost_blocks").is_none());
+                    assert!(detail[0].get("active_requests").is_none());
+                }
+                if case == "single" {
+                    assert!(detail[0]["preferred_taint_multiplier"].is_number());
+                    assert_eq!(detail[0]["preferred_taint_multiplier"], detail[0]["score"]);
+                }
+            } else if result.is_err() {
+                assert!(!fields.contains_key("dynamo.router.candidates.top_k"));
+            }
+        }
+    }
 
     impl WorkerPicker for FirstPicker {
         fn pick(
