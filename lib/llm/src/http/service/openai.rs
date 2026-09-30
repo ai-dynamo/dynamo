@@ -4174,6 +4174,7 @@ async fn responses(
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
         max_output_tokens: request.inner.max_output_tokens,
+        metadata: request.inner.metadata.clone(),
         parallel_tool_calls: request.inner.parallel_tool_calls,
         store: request.inner.store,
         tools: request.inner.tools.clone(),
@@ -5917,7 +5918,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::common::extensions::{AgentCompaction, NvExt};
+    use crate::protocols::common::extensions::NvExt;
     use crate::protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
@@ -6144,6 +6145,104 @@ mod tests {
         let err =
             ensure_json_content_type(&headers).expect_err("non-json content type should fail");
         assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_null_flags() {
+        for (options, expected) in [
+            (serde_json::json!(null), None),
+            (serde_json::json!({}), Some((false, false))),
+            (
+                serde_json::json!({"continuous_usage_stats": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+            (
+                serde_json::json!({"include_usage": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": true, "continuous_usage_stats": null}),
+                Some((true, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": null, "continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+        ] {
+            let mut payload = serde_json::json!({
+                "model": "test-model", "stream": true, "stream_options": options,
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            let chat: NvCreateChatCompletionRequest =
+                parse_json_request("chat completions", &serde_json::to_vec(&payload).unwrap())
+                    .unwrap();
+            payload.as_object_mut().unwrap().remove("messages");
+            payload["prompt"] = serde_json::json!("hello");
+            let completion: NvCreateCompletionRequest =
+                parse_json_request("completions", &serde_json::to_vec(&payload).unwrap()).unwrap();
+            crate::engines::ValidateRequest::validate(&chat).unwrap();
+            crate::engines::ValidateRequest::validate(&completion).unwrap();
+            for parsed in [chat.inner.stream_options, completion.inner.stream_options] {
+                assert_eq!(
+                    parsed.map(|opts| (opts.include_usage, opts.continuous_usage_stats)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_rejects_invalid_types() {
+        for options in [
+            serde_json::json!(false),
+            serde_json::json!({"include_usage": "true", "continuous_usage_stats": null}),
+            serde_json::json!({"include_usage": null, "continuous_usage_stats": 0}),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "model": "test-model", "messages": [{"role": "user", "content": "hello"}],
+                "prompt": "hello", "stream_options": options,
+            }))
+            .unwrap();
+            assert_eq!(
+                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                parse_json_request::<NvCreateCompletionRequest>("completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let body =
+            br#"{"model":"test-model","messages":42,"stream_options":{"include_usage":null}}"#;
+        assert_eq!(
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_preserves_duplicate_field_errors() {
+        let chat_body = br#"{
+            "model":"first-model",
+            "model":"second-model",
+            "messages":[{"role":"user","content":"hello"}],
+            "stream_options":{"include_usage":null}
+        }"#;
+        let chat_error =
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", chat_body)
+                .unwrap_err();
+        assert_eq!(chat_error.0, StatusCode::BAD_REQUEST);
+        assert!(chat_error.1.message.contains("duplicate field `model`"));
     }
 
     #[test]
@@ -6400,10 +6499,11 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
-                compaction: Some(AgentCompaction {
-                    trigger: Some("automatic".to_string()),
-                    ..Default::default()
-                }),
+                agent_headers: std::collections::BTreeMap::from([(
+                    "x-claude-code-compaction".into(),
+                    vec!["automatic".into()],
+                )])
+                .into(),
                 input_trigger: None,
             },
         );
@@ -6421,11 +6521,8 @@ mod tests {
         );
         assert_eq!(agent_context.session_final, Some(true));
         assert_eq!(
-            agent_context
-                .compaction
-                .as_ref()
-                .and_then(|compaction| compaction.trigger.as_deref()),
-            Some("automatic")
+            agent_context.agent_headers["x-claude-code-compaction"],
+            ["automatic"]
         );
     }
 
@@ -6446,11 +6543,8 @@ mod tests {
             .expect("agent context attached");
         assert_eq!(agent_context.session_id, "codex-thread");
         assert_eq!(
-            agent_context
-                .compaction
-                .as_ref()
-                .and_then(|compaction| compaction.implementation.as_deref()),
-            Some("local")
+            agent_context.agent_headers["x-codex-turn-metadata"],
+            [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
     }
 

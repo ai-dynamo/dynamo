@@ -204,6 +204,7 @@ impl SglangMockerService {
         pb::GetServerInfoResponse {
             json_info: json!({
                 "disaggregation_mode": self.config.mode.discovery_value(),
+                "incremental_streaming_output": true,
                 "page_size": self.discovery.page_size,
                 "max_total_num_tokens": self.discovery.max_total_num_tokens,
                 "max_running_requests": self.discovery.max_running_requests,

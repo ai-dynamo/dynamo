@@ -1259,6 +1259,13 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
                 }
 
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                ) {
+                    bytes_to_hash
+                        .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
+                }
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -3168,6 +3175,55 @@ mod ownership_tests {
     }
 
     #[test]
+    fn prefill_load_model_wire_aliases_preserve_card_and_mdcsum() {
+        use crate::entrypoint::RouterConfig;
+        use dynamo_kv_router::scheduling::config::RouterPrefillLoadModel;
+        use dynamo_runtime::pipeline::RouterMode;
+
+        for mode in [RouterMode::KV, RouterMode::RoundRobin] {
+            let mut card = ModelDeploymentCard::with_name_only("wire-compat-model");
+            let mut router = RouterConfig {
+                router_mode: mode,
+                ..Default::default()
+            };
+            router.kv_router_config.router_prefill_load_model = RouterPrefillLoadModel::Ais;
+            card.router_config = Some(router);
+            let emitted: serde_json::Value =
+                serde_json::from_str(&card.to_json().unwrap()).unwrap();
+            assert_eq!(
+                emitted["router_config"]["kv_router_config"]["router_prefill_load_model"],
+                "aic"
+            );
+
+            for spelling in ["aic", "ais"] {
+                let mut input = emitted.clone();
+                input["router_config"]["kv_router_config"]["router_prefill_load_model"] =
+                    serde_json::json!(spelling);
+                let parsed = ModelDeploymentCard::load_from_json_str(&input.to_string()).unwrap();
+                assert_eq!(
+                    parsed
+                        .router_config
+                        .as_ref()
+                        .unwrap()
+                        .kv_router_config
+                        .router_prefill_load_model,
+                    RouterPrefillLoadModel::Ais
+                );
+                assert_eq!(parsed.mdcsum(), card.mdcsum());
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&parsed.to_json().unwrap()).unwrap(),
+                    emitted
+                );
+            }
+        }
+
+        let card = ModelDeploymentCard::with_name_only("wire-compat-default");
+        let parsed = ModelDeploymentCard::load_from_json_str(&card.to_json().unwrap()).unwrap();
+        assert!(parsed.router_config.is_none());
+        assert_eq!(parsed.mdcsum(), card.mdcsum());
+    }
+
+    #[test]
     fn context_length_wire_compatibility() {
         let card = ModelDeploymentCard::with_name_only("model");
         let mut legacy_value = serde_json::to_value(&card).unwrap();
@@ -3239,6 +3295,26 @@ mod ownership_tests {
         let mut enabled = ModelDeploymentCard::with_name_only("model");
         enabled.runtime_config.runtime_data.insert(
             VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            true.into(),
+        );
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn vllm_generate_capability_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
             true.into(),
         );
 

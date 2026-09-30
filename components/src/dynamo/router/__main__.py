@@ -18,10 +18,10 @@ from typing import Optional
 
 import uvloop
 
-from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
 from dynamo.router.args import (
     DynamoRouterConfig,
-    build_aic_perf_config,
+    build_ais_perf_config,
     build_kv_router_config,
 )
 from dynamo.router.args import parse_args as parse_router_args
@@ -41,13 +41,13 @@ class StandaloneRouterHandler:
         worker_endpoint_path: str,
         block_size: int,
         kv_router_config: KvRouterConfig,
-        aic_perf_config: Optional[AicPerfConfig],
+        ais_perf_config: Optional[AisPerfConfig],
     ):
         self.runtime = runtime
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
-        self.aic_perf_config = aic_perf_config
+        self.ais_perf_config = ais_perf_config
         self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
 
@@ -73,7 +73,7 @@ class StandaloneRouterHandler:
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
-                aic_perf_config=self.aic_perf_config,
+                ais_perf_config=self.ais_perf_config,
             )
 
         except Exception as e:
@@ -84,62 +84,25 @@ class StandaloneRouterHandler:
         """
         Generate tokens using the KV-aware router.
 
-        This endpoint routes the request to the best worker and streams back results.
-        Wraps the request into PreprocessedRequest format and wraps worker responses
-        into LLMEngineOutput format.
+        Routes a PreprocessedRequest-shaped request to the best worker and streams back
+        its LLMEngineOutput responses unchanged, so fields this router does not inspect
+        (multimodal data, KV hints, agent context, ...) survive the hop.
         """
         if self.kv_router is None:
             logger.error("KvRouter not initialized - cannot process request")
             raise RuntimeError("Router not initialized")
 
-        # Wrap incoming request into PreprocessedRequest format for KvRouter
-        # The request should already have most fields, but we ensure it has the structure
-        # Build routing hints from request (supports both nested routing object and legacy dp_rank)
-        routing = request.get("routing")
-        dp_rank = request.get("dp_rank")
-        if routing is None and dp_rank is not None:
-            routing = {"dp_rank": dp_rank}
-
-        preprocessed_request = {
-            "model": request.get("model", "unknown"),
-            "token_ids": request["token_ids"],
-            "stop_conditions": request.get("stop_conditions", {}),
-            "sampling_options": request.get("sampling_options", {}),
-            "output_options": request.get("output_options", {}),
-            "eos_token_ids": request.get("eos_token_ids", []),
-            "annotations": request.get("annotations", []),
-            "routing": routing,
-            "router_config_override": request.get("router_config_override"),
-            "prefill_result": request.get("prefill_result"),
-            "bootstrap_info": request.get("bootstrap_info"),
-            "extra_args": request.get("extra_args"),
-            "mm_processor_kwargs": request.get("mm_processor_kwargs"),
-        }
+        preprocessed_request = dict(request)
+        preprocessed_request.setdefault("model", "unknown")
+        # Legacy callers send a top-level dp_rank instead of routing hints.
+        dp_rank = preprocessed_request.get("dp_rank")
+        if preprocessed_request.get("routing") is None and dp_rank is not None:
+            preprocessed_request["routing"] = {"dp_rank": dp_rank}
 
         async for worker_output in await self.kv_router.generate_from_request(
-            preprocessed_request  # type: ignore[arg-type]
+            preprocessed_request
         ):
-            # Wrap worker output into LLMEngineOutput format
-            # Worker should return dict with at minimum kv_transfer_params in extra_args
-            llm_engine_output = {
-                "token_ids": worker_output.get("token_ids", []),  # type: ignore[attr-defined]
-                "tokens": worker_output.get("tokens"),  # type: ignore[attr-defined]
-                "text": worker_output.get("text"),  # type: ignore[attr-defined]
-                "cum_log_probs": worker_output.get("cum_log_probs"),  # type: ignore[attr-defined]
-                "log_probs": worker_output.get("log_probs"),  # type: ignore[attr-defined]
-                "top_logprobs": worker_output.get("top_logprobs"),  # type: ignore[attr-defined]
-                "finish_reason": worker_output.get("finish_reason"),  # type: ignore[attr-defined]
-                "stop_reason": worker_output.get("stop_reason"),  # type: ignore[attr-defined]
-                "index": worker_output.get("index"),  # type: ignore[attr-defined]
-                "disaggregated_params": worker_output.get("disaggregated_params"),  # type: ignore[attr-defined]
-                "extra_args": worker_output.get("extra_args"),  # type: ignore[attr-defined]
-                "completion_usage": worker_output.get("completion_usage"),  # type: ignore[attr-defined]
-                # engine_data carries routed_experts/prompt_logprobs; routing_data carries
-                # worker_id/token_ids/timing. Forward both so they survive this router.
-                "engine_data": worker_output.get("engine_data"),  # type: ignore[attr-defined]
-                "routing_data": worker_output.get("routing_data"),  # type: ignore[attr-defined]
-            }
-            yield llm_engine_output
+            yield worker_output
 
     async def best_worker_id(
         self, token_ids, router_config_override=None, cache_namespace=None
@@ -225,7 +188,7 @@ async def worker(runtime: DistributedRuntime):
     )
 
     kv_router_config = build_kv_router_config(config)
-    aic_perf_config = build_aic_perf_config(config)
+    ais_perf_config = build_ais_perf_config(config)
 
     # Create handler
     handler = StandaloneRouterHandler(
@@ -233,7 +196,7 @@ async def worker(runtime: DistributedRuntime):
         config.endpoint,
         config.router_block_size,
         kv_router_config,
-        aic_perf_config,
+        ais_perf_config,
     )
     await handler.initialize()
 

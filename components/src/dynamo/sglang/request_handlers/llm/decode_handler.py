@@ -16,13 +16,18 @@ from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
-from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.sglang._compat import (
+    cache_salt_kwargs,
     filter_supported_async_generate_kwargs,
+    prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -44,6 +49,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     extract_media_urls,
     raise_if_unextracted_multimodal,
 )
+from dynamo.sglang.request_utils import request_cache_salt
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -55,6 +61,38 @@ _SAMPLING_OPTION_FIELDS = (
     "min_p",
 )
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+_MAX_ABORT_MESSAGE_LENGTH = 8192
+
+
+def _raise_if_sglang_error(finish_reason: dict[str, Any]) -> None:
+    """Propagate error-bearing aborts before their placeholder output is emitted."""
+    if finish_reason.get("type") != "abort":
+        return
+
+    status_code = finish_reason.get("status_code")
+    if status_code is None and finish_reason.get("err_type") is None:
+        # SGLang also uses FINISH_ABORT for ordinary cancellation. Its default
+        # message is "Aborted", but both error metadata fields are absent/null.
+        return
+
+    if (
+        isinstance(status_code, bool)
+        or not isinstance(status_code, int)
+        or not 400 <= status_code < 600
+    ):
+        status_code = 500
+
+    message = finish_reason.get("message")
+    if not isinstance(message, str) or not message:
+        message = "SGLang aborted the request with an error"
+    message = message[:_MAX_ABORT_MESSAGE_LENGTH]
+
+    if status_code == 400:
+        # Explicit InvalidArgument keeps a client-visible validation message
+        # through Dynamo's Python/Rust boundary. Generic HttpError messages are
+        # diagnostic-only in the semantic error protocol.
+        raise InvalidArgument(message)
+    raise HttpError(status_code, message)
 
 
 def _raise_if_conditional_disagg_bypass(request: Dict[str, Any]) -> None:
@@ -549,7 +587,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 context.trace_headers() if self.enable_trace else None
             ),
             routed_dp_rank=routing.get("dp_rank"),
+            prefill_dp_rank=routing.get("prefill_dp_rank"),
             lora_path=self._resolve_lora(request),
+            cache_salt=request_cache_salt(request),
         )
         return native_generate_stream(self.engine, native_request)
 
@@ -673,6 +713,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             decode = await self.engine.async_generate(
                 **input_param,
                 **decode_mm_kwargs,
+                **cache_salt_kwargs(self.engine, request_cache_salt(request)),
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
@@ -680,6 +721,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
+                **prefill_dp_rank_kwargs(self.engine, routing.get("prefill_dp_rank")),
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
                 data_parallel_rank=dp_rank,
@@ -724,7 +766,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 assert self._image_loader is not None
                 image_items = mm_data.get(IMAGE_URL_KEY) or []
                 if image_items:
-                    image_data = await self._image_loader.load_image_batch(image_items)
+                    image_data = await self._image_loader.load_image_batch(
+                        image_items,
+                        cache_scope=image_cache_scope_from_request(request),
+                    )
                 else:
                     image_data = None
 
@@ -758,6 +803,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             agg = await self.engine.async_generate(
                 **input_param,
+                **cache_salt_kwargs(self.engine, request_cache_salt(request)),
                 image_data=image_data,
                 audio_data=audio_data,
                 video_data=video_data,
@@ -924,6 +970,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         raise EngineShutdown(
                             "Engine was shut down during token generation"
                         )
+                    _raise_if_sglang_error(finish_reason)
                     out["finish_reason"] = normalize_finish_reason(
                         finish_reason["type"]
                     )
@@ -1080,6 +1127,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         raise EngineShutdown(
                             "Engine was shut down during token generation"
                         )
+                    _raise_if_sglang_error(finish_reason)
                     finish_reason_type = normalize_finish_reason(finish_reason["type"])
                 else:
                     finish_reason_type = None

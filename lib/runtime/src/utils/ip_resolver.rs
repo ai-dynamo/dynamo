@@ -319,7 +319,9 @@ fn resolve_wildcard(
 }
 
 /// Resolve an advertisement address that is served by an existing listener.
-/// Wildcard listeners stay in their bound family.
+/// Wildcard listeners prefer their bound family. An IPv6 wildcard listener also
+/// accepts IPv4 by default, so it falls back to a non-loopback IPv4 address on
+/// hosts without one for IPv6. An IPv4 wildcard never advertises IPv6.
 pub(crate) fn resolve_advertise_ip_for_bind<R: IpResolver>(
     bind_ip: IpAddr,
     resolver: &R,
@@ -331,8 +333,13 @@ pub(crate) fn resolve_advertise_ip_for_bind<R: IpResolver>(
     }
 
     let candidates = local_candidates(resolver)?;
+    let dual_stack_fallback = bind_ip
+        .is_ipv6()
+        .then(|| candidates.other_non_loopback(bind_ip))
+        .flatten();
     Ok(candidates
         .non_loopback_for(bind_ip)
+        .or(dual_stack_fallback)
         .or_else(|| candidates.loopback_for(bind_ip))
         .unwrap_or_else(|| loopback_for(bind_ip)))
 }
@@ -836,6 +843,32 @@ mod tests {
         assert_eq!(
             resolve_advertise_ip_for_bind(ip("::ffff:127.0.0.1"), &resolver).unwrap(),
             ip("127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn ipv6_wildcard_advertisement_falls_back_to_ipv4() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![
+            ("lo", ip("127.0.0.1")),
+            ("lo", ip("::1")),
+            ("eth0", ip("192.0.2.20")),
+        ];
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::"), &resolver).unwrap(),
+            ip("192.0.2.20")
+        );
+
+        resolver.interfaces.push(("eth0", ip("2001:db8::20")));
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::"), &resolver).unwrap(),
+            ip("2001:db8::20")
+        );
+
+        resolver.interfaces.retain(|(name, _)| *name == "lo");
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::"), &resolver).unwrap(),
+            ip("::1")
         );
     }
 

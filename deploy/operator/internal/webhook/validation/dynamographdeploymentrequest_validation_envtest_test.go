@@ -162,6 +162,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "B300 hardware is admitted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeB300SXM}
+			}),
+		},
+		{
 			name: "independent create failures aggregate in API declaration order",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
