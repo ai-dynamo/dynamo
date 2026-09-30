@@ -16,9 +16,14 @@ pub struct CommonArgs {
     #[clap(long, default_value = "16384")]
     pub num_gpu_blocks: usize,
 
-    /// Number of tokens per KV cache block.
+    /// Number of tokens per KV cache block in the mock engine and indexer.
     #[clap(long, default_value = "128")]
     pub block_size: u32,
+
+    /// Number of tokens represented by each trace `hash_id`. The public Mooncake
+    /// traces use 512-token hash blocks; the engine re-chunks them at `--block-size`.
+    #[clap(long, default_value = "512")]
+    pub trace_block_size: u32,
 
     /// Optional wall-clock duration (ms) used to rescale the trace during event generation.
     /// Omit to preserve the original Mooncake timestamps.

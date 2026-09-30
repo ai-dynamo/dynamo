@@ -413,7 +413,7 @@ async fn prepare_benchmark(
 
     let traces = process_mooncake_trace(
         path,
-        args.common.block_size,
+        args.common.trace_block_size,
         args.common.trace_length_factor,
         args.common.trace_duplication_factor,
         args.common.num_unique_inference_workers,

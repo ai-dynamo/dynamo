@@ -79,6 +79,11 @@ BIN=$(find target/release/deps -maxdepth 1 -type f -perm -111 \
   -name 'mooncake_bench-*' | head -n1)
 ```
 
+`--trace-block-size` (default 512) is the number of tokens each trace `hash_id`
+represents and must match the trace; the public Mooncake traces use 512.
+`--block-size` (default 128) is the separate mock-engine and indexer block size;
+the engine re-chunks synthesized prompt tokens at that size.
+
 Linux uses absolute `CLOCK_MONOTONIC` sleeps followed by the configured spin.
 macOS uses a portable sleep-plus-spin timer for correctness tests only.
 
@@ -288,14 +293,14 @@ cargo bench --package dynamo-bench --bench approximate_lru_bench \
 cargo bench --package dynamo-bench --bench approximate_lru_bench \
   --no-default-features --features approximate-lru -- \
   testdata/mooncake_trace_approximate_pressure.jsonl \
-  --policy ttl --block-size 4 --benchmark-duration-ms 1000 \
+  --policy ttl --trace-block-size 8 --block-size 4 --benchmark-duration-ms 1000 \
   --num-unique-inference-workers 1 --pre-run-quiescence-ms 0 \
   --result-json-output /tmp/approx-ttl-smoke.json
 
 cargo bench --package dynamo-bench --bench approximate_lru_bench \
   --no-default-features --features approximate-lru -- \
   testdata/mooncake_trace_approximate_pressure.jsonl \
-  --policy lru --block-size 4 --capacity-blocks 2 --require-eviction \
+  --policy lru --trace-block-size 8 --block-size 4 --capacity-blocks 2 --require-eviction \
   --benchmark-duration-ms 1000 --num-unique-inference-workers 1 \
   --pre-run-quiescence-ms 0 \
   --result-json-output /tmp/approx-lru-smoke.json

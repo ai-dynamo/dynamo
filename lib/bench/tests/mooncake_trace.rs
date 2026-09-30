@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use clap::Parser;
 use dc_ckf_parity::{DirectCkfParityConfig, DirectCkfParityIndexer, DirectCkfParityMatchMode};
+use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::replay::{
     WorkerReplayArtifacts, generate_replay_artifacts, generate_replay_artifacts_with_args,
     process_mooncake_trace,
@@ -823,6 +825,25 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
         .collect();
     assert!(set0.is_disjoint(&set1), "copies are not hash-disjoint");
 
+    Ok(())
+}
+
+#[derive(Parser)]
+struct CommonArgsCli {
+    #[clap(flatten)]
+    common: CommonArgs,
+}
+
+#[test]
+fn default_cli_block_sizes_load_the_canonical_512_token_fixture() -> anyhow::Result<()> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let args = CommonArgsCli::try_parse_from(["mooncake_bench", fixture.as_str()])?.common;
+    let load =
+        |trace_block_size| process_mooncake_trace(&fixture, trace_block_size, 1, 1, 2, args.seed);
+
+    assert!(!load(args.trace_block_size)?.is_empty());
+    // The engine/indexer block size cannot expand this trace's 512-token hash_ids.
+    assert!(load(args.block_size).is_err());
     Ok(())
 }
 

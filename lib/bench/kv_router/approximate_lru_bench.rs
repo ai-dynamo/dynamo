@@ -1071,7 +1071,7 @@ async fn async_main(args: Args, backend_cpus: Option<Vec<usize>>) -> anyhow::Res
         .context("mooncake trace path is required")?;
     let traces = process_mooncake_trace(
         trace_path,
-        args.common.block_size,
+        args.common.trace_block_size,
         args.common.trace_length_factor,
         args.common.trace_duplication_factor,
         args.common.num_unique_inference_workers,
@@ -1320,6 +1320,7 @@ mod tests {
                 test: false,
                 num_gpu_blocks: 16,
                 block_size: 4,
+                trace_block_size: 8,
                 trace_simulation_duration_ms: None,
                 benchmark_duration_ms: 1_000,
                 num_unique_inference_workers: 1,
