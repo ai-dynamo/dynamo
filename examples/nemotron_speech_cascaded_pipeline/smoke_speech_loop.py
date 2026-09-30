@@ -146,7 +146,10 @@ async def _transcribe(
                         first_transcript_at,
                         completed_at,
                     )
-                elif event_type == "error":
+                elif event_type in (
+                    "error",
+                    "conversation.item.input_audio_transcription.failed",
+                ):
                     raise RuntimeError(event.get("error", event))
 
         receive_task = asyncio.create_task(receive_transcript())

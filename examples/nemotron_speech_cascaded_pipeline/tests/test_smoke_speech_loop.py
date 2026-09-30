@@ -14,7 +14,12 @@ from smoke_speech_loop import (
     _transcribe,
 )
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.asyncio,
+]
 
 
 class _WebSocket:
@@ -110,6 +115,24 @@ async def test_realtime_llm_sends_final_only_text_without_more_warming(
     ]
 
 
+@pytest.mark.parametrize("partial", ["", "discard this hypothesis"])
+async def test_empty_final_transcript_never_commits_speculative_text(partial):
+    websocket = _WebSocket([])
+    text_input = _RealtimeTextInput(websocket)
+
+    await text_input.append(partial)
+    await text_input.commit("")
+
+    assert websocket.sent == (
+        [
+            {"type": "input_text.append", "text": partial},
+            {"type": "input_text.clear"},
+        ]
+        if partial
+        else []
+    )
+
+
 async def test_transcription_forwards_deltas_to_realtime_llm_before_commit():
     asr_websocket = _WebSocket(
         [
@@ -145,6 +168,31 @@ async def test_transcription_forwards_deltas_to_realtime_llm_before_commit():
         {"type": "input_text.append", "text": "hello"},
         {"type": "input_text.commit"},
     ]
+
+
+@pytest.mark.parametrize(
+    "event_type", ["error", "conversation.item.input_audio_transcription.failed"]
+)
+async def test_transcription_failure_does_not_commit_llm_input(event_type):
+    asr_websocket = _WebSocket([{"type": event_type, "error": "ASR unavailable"}])
+    llm_websocket = _WebSocket([])
+    args = SimpleNamespace(
+        base_url="http://dynamo",
+        asr_model="test/asr",
+        language="en",
+        timeout=1.0,
+        chunk_bytes=2,
+    )
+
+    with pytest.raises(RuntimeError, match="ASR unavailable"):
+        await _transcribe(
+            _WebSocketSession(asr_websocket),
+            args,
+            b"\x00\x00",
+            _RealtimeTextInput(llm_websocket),
+        )
+
+    assert llm_websocket.sent == []
 
 
 class _Content:

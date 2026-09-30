@@ -457,7 +457,10 @@ impl RankLruState {
     }
 
     fn next_release_epoch(&mut self) -> u64 {
-        self.release_epoch = self.release_epoch.wrapping_add(1).max(1);
+        self.release_epoch = self
+            .release_epoch
+            .checked_add(1)
+            .expect("release epoch exhausted");
         self.release_epoch
     }
 
@@ -501,10 +504,13 @@ impl RankLruState {
                 let copy = self
                     .copies
                     .get_mut(&copy_id)
-                    .ok_or(KvRouterError::IndexerDroppedRequest)?;
+                    .expect("hash index references a missing block copy");
                 if copy.refs == 0 {
                     let key = Self::inactive_key(copy_id, copy);
-                    self.inactive.remove(&key);
+                    assert!(
+                        self.inactive.remove(&key),
+                        "inactive copy is missing from the eviction index"
+                    );
                 }
                 copy.refs += 1;
                 copy.sequence_position = position;
@@ -512,7 +518,10 @@ impl RankLruState {
             } else {
                 prefix_hit = false;
                 let copy_id = self.next_copy_id;
-                self.next_copy_id = self.next_copy_id.wrapping_add(1).max(1);
+                self.next_copy_id = self
+                    .next_copy_id
+                    .checked_add(1)
+                    .expect("block copy ID exhausted");
                 self.copies.insert(
                     copy_id,
                     BlockCopy {
@@ -546,7 +555,10 @@ impl RankLruState {
         let mut lease = self.leases.remove(&attempt_id)?;
         for (offset, block) in blocks.iter().enumerate() {
             let copy_id = self.next_copy_id;
-            self.next_copy_id = self.next_copy_id.wrapping_add(1).max(1);
+            self.next_copy_id = self
+                .next_copy_id
+                .checked_add(1)
+                .expect("block copy ID exhausted");
             self.copies.insert(
                 copy_id,
                 BlockCopy {
@@ -577,14 +589,16 @@ impl RankLruState {
             return Vec::new();
         };
         let release_epoch = self.next_release_epoch();
-        self.private_blocks = self.private_blocks.saturating_sub(lease.private_blocks);
+        self.private_blocks = self
+            .private_blocks
+            .checked_sub(lease.private_blocks)
+            .expect("lease private blocks exceed rank total");
         for copy_id in lease.copies {
-            let Some(copy) = self.copies.get_mut(&copy_id) else {
-                continue;
-            };
-            if copy.refs == 0 {
-                continue;
-            }
+            let copy = self
+                .copies
+                .get_mut(&copy_id)
+                .expect("lease references a missing block copy");
+            assert_ne!(copy.refs, 0, "lease references an inactive block copy");
             copy.refs -= 1;
             if copy.refs == 0 {
                 copy.release_epoch = release_epoch;
@@ -601,24 +615,31 @@ impl RankLruState {
             let Some(key) = self.inactive.pop_first() else {
                 break;
             };
-            let Some(copy) = self.copies.remove(&key.copy_id) else {
-                continue;
-            };
-            evicted_blocks = evicted_blocks.saturating_add(1);
-            debug_assert_eq!(copy.refs, 0);
-            let mut remove_hash = false;
-            if let Some(copies) = self.by_hash.get_mut(&copy.sequence_hash) {
-                if let Some(position) = copies.iter().position(|id| *id == key.copy_id) {
-                    copies.swap_remove(position);
-                }
-                remove_hash = copies.is_empty();
-            }
+            let copy = self
+                .copies
+                .remove(&key.copy_id)
+                .expect("eviction index references a missing block copy");
+            evicted_blocks += 1;
+            assert_eq!(copy.refs, 0, "eviction index references an active copy");
+            let copies = self
+                .by_hash
+                .get_mut(&copy.sequence_hash)
+                .expect("block copy is missing from the hash index");
+            let position = copies
+                .iter()
+                .position(|id| *id == key.copy_id)
+                .expect("block copy is missing from its hash-index entry");
+            copies.swap_remove(position);
+            let remove_hash = copies.is_empty();
             if remove_hash {
                 self.by_hash.remove(&copy.sequence_hash);
                 removed_hashes.push(copy.sequence_hash);
             }
         }
-        self.evicted_blocks = self.evicted_blocks.saturating_add(evicted_blocks);
+        self.evicted_blocks = self
+            .evicted_blocks
+            .checked_add(evicted_blocks)
+            .expect("rank eviction counter overflowed");
         removed_hashes
     }
 
@@ -783,7 +804,7 @@ impl ApproximateLruLane {
                             let before = state.evicted_blocks;
                             state.capacity = capacity;
                             let removed = state.reconcile();
-                            (removed, state.evicted_blocks.saturating_sub(before))
+                            (removed, state.evicted_blocks - before)
                         }
                         Some(WorkerRetentionState::TtlFallback { .. }) => (Vec::new(), 0),
                         None => {
@@ -871,7 +892,7 @@ impl ApproximateLruLane {
                 };
                 let before = state.evicted_blocks;
                 let removed = state.acquire(attempt_id, &blocks, private_blocks)?;
-                let evicted = state.evicted_blocks.saturating_sub(before);
+                let evicted = state.evicted_blocks - before;
                 self.record_evictions(evicted);
                 self.push_store_event(&mut events, worker, None, blocks);
                 self.push_remove_event(&mut events, worker, removed);
@@ -900,7 +921,7 @@ impl ApproximateLruLane {
                     if let Some(removed) =
                         state.materialize(attempt_id, &blocks, start_position, private_blocks)
                     {
-                        let evicted = state.evicted_blocks.saturating_sub(before);
+                        let evicted = state.evicted_blocks - before;
                         self.record_evictions(evicted);
                         self.push_store_event(&mut events, worker, parent_hash, blocks);
                         self.push_remove_event(&mut events, worker, removed);
@@ -922,7 +943,7 @@ impl ApproximateLruLane {
                 {
                     let before = state.evicted_blocks;
                     let removed = state.release(attempt_id);
-                    let evicted = state.evicted_blocks.saturating_sub(before);
+                    let evicted = state.evicted_blocks - before;
                     self.record_evictions(evicted);
                     self.push_remove_event(&mut events, worker, removed);
                 }

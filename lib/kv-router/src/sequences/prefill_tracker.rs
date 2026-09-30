@@ -110,7 +110,7 @@ impl PrefillLoadSnapshot {
     /// reduce later modeled prefills. The final worker backlog is clipped at zero.
     ///
     /// `Err(MissingExpectedDuration)` means at least one active prefill was added
-    /// without a modeled duration, which is expected when AIC is absent or
+    /// without a modeled duration, which is expected when AIS is absent or
     /// prediction failed. In that case the snapshot was created via the fast path
     /// and did not scan active prefills to sum modeled time.
     pub(super) fn modeled_remaining_prefill_time_ms_at(
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn modeled_remaining_no_aic_prefill_returns_missing_duration_error() {
+    fn modeled_remaining_no_ais_prefill_returns_missing_duration_error() {
         let epoch = Instant::now();
         let mut tracker = PrefillLoadTracker::default();
         let r1 = "r1".to_string();

@@ -17,7 +17,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::TierOverlapBlocks;
 use dynamo_kv_router::{
-    ConcurrentRadixTree, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
+    ConcurrentRadixTreeCompressed, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -35,7 +35,7 @@ use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
 #[derive(Clone)]
 enum ReplayIndexer {
     Single(KvIndexer),
-    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTree>>),
+    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>),
 }
 
 impl ReplayIndexer {
@@ -78,7 +78,7 @@ impl ReplayIndexer {
 fn create_replay_indexer(block_size: u32, num_threads: usize) -> ReplayIndexer {
     if num_threads > 1 {
         return ReplayIndexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
-            ConcurrentRadixTree::new(),
+            ConcurrentRadixTreeCompressed::new(),
             num_threads,
             block_size,
         )));
@@ -205,7 +205,7 @@ impl KvReplayRouter {
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
         let scheduler_cancel = CancellationToken::new();
-        let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new_with_policy_profile(
+        let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new(
             slots,
             worker_config_rx,
             profile,
@@ -220,7 +220,7 @@ impl KvReplayRouter {
             scheduler_cancel.clone(),
             "replay",
             false,
-        )?);
+        ));
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();
         let event_task = tokio::spawn(async move {
@@ -372,7 +372,7 @@ impl KvReplayRouter {
         self.scheduler.get_potential_loads(
             None,
             isl_tokens,
-            std::collections::HashMap::new(),
+            Default::default(),
             track_prefill_tokens,
         )
     }
@@ -583,6 +583,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             preferred_dp_rank: None,
+            preferred_prefill_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,

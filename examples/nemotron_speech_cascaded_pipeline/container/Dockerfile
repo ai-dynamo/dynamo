@@ -21,11 +21,9 @@ FROM ${BASE_IMAGE}
 ARG RUNTIME_USER=dynamo
 
 USER root
-COPY --chmod=644 requirements.txt /tmp/speech-nim-requirements.txt
-RUN uv pip install \
-    --system \
-    --no-cache \
-    --requirement /tmp/speech-nim-requirements.txt
+COPY --chmod=644 requirements.txt /tmp/speech-nim/requirements.txt
+COPY --chmod=644 container/install.sh /tmp/speech-nim/container/install.sh
+RUN bash /tmp/speech-nim/container/install.sh
 
 COPY --chown=${RUNTIME_USER}:root nemotron_speech/ /opt/nemotron-speech-cascaded-pipeline/nemotron_speech/
 ENV PYTHONPATH=/opt/nemotron-speech-cascaded-pipeline

@@ -33,6 +33,9 @@ pub use routing::{
 pub use source::{HuggingFaceLoRASource, LoRASource, LocalLoRASource, S3LoRASource};
 pub use state_tracker::LoraStateTracker;
 
+/// Worker runtime flag requiring an adapter registration before request routing.
+pub const LORA_REQUIRES_REGISTRATION: &str = "lora_requires_registration";
+
 /// Returns true when LoRA serving is enabled via a truthy `DYN_LORA_ENABLED` env var
 /// (`1`/`true`/`on`/`yes`, case-insensitive). This gates the request-time LoRA filter on
 /// both the KV and non-KV routing paths, so non-LoRA deployments keep the unmodified

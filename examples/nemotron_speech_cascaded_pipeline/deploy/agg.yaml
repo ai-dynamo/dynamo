@@ -30,13 +30,13 @@ spec:
               args: [--http-port, "8000"]
       replicas: 1
       type: frontend
-    - name: SpeechAsrWorker
+    - name: asr
       podTemplate:
         spec:
           containers:
             - name: main
               image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
-              command: [python3, -m, nemotron_speech.asr_worker]
+              command: [python3, -m, nemotron_speech.asr.worker]
               args:
                 - --nim-server
                 - localhost:50052
@@ -124,7 +124,6 @@ spec:
                 - --use-vllm-tokenizer
               env:
                 - {name: HF_HOME, value: /home/dynamo/.cache/huggingface}
-                - {name: VLLM_USE_FLASHINFER_MOE_FP8, value: "1"}
               envFrom:
                 - secretRef: {name: hf-token-secret}
               resources:
@@ -143,13 +142,13 @@ spec:
       scalingAdapter: {}
       sharedMemorySize: 16Gi
       type: worker
-    - name: SpeechTtsWorker
+    - name: tts
       podTemplate:
         spec:
           containers:
             - name: main
               image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
-              command: [python3, -m, nemotron_speech.tts_worker]
+              command: [python3, -m, nemotron_speech.tts.worker]
               args:
                 - --nim-server
                 - localhost:50051

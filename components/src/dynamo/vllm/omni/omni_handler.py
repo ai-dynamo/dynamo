@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import copy
 import functools
 import logging
 import os
 import random
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import (
     Any,
@@ -36,7 +36,11 @@ from dynamo.common.utils.output_modalities import (
     get_output_modalities,
     parse_request_type,
 )
-from dynamo.common.utils.video_utils import compute_num_frames, parse_size
+from dynamo.common.utils.video_utils import (
+    DEFAULT_VIDEO_NUM_FRAMES,
+    compute_num_frames,
+    parse_size,
+)
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -44,20 +48,26 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
+
+# Re-exported: EngineInputs moved to its own module so the per-modality
+# builders can annotate it without importing this handler.
+from dynamo.vllm.omni.engine_inputs import EngineInputs
 from dynamo.vllm.omni.output_formatter import (
     AudioAggregateState,
     AudioStreamState,
     OutputFormatter,
 )
 from dynamo.vllm.omni.utils import (
+    audio_output_is_cumulative,
     build_image_generation_prompt,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
+    image_generation_size_from_str,
     streaming_sampling_params,
 )
 
@@ -93,33 +103,6 @@ def _apply_media_passthrough(
                 "no extra_args",
                 sorted(knobs),
             )
-
-
-@dataclass
-class EngineInputs:
-    """Parsed engine inputs ready for AsyncOmni.generate().
-
-    Attributes:
-        prompt: OmniTextPrompt dict for the engine.
-        sampling_params_list: Per-stage sampling parameters, or None for defaults.
-        request_type: The resolved request type (may differ from the initial parse
-            when a chat completion request carries video params).
-        fps: Frames per second, only meaningful for video requests.
-        response_format: Desired response format (e.g. "url" or "b64_json" for
-            image requests). None means use the default for the request type.
-        output_format: The output format to use for the response.
-            None means use the default for the request type.
-    """
-
-    prompt: Union[OmniTextPrompt, Dict[str, Any]]
-    sampling_params_list: list | None = None
-    request_type: RequestType = RequestType.CHAT_COMPLETION
-    fps: int = 0
-    speed: float = 1.0
-    response_format: str | None = None
-    output_format: str | None = None
-    lora_request: LoRARequest | None = None
-    stream_audio: bool = False
 
 
 class OmniHandler(BaseOmniHandler):
@@ -376,10 +359,19 @@ class OmniHandler(BaseOmniHandler):
 
         try:
             inputs = await self.build_engine_inputs(
-                parsed_request, request_type, image=image
+                parsed_request, request_type, image=image, request_id=request_id
             )
         except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
+            if isinstance(e, ValueError) and request_type in (
+                RequestType.IMAGE_GENERATION,
+                RequestType.VIDEO_GENERATION,
+            ):
+                # Media endpoints cannot interpret the chat.completion.chunk
+                # returned by _error_chunk as a request rejection. Re-raise as
+                # the registered binding exception so the HTTP layer returns a
+                # 400 with the validation reason before generation begins.
+                raise InvalidArgument(str(e)) from e
             yield self._error_chunk(request_id, str(e), request_type)
             return
 
@@ -402,8 +394,14 @@ class OmniHandler(BaseOmniHandler):
 
         previous_text = ""
         audio_stream_state = AudioStreamState() if inputs.stream_audio else None
+        # Read the coerced params, not the request's: the coercion above is what
+        # decides whether the engine emits disjoint deltas or whole-waveform
+        # snapshots, so aggregation has to follow its result rather than the
+        # model's identity.
         audio_aggregate_state = (
-            AudioAggregateState()
+            AudioAggregateState(
+                cumulative=audio_output_is_cumulative(inputs.sampling_params_list)
+            )
             if inputs.request_type == RequestType.AUDIO_GENERATION
             and not inputs.stream_audio
             else None
@@ -593,6 +591,7 @@ class OmniHandler(BaseOmniHandler):
         ],
         request_type: RequestType,
         image: PIL.Image.Image | None = None,
+        request_id: str | None = None,
     ) -> EngineInputs:
         """Convert a parsed request into AsyncOmni engine inputs.
 
@@ -601,6 +600,8 @@ class OmniHandler(BaseOmniHandler):
                 for image/video/audio requests, or a raw dict for chat completions.
             request_type: The RequestType determined by parse_request_type.
             image: Pre-loaded PIL Image for I2V requests (from input_reference).
+            request_id: Final request id, used by audio models (Audex) that bind
+                per-request state such as the CFG pair id to it.
 
         Returns:
             EngineInputs ready for engine_client.generate().
@@ -616,7 +617,9 @@ class OmniHandler(BaseOmniHandler):
             return self._engine_inputs_from_video(parsed_request, image=image)
         elif request_type == RequestType.AUDIO_GENERATION:
             assert isinstance(parsed_request, NvCreateAudioSpeechRequest)
-            return await self.audio.build_engine_inputs(parsed_request)
+            return await self.audio.build_engine_inputs(
+                parsed_request, request_id=request_id
+            )
 
         raise ValueError(f"Unknown request type: {request_type}")
 
@@ -685,9 +688,100 @@ class OmniHandler(BaseOmniHandler):
                 )
         return result if result else [diffusion_sp]
 
+    def _build_video_sampling_params_list(
+        self, req: NvCreateVideoRequest, nvext: VideoNvExt
+    ) -> tuple[list, OmniDiffusionSamplingParams]:
+        """Clone per-stage model defaults and apply explicit video overrides."""
+        defaults = list(self.engine_client.default_sampling_params_list or [])
+        if not defaults:
+            defaults = [OmniDiffusionSamplingParams()]
+            stage_types = ["diffusion"]
+        else:
+            stage_types = [
+                getattr(
+                    self.engine_client.engine.get_stage_metadata(i),
+                    "stage_type",
+                    "llm",
+                )
+                for i in range(len(defaults))
+            ]
+
+        result = []
+        output_sp = None
+        for default, stage_type in zip(defaults, stage_types, strict=True):
+            if stage_type != "diffusion":
+                result.append(
+                    default.clone() if hasattr(default, "clone") else SamplingParams()
+                )
+                continue
+
+            sp = (
+                copy.deepcopy(default)
+                if isinstance(default, OmniDiffusionSamplingParams)
+                else OmniDiffusionSamplingParams()
+            )
+            self._apply_video_sampling_overrides(sp, req, nvext)
+            result.append(sp)
+            output_sp = sp
+
+        if output_sp is None:
+            raise ValueError("Video generation requires a diffusion stage")
+        return result, output_sp
+
+    def _apply_video_sampling_overrides(
+        self,
+        sp: OmniDiffusionSamplingParams,
+        req: NvCreateVideoRequest,
+        nvext: VideoNvExt,
+    ) -> None:
+        """Overlay only fields explicitly supplied by a video request."""
+        if nvext.num_frames is not None and nvext.num_frames <= 0:
+            raise ValueError("nvext.num_frames must be greater than zero")
+        if nvext.fps is not None and nvext.fps <= 0:
+            raise ValueError("nvext.fps must be greater than zero")
+        if req.seconds is not None and req.seconds <= 0:
+            raise ValueError("seconds must be greater than zero")
+
+        if req.size is not None:
+            width, height = parse_size(req.size)
+            sp.width = width
+            sp.height = height
+
+        if nvext.num_frames is not None:
+            sp.num_frames = nvext.num_frames
+        elif req.seconds is not None:
+            frame_rate = (
+                float(nvext.fps) if nvext.fps is not None else sp.resolved_frame_rate
+            )
+            sp.num_frames = compute_num_frames(
+                seconds=req.seconds,
+                fps=frame_rate,
+                default_fps=int(
+                    getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
+                ),
+            )
+        elif sp.num_frames == 1:
+            # vllm-omni uses 1 as the image-model sentinel. It is not a usable
+            # video default for pipelines that consume num_frames verbatim.
+            sp.num_frames = DEFAULT_VIDEO_NUM_FRAMES
+
+        if nvext.fps is not None:
+            sp.fps = nvext.fps
+            if hasattr(sp, "frame_rate"):
+                sp.frame_rate = float(nvext.fps)
+
+        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
+        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
+        self._update_if_not_none(sp, "seed", nvext.seed)
+        self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
+        self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
+        _apply_media_passthrough(sp, req.extra_args)
+
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
-        width, height = parse_size(req.size, default_w=1024, default_h=1024)
+        # req.size is a free-form client string, so it needs the same bound the
+        # chat path applies -- parse_size alone returns whatever it parses.
+        width, height = image_generation_size_from_str(req.size)
         nvext = req.nvext or ImageNvExt()
 
         prompt = build_image_generation_prompt(
@@ -737,17 +831,21 @@ class OmniHandler(BaseOmniHandler):
             image: Pre-loaded PIL Image for I2V. When provided, the image is
                 attached to the prompt via ``multi_modal_data`` so vllm-omni's
                 I2V pipeline pre-process can use it.
+
+        Returns:
+            EngineInputs: Validated inputs for video generation.
+
+        Raises:
+            ValueError: If the frame rate or output format is unsupported.
         """
-        width, height = parse_size(req.size)
         nvext = req.nvext or VideoNvExt()
 
-        num_frames = compute_num_frames(
-            num_frames=nvext.num_frames,
-            seconds=req.seconds,
-            fps=nvext.fps,
-            default_fps=DEFAULT_VIDEO_FPS,
-        )
-        fps = nvext.fps if nvext.fps is not None else DEFAULT_VIDEO_FPS
+        output_format = req.output_format.lower() if req.output_format else None
+        if output_format not in (None, "mp4"):
+            raise ValueError(
+                f"Unsupported output_format: {req.output_format!r}; "
+                "only 'mp4' is supported"
+            )
 
         prompt = OmniTextPrompt(prompt=req.prompt)
         if nvext.negative_prompt is not None:
@@ -761,37 +859,33 @@ class OmniHandler(BaseOmniHandler):
                 image.size[1],
             )
 
-        sp = OmniDiffusionSamplingParams(
-            height=height,
-            width=width,
-            num_frames=num_frames,
+        sampling_params_list, output_sp = self._build_video_sampling_params_list(
+            req, nvext
         )
-        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
-        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
-        sp.seed = (
-            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
-        )
-        self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
-        self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
-        self._update_if_not_none(sp, "fps", fps)
-        _apply_media_passthrough(sp, req.extra_args)
-
-        sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
+
+        model_fps = output_sp.resolved_frame_rate
+        output_fps = round(
+            model_fps
+            if model_fps is not None
+            else getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
+        )
 
         logger.info(
             "Video diffusion request: prompt='%s...', size=%sx%s, frames=%s, fps=%s",
             req.prompt[:50],
-            width,
-            height,
-            num_frames,
-            fps,
+            getattr(output_sp, "width", None),
+            getattr(output_sp, "height", None),
+            getattr(output_sp, "num_frames", None),
+            model_fps,
         )
 
         return EngineInputs(
             prompt=prompt,
             sampling_params_list=sampling_params_list,
             request_type=RequestType.VIDEO_GENERATION,
-            fps=fps,
+            fps=output_fps,
+            response_format=req.response_format,
+            output_format=output_format,
             lora_request=lora_request,
         )

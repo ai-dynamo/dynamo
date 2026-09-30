@@ -65,19 +65,43 @@ impl OfflineDisaggReplayConfig {
 pub use aisimulate_core::replay::TrafficStats;
 pub use aisimulate_core::replay::{
     ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
+    ReplaySchedulerIntervalMetrics, ReplaySchedulerMetricsSnapshot, ReplayTelemetryObserver,
+    ReplayTelemetrySampleKind, ReplayTelemetrySnapshot, ReplayTrafficMetricsSnapshot,
 };
+
+/// Optional policy-neutral telemetry sink for one offline replay.
+///
+/// Telemetry is deliberately configured independently from
+/// [`ReplayScalingPolicy`]: observing a replay must not change the planner
+/// callback contract or its decision cadence.
+pub struct ReplayTelemetryOptions {
+    pub sample_interval_ms: f64,
+    pub observer: Box<dyn ReplayTelemetryObserver>,
+}
+
+/// Optional replay observers installed for one invocation.
+///
+/// Scaling and telemetry share an invocation without coupling their callback
+/// contracts or sampling cadence.
+#[derive(Default)]
+pub struct ReplayRuntimeObservers {
+    pub scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    pub telemetry: Option<ReplayTelemetryOptions>,
+}
 pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,
     simulate_agentic_trace_live_workload_with_router_mode_and_options,
     simulate_agentic_trace_workload_disagg_with_router_mode,
-    simulate_agentic_trace_workload_with_router_mode, simulate_concurrency_file,
+    simulate_agentic_trace_workload_disagg_with_router_mode_and_telemetry,
+    simulate_agentic_trace_workload_with_router_mode,
+    simulate_agentic_trace_workload_with_router_mode_and_telemetry, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,
     simulate_concurrency_file_disagg_with_router_mode_and_format,
-    simulate_concurrency_file_disagg_with_router_mode_and_format_and_scaling_policy,
+    simulate_concurrency_file_disagg_with_router_mode_and_format_and_runtime_observers,
     simulate_concurrency_file_with_router_mode,
     simulate_concurrency_file_with_router_mode_and_format,
-    simulate_concurrency_file_with_router_mode_and_format_and_scaling_policy,
+    simulate_concurrency_file_with_router_mode_and_format_and_runtime_observers,
     simulate_concurrency_live_file, simulate_concurrency_live_file_with_router_mode,
     simulate_concurrency_live_file_with_router_mode_and_format,
     simulate_concurrency_live_file_with_router_mode_and_format_and_options,
@@ -86,29 +110,29 @@ pub use entrypoints::{
     simulate_concurrency_live_workload, simulate_concurrency_live_workload_with_router_mode,
     simulate_concurrency_live_workload_with_router_mode_and_options, simulate_concurrency_requests,
     simulate_concurrency_requests_disagg_with_router_mode,
-    simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy,
+    simulate_concurrency_requests_disagg_with_router_mode_and_runtime_observers,
     simulate_concurrency_requests_with_router_mode,
-    simulate_concurrency_requests_with_router_mode_and_scaling_policy,
+    simulate_concurrency_requests_with_router_mode_and_runtime_observers,
     simulate_concurrency_workload, simulate_concurrency_workload_disagg_with_router_mode,
     simulate_concurrency_workload_disagg_with_router_mode_and_options,
-    simulate_concurrency_workload_disagg_with_router_mode_and_options_and_scaling_policy,
+    simulate_concurrency_workload_disagg_with_router_mode_and_options_and_runtime_observers,
     simulate_concurrency_workload_with_router_mode,
     simulate_concurrency_workload_with_router_mode_and_options,
-    simulate_concurrency_workload_with_router_mode_and_options_and_scaling_policy,
+    simulate_concurrency_workload_with_router_mode_and_options_and_runtime_observers,
     simulate_loaded_trace_disagg_with_router_mode_and_capture_options,
     simulate_loaded_trace_disagg_with_router_mode_and_options,
-    simulate_loaded_trace_disagg_with_router_mode_and_options_and_scaling_policy,
+    simulate_loaded_trace_disagg_with_router_mode_and_options_and_runtime_observers,
     simulate_loaded_trace_live_with_router_mode,
     simulate_loaded_trace_live_with_router_mode_and_options,
     simulate_loaded_trace_with_router_mode_and_capture_options,
     simulate_loaded_trace_with_router_mode_and_options,
-    simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy, simulate_trace_file,
+    simulate_loaded_trace_with_router_mode_and_options_and_runtime_observers, simulate_trace_file,
     simulate_trace_file_disagg_with_router_mode,
     simulate_trace_file_disagg_with_router_mode_and_format,
-    simulate_trace_file_disagg_with_router_mode_and_format_and_scaling_policy,
+    simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observers,
     simulate_trace_file_with_router_mode, simulate_trace_file_with_router_mode_and_format,
-    simulate_trace_file_with_router_mode_and_format_and_scaling_policy, simulate_trace_live_file,
-    simulate_trace_live_file_with_router_mode,
+    simulate_trace_file_with_router_mode_and_format_and_runtime_observers,
+    simulate_trace_live_file, simulate_trace_live_file_with_router_mode,
     simulate_trace_live_file_with_router_mode_and_format,
     simulate_trace_live_file_with_router_mode_and_format_and_options, simulate_trace_live_requests,
     simulate_trace_live_requests_with_router_mode,
@@ -116,13 +140,13 @@ pub use entrypoints::{
     simulate_trace_live_workload_with_router_mode,
     simulate_trace_live_workload_with_router_mode_and_options, simulate_trace_requests,
     simulate_trace_requests_disagg_with_router_mode,
-    simulate_trace_requests_disagg_with_router_mode_and_scaling_policy,
+    simulate_trace_requests_disagg_with_router_mode_and_runtime_observers,
     simulate_trace_requests_with_router_mode,
-    simulate_trace_requests_with_router_mode_and_scaling_policy, simulate_trace_workload,
+    simulate_trace_requests_with_router_mode_and_runtime_observers, simulate_trace_workload,
     simulate_trace_workload_disagg_with_router_mode,
-    simulate_trace_workload_disagg_with_router_mode_and_options_and_scaling_policy,
+    simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_observers,
     simulate_trace_workload_with_router_mode,
-    simulate_trace_workload_with_router_mode_and_options_and_scaling_policy,
+    simulate_trace_workload_with_router_mode_and_options_and_runtime_observers,
 };
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;

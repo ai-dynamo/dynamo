@@ -16,7 +16,8 @@
 
 # Build the CPU-only Dynamo adapter image for Speech NIMs for the cascaded voice
 # pipeline example. The published Dynamo frontend image supplies the runtime;
-# this layer adds only the Riva client and adapter code.
+# this layer adds the Riva client and adapter code while preserving the base
+# image's protobuf and websockets versions.
 #
 #   DYNAMO_FRONTEND_IMAGE     Published Dynamo frontend base image
 #   CUSTOM_SPEECH_ADAPTER_IMAGE Output adapter image tag

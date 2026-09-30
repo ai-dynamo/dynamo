@@ -18,9 +18,10 @@ limitations under the License.
 # Nemotron Speech adapters for a cascaded voice agent
 
 This example exposes NVIDIA Speech NIM microservices serving Nemotron models
-through Dynamo's standard OpenAI-compatible APIs. A voice application such as Pipecat remains responsible
-for the ASR -> LLM -> TTS cascade, conversation state, turn taking, tools, and
-barge-in.
+through NVIDIA Dynamo's standard OpenAI-compatible APIs. It deploys independent
+ASR, LLM, and TTS endpoints with a standalone speech smoke test. A client
+application remains responsible for the cascade, conversation state, turn
+taking, tools, and barge-in.
 
 NVIDIA documents these containers as
 [NVIDIA Speech NIM microservices](https://docs.nvidia.com/nim/speech/latest/index.html),
@@ -29,15 +30,7 @@ NIM documentation specifies for gRPC access.
 
 ```mermaid
 flowchart LR
-    Browser["Browser UI"]
-
-    subgraph PipecatContainer["Container: Generic Assistant"]
-        direction TB
-        Pipecat["Same Pipecat pipeline"]
-        STTClient["OpenAI Realtime STT<br/>WebSocket"]
-        LLMClient["OpenAI-compatible LLM<br/>HTTP or Realtime WebSocket"]
-        TTSClient["OpenAI-compatible TTS<br/>Streaming HTTP"]
-    end
+    Client["Application / orchestrator"]
 
     subgraph DGD["DynamoGraphDeployment: nemotron-speech-cascaded"]
         direction LR
@@ -46,46 +39,39 @@ flowchart LR
             Frontend["Container: main<br/>Published Dynamo Frontend<br/>OpenAI APIs and routing"]
         end
 
-        subgraph ASRPod["Kubernetes Pod: SpeechAsrWorker"]
+        subgraph ASRPod["Kubernetes Pod: asr"]
             ASRWorker["Container: main<br/>Custom Dynamo ASR adapter<br/>CPU only"]
-            ASR["Container: asr-nim<br/>Same Nemotron ASR NIM<br/>1 GPU"]
+            ASR["Container: asr-nim<br/>Nemotron ASR NIM<br/>1 GPU"]
         end
 
         subgraph LLMPod["Kubernetes Pod: worker"]
             LLMWorker["Container: main<br/>Published Dynamo vLLM worker<br/>FP8, TP=1, 1 GPU"]
         end
 
-        subgraph TTSPod["Kubernetes Pod: SpeechTtsWorker"]
+        subgraph TTSPod["Kubernetes Pod: tts"]
             TTSWorker["Container: main<br/>Custom Dynamo TTS adapter<br/>CPU only"]
-            TTS["Container: tts-nim<br/>Same Magpie TTS NIM<br/>1 GPU"]
+            TTS["Container: tts-nim<br/>Magpie TTS NIM<br/>1 GPU"]
         end
     end
 
-    Browser <--> Pipecat
-
-    Pipecat --> STTClient
-    STTClient -->|"/v1/realtime"| Frontend
+    Client -->|"/v1/realtime (WebSocket)"| Frontend
     Frontend --> ASRWorker
     ASRWorker <-->|"Speech NIM streaming gRPC"| ASR
 
-    STTClient -.->|"transcript deltas"| LLMClient
-    Pipecat --> LLMClient
-    LLMClient -->|"/v1/chat/completions<br/>or /v1/realtime"| Frontend
+    Client -->|"/v1/chat/completions (HTTP)"| Frontend
     Frontend --> LLMWorker
 
-    Pipecat --> TTSClient
-    TTSClient -->|"/v1/audio/speech"| Frontend
+    Client -->|"/v1/audio/speech (HTTP)"| Frontend
     Frontend --> TTSWorker
     TTSWorker <-->|"Speech NIM online gRPC"| TTS
 
     classDef client fill:#eef6ff,stroke:#2563eb,color:#111827
     classDef dynamo fill:#fff7e6,stroke:#b45309,color:#111827
     classDef nim fill:#edf9f0,stroke:#15803d,color:#111827
-    class Browser,Pipecat,STTClient,LLMClient,TTSClient client
+    class Client client
     class Frontend,ASRWorker,LLMWorker,TTSWorker dynamo
     class ASR,TTS nim
 
-    style PipecatContainer fill:#f8fafc,stroke:#2563eb,stroke-width:2px
     style DGD fill:#f8fafc,stroke:#1d4ed8,stroke-width:4px
     style FrontendPod fill:#ffffff,stroke:#64748b,stroke-width:2px,stroke-dasharray:5 5
     style ASRPod fill:#ffffff,stroke:#64748b,stroke-width:2px,stroke-dasharray:5 5
@@ -94,12 +80,10 @@ flowchart LR
 ```
 
 The thick blue border is the DGD, dashed borders are Kubernetes pods, and each
-labeled inner box is a container. The Generic Assistant container runs outside
-the DGD.
+labeled inner box is a container. The application runs outside the DGD and is
+not included in this example.
 
-The deployment matches the Generic Assistant recipe in the Nemotron Voice
-Agent Blueprint so the same UI and workload can compare direct NIM access with
-Dynamo routing:
+The deployment serves these models:
 
 | Stage | Model |
 | --- | --- |
@@ -113,25 +97,33 @@ The manifest creates a Dynamo frontend, a vLLM worker, and separate ASR and TTS
 worker pods. Each speech worker runs a Speech NIM as a sidecar. The deployment
 uses three GPUs in total, one for each model.
 The ASR worker appends 400 ms of PCM silence on explicit commits to flush short
-utterances, matching the direct pipeline endpointing window without a real-time wait.
+utterances without a real-time wait.
 
 ### Prerequisites
 
 - A Kubernetes cluster with at least three NVIDIA GPUs and the
-  [Dynamo Kubernetes Platform](../../docs/fern/kubernetes/quickstart.mdx)
-  installed.
+  [Dynamo Kubernetes Platform](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
+  installed, with an operator and CRDs that support `nvidia.com/v1beta1`.
 - Docker and `envsubst`, plus access to a registry that the cluster can pull
   from.
 - An NGC API key with access to the ASR and TTS NIM images.
 - A Hugging Face token with access to the Nemotron LLM.
 - A ReadWriteMany storage class for the shared model cache.
 
+The runtime must support realtime transcription, streaming `/v1/audio/speech`,
+and `register_model(skip_model_assets=True)` for external audio models.
+Published Dynamo **1.5.0 is not compatible** with this example. Until a release
+includes these capabilities, use source-built runtime images with rebuilt Python
+bindings from a revision that provides that registration option. See the
+[frontend image build instructions](../../container/README.md#building-the-frontend-image).
+Building only the adapter image below does not rebuild the Dynamo runtime.
+
 Run all commands from the Dynamo repository root. Set the deployment values
 once:
 
 ```bash
 export NAMESPACE=voice-agent
-export DYNAMO_RUNTIME_VERSION=<compatible-published-version>
+export DYNAMO_RUNTIME_VERSION=<compatible-runtime-version>
 export DYNAMO_FRONTEND_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_RUNTIME_VERSION}"
 export DYNAMO_VLLM_IMAGE="nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_RUNTIME_VERSION}"
 export CUSTOM_IMAGE_REGISTRY=<registry-host>
@@ -144,25 +136,30 @@ export HF_TOKEN=<hugging-face-token>
 export RWX_STORAGE_CLASS=<rwx-storage-class>
 ```
 
-Use the same Dynamo runtime version for the two published images and the custom
-adapter image. Its semantic tag lets the Dynamo operator derive compatibility
+For source builds, replace `DYNAMO_FRONTEND_IMAGE` and `DYNAMO_VLLM_IMAGE` with
+your pushed image references before continuing. Use the same Dynamo runtime
+version for the runtime images and the custom adapter image. Its semantic tag
+lets the Dynamo operator derive compatibility
 directly from each component's main image. The custom image can use any OCI
 registry; the published Dynamo images are pulled directly from NVCR.
 
 ### 1. Build and push the adapter image
 
 The speech worker's main container is a small CPU-only adapter. It derives from
-the published Dynamo frontend image, which provides the Dynamo runtime without
+the selected Dynamo frontend image, which provides the Dynamo runtime without
 vLLM, and adds the Riva client and this example's adapter code:
 
 ```bash
 ./examples/nemotron_speech_cascaded_pipeline/container/build.sh
+printf '%s' "${CUSTOM_IMAGE_REGISTRY_PASSWORD}" | docker login "${CUSTOM_IMAGE_REGISTRY}" \
+  --username "${CUSTOM_IMAGE_REGISTRY_USER}" --password-stdin
 docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
 ```
 
-The selected published version must contain the Dynamo realtime and streaming
-speech support required by this example. Use branch-built images only when
-validating changes that have not reached a published release.
+The installer preserves the base image's `protobuf` and `websockets` versions
+using scoped `uv` overrides. These intentionally override Riva 2.26's declared
+constraints, so `uv pip check` still reports those metadata conflicts. Validation
+covers the adapter's gRPC paths, not the Riva client's WebSocket APIs.
 
 ### 2. Create the namespace and credentials
 
@@ -253,7 +250,7 @@ If a pod does not become ready, inspect its events and container logs:
 kubectl describe pod --namespace "${NAMESPACE}" \
   --selector nvidia.com/dynamo-graph-deployment-name=nemotron-speech-cascaded
 kubectl logs --namespace "${NAMESPACE}" \
-  --selector nvidia.com/dynamo-component=SpeechAsrWorker \
+  --selector nvidia.com/dynamo-component=asr \
   --container asr-nim --tail=100
 ```
 
@@ -262,13 +259,12 @@ kubectl logs --namespace "${NAMESPACE}" \
 Forward the generated frontend service:
 
 ```bash
-kubectl port-forward --namespace "${NAMESPACE}" --address 0.0.0.0 \
+kubectl port-forward --namespace "${NAMESPACE}" \
   service/nemotron-speech-cascaded-frontend 8000:8000
 ```
 
-Keep this command running for validation and the Blueprint demo. The broader
-bind lets a local Docker container reach the listener; do not expose port 8000
-through an external firewall because it does not provide authentication.
+Keep this command running during validation. It binds only to localhost; the
+example does not configure API authentication.
 
 The deployment exposes:
 
@@ -287,6 +283,19 @@ python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py
 The check reports TTS TTFB, ASR first-transcript latency, PCM RMS, and the final
 transcript. It fails on an API error, silent audio, or an empty transcript.
 
+Verify the LLM separately:
+
+```bash
+curl --fail --silent --show-error http://localhost:8000/v1/chat/completions \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "model": "nvidia/nemotron-3-nano",
+    "messages": [{"role": "user", "content": "Reply with one short greeting."}],
+    "max_tokens": 64,
+    "chat_template_kwargs": {"enable_thinking": false}
+  }'
+```
+
 ### Measure ASR-to-LLM handoff
 
 The smoke client can pass ASR output to the LLM and report time to first text
@@ -297,15 +306,19 @@ python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
   --llm-transport chat
 ```
 
-To test LLM prefill while speech is still being transcribed, use a Dynamo vLLM
-image containing [incremental realtime text support](https://github.com/ai-dynamo/dynamo/pull/14326),
-add `--realtime` to the `VllmWorker` arguments in `deploy/agg.yaml`, and redeploy
-the DGD. Then run:
+To test LLM prefill while speech is still being transcribed, use Dynamo
+frontend and vLLM images containing
+[incremental realtime text support](https://github.com/ai-dynamo/dynamo/pull/14326),
+add `--realtime` to the `VllmWorker` arguments in `deploy/agg.yaml`, and keep
+vLLM prefix caching enabled. Build frontend, worker, and speech-adapter images
+from a combined revision containing [#12567](https://github.com/ai-dynamo/dynamo/pull/12567)
+and #14326: the adapter also needs #12567's native
+`register_model(skip_model_assets=True)` binding. Use published images only
+after both capabilities are released, then redeploy the DGD. Run:
 
 > [!NOTE]
 > The incremental text events are an experimental Dynamo extension and may
 > change before stabilization.
-
 
 ```bash
 python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
@@ -314,107 +327,92 @@ python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
 
 The smoke client demonstrates the endpoint flow an external orchestrator can
 use: it opens separate ASR and LLM WebSockets through the Dynamo frontend,
-forwards ASR deltas with Dynamo's `input_text.append` extension, commits the
-final transcript, and then requests a response. If ASR revises an interim
-hypothesis, it clears the speculative text and sends the authoritative final
+forwards append-only ASR deltas with Dynamo's `input_text.append` extension,
+commits the final transcript, and then requests a response. At ASR completion,
+if the final transcript differs from the forwarded text, it clears the
+speculative text and sends the authoritative final
 transcript with `conversation.item.create`, without starting more speculative
-warming at turn end. Unchanged text uses `input_text.commit`. The pinned
-Blueprint Pipecat profile continues to use streamed
-chat completions and does not yet implement this experimental handoff.
+warming at turn end. Unchanged text uses `input_text.commit`. This is a
+single-turn endpoint smoke test, not a full voice application; it does not
+synthesize the LLM response or add an integration to Pipecat or the Blueprint.
 
 For an established Realtime connection without overlapping prefill, run
 `--llm-transport realtime-atomic`. Compare it with `realtime` using the same
 image, model, speech, instructions, and output-token limit.
 `llm_ttft_from_asr_final_ms` measures the post-transcription handoff, while
 `asr_start_to_llm_first_token_ms` covers the full ASR-to-first-token path.
+These measurements include final-text correction and handoff, but do not prove
+that prefix blocks were reused. Short utterances or frequently revised prefixes
+may provide no overlap benefit. Use matched longer utterances and inspect
+backend prefix-cache reuse when evaluating latency.
 
 The TTS adapter requires a Dynamo runtime with streaming
-`/v1/audio/speech` support. The realtime ASR adapter disables server VAD
-because Pipecat's local VAD and Smart Turn processors commit the input audio.
+`/v1/audio/speech` support. The realtime ASR adapter uses explicit client commits
+(`turn_detection: null`); it does not implement server-side voice activity
+detection (VAD).
 
-## Run the Blueprint UI and Pipecat
+Each ASR worker admits up to 32 active turns across all clients, configurable
+with `--max-concurrent-turns`. Excess turns receive a transcription failure
+immediately rather than waiting for a consumer thread. The TTS adapter rejects
+unsupported cloning and generation controls instead of silently ignoring them.
 
-The [Nemotron Voice Agent Blueprint](https://github.com/NVIDIA-AI-Blueprints/nemotron-voice-agent)
-provides the browser UI and the Generic Assistant Pipecat pipeline. A temporary
-companion Dynamo profile in the private `ptarasiewiczNV/nemotron-voice-agent`
-fork adds OpenAI-compatible clients for this deployment. Access to that fork is
-required until the companion change is upstreamed.
+## External Orchestration
 
-There is no separate Pipecat command: the Blueprint Compose service runs both
-Pipecat and the UI. Run the following steps on the machine that has Kubernetes
-and Docker access.
+Connect these endpoints to an external voice application, for example:
 
-### 1. Keep the Dynamo frontend reachable from Docker
+- [Pipecat](https://docs.pipecat.ai/pipecat/learn/pipeline): build an ASR -> LLM ->
+  TTS pipeline with service clients that use the Dynamo endpoints below.
+- [NVIDIA Nemotron Voice Agent Blueprint](https://github.com/NVIDIA-AI-Blueprints/nemotron-voice-agent):
+  reuse its browser UI and Pipecat pipeline, adapting its model-service clients
+  to call Dynamo instead of the model backends directly.
 
-Keep the port-forward from deployment step 5 running. The Compose container
-resolves `host.docker.internal` to the Docker host, where that listener
-exposes Dynamo on port 8000. If you stopped it, run the command from step 5
-again before starting the Blueprint.
+These are optional integrations, not dependencies of this example. Direct Riva
+gRPC clients need HTTP/WebSocket replacements, not just a different server URL.
+Use `http://localhost:8000/v1` for HTTP and
+`ws://localhost:8000/v1/realtime` for transcription:
 
-### 2. Start the Blueprint application
+| Stage | Client behavior |
+| --- | --- |
+| ASR | Use model `nemotron-asr-streaming` and `session.type="transcription"`. Send base64-encoded 24 kHz mono PCM16 audio with `input_audio_buffer.append`, then `input_audio_buffer.commit` at the end of each turn. |
+| LLM | Send the transcript and conversation history to `/v1/chat/completions` with model `nvidia/nemotron-3-nano` and `stream: true`. |
+| TTS | Send generated text to `/v1/audio/speech` with model `nvidia/magpie-tts-multilingual`, voice `Magpie-Multilingual.EN-US.Aria`, and `response_format="pcm"`; play the 24 kHz mono PCM16 response chunks as they arrive. |
 
-In a second terminal:
+Keep turn detection, conversation history, and interruptions in the application.
+To overlap LLM generation with speech playback, aggregate generated text into
+sentence-sized TTS requests rather than waiting for the full LLM response.
+The included `smoke_speech_loop.py` demonstrates the ASR and TTS wire contracts;
+no orchestrator installation is required to validate the deployment.
 
-```bash
-git clone git@github.com:ptarasiewiczNV/nemotron-voice-agent.git
-cd nemotron-voice-agent
-git checkout e33d9bb86016239a35fdae2d1360dd4d2019257e
-
-cat > .env <<'EOF'
-NVIDIA_API_KEY=not-used
-TRANSPORT_SELECTION=websocket
-PIPELINE_TLS=true
-EOF
-
-docker compose --profile generic-assistant/dynamo up --detach --build
-docker compose --profile generic-assistant/dynamo ps
-curl --fail --insecure https://localhost:7860/health
-```
-
-`TRANSPORT_SELECTION=websocket` makes the demo usable through a single SSH
-tunnel. The Dynamo profile connects ASR, LLM, and TTS to
-`host.docker.internal:8000`; it does not start duplicate model containers.
-
-Follow the Pipecat logs while testing:
-
-```bash
-docker compose --profile generic-assistant/dynamo \
-  logs --follow generic-assistant-dynamo
-```
-
-### 3. Open the UI
-
-For a local Kubernetes/Docker host, open `https://localhost:7860`. For a remote
-host, create the tunnel from your workstation:
-
-```bash
-ssh -N -L 7860:127.0.0.1:7860 <user>@<remote-host>
-```
-
-Then open `https://localhost:7860`, accept the development certificate, allow
-microphone access, and start a conversation. This uses the same browser UI,
-prompt, Pipecat pipeline, VAD, and turn processor as the direct NIM profile;
-only the model service path differs.
-
-Stop the application with:
-
-```bash
-docker compose --profile generic-assistant/dynamo down
-```
+## Clean Up
 
 Stop the Kubernetes port-forward with `Ctrl-C` in its terminal.
 
-## Tests
-
-The unit tests mock the Speech NIM services while exercising the public Dynamo
-event and audio contracts:
+Remove the model deployment to release its GPUs. The model cache and credentials
+remain available for the next deployment:
 
 ```bash
-python3 -m pip install -r examples/nemotron_speech_cascaded_pipeline/requirements.txt \
-  pytest pytest-asyncio
+kubectl delete dgd nemotron-speech-cascaded --namespace "${NAMESPACE}"
+```
+
+## Tests
+
+Running the adapter workers or unit tests outside the container requires Python
+3.11 or newer.
+
+The example's unit tests cover connection configuration, endpoint resolution,
+and the external ASR-to-LLM handoff without installing the Riva client.
+Model-registration regressions are covered
+by `lib/bindings/python/tests/test_runtime_data_discovery.py` in the regular
+Dynamo binding suite. These tests do not cover the Riva adapters' streaming or
+cancellation behavior; use the deployed smoke test for functional validation.
+
+```bash
+python3 -m pip install aiohttp pytest pytest-asyncio
 PYTHONPATH=components/src:lib/bindings/python/src \
   python3 -m pytest -xvv examples/nemotron_speech_cascaded_pipeline/tests
-bash -n examples/nemotron_speech_cascaded_pipeline/{launch_workers.sh,container/build.sh}
+bash -n examples/nemotron_speech_cascaded_pipeline/launch_workers.sh
+bash -n examples/nemotron_speech_cascaded_pipeline/container/build.sh
+bash -n examples/nemotron_speech_cascaded_pipeline/container/install.sh
 pre-commit run check-yaml --files examples/nemotron_speech_cascaded_pipeline/deploy/agg.yaml
 ```
 
