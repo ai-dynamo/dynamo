@@ -94,7 +94,7 @@ RUN apt-get update && \
 # _sycl_vmm requires DPC++ for its -fsycl compilation.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+        intel-oneapi-compiler-dpcpp-cpp-2026.0 && \
     ln -s "$(find /opt/intel/oneapi/compiler -type f -name icpx -print -quit)" /usr/local/bin/icpx && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
