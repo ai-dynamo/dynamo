@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end coverage for discovery-driven cancellation while establishing a
+//! TCP end-to-end coverage for discovery-driven cancellation while establishing a
 //! response stream and graceful draining after the stream is established.
+//! QUIC also cancels active streams on discovery removal and has no drain guarantee.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,10 @@ use dynamo_runtime::{
     distributed::DistributedConfig,
     engine::{AsyncEngine, AsyncEngineContextProvider},
     error::{DynamoError, ErrorType, match_error_chain},
-    pipeline::{ManyOut, ResponseStream, SingleIn, network::Ingress},
+    pipeline::{
+        ManyOut, ResponseStream, SingleIn,
+        network::{Ingress, ResponsePlaneMode},
+    },
     protocols::maybe_error::MaybeError,
 };
 
@@ -210,10 +214,14 @@ async fn assert_removal_drains_established_response_stream(distributed: &Distrib
 }
 
 #[tokio::test]
-async fn worker_removal_cancels_pending_handshakes_but_drains_established_streams() {
+async fn tcp_worker_removal_cancels_pending_handshakes_but_drains_established_streams() {
     // Both scenarios share the process-wide request-plane listener and its runtime.
     let runtime = Runtime::from_current().unwrap();
-    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+    let config = DistributedConfig {
+        response_plane: Some(ResponsePlaneMode::Tcp),
+        ..DistributedConfig::process_local()
+    };
+    let distributed = DistributedRuntime::new(runtime.clone(), config)
         .await
         .unwrap();
 
