@@ -3,15 +3,14 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 mod aggregator;
 mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use nvext::NvExt;
 
 /// Request for video generation (/v1/videos endpoint)
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvCreateVideoRequest {
     /// The text prompt for video generation
     pub prompt: String,
@@ -115,7 +114,7 @@ pub struct VideoData {
 }
 
 /// Response structure for video generation
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvVideosResponse {
     /// Unique identifier for the response
     pub id: String,
@@ -176,15 +175,6 @@ impl NvVideosResponse {
             error: None,
             inference_time_s: None,
         }
-    }
-}
-
-/// Implements `NvExtProvider` for `NvCreateVideoRequest`,
-/// providing access to NVIDIA-specific extensions.
-impl NvExtProvider for NvCreateVideoRequest {
-    /// Returns a reference to the optional `NvExt` extension, if available.
-    fn nvext(&self) -> Option<&NvExt> {
-        self.nvext.as_ref()
     }
 }
 

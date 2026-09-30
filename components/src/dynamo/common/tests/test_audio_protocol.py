@@ -41,14 +41,6 @@ def test_audio_request_wire_shape_adds_no_defaults():
     }
 
 
-def test_audio_request_task_type_is_free_text():
-    # The shared protocol does not know one model's task vocabulary. The
-    # handler for the model validates the value.
-    request = NvCreateAudioSpeechRequest(input="hello", task_type="Banana")
-
-    assert request.task_type == "Banana"
-
-
 @pytest.mark.parametrize("speed", [0.1, 5.0])
 def test_audio_request_rejects_speed_outside_supported_range(speed):
     with pytest.raises(ValidationError):

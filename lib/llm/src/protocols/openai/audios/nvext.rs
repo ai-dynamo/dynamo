@@ -1,20 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-pub trait NvExtProvider {
-    fn nvext(&self) -> Option<&NvExt>;
-}
-
 /// NVIDIA extensions to the Audio Speech API
-#[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Default, Debug, Clone)]
 pub struct NvExt {
     /// Annotations for SSE stream events
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
     pub annotations: Option<Vec<String>>,
 
     /// Internal frontend-to-worker compatibility signal.
@@ -25,7 +19,6 @@ pub struct NvExt {
     ///
     /// TODO(v1.7): Remove after v1.4 leaves the N-2 compatibility window.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
     pub frontend_accepts_audio_chunks: Option<bool>,
 
     /// Classifier-free guidance scale (Audex only, hence an extension rather
@@ -34,29 +27,5 @@ pub struct NvExt {
     /// unknown `nvext` keys, so without the field the client's value never
     /// reaches the worker and guidance is silently never applied.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
     pub cfg_scale: Option<f64>,
-}
-
-impl Default for NvExt {
-    fn default() -> Self {
-        NvExt::builder().build().unwrap()
-    }
-}
-
-impl NvExt {
-    pub fn builder() -> NvExtBuilder {
-        NvExtBuilder::default()
-    }
-}
-
-impl NvExtBuilder {
-    pub fn add_annotation(&mut self, annotation: impl Into<String>) -> &mut Self {
-        self.annotations
-            .get_or_insert_with(|| Some(vec![]))
-            .as_mut()
-            .expect("annotations should always be Some(Vec)")
-            .push(annotation.into());
-        self
-    }
 }

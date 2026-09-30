@@ -10,7 +10,7 @@ use crate::engines::ValidateRequest;
 mod aggregator;
 mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use nvext::NvExt;
 
 /// Request for audio speech generation (/v1/audio/speech endpoint).
 ///
@@ -132,7 +132,7 @@ pub struct AudioData {
 }
 
 /// Response structure for audio speech generation
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvAudioSpeechResponse {
     /// Unique identifier for the response
     pub id: String,
@@ -201,13 +201,6 @@ impl ValidateRequest for NvCreateAudioSpeechRequest {
         // `Validate` and `ValidateRequest` share the method name, so the
         // call names the trait.
         Validate::validate(self).map_err(anyhow::Error::from)
-    }
-}
-
-/// Implements `NvExtProvider` for `NvCreateAudioSpeechRequest`.
-impl NvExtProvider for NvCreateAudioSpeechRequest {
-    fn nvext(&self) -> Option<&NvExt> {
-        self.nvext.as_ref()
     }
 }
 
