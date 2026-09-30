@@ -19,7 +19,12 @@ pytest.importorskip(
 from aisimulate.sweeper.config import OptimizationTarget, SmartSearchConfig
 from aisimulate.sweeper.deploy import build_backend_deployment
 from aisimulate.sweeper.kv_estimate import resolve_backend_version
-from aisimulate.sweeper.provider import CandidateContext, SweepContext
+from aisimulate.sweeper.provider import (
+    AdapterReplaySpec,
+    CandidateContext,
+    RuntimeHookSpec,
+    SweepContext,
+)
 from aisimulate.sweeper.replay import (
     BackendDeploymentSpec,
     ReplayOutputRequirements,
@@ -265,23 +270,24 @@ def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:
     )
 
 
+def _fixed_engine_args(backend: str, role: str, dp_size: int = 1) -> dict:
+    return {
+        "engine_type": backend,
+        "worker_type": role,
+        "dp_size": dp_size,
+        "block_size": 4,
+        "num_gpu_blocks": 64,
+        "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+    }
+
+
 @pytest.mark.pre_merge
 @pytest.mark.timeout(30)
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
 @pytest.mark.parametrize("prefill_dp,decode_dp", [(2, 1), (1, 2), (2, 4)])
 def test_real_runner_supports_disaggregated_attention_dp(
     backend: str, prefill_dp: int, decode_dp: int
 ) -> None:
-    def role_args(role: str, dp_size: int) -> dict:
-        return {
-            "engine_type": backend,
-            "worker_type": role,
-            "dp_size": dp_size,
-            "block_size": 4,
-            "num_gpu_blocks": 64,
-            "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
-        }
-
     factory = DynamoReplayRunnerFactory()
     assert factory.capabilities().supports_attention_dp("disagg", prefill_dp, decode_dp)
     spec = ReplaySpec(
@@ -289,8 +295,8 @@ def test_real_runner_supports_disaggregated_attention_dp(
             deployment_mode="disagg",
             backend=backend,
             backend_version="current",
-            prefill_engine_args=role_args("prefill", prefill_dp),
-            decode_engine_args=role_args("decode", decode_dp),
+            prefill_engine_args=_fixed_engine_args(backend, "prefill", prefill_dp),
+            decode_engine_args=_fixed_engine_args(backend, "decode", decode_dp),
             num_prefill_workers=1,
             num_decode_workers=1,
         ),
@@ -320,3 +326,149 @@ def test_real_runner_supports_disaggregated_attention_dp(
         assert {(route["logical_worker_id"], route["dp_rank"]) for route in routes} == {
             (0, rank) for rank in range(dp_size)
         }
+
+
+@pytest.mark.pre_merge
+@pytest.mark.parametrize(
+    "prefill_backend,decode_backend", [("vllm", "sglang"), ("trtllm", "vllm")]
+)
+def test_real_runner_preserves_native_mixed_backend_rejection(
+    prefill_backend: str, decode_backend: str
+) -> None:
+    spec = ReplaySpec(
+        backend_deployment=BackendDeploymentSpec(
+            deployment_mode="disagg",
+            backend=prefill_backend,
+            backend_version="current",
+            prefill_engine_args=_fixed_engine_args(prefill_backend, "prefill", 2),
+            decode_engine_args=_fixed_engine_args(decode_backend, "decode", 4),
+            num_prefill_workers=1,
+            num_decode_workers=1,
+        ),
+        workload={"isl": 16, "osl": 2, "request_count": 1, "concurrency": 1},
+        goal={"target": "throughput"},
+    )
+    runner = DynamoReplayRunnerFactory().create(0)
+    try:
+        with pytest.raises(
+            Exception,
+            match="replay invariant violated: offline disaggregated replay requires matching backend engine types",
+        ):
+            runner.run(spec)
+    finally:
+        runner.close()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.timeout(30)
+def test_real_runner_supports_single_target_kv_routing() -> None:
+    spec = ReplaySpec(
+        backend_deployment=BackendDeploymentSpec(
+            deployment_mode="agg",
+            backend="vllm",
+            backend_version="current",
+            agg_engine_args=_fixed_engine_args("vllm", "aggregated"),
+            num_workers=1,
+        ),
+        workload={"isl": 16, "osl": 2, "request_count": 8, "concurrency": 4},
+        goal={"target": "goodput", "sla": {"ttft_ms": 1000.0, "itl_ms": 1000.0}},
+        adapters={
+            "dynamo.router": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.router",
+                        kind="placement_policy",
+                        api_version=1,
+                        config={"router_mode": "kv_router", "router_config": {}},
+                    ),
+                )
+            )
+        },
+    )
+    runner = DynamoReplayRunnerFactory().create(0)
+    try:
+        report = runner.run(
+            spec, output_requirements=ReplayOutputRequirements(capture_per_request=True)
+        )
+    finally:
+        runner.close()
+
+    assert report.metrics["completed_requests"] == 8
+    records = report.metadata["native_report"]["per_request"]
+    assert len(records) == 8
+    assert all(len(record["routing_history"]) == 1 for record in records)
+    assert all(
+        (route["logical_worker_id"], route["dp_rank"]) == (0, 0)
+        for record in records
+        for route in record["routing_history"]
+    )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
+def test_real_runner_preserves_disaggregated_agentic_dependencies(
+    backend: str, router_mode: str
+) -> None:
+    trace = (
+        Path(__file__).parent
+        / "e2e/configs/unified_cli/fixtures/traces/agentic-mooncake.jsonl"
+    )
+    spec = ReplaySpec(
+        backend_deployment=BackendDeploymentSpec(
+            deployment_mode="disagg",
+            backend=backend,
+            backend_version="current",
+            prefill_engine_args=_fixed_engine_args(backend, "prefill", 2),
+            decode_engine_args=_fixed_engine_args(backend, "decode", 4),
+            num_prefill_workers=1,
+            num_decode_workers=1,
+            performance_model_metadata={
+                "decode": {"config": {"model": "target-model"}}
+            },
+        ),
+        workload={
+            "trace_path": str(trace),
+            "trace_format": "agentic_mooncake",
+            "trace_block_size": 4,
+            "agentic_lanes": 1,
+        },
+        goal={"target": "throughput"},
+        adapters={
+            "dynamo.router": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.router",
+                        kind="placement_policy",
+                        api_version=1,
+                        config={"router_mode": router_mode, "router_config": {}},
+                    ),
+                )
+            )
+        },
+    )
+    runner = DynamoReplayRunnerFactory().create(0)
+    try:
+        report = runner.run(
+            spec, output_requirements=ReplayOutputRequirements(capture_per_request=True)
+        )
+    finally:
+        runner.close()
+
+    assert report.metrics["completed_requests"] == 3
+    assert report.metrics["total_output_tokens"] == 6
+    assert report.metrics["completed_trajectories"] == 1
+    assert report.metrics["incomplete_trajectories"] == 0
+    assert report.metadata["agentic_qualification"] == "functional_only"
+    records = {
+        record["request_id"]: record
+        for record in report.metadata["native_report"]["per_request"]
+    }
+    root, child, join = (
+        records[name] for name in ("agent-root", "agent-child", "agent-join")
+    )
+    assert child["dispatched_at_ms"] == pytest.approx(root["dispatched_at_ms"] + 5)
+    assert join["dispatched_at_ms"] == pytest.approx(
+        max(root["terminal_time_ms"], child["terminal_time_ms"]) + 1
+    )

@@ -8,7 +8,6 @@ use dynamo_kv_router::config::KvRouterConfig;
 
 use super::online;
 use super::validate::{
-    validate_offline_concurrency_args, validate_offline_disagg_concurrency_args,
     validate_offline_disagg_replay_args, validate_offline_replay_args,
     validate_online_concurrency_args, validate_online_replay_args,
 };
@@ -199,7 +198,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_options_and_runtime_observers(
         telemetry,
     } = observers;
     let args = args.normalized()?;
-    validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
+    validate_offline_replay_args(&args)?;
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
@@ -256,7 +255,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_capture_options(
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    validate_offline_replay_args(&args, num_workers, router_mode, false)?;
+    validate_offline_replay_args(&args)?;
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
@@ -321,7 +320,7 @@ pub fn simulate_loaded_trace_disagg_with_router_mode_and_options_and_runtime_obs
         telemetry,
     } = observers;
     let config = config.normalized()?;
-    validate_offline_disagg_replay_args(&config, router_mode)?;
+    validate_offline_disagg_replay_args(&config)?;
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
@@ -373,7 +372,7 @@ pub fn simulate_loaded_trace_disagg_with_router_mode_and_capture_options(
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
-    validate_offline_disagg_replay_args(&config, router_mode)?;
+    validate_offline_disagg_replay_args(&config)?;
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
@@ -580,7 +579,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
         telemetry,
     } = observers;
     let args = args.normalized()?;
-    validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
+    validate_offline_replay_args(&args)?;
     if is_agentic_trace_format(trace_format) {
         anyhow::ensure!(
             scaling_policy.is_none(),
@@ -755,7 +754,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observ
         telemetry,
     } = observers;
     let config = config.normalized()?;
-    validate_offline_disagg_replay_args(&config, router_mode)?;
+    validate_offline_disagg_replay_args(&config)?;
     if is_agentic_trace_format(trace_format) {
         anyhow::ensure!(
             scaling_policy.is_none(),
@@ -1039,10 +1038,7 @@ pub fn simulate_trace_requests_with_router_mode_and_runtime_observers(
         telemetry,
     } = observers;
     let args = args.normalized()?;
-    validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
-    if requests.is_empty() {
-        bail!("trace replay requires at least one request");
-    }
+    validate_offline_replay_args(&args)?;
 
     let report = crate::replay::offline::simulate_trace_with_scaling_policy(
         args,
@@ -1101,10 +1097,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
         telemetry,
     } = observers;
     let config = config.normalized()?;
-    validate_offline_disagg_replay_args(&config, router_mode)?;
-    if requests.is_empty() {
-        bail!("trace replay requires at least one request");
-    }
+    validate_offline_disagg_replay_args(&config)?;
 
     let report = crate::replay::offline::simulate_trace_disagg_with_scaling_policy(
         config,
@@ -1301,13 +1294,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format_and_runtime_observe
         telemetry,
     } = observers;
     let args = args.normalized()?;
-    validate_offline_concurrency_args(
-        &args,
-        num_workers,
-        max_in_flight,
-        router_mode,
-        scaling_policy.is_some(),
-    )?;
+    validate_offline_replay_args(&args)?;
     if is_agentic_trace_format(trace_format) {
         bail!(
             "{} trace format is not supported with replay_concurrency",
@@ -1440,7 +1427,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format_and_runtime_
         telemetry,
     } = observers;
     let config = config.normalized()?;
-    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    validate_offline_disagg_replay_args(&config)?;
     if is_agentic_trace_format(trace_format) {
         bail!(
             "{} trace format is not supported with replay_concurrency",
@@ -1730,13 +1717,7 @@ pub fn simulate_concurrency_requests_with_router_mode_and_runtime_observers(
         telemetry,
     } = observers;
     let args = args.normalized()?;
-    validate_offline_concurrency_args(
-        &args,
-        num_workers,
-        max_in_flight,
-        router_mode,
-        scaling_policy.is_some(),
-    )?;
+    validate_offline_replay_args(&args)?;
     if requests.is_empty() {
         bail!("concurrency replay requires at least one request");
     }
@@ -1797,7 +1778,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode_and_runtime_observe
         telemetry,
     } = observers;
     let config = config.normalized()?;
-    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    validate_offline_disagg_replay_args(&config)?;
     if requests.is_empty() {
         bail!("concurrency replay requires at least one request");
     }
@@ -1900,7 +1881,7 @@ pub fn simulate_trace_workload_with_router_mode_and_options_and_runtime_observer
         telemetry,
     } = observers;
     let args = args.normalized()?;
-    validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
+    validate_offline_replay_args(&args)?;
     let report = crate::replay::offline::simulate_trace_workload_with_scaling_policy(
         args,
         router_config,
@@ -1980,7 +1961,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_o
         telemetry,
     } = observers;
     let config = config.normalized()?;
-    validate_offline_disagg_replay_args(&config, router_mode)?;
+    validate_offline_disagg_replay_args(&config)?;
     let report = crate::replay::offline::simulate_trace_workload_disagg_with_scaling_policy(
         config,
         router_config,
@@ -2150,13 +2131,7 @@ pub fn simulate_concurrency_workload_with_router_mode_and_options_and_runtime_ob
         telemetry,
     } = observers;
     let args = args.normalized()?;
-    validate_offline_concurrency_args(
-        &args,
-        num_workers,
-        max_in_flight,
-        router_mode,
-        scaling_policy.is_some(),
-    )?;
+    validate_offline_replay_args(&args)?;
     crate::replay::offline::simulate_concurrency_workload_with_scaling_policy(
         args,
         router_config,
@@ -2240,7 +2215,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options_and_run
         telemetry,
     } = observers;
     let config = config.normalized()?;
-    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    validate_offline_disagg_replay_args(&config)?;
     crate::replay::offline::simulate_concurrency_workload_disagg_with_scaling_policy(
         config,
         router_config,
@@ -2300,7 +2275,7 @@ pub fn simulate_agentic_trace_workload_with_router_mode_and_telemetry(
     telemetry: Option<super::ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    validate_offline_replay_args(&args, num_workers, router_mode, false)?;
+    validate_offline_replay_args(&args)?;
     crate::replay::offline::simulate_agentic_trace_workload(
         args,
         router_config,
@@ -2357,7 +2332,7 @@ pub fn simulate_agentic_trace_workload_disagg_with_router_mode_and_telemetry(
     telemetry: Option<super::ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
-    validate_offline_disagg_replay_args(&config, router_mode)?;
+    validate_offline_disagg_replay_args(&config)?;
     crate::replay::offline::simulate_agentic_trace_workload_disagg(
         config,
         router_config,
@@ -2644,13 +2619,153 @@ mod tests {
         assert!(error.to_string().contains("first_arrival_timestamp_ms"));
     }
 
+    #[rstest]
+    fn single_target_kv_router_replays_trace_and_concurrency(
+        #[values(EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm)] engine_type: EngineType,
+    ) {
+        let args = MockEngineArgs {
+            engine_type,
+            ..replay_test_args()
+        };
+        let trace_report = simulate_trace_requests_with_router_mode(
+            args.clone(),
+            None,
+            None,
+            attention_dp_requests(8, 10.0),
+            1,
+            1.0,
+            ReplayRouterMode::KvRouter,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+        let concurrency_report = simulate_concurrency_requests_with_router_mode(
+            args,
+            None,
+            None,
+            attention_dp_requests(8, 10.0),
+            4,
+            1,
+            ReplayRouterMode::KvRouter,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+        assert_eq!(trace_report.request_counts.completed_requests, 8);
+        assert_eq!(concurrency_report.request_counts.completed_requests, 8);
+    }
+
+    #[test]
+    fn offline_replay_delegates_invalid_topology_to_aisimulate() {
+        let assert_invalid_spec = |error: anyhow::Error, message: &str| {
+            assert!(
+                matches!(
+                    error.downcast_ref::<aisimulate_core::replay::ReplayError>(),
+                    Some(aisimulate_core::replay::ReplayError::InvalidSpec(_))
+                ),
+                "expected native AISimulate validation, got {error:#}"
+            );
+            assert!(error.to_string().contains(message), "{error:#}");
+        };
+        for (workers, concurrency, message) in [
+            (0, 1, "aggregated pool must start with at least one worker"),
+            (1, 0, "max_in_flight must be positive"),
+        ] {
+            let error = simulate_concurrency_requests(
+                replay_test_args(),
+                attention_dp_requests(1, 0.0),
+                concurrency,
+                workers,
+            )
+            .unwrap_err();
+            assert_invalid_spec(error, message);
+        }
+        for (prefill, decode, concurrency, message) in [
+            (0, 1, 1, "prefill pool must start with at least one worker"),
+            (1, 0, 1, "decode pool must start with at least one worker"),
+            (1, 1, 0, "max_in_flight must be positive"),
+        ] {
+            let mut config = disagg_test_config();
+            config.num_prefill_workers = prefill;
+            config.num_decode_workers = decode;
+            let error = simulate_concurrency_requests_disagg_with_router_mode(
+                config,
+                None,
+                None,
+                attention_dp_requests(1, 0.0),
+                concurrency,
+                ReplayRouterMode::RoundRobin,
+                SlaThresholds::default(),
+            )
+            .unwrap_err();
+            assert_invalid_spec(error, message);
+        }
+    }
+
+    #[test]
+    fn offline_request_entrypoints_still_reject_empty_workloads() {
+        let errors = [
+            simulate_trace_requests_with_router_mode(
+                replay_test_args(),
+                None,
+                None,
+                vec![],
+                1,
+                1.0,
+                ReplayRouterMode::RoundRobin,
+                SlaThresholds::default(),
+            )
+            .unwrap_err(),
+            simulate_trace_requests_disagg_with_router_mode(
+                disagg_test_config(),
+                None,
+                None,
+                vec![],
+                1.0,
+                ReplayRouterMode::RoundRobin,
+                SlaThresholds::default(),
+            )
+            .unwrap_err(),
+            simulate_concurrency_requests(replay_test_args(), vec![], 1, 1).unwrap_err(),
+            simulate_concurrency_requests_disagg_with_router_mode(
+                disagg_test_config(),
+                None,
+                None,
+                vec![],
+                1,
+                ReplayRouterMode::RoundRobin,
+                SlaThresholds::default(),
+            )
+            .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(error.to_string().contains("requires at least one"));
+        }
+    }
+
+    #[rstest]
+    fn offline_handoff_conformance_supports_native_backends(
+        #[values(EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm)] engine_type: EngineType,
+        #[values(
+            crate::common::protocols::KvTransferTimingMode::FullPrompt,
+            crate::common::protocols::KvTransferTimingMode::DestinationMissing
+        )]
+        transfer_timing: crate::common::protocols::KvTransferTimingMode,
+    ) {
+        crate::replay::run_offline_handoff_conformance(engine_type, transfer_timing)
+            .unwrap()
+            .validate()
+            .unwrap();
+    }
+
     const PREFILL_DP_SIZE: u32 = 2;
     const DECODE_DP_SIZE: u32 = 4;
 
     type RankSet = BTreeSet<(usize, u32)>;
 
-    fn attention_dp_disagg_config(engine_type: EngineType) -> OfflineDisaggReplayConfig {
-        let role_args = |worker_type: WorkerType, dp_size: u32| {
+    fn attention_dp_disagg_config(
+        prefill_engine: EngineType,
+        decode_engine: EngineType,
+    ) -> OfflineDisaggReplayConfig {
+        let role_args = |engine_type, worker_type: WorkerType, dp_size: u32| {
             MockEngineArgs::builder()
                 .engine_type(engine_type)
                 .worker_type(worker_type)
@@ -2662,8 +2777,8 @@ mod tests {
                 .unwrap()
         };
         OfflineDisaggReplayConfig {
-            prefill_args: role_args(WorkerType::Prefill, PREFILL_DP_SIZE),
-            decode_args: role_args(WorkerType::Decode, DECODE_DP_SIZE),
+            prefill_args: role_args(prefill_engine, WorkerType::Prefill, PREFILL_DP_SIZE),
+            decode_args: role_args(decode_engine, WorkerType::Decode, DECODE_DP_SIZE),
             num_prefill_workers: 1,
             num_decode_workers: 1,
         }
@@ -2721,12 +2836,15 @@ mod tests {
     #[rstest]
     #[case::round_robin(ReplayRouterMode::RoundRobin)]
     #[case::kv_router(ReplayRouterMode::KvRouter)]
-    fn disagg_attention_dp_resolves_ranks_without_aliasing(
+    fn disagg_attention_dp_uses_native_backend_support(
         #[case] router_mode: ReplayRouterMode,
-        #[values(EngineType::Vllm, EngineType::Sglang)] engine_type: EngineType,
+        #[values(EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm)]
+        prefill_engine: EngineType,
+        #[values(EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm)]
+        decode_engine: EngineType,
     ) {
-        let report = simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
-            attention_dp_disagg_config(engine_type),
+        let result = simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
+            attention_dp_disagg_config(prefill_engine, decode_engine),
             None,
             None,
             attention_dp_requests(8, 10.0),
@@ -2735,9 +2853,19 @@ mod tests {
             true,
             SlaThresholds::default(),
             ReplayRuntimeObservers::default(),
-        )
-        .unwrap();
-
+        );
+        if prefill_engine != decode_engine {
+            // The pinned native engine owns this restriction; Dynamo must not
+            // reject it earlier using a second backend support matrix.
+            let error = result.unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<aisimulate_core::replay::ReplayError>(),
+                Some(aisimulate_core::replay::ReplayError::Invariant(_))
+            ));
+            assert!(error.to_string().contains("matching backend engine types"));
+            return;
+        }
+        let report = result.unwrap();
         assert_eq!(report.request_counts.completed_requests, 8);
         assert_eq!(report.per_request.len(), 8);
         let (prefill, decode) = routed_ranks_per_pool(&report, router_mode);
@@ -2754,7 +2882,7 @@ mod tests {
     #[case::kv_router(ReplayRouterMode::KvRouter)]
     fn disagg_attention_dp_scale_up_keeps_rank_identity(
         #[case] router_mode: ReplayRouterMode,
-        #[values(EngineType::Vllm, EngineType::Sglang)] engine_type: EngineType,
+        #[values(EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm)] engine_type: EngineType,
     ) {
         const SCALE_UP_AT_MS: f64 = 50.0;
         // Idle FPM samples emit once per second, so a recheck more than a second after
@@ -2793,7 +2921,7 @@ mod tests {
         // Arrivals span 0..1125 ms: most route after the scale-up, and the replay
         // outlives the recheck tick.
         let report = simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
-            attention_dp_disagg_config(engine_type),
+            attention_dp_disagg_config(engine_type, engine_type),
             None,
             None,
             attention_dp_requests(16, 75.0),

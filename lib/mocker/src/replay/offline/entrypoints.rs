@@ -341,9 +341,6 @@ pub fn run_offline_handoff_conformance(
     engine_type: EngineType,
     transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
 ) -> Result<NormalizedHandoffConformance> {
-    if engine_type == EngineType::Trtllm {
-        anyhow::bail!("TRT-LLM does not support destination handoff");
-    }
     let build_args = |worker_type| {
         let mut builder = MockEngineArgs::builder()
             .engine_type(engine_type)
