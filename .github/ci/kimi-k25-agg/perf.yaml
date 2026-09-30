@@ -216,8 +216,7 @@ spec:
                 fi
                 request_count=$((concurrency * REQUEST_MULTIPLIER))
 
-                # Preserve the executed legacy K8s contract: use_nvext was an
-                # accepted but inert value, while ignore_eos was sent directly.
+                # Eagle3 rejects min_tokens; ignore_eos and max_tokens fix output length.
                 set -- aiperf profile \
                   --model "$TARGET_MODEL" \
                   --tokenizer "$TOKENIZER" \
@@ -234,7 +233,6 @@ spec:
                   --output-tokens-mean "$OSL" \
                   --output-tokens-stddev 0 \
                   --extra-inputs "max_tokens:$OSL" \
-                  --extra-inputs "min_tokens:$OSL" \
                   --extra-inputs ignore_eos:true \
                   --extra-inputs repetition_penalty:1.0 \
                   --extra-inputs temperature:0.0 \
