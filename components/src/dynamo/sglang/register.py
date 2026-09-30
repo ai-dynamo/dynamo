@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+from importlib.metadata import version
 from typing import Any, List, Optional
 
 import sglang as sgl
@@ -41,6 +42,7 @@ from dynamo.sglang.capacity import (
     get_spec_decode_runtime_data,
     kv_event_block_size,
     model_card_dp_rank_bounds,
+    per_rank_max_running_requests,
     runtime_capacity,
 )
 from dynamo.sglang.engine_generate import (
@@ -56,6 +58,7 @@ from dynamo.sglang.gateway import (
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+SGLANG_SYSTEMONE_SERIAL_V1 = "sglang_systemone_serial_v1"
 
 
 def _supports_engine_generate(
@@ -69,6 +72,29 @@ def _supports_engine_generate(
         return output_type == ModelType.Prefill
     return worker_type in (WorkerType.Decode, WorkerType.Aggregated) and (
         output_type.supports_chat() or output_type == ModelType.Completions
+    )
+
+
+def _supports_systemone_serial(
+    server_args: ServerArgs,
+    input_type: ModelInput,
+    output_type: ModelType,
+    worker_type: WorkerType,
+) -> bool:
+    """Require scheduler isolation until SGLang's mixed logprob rows are safe."""
+    # Relax the validated pin only after mixed scoring/decode GPU validation.
+    priority_preemption = getattr(
+        server_args, "enable_priority_scheduling", False
+    ) and not getattr(server_args, "disable_priority_preemption", False)
+    return (
+        worker_type == WorkerType.Aggregated
+        and version("sglang").split("+")[0] == "0.5.19"
+        and _supports_engine_generate(input_type, output_type, worker_type)
+        and per_rank_max_running_requests(server_args) == 1
+        and getattr(server_args, "disable_overlap_schedule", False) is True
+        and getattr(server_args, "pp_size", 1) == 1
+        and not getattr(server_args, "speculative_algorithm", None)
+        and not priority_preemption
     )
 
 
@@ -175,6 +201,13 @@ async def _register_model_with_runtime_config(
             json.dumps(True),
         )
         logging.info("Published SGLang engine-native generate capability")
+        if _supports_systemone_serial(
+            server_args, input_type, output_type, worker_type
+        ):
+            runtime_config.set_engine_specific(
+                SGLANG_SYSTEMONE_SERIAL_V1, json.dumps(True)
+            )
+            logging.info("Published serialized SGLang System One capability")
     # Configure the Rust frontend's media decoder so it ships pre-decoded
     # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None

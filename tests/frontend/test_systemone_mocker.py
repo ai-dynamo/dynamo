@@ -165,13 +165,12 @@ def test_systemone_disabled_route(systemone_server):
 @pytest.mark.parametrize(
     "systemone_server", [{"branch_limit": 2, "overload_status": 503}], indirect=True
 )
-def test_systemone_weighted_overload_and_recovery(systemone_server):
-    # One request with three questions needs three permits, even though there is
-    # only one HTTP request. This avoids a timing race with very fast mock scoring.
+def test_systemone_impossible_admission_and_recovery(systemone_server):
     url = f"{systemone_server}/v1/systemone"
     response = requests.post(url, json=_payload(), timeout=30)
-    assert response.status_code == 503, response.text
-    assert response.headers["retry-after"] == "1"
+    assert response.status_code == 422, response.text
+    assert "retry-after" not in response.headers
+    assert "branch limit" in response.json()["error"]["message"]
     payload = _payload()
     payload["questions"] = {"urgent": payload["questions"]["urgent"]}
     recovered = requests.post(url, json=payload, timeout=30)
