@@ -26,7 +26,7 @@ on:
         type: string
         default: '30'
       diff_event_context:
-        description: 'Compliance diff context (pr or push); empty disables baseline resolution'
+        description: 'Compliance diff context (pr, push, or nightly); empty disables baseline resolution'
         required: false
         type: string
         default: ''

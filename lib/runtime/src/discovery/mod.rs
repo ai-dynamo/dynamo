@@ -1193,13 +1193,12 @@ pub enum DiscoveryEvent {
     ModelTaintsUpdated(ModelTaintsUpdate),
     /// An instance was removed (identified by its unique ID)
     Removed(DiscoveryInstanceId),
-    /// The backend resynchronized. The payload holds every instance that matches the query at
-    /// that moment.
+    /// The full set of instances that match the query at one moment.
     ///
-    /// The stream sends this event after the incremental events of the same resync. A consumer
-    /// that builds its state only from this stream can ignore this event. A consumer
-    /// that holds state from another source, such as a [`Discovery::list`] call, must replace its
-    /// state with the payload.
+    /// Sent once at startup, after the `Added` events of the same snapshot, and again after a
+    /// backend resync. A consumer that holds state from another source, such as an earlier
+    /// stream or a [`Discovery::list`] call, replaces it with the payload. One that builds its
+    /// state from this stream alone can ignore the event.
     Resync(Vec<DiscoveryInstance>),
 }
 
@@ -1670,17 +1669,18 @@ pub trait Discovery: Send + Sync {
 
     /// Returns a stream of discovery events for the given discovery query
     ///
-    /// An implementation establishes the watch before it returns. The stream reports the state at
-    /// that moment as `Added` events, and then every change that follows.
+    /// The watch is established before this returns. A backend still initializing waits for it,
+    /// and fails the call if that initialization ends first.
     ///
-    /// A backend can fall behind and resynchronize from an authoritative snapshot. The stream then
-    /// reports the changes between its own state and that snapshot, and after them one
-    /// [`DiscoveryEvent::Resync`] that holds the full set. A change that started and ended inside
-    /// the gap is not reported as a change.
+    /// The stream starts with the state at establishment: one `Added` per matching instance,
+    /// then one [`DiscoveryEvent::Resync`] holding the same set, empty when nothing matches.
+    /// Later changes follow that `Resync`, which never replays over them.
     ///
-    /// A caller that also needs a [`Discovery::list`] snapshot calls `list_and_watch` first, and
-    /// replaces its state on every `Resync`. A `list` before the watch can show an instance that
-    /// an unregister removes before the snapshot, and no event reports that removal.
+    /// A backend that falls behind sends the changes it missed, then one `Resync` of the full
+    /// set. A change that started and ended inside the gap is not reported.
+    ///
+    /// Replace any state held from an earlier stream or a [`Discovery::list`] call on every
+    /// `Resync`. Instances that left are absent from it, with no `Removed` event to report them.
     ///
     /// The optional cancellation token can be used to stop the watch stream
     async fn list_and_watch(
@@ -1693,6 +1693,130 @@ pub trait Discovery: Send + Sync {
     /// For KV store backends, this deletes owned registrations immediately rather than
     /// waiting for TTL expiry. Default is a no-op for backends that don't need cleanup.
     fn shutdown(&self) {}
+}
+
+/// The `list_and_watch` startup contract, checked the same way against every backend, and the
+/// helpers backend tests use to consume the startup events.
+#[cfg(test)]
+pub(crate) mod startup_contract {
+    use super::*;
+    use futures::StreamExt;
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    const EVENT_TIMEOUT: Duration = Duration::from_secs(2);
+    /// Long enough for a late event to arrive on the memory and file stores.
+    const QUIET_PERIOD: Duration = Duration::from_millis(200);
+
+    /// The contract watches model cards, the one instance kind every backend updates in place.
+    fn query() -> DiscoveryQuery {
+        DiscoveryQuery::ComponentModels {
+            namespace: "contract".to_string(),
+            component: "comp".to_string(),
+        }
+    }
+
+    fn model_spec(endpoint: &str) -> DiscoverySpec {
+        DiscoverySpec::Model {
+            namespace: "contract".to_string(),
+            component: "comp".to_string(),
+            endpoint: endpoint.to_string(),
+            card_json: serde_json::json!({
+                "display_name": "model",
+                "runtime_config": {"taints": ["initial"]}
+            }),
+            model_suffix: None,
+        }
+    }
+
+    pub(crate) async fn next(stream: &mut DiscoveryStream) -> DiscoveryEvent {
+        tokio::time::timeout(EVENT_TIMEOUT, stream.next())
+            .await
+            .expect("the stream sent no event")
+            .expect("the stream ended")
+            .expect("the stream reported an error")
+    }
+
+    /// Consumes the startup snapshot of a watch opened on an empty registry.
+    pub(crate) async fn expect_empty_snapshot(stream: &mut DiscoveryStream) {
+        assert_eq!(next(stream).await, DiscoveryEvent::Resync(vec![]));
+    }
+
+    async fn assert_quiet(stream: &mut DiscoveryStream) {
+        if let Ok(event) = tokio::time::timeout(QUIET_PERIOD, stream.next()).await {
+            panic!("unexpected event after the sequence: {event:?}");
+        }
+    }
+
+    /// Checks the startup contract against an empty `discovery`.
+    ///
+    /// A watch on the empty registry sends one empty `Resync` and nothing else. A populated
+    /// registry arrives as `Added` events then one `Resync` of the same set. A registration, an
+    /// update, and a removal made right after `list_and_watch` returns follow that snapshot,
+    /// which still holds the pre-update state, in whatever order the backend chooses.
+    pub(crate) async fn check(discovery: &dyn Discovery) {
+        let mut stream = discovery.list_and_watch(query(), None).await.unwrap();
+        expect_empty_snapshot(&mut stream).await;
+        assert_quiet(&mut stream).await;
+        drop(stream);
+
+        let first = discovery.register(model_spec("first")).await.unwrap();
+        let second = discovery.register(model_spec("second")).await.unwrap();
+        let DiscoveryInstanceId::Model(second_id) = second.id() else {
+            panic!("expected a model instance");
+        };
+        let mut stream = discovery.list_and_watch(query(), None).await.unwrap();
+        // Mutate before the stream is read: the snapshot is already captured.
+        let third = discovery.register(model_spec("third")).await.unwrap();
+        discovery
+            .update_model_taints(second_id.clone(), HashSet::from(["updated".to_string()]))
+            .await
+            .unwrap();
+        discovery.unregister(first.clone()).await.unwrap();
+
+        let initial = HashSet::from([first.id(), second.id()]);
+        let mut added = HashSet::new();
+        for _ in 0..2 {
+            let DiscoveryEvent::Added(instance) = next(&mut stream).await else {
+                panic!("expected an Added event in the startup burst");
+            };
+            added.insert(instance.id());
+        }
+        assert_eq!(added, initial);
+        let DiscoveryEvent::Resync(snapshot) = next(&mut stream).await else {
+            panic!("expected one Resync after the Added burst");
+        };
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(DiscoveryInstance::id)
+                .collect::<HashSet<_>>(),
+            initial
+        );
+        assert!(
+            snapshot.contains(&second),
+            "the snapshot must hold the pre-update instance, got {snapshot:?}"
+        );
+
+        let changes = [
+            next(&mut stream).await,
+            next(&mut stream).await,
+            next(&mut stream).await,
+        ];
+        let expected = [
+            DiscoveryEvent::Added(third),
+            DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                id: second_id,
+                taints: vec!["updated".to_string()],
+            }),
+            DiscoveryEvent::Removed(first.id()),
+        ];
+        assert!(
+            expected.iter().all(|event| changes.contains(event)),
+            "expected {expected:?} after the snapshot, got {changes:?}"
+        );
+        assert_quiet(&mut stream).await;
+    }
 }
 
 #[cfg(test)]

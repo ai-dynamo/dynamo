@@ -10,7 +10,7 @@ from typing import Any, Literal
 from dynamo.llm import KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 
-from .constants import AIC_BACKEND_VERSIONS
+from .constants import AIS_BACKEND_VERSIONS
 
 
 def _build_candidate_engine_args(
@@ -24,11 +24,18 @@ def _build_candidate_engine_args(
 ) -> MockEngineArgs:
     payload = dict(base_args)
     payload["worker_type"] = worker_type
-    payload["aic_backend"] = backend
-    payload["aic_system"] = system
-    payload["aic_backend_version"] = AIC_BACKEND_VERSIONS[backend]
-    payload["aic_tp_size"] = tp_size
-    payload["aic_model_path"] = model
+    perf_config = dict(payload.get("ais_perf_config") or {})
+    perf_config.update(
+        model=model,
+        system=system,
+        backend=backend,
+        worker_type=worker_type,
+        tp=tp_size,
+    )
+    perf_config.setdefault("backend_version", AIS_BACKEND_VERSIONS[backend])
+    if "block_size" in payload:
+        perf_config.setdefault("kv_block_size", payload["block_size"])
+    payload["ais_perf_config"] = perf_config
     # Keep engine args as user-intent data until this boundary. In particular,
     # do not synthesize base-only fields here; if num_gpu_blocks was omitted,
     # replay materialization will estimate capacity for the candidate TP shape.
