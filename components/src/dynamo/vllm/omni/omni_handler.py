@@ -612,6 +612,7 @@ class OmniHandler(BaseOmniHandler):
             return self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
             assert isinstance(parsed_request, NvCreateImageRequest)
+            dimensions = image_generation_size_from_str(parsed_request.size)
             if parsed_request.input_reference is not None:
                 try:
                     image = await self._image_loader.load_image(
@@ -620,7 +621,9 @@ class OmniHandler(BaseOmniHandler):
                 except (OSError, ValueError, PIL.Image.DecompressionBombError) as e:
                     # Keep URLs and inline image data out of the client error.
                     raise ValueError("Failed to load input_reference") from e
-            return self._engine_inputs_from_image(parsed_request, image=image)
+            return self._engine_inputs_from_image(
+                parsed_request, dimensions=dimensions, image=image
+            )
         elif request_type == RequestType.VIDEO_GENERATION:
             assert isinstance(parsed_request, NvCreateVideoRequest)
             return self._engine_inputs_from_video(parsed_request, image=image)
@@ -787,12 +790,14 @@ class OmniHandler(BaseOmniHandler):
         _apply_media_passthrough(sp, req.extra_args)
 
     def _engine_inputs_from_image(
-        self, req: NvCreateImageRequest, image: PIL.Image.Image | None = None
+        self,
+        req: NvCreateImageRequest,
+        *,
+        dimensions: tuple[int, int],
+        image: PIL.Image.Image | None = None,
     ) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
-        # req.size is a free-form client string, so it needs the same bound the
-        # chat path applies -- parse_size alone returns whatever it parses.
-        width, height = image_generation_size_from_str(req.size)
+        width, height = dimensions
         nvext = req.nvext or ImageNvExt()
 
         prompt = build_image_generation_prompt(

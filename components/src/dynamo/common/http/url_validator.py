@@ -92,8 +92,12 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     """
     if not isinstance(source, str):
         return "<non-string media source>"
-    if source.startswith("data:"):
-        meta = source[len("data:") :].partition(",")[0]
+    try:
+        parsed = urlparse(source)
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.scheme == "data":
+        meta = parsed.path.partition(",")[0]
         media_type = meta.split(";")[0] or "application/octet-stream"
         # The media-type field is client-supplied and unbounded: a reference of
         # ``"data:" + "A" * 200_000 + ",AAAA"`` puts all of it here, so eliding

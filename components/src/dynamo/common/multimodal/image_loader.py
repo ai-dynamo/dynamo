@@ -27,6 +27,7 @@ from ..http.media_reference import max_media_bytes
 from ..http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_media_source,
     validate_media_url,
 )
 from .media_source import decode_data_uri
@@ -375,25 +376,38 @@ class ImageLoader:
                     image_data = BytesIO(image_bytes)
                 return await self._open_image(image_data)
             except Image.UnidentifiedImageError as e:
-                logger.error(f"Unsupported image format decoding: '{image_url}'")
+                logger.error(
+                    "Unsupported image format decoding: '%s'",
+                    describe_media_source(image_url),
+                )
                 raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
             except UrlValidationError as e:
                 raise ValueError(f"Failed to decode image: {e}") from e
             except ValueError as e:
                 if "Unsupported image format" in str(e):
-                    logger.error(f"Unsupported image format decoding: '{image_url}'")
+                    logger.error(
+                        "Unsupported image format decoding: '%s'",
+                        describe_media_source(image_url),
+                    )
                     raise HttpStatusError(
                         415, "Unsupported Media Type", image_url
                     ) from e
-                logger.error(f"{type(e).__name__} decoding image: '{image_url}': {e}")
-                raise ValueError(f"Failed to decoding image: '{image_url}': {e}") from e
+                source = describe_media_source(image_url)
+                logger.error("%s decoding image: '%s': %s", type(e).__name__, source, e)
+                raise ValueError(f"Failed to decoding image: '{source}': {e}") from e
             except OSError as e:
-                logger.error(f"Invalid or truncated image data: '{image_url}'")
+                logger.error(
+                    "Invalid or truncated image data: '%s'",
+                    describe_media_source(image_url),
+                )
                 raise HttpStatusError(
                     400, "Invalid or truncated image data", image_url
                 ) from e
             except Exception:
-                logger.error(f"Unexpected error decoding image: '{image_url}'")
+                logger.error(
+                    "Unexpected error decoding image: '%s'",
+                    describe_media_source(image_url),
+                )
                 raise
 
         # It's not file:, http:, https:, or data:
@@ -469,7 +483,11 @@ class ImageLoader:
                 url = item[URL_VARIANT_KEY]
                 slot_to_future_idx.append(len(image_futures))
                 image_futures.append(self.load_image(url, cache_scope=cache_scope))
-                logger.debug(f"Preparing to load image from URL: {url[:80]}...")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Preparing to load image from URL: %s",
+                        describe_media_source(url),
+                    )
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]
@@ -516,10 +534,12 @@ class ImageLoader:
                 # image-loading error.
                 if not isinstance(result, Exception):
                     raise result
-                source = media_item.get(URL_VARIANT_KEY, "decoded")
-                logger.error(f"Failed to load image from {source[:80]}...: {result}")
+                source = describe_media_source(
+                    media_item.get(URL_VARIANT_KEY, "decoded")
+                )
+                logger.error("Failed to load image from %s: %s", source, result)
                 collective_exceptions += (
-                    f"Failed to load image from {source[:80]}...: {result}\n"
+                    f"Failed to load image from {source}: {result}\n"
                 )
                 # Preserve HTTP status semantics (e.g. 415 Unsupported Media Type).
                 # Folding an HttpStatusError into a generic Exception below would
