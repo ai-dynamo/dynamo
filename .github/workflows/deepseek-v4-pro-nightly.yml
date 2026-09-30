@@ -69,6 +69,8 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           ACR_HOST: ${{ secrets.AZURE_ACR_HOSTNAME }}
           ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+          PERF_CLEANUP: |
+            trap 'find "$ARTIFACT_ROOT" -type f -name inputs.json -delete || true' EXIT
         run: |
           image="${ACR_HOST}/${ACR_REPOSITORY}:${IMAGE_TAG}"
           digest=$(skopeo inspect --raw "docker://$image" | jq -er '
@@ -82,7 +84,8 @@ jobs:
           yq 'select(.kind != "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/deploy.yaml"
           yq 'select(.kind == "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/perf.yaml"
           yq -i '(.spec.template.spec.containers[0].env[] | select(.name == "ARTIFACT_ROOT").value) = "/opt/models/perf/" + strenv(RUN_KEY) |
-            .spec.template.spec.containers[0].envFrom[0].secretRef.name = "hf-" + strenv(RUN_KEY)' "$ARTIFACTS/perf.yaml"
+            .spec.template.spec.containers[0].envFrom[0].secretRef.name = "hf-" + strenv(RUN_KEY) |
+            .spec.template.spec.containers[0].command[2] = strenv(PERF_CLEANUP) + "\n" + .spec.template.spec.containers[0].command[2]' "$ARTIFACTS/perf.yaml"
           git rev-parse HEAD > "$ARTIFACTS/source-sha.txt"
       - name: Preflight and create run credentials
         timeout-minutes: 10
@@ -161,10 +164,11 @@ jobs:
               -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg,nvidia.com/dynamo-component-type=frontend -o json |
               jq -r 'first(.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")) | .metadata.name // empty')
             if [[ -n "$frontend" ]]; then
-              # Synthetic prompts are large and reproducible from the benchmark seed.
+              # Exclude generated prompts even if cleanup in the benchmark Job failed.
+              mkdir -p "$ARTIFACTS/perf"
               "${k[@]}" exec -c main "$frontend" -- \
-                find "/opt/models/perf/$RUN_KEY" -type f -name inputs.json -delete
-              "${k[@]}" cp -c main "$frontend:/opt/models/perf/$RUN_KEY/." "$ARTIFACTS/perf"
+                tar -C "/opt/models/perf/$RUN_KEY" --exclude=inputs.json -cf - . |
+                tar -C "$ARTIFACTS/perf" -xf -
             fi
           fi
       - name: Verify AIPerf results
