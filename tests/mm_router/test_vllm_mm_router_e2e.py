@@ -45,6 +45,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,
+    # Restore xpu_1 after the paged decode kernel is available; see #15417.
     pytest.mark.gpu_1,
     pytest.mark.model(VLLM_MM_MODEL),
 ]

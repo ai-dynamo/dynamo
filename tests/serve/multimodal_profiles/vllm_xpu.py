@@ -63,7 +63,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg": TopologyConfig(
                 marks=[
                     pytest.mark.skip(
-                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false"
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
                     ),
                     pytest.mark.post_merge,
                     pytest.mark.xpu_1,
@@ -124,7 +124,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 health_check_workers=True,
                 marks=[
                     pytest.mark.skip(
-                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false"
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
                     ),
                     pytest.mark.pre_merge,
                     pytest.mark.xpu_2,
@@ -149,7 +149,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 health_check_workers=True,
                 marks=[
                     pytest.mark.skip(
-                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false"
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
                     ),
                     pytest.mark.post_merge,
                     pytest.mark.xpu_2,
@@ -173,7 +173,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router_frontend_decode": TopologyConfig(
                 marks=[
                     pytest.mark.skip(
-                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false"
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
                     ),
                     pytest.mark.post_merge,
                     pytest.mark.xpu_2,
@@ -206,7 +206,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 health_check_workers=True,
                 marks=[
                     pytest.mark.skip(
-                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false"
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
                     ),
                     pytest.mark.post_merge,
                 ],
@@ -227,7 +227,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 health_check_workers=True,
                 marks=[
                     pytest.mark.skip(
-                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false"
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false; see #15417"
                     ),
                     pytest.mark.post_merge,
                 ],
