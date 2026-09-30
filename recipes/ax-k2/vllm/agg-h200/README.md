@@ -19,5 +19,5 @@ python3 scripts/kustomize-matrix.py render recipes/ax-k2/vllm/agg-h200/.kustomiz
 ```
 
 Apply `deploy-generic.yaml` with your cluster bindings. The measured aggregated
-[W1 workload](../../perf/h200/README.md#aggregated-w1-measurement) uses fresh
+[W1 workload](../../perf/h200/README.md#h200-w1-measurements) uses fresh
 workers and distinct input seeds; the existing Job has different sweep settings.
