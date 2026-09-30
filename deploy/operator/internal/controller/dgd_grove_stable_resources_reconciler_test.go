@@ -232,10 +232,12 @@ func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *te
 		for _, tc := range []struct {
 			name   string
 			legacy bool
+			noType bool
 			labels map[string]string
 		}{
 			{name: "native"},
 			{name: "legacy", legacy: true},
+			{name: "type-from-pod-label", noType: true},
 			{name: "native-custom", labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: "custom"}},
 			{name: "legacy-custom", legacy: true, labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: "custom"}},
 			{name: "native-empty", labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: ""}},
@@ -249,6 +251,10 @@ func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *te
 				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
 				component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "test", "--enable-elastic-ep", "--data-parallel-backend", "ray"}
 				component.PodTemplate.Labels = tc.labels
+				if tc.noType {
+					component.ComponentType = ""
+					component.PodTemplate.Labels = map[string]string{commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker}
+				}
 				dgd := newElasticEPTestDGD(component)
 				reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
 				original := dgd.DeepCopy()
@@ -278,7 +284,7 @@ func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *te
 				t.Log("Verify both Services select the rendered leader without changing the source DGD")
 				podLabels := pcs.Spec.Template.Cliques[0].Labels
 				wantType := string(componentType)
-				if tc.legacy {
+				if tc.legacy || tc.noType {
 					wantType = commonconsts.ComponentTypeWorker
 				}
 				require.Equal(t, wantType, podLabels[commonconsts.KubeLabelDynamoComponentType])

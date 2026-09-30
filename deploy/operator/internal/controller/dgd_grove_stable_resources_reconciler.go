@@ -146,7 +146,7 @@ func groveComponentServiceParams(
 	if clique := podCliqueSetCliqueForComponent(podCliqueSet, componentName); clique != nil {
 		// Preserve only the subcomponent label added by legacy worker conversion.
 		if renderedType := clique.Labels[commonconsts.KubeLabelDynamoComponentType]; renderedType != "" && renderedType != componentType {
-			if _, supplied := dynamo.GetPodTemplateLabels(component)[commonconsts.KubeLabelDynamoSubComponentType]; !supplied {
+			if _, supplied := dynamo.GetPodTemplateLabels(component)[commonconsts.KubeLabelDynamoSubComponentType]; !supplied && componentType != "" {
 				labels[commonconsts.KubeLabelDynamoSubComponentType] = componentType
 			}
 			componentType = renderedType
