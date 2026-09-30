@@ -26,7 +26,7 @@ use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_co
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
-    DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
+    DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name, ready_container_names,
 };
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -918,8 +918,8 @@ fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
 }
 
 /// The worker instance IDs `pod` is currently known under, per discovery mode:
-/// its pod-level identity under pod discovery, or each `Ready` container's
-/// identity under container discovery (`DYN_KUBE_DISCOVERY_MODE=container`,
+/// its pod-level identity under pod discovery, or each `Ready` regular container's
+/// or native sidecar's identity under container discovery (`DYN_KUBE_DISCOVERY_MODE=container`,
 /// e.g. intra-pod GMS failover). The HTTP endpoint stays pod-level either way
 /// (see [`pod_endpoint_address`]).
 ///
@@ -956,13 +956,10 @@ fn pod_worker_ids(
     let named = !pod_name.is_empty();
     let pod_id = (named && !container_discovery).then(|| hash_pod_name(pod_name));
     let container_ids = (container_discovery && named)
-        .then_some(pod.status.as_ref())
-        .flatten()
-        .and_then(|s| s.container_statuses.as_ref())
+        .then(|| ready_container_names(pod))
         .into_iter()
         .flatten()
-        .filter(|cs| cs.ready)
-        .map(move |cs| hash_container_name(pod_name, &cs.name));
+        .map(move |name| hash_container_name(pod_name, name));
     pod_id.into_iter().chain(container_ids)
 }
 
@@ -2061,6 +2058,83 @@ mod tests {
                 ..Default::default()
             }),
         }
+    }
+
+    #[test]
+    fn native_sidecar_worker_index_tracks_readiness_and_deletion() {
+        use k8s_openapi::api::core::v1::{Container, ContainerStatus};
+
+        let mut pod = failover_pod(&[("main", true)], true);
+        pod.spec.as_mut().unwrap().init_containers = Some(vec![
+            Container {
+                name: "dynamo".into(),
+                restart_policy: Some("Always".into()),
+                ..Default::default()
+            },
+            Container {
+                name: "setup".into(),
+                ..Default::default()
+            },
+        ]);
+        pod.status.as_mut().unwrap().init_container_statuses = Some(
+            ["dynamo", "setup"]
+                .into_iter()
+                .map(|name| ContainerStatus {
+                    name: name.into(),
+                    ready: true,
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        let id = hash_container_name("worker-0", "dynamo");
+        assert_eq!(
+            pod_worker_ids(&pod, false).collect::<Vec<_>>(),
+            vec![hash_pod_name("worker-0")]
+        );
+        assert_eq!(
+            pod_worker_ids(&pod, true).collect::<Vec<_>>(),
+            vec![hash_pod_name("worker-0"), id]
+        );
+
+        let mut index = WorkerEndpointIndex::new(true);
+        index.upsert(&pod);
+        assert_eq!(
+            index.endpoints.get(&id).map(String::as_str),
+            Some("10.0.0.1:8000")
+        );
+        assert!(
+            !index
+                .endpoints
+                .contains_key(&hash_container_name("worker-0", "setup"))
+        );
+
+        pod.status
+            .as_mut()
+            .unwrap()
+            .init_container_statuses
+            .as_mut()
+            .unwrap()[0]
+            .ready = false;
+        index.upsert(&pod);
+        assert!(!index.endpoints.contains_key(&id));
+        assert!(index.endpoints.contains_key(&hash_pod_name("worker-0")));
+
+        pod.status
+            .as_mut()
+            .unwrap()
+            .init_container_statuses
+            .as_mut()
+            .unwrap()[0]
+            .ready = true;
+        index.upsert(&pod);
+        assert!(index.endpoints.contains_key(&id));
+        index.remove(&pod);
+        assert!(index.endpoints.is_empty());
+
+        pod.status.as_mut().unwrap().container_statuses = None;
+        assert_eq!(pod_worker_ids(&pod, true).collect::<Vec<_>>(), vec![id]);
+        pod.metadata.name = None;
+        assert!(pod_worker_ids(&pod, true).next().is_none());
     }
 
     /// Only currently-`Ready` engine containers contribute a live worker_id; a
