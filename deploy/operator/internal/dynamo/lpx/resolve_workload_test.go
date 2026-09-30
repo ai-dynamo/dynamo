@@ -7,7 +7,6 @@ package lpx
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -34,8 +33,9 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	hx, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticBuildSnapshotSource{"build": hxSnapshot})
 	require.NoError(t, err)
 	require.Equal(t, PipelineSingle, hx.Pipeline())
-	require.Equal(t, BuildFamilyHX, hx.BuildFamily())
-	require.Equal(t, lpxv1alpha1.WorkloadModeV3HxLPUOnly, hx.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents").WorkloadMode)
+	hxRequest := hx.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents")
+	require.Equal(t, lpxv1alpha1.TargetFamilyHx16x8x2x3, hxRequest.TargetFamily)
+	require.Equal(t, lpxv1alpha1.WorkloadModeV3HxLPUOnly, hxRequest.WorkloadMode)
 	require.Equal(t, "LPX", hx.ServingComponentName())
 	plan, err := hx.PlanNodeLocalMaterialization("test-pcs")
 	require.NoError(t, err)
@@ -123,8 +123,9 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	xt, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 	require.NoError(t, err)
 	require.Equal(t, PipelineLPX, xt.Pipeline())
-	require.Equal(t, BuildFamilyXT, xt.BuildFamily())
-	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, xt.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents").WorkloadMode)
+	xtRequest := xt.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents")
+	require.Equal(t, lpxv1alpha1.TargetFamilyXt8888, xtRequest.TargetFamily)
+	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, xtRequest.WorkloadMode)
 	require.Len(t, xt.modelProjections[0].configuredBuild.Partitions, 2)
 	plan, err = xt.PlanNodeLocalMaterialization("test-pcs")
 	require.NoError(t, err)
@@ -204,8 +205,9 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			t.Log("Project the selected family, workload mode, and pipeline")
 			require.NoError(t, err)
 			require.Equal(t, before, dgd, "canonical ordering must not rewrite the authored target-first list")
-			require.Equal(t, test.family, selected.BuildFamily())
-			require.Equal(t, test.wantMode, selected.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents").WorkloadMode)
+			request := selected.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents")
+			require.Equal(t, lpxv1alpha1.TargetFamily(test.family), request.TargetFamily)
+			require.Equal(t, test.wantMode, request.WorkloadMode)
 			require.Equal(t, PipelineSpecDecode, selected.Pipeline())
 			require.Equal(t, "lpx", selected.ServingComponentName())
 
@@ -273,7 +275,6 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 					require.Empty(t, request.PropSyncConnectors)
 				}
 				require.Equal(t, original, projection.configuredBuild.Partitions)
-				require.Equal(t, slices.Repeat([]string{projection.Model()}, len(original)), strings.Split(resolvedPartitionData([]*ModelProjection{projection})["partition_models"], "\n"))
 			}
 
 			for _, expansion := range []struct {

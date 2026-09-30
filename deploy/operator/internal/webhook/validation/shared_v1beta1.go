@@ -57,7 +57,6 @@ func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.
 		allErrs = append(allErrs, field.Required(fldPath.Child("containers"), fmt.Sprintf("LPX %s component requires a %q runtime container", role, consts.MainContainerName)))
 	}
 
-	// Every authored container needs an image, including initialization containers.
 	for _, group := range []struct {
 		name       string
 		containers []corev1.Container

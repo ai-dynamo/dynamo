@@ -61,10 +61,11 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	agentReplicas := 0
 	for index, partition := range partitions {
 		compilerID := uint32(partition.SourcePartitionID)
-		shape, endpoints, shapeErr := xtShape(partition)
+		shape, shapeErr := xtShape(partition)
 		if shapeErr != nil {
 			return nil, shapeErr
 		}
+		endpoints := int64(partition.effectiveNodeCount())
 		agentReplicas += int(endpoints)
 		for modelIndex := range transcripts {
 			transcripts[modelIndex].uint32Field("compiler-partition-id", compilerID)
@@ -135,14 +136,14 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	return dst, nil
 }
 
-func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, int64, error) {
+func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {
 	// These chip capacities name registered XT shapes; node width comes from the manifest.
 	chips := max(partition.Topology.ChipCount, partition.DevicesPerNode)
 	switch chips {
 	case 8, 16, 24, 32, 40, 48, 56, 64, 96, 128:
-		return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chips)), int64(partition.effectiveNodeCount()), nil
+		return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chips)), nil
 	default:
-		return "", 0, fmt.Errorf("partition %d has unregistered XT shape c%d", uint32(partition.SourcePartitionID), chips)
+		return "", fmt.Errorf("partition %d has unregistered XT shape c%d", uint32(partition.SourcePartitionID), chips)
 	}
 }
 

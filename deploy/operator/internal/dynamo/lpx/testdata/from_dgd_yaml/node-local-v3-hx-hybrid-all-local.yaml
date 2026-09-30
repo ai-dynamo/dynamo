@@ -15,8 +15,6 @@ metadata:
 data:
   nodes_per_partition: ""
   partition_ids: ""
-  partition_indices: ""
-  partition_models: ""
   partition_node_offsets: ""
   partition_paths: ""
   topologies: ""
@@ -26,7 +24,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid-all-local
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v3-hx-hybrid-all-local-9b6a-lpu-b79c921f010dd141
+  name: node-local-v3-hx-hybrid-all-local-9b6a-lpu-e0d4757d73c8e8a8
   namespace: test
 ---
 metadata:

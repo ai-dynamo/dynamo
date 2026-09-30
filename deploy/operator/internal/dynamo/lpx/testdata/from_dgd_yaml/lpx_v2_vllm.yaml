@@ -66,42 +66,6 @@ data:
     14
     15
     16
-  partition_indices: |-
-    0
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-    14
-    15
-    16
-  partition_models: |-
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
   partition_node_offsets: |-
     0
     1
@@ -162,7 +126,7 @@ metadata:
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-lpx-v2-vllm-94cd-lpu-0a822a56d11eef9a
+  name: dgd-lpx-v2-vllm-94cd-lpu-311b847b1644357f
   namespace: inference-engine
 ---
 metadata:
@@ -180,7 +144,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-        nvidia.com/extra-resources-hash: 0a822a56d11eef9a4801ba22c816fede0b14421ad64dce8da134d083af23ea97
+        nvidia.com/extra-resources-hash: 311b847b1644357fea6ed0384ea3528deeca74095a979f274d411413483825f1
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ddd723d746da78065c032312c775dd3ad545eb3ddddaf6d3d81fb04bd4d849ba
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:e5619faa09aca781333e12dfaa13e6c6489d2e3a08f1296a1735b173e706ff75
         scheduling.lpu.nvidia.com/model: default
@@ -382,7 +346,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-lpx-v2-vllm-94cd-lpu-0a822a56d11eef9a
+              name: dgd-lpx-v2-vllm-94cd-lpu-311b847b1644357f
             name: config
         replicas: 17
         roleName: agt

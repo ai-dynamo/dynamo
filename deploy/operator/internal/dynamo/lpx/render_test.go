@@ -61,36 +61,35 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Cover XT configuration mounts and HX hybrid model-storage paths")
+	t.Log("Cover shared configuration overrides and HX hybrid model-storage paths")
 	hybrid := newV3CompilerFixture()
 	hybrid.compilationMode = manifestcapnp.CompilationMode_lpx
 	xtSnapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	hxSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	tests := []struct {
 		name       string
-		family     lpxv1alpha1.TargetFamily
 		pipeline   Pipeline
 		snapshot   *BuildSnapshot
 		configPath string
 	}{
 		{
-			name: "XT config mount", family: lpxv1alpha1.TargetFamilyXt8888, pipeline: PipelineSingle,
+			name: "XT config mount", pipeline: PipelineSingle,
 			snapshot: xtSnapshot, configPath: "/custom",
 		},
 		{
-			name: "XT omitted config mount", family: lpxv1alpha1.TargetFamilyXt8888, pipeline: PipelineSingle,
+			name: "XT omitted config mount", pipeline: PipelineSingle,
 			snapshot: xtSnapshot,
 		},
 		{
-			name: "HX omitted config mount", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineSingle,
+			name: "HX omitted config mount", pipeline: PipelineSingle,
 			snapshot: hxSnapshot,
 		},
 		{
-			name: "HX custom config mount", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineSingle,
+			name: "HX custom config mount", pipeline: PipelineSingle,
 			snapshot: hxSnapshot, configPath: "/custom",
 		},
 		{
-			name: "HX hybrid storage", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineLPX,
+			name: "HX hybrid storage", pipeline: PipelineLPX,
 			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)), configPath: "/configs",
 		},
 	}
@@ -117,7 +116,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				{Key: "cluster.example/custom", Operator: corev1.TolerationOpExists},
 				{Key: "lpu.nvidia.com/node", Operator: corev1.TolerationOpExists},
 			}
-			if test.family == lpxv1alpha1.TargetFamilyXt8888 && test.configPath != "" {
+			if test.configPath != "" {
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
 					Name: lpuConfigVolumeName,
 					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -166,6 +165,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			if test.pipeline != PipelineLPX {
 				conductor := namedClique(t, rendered, "cond")
 				require.Equal(t, "kept", conductor.Annotations["user"])
+				require.Subset(t, conductor.Spec.PodSpec.Volumes, template.Spec.Volumes)
 				require.Equal(t, template.Spec.Containers[0].VolumeMounts, conductor.Spec.PodSpec.Containers[0].VolumeMounts)
 				require.Equal(t, template.Spec.Containers[0].VolumeMounts, agent.Spec.PodSpec.Containers[0].VolumeMounts)
 			} else {

@@ -118,7 +118,7 @@ func (p *ModelProjection) RequestSpec(
 			CompilerPartitionID: int64(uint32(partition.SourcePartitionID)),
 		}
 		if p.configuredBuild.Family == BuildFamilyXT {
-			shape, _, _ := xtShape(partition)
+			shape, _ := xtShape(partition)
 			request.XtShape = &shape
 		}
 		if partition.HXExtent != nil {

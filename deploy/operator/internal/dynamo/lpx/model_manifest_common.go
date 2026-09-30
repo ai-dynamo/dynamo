@@ -17,7 +17,7 @@ import (
 
 const hxTopologyFamily = "16x8x2x3"
 
-func classifyManifestPartitions(filename string, partitions []BuildPartition, partSelect bool) (BuildFamily, int, int, error) {
+func classifyManifestPartitions(partitions []BuildPartition, partSelect bool) (BuildFamily, int, int, error) {
 	family := BuildFamilyXT
 	packagedNodes, partitionZeroNodes := 0, 0
 	seen := make(map[int]struct{}, len(partitions))
@@ -27,16 +27,22 @@ func classifyManifestPartitions(filename string, partitions []BuildPartition, pa
 			partitionFamily = BuildFamilyHX
 		}
 		if len(seen) != 0 && family != partitionFamily {
-			return "", 0, 0, fmt.Errorf("%s mixes XT and HX LPU partitions", filename)
+			return "", 0, 0, fmt.Errorf("%s mixes XT and HX LPU partitions", gbuildManifestV2CapnpFile)
 		}
 		family = partitionFamily
 		if _, duplicate := seen[partition.SourcePartitionID]; duplicate {
 			if family == BuildFamilyHX {
-				return "", 0, 0, fmt.Errorf("V3 %s repeats LPU partition ID %d", filename, partition.SourcePartitionID)
+				return "", 0, 0, fmt.Errorf("V3 %s repeats LPU partition ID %d", gbuildManifestV2CapnpFile, partition.SourcePartitionID)
 			}
-			return "", 0, 0, fmt.Errorf("%s has duplicate LPU partition id %d", filename, partition.SourcePartitionID)
+			return "", 0, 0, fmt.Errorf("%s has duplicate LPU partition id %d", gbuildManifestV2CapnpFile, partition.SourcePartitionID)
 		}
 		seen[partition.SourcePartitionID] = struct{}{}
+
+		// One Agent template serves the build; mixed node widths require Dynamo rendering support.
+		if partition.DevicesPerNode != partitions[0].DevicesPerNode {
+			return "", 0, 0, fmt.Errorf("%s LPU partition %d has devicesPerNode %d, want %d; all LPU partitions must use the same devicesPerNode",
+				gbuildManifestV2CapnpFile, partition.SourcePartitionID, partition.DevicesPerNode, partitions[0].DevicesPerNode)
+		}
 
 		// Retain both deployment geometries during the mandatory artifact traversal.
 		nodes := partition.effectiveNodeCount()
@@ -47,7 +53,7 @@ func classifyManifestPartitions(filename string, partitions []BuildPartition, pa
 	}
 	if family == BuildFamilyHX {
 		if partSelect {
-			return "", 0, 0, fmt.Errorf("V3 %s partSelect builds are not supported", filename)
+			return "", 0, 0, fmt.Errorf("V3 %s partSelect builds are not supported", gbuildManifestV2CapnpFile)
 		}
 		return family, packagedNodes, partitionZeroNodes, nil
 	}

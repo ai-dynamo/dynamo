@@ -230,7 +230,7 @@ func addLPUArtifactsFromManifestV2(
 		return fmt.Errorf("%s artifacts contain no LPU partitions", gbuildManifestV2CapnpFile)
 	}
 	partialSelection := artifacts.HasPartSelect()
-	family, packagedNodes, partitionZeroNodes, err := classifyManifestPartitions(gbuildManifestV2CapnpFile, partitions, partialSelection)
+	family, packagedNodes, partitionZeroNodes, err := classifyManifestPartitions(partitions, partialSelection)
 	if err == nil && family == BuildFamilyXT {
 		err = validateManifestV2PartSelect(artifacts, partitions)
 	}

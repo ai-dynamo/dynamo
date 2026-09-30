@@ -215,6 +215,11 @@ func TestBuildFromGbuildManifestV2ValidatesV2OnlyContracts(t *testing.T) {
 		},
 		{name: "missing numChips", geometry: &geometryFixture{devicesPerNode: 8, numNodes: 1}, wantErr: "numChips must be >= 1"},
 		{name: "missing devicesPerNode", geometry: &geometryFixture{numChips: 8, numNodes: 1}, wantErr: "devicesPerNode must be >= 1"},
+		{name: "manifest device density", geometry: &geometryFixture{numChips: 8, devicesPerNode: 4, numNodes: 2}},
+		{
+			name: "node count uses manifest device density", geometry: &geometryFixture{numChips: 8, devicesPerNode: 4, numNodes: 1},
+			wantErr: "LPU partitions use 2 LPU nodes, want deployment.numLpuNodes 1",
+		},
 		{
 			name: "deployment node count mismatch", geometry: &geometryFixture{numChips: 8, devicesPerNode: 8, numNodes: 2},
 			wantErr: "LPU partitions use 1 LPU nodes, want deployment.numLpuNodes 2",
