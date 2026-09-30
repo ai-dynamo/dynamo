@@ -464,7 +464,7 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 
 # Replace the base image's PyNvVideoCodec with one past the release that stopped
 # shipping a separate libavcodec. rc24 is the first TensorRT-LLM base image to
-# ship this package at all, and rc24 through the currently pinned rc26 all ship
+# ship this package at all, and rc24 through the currently pinned rc28 all ship
 # 2.1.0, which bundles libavcodec, libavdevice, libavfilter, libswresample and
 # libswscale alongside the libavformat and libavutil it actually uses. 2.2.x
 # ships only the latter two -- but libavcodec is not gone, it is statically
@@ -520,16 +520,14 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # on PyNvVideoCodec_130.cpython-312-x86_64-linux-gnu.so lists libavformat.so.61,
 # libavcodec.so.61, libswresample.so.5 and libavutil.so.59 as NEEDED. 2.2.0
 # moved to FFmpeg 8.1.2 (libavformat.so.62.12.102 / libavutil.so.60.26.102) and
-# 2.2.3 to FFmpeg 9.0.1 (libavformat.so.63.1.101 / libavutil.so.61.1.101), both
-# at or above the floor deny_components sets for ffmpeg in codec_policy.yaml.
-# 2.1.0 sits below it.
+# 2.2.3 to FFmpeg 9.0.1 (libavformat.so.63.1.101 / libavutil.so.61.1.101).
+# 9.0.1 is the floor deny_components sets for ffmpeg in codec_policy.yaml, so
+# 2.1.0 and 2.2.0 both sit below it.
 #
-# The 2.2.3 SONAME bump is worth stating because it removes a hazard rather than
-# adding one. The in-tree FFmpeg is 8.1.2, so through 2.2.2 the vendored
-# libavformat.so.62 / libavutil.so.60 collided with it by SONAME while being
-# built with different configure flags -- whichever loaded first served the whole
-# process. 9.0.1's .so.63 / .so.61 cannot collide with .so.62 / .so.60, so each
-# consumer now resolves its own copy regardless of import order.
+# The in-tree FFmpeg is 9.0.1 too, so without more the two copies would share
+# SONAMEs and whichever loaded first would serve both. wheel_builder.Dockerfile
+# builds ours with --build-suffix=_dynamo, which renames its SONAMEs, so each
+# consumer resolves its own copy.
 #
 # Note that the gate did not tell us this. deny_components is evaluated against
 # SBOM components (scan_codecs.scan_sbom), and the SBOM does not enumerate

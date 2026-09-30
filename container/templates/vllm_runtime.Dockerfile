@@ -634,7 +634,7 @@ RUN set -eux; \
     ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
     python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
 
-# PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED at >=2.2.3 by
+# PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED with 2.2.3 by
 # the removal and requirements install above: the base image's 2.0.4 bundles a
 # full FFmpeg 8.1.1 (incl. libavcodec) that the codec gate rejects, while 2.2.3
 # bundles only libavutil.so.61 + libavformat.so.63 (FFmpeg 9.0.1, container
@@ -653,12 +653,12 @@ RUN set -eux; \
 #
 # The override is deliberate: 2.0.4 is the version whose bundled libavcodec the
 # codec gate rejects, so the override is the point. vLLM's own consumer is
-# vllm/multimodal/video.py (PyNvVideoCodecVideoBackendMixin), and everything it
-# touches -- SimpleDecoder, OutputColorType, get_batch_frames_by_index,
-# get_stream_metadata, reconfigure_decoder -- still exists in 2.2.3. The one API
-# 2.2.3 drops is SimpleDecoder.stop(), which neither vLLM nor Dynamo calls;
-# `get_frames_at` in that file belongs to the torchcodec backend, not this
-# package. Re-check that list when the base image moves.
+# vllm/multimodal/video_decoders/pynvvideocodec.py
+# (PyNvVideoCodecVideoBackendMixin), and everything it touches -- SimpleDecoder,
+# OutputColorType, get_batch_frames_by_index, get_stream_metadata,
+# reconfigure_decoder -- still exists in 2.2.3. The one API 2.2.3 drops is
+# SimpleDecoder.stop(), which neither vLLM nor Dynamo calls. Re-check that list
+# when the base image moves.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 {% endif %}
 

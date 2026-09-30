@@ -67,7 +67,7 @@ _SEMVER = re.compile(r"\b\d+\.\d+\.\d+\b")
 _HEREDOC = re.compile(r"<<-?'?([A-Za-z_][A-Za-z0-9_]*)'?")
 # A real Dockerfile instruction, used to bound an unterminated heredoc. Spelled out
 # rather than matched as "an uppercase word": the heredoc bodies assign uppercase
-# Python constants (`FLOOR = "2.2.3"`), and a pattern that treats those as a new
+# Python constants (`PINNED = "2.2.3"`), and a pattern that treats those as a new
 # instruction cuts the body off exactly where the constant being checked lives.
 _INSTRUCTION = re.compile(
     r"^(FROM|RUN|CMD|LABEL|MAINTAINER|EXPOSE|ENV|ADD|COPY|ENTRYPOINT|VOLUME"
@@ -75,10 +75,10 @@ _INSTRUCTION = re.compile(
 )
 # Diagnostic output does not constrain a guard -- it describes one, and it is where
 # historical versions legitimately appear ("the base image's 2.1.0 copy survived the
-# overlay"). Only the lines that compare or install are held to the floor.
+# overlay"). Only the lines that compare or install are held to the pin.
 _DIAGNOSTIC = re.compile(r'^\s*(\|\|\s*\{\s*)?(echo\b|print\(|sys\.exit\(|f?")')
 # A PyNvVideoCodec requirement specifier written inline in a template, e.g. the
-# `pip install 'PyNvVideoCodec>=2.2.3,<3'` in trtllm_runtime.Dockerfile.
+# `pip install 'PyNvVideoCodec==2.2.3'` in trtllm_runtime.Dockerfile.
 _INLINE_SPEC = re.compile(
     r"(?i)pynvvideocodec\s*((?:[<>=!~]=?\s*[0-9][^\'\"\s;]*)(?:\s*,\s*[<>=!~]=?\s*[0-9][^\'\"\s;]*)*)"
 )
@@ -91,7 +91,7 @@ def _instruction_blocks(text: str) -> list[list[str]]:
     BuildKit heredocs. Matching has to be per instruction, not per file, because
     the ``sort -V`` comparison idiom the TRT-LLM guard uses is also how the DALI
     pin in the same file is written -- a file-wide scan reads DALI's version as a
-    PyNvVideoCodec floor and fails for the wrong reason.
+    PyNvVideoCodec version and fails for the wrong reason.
 
     Comment lines are excluded from both the continuation and the heredoc tests: a
     comment that quotes ``<<'PYEOF'`` or ends in a backslash would otherwise swallow
@@ -166,7 +166,7 @@ def _template_pinned_versions(path: str) -> set[str]:
 
     Diagnostic lines are excluded, because that is where versions the guard is *not*
     comparing against legitimately appear -- the post-overlay check names the base
-    image's 2.1.0 in its error text, and holding that to the floor would force an
+    image's 2.1.0 in its error text, and holding that to the pin would force an
     unrelated rewrite of the message on every bump.
     """
     return _pinned_versions_in((ROOT / path).read_text(encoding="utf-8"))
