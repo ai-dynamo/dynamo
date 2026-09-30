@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::HashMap, sync::Arc};
+use tokio::time::Instant;
 
 use crate::{
     kv_router::{
@@ -248,15 +249,15 @@ struct RequestObservability {
     tracker: Option<Arc<RequestTracker>>,
     request_metrics: Arc<RouterRequestMetrics>,
     attempt_metrics: AttemptMetrics,
+    started_at: Instant,
+    first_token_at: Option<Instant>,
     cumulative_osl: usize,
     metrics_recorded: bool,
-    first_token_recorded: bool,
     dispatch_guard: Option<StageGuard>,
     dispatched: bool,
 }
 
 impl RequestObservability {
-    /// Labels the per-attempt histograms with the tracker's phase as of now.
     fn new(request: &PreprocessedRequest, request_metrics: Arc<RouterRequestMetrics>) -> Self {
         let tracker = request.tracker.clone();
         let phase = tracker
@@ -268,9 +269,10 @@ impl RequestObservability {
             tracker,
             request_metrics,
             attempt_metrics,
+            started_at: Instant::now(),
+            first_token_at: None,
             cumulative_osl: 0,
             metrics_recorded: false,
-            first_token_recorded: false,
             dispatch_guard: None,
             dispatched: false,
         }
@@ -314,19 +316,18 @@ impl RequestObservability {
     }
 
     fn observe_tokens(&mut self, new_tokens: usize) {
-        if !self.first_token_recorded && new_tokens > 0 {
+        if self.first_token_at.is_none() && new_tokens > 0 {
+            let now = Instant::now();
+            self.first_token_at = Some(now);
+            self.attempt_metrics
+                .time_to_first_token_seconds
+                .observe(now.duration_since(self.started_at).as_secs_f64());
             if let Some(tracker) = &self.tracker {
                 tracker.record_first_token();
                 if tracker.phase() == RequestPhase::Decode {
                     tracker.record_decode_first_token();
                 }
-                if let Some(ttft) = tracker.ttft_ms() {
-                    self.attempt_metrics
-                        .time_to_first_token_seconds
-                        .observe(ttft / 1000.0);
-                }
             }
-            self.first_token_recorded = true;
         }
 
         self.cumulative_osl += new_tokens;
@@ -337,17 +338,21 @@ impl RequestObservability {
     }
 
     fn observe_output_block_boundary(&self) {
-        let Some(tracker) = &self.tracker else {
-            return;
-        };
-
         // Refresh finish time at block boundaries so the streaming ITL sample stays current.
-        tracker.record_osl(self.cumulative_osl);
-        tracker.record_finish();
-        if let Some(avg_itl) = tracker.avg_itl_ms() {
+        if let Some(tracker) = &self.tracker {
+            tracker.record_osl(self.cumulative_osl);
+            tracker.record_finish();
+        }
+        self.observe_itl();
+    }
+
+    fn observe_itl(&self) {
+        if self.cumulative_osl > 1
+            && let Some(first_token_at) = self.first_token_at
+        {
             self.attempt_metrics
                 .inter_token_latency_seconds
-                .observe(avg_itl / 1000.0);
+                .observe(first_token_at.elapsed().as_secs_f64() / (self.cumulative_osl - 1) as f64);
         }
     }
 
@@ -361,16 +366,14 @@ impl RequestObservability {
         if let Some(tracker) = &self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
-            if record_itl_at_completion && let Some(avg_itl) = tracker.avg_itl_ms() {
-                self.attempt_metrics
-                    .inter_token_latency_seconds
-                    .observe(avg_itl / 1000.0);
-            }
             if let Some(latency) = tracker.kv_transfer_estimated_latency_secs() {
                 self.request_metrics
                     .kv_transfer_estimated_latency_seconds
                     .observe(latency);
             }
+        }
+        if record_itl_at_completion {
+            self.observe_itl();
         }
         if self.cumulative_osl > 0 {
             self.attempt_metrics
@@ -1184,5 +1187,55 @@ mod prefill_start_tests {
                 .get_sample_count(),
             0
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attempt_timing_is_independent_of_shared_tracker_updates() {
+        use std::time::Duration;
+
+        let tracker = Arc::new(RequestTracker::new());
+        let request = test_request(tracker.clone(), Vec::new());
+        let metrics = test_metrics();
+        let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
+        let mut prefill = RequestObservability::new(&request, metrics.clone());
+        prefill.mark_dispatched();
+        prefill.observe_tokens(0);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        prefill.observe_tokens(1);
+        let traced_ttft = tracker.ttft_ms();
+        drop(prefill_permit);
+
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+        let mut decode = RequestObservability::new(&request, metrics);
+        decode.mark_dispatched();
+        tokio::time::advance(Duration::from_millis(30)).await;
+        decode.observe_tokens(1);
+        tokio::time::advance(Duration::from_millis(20)).await;
+        decode.observe_tokens(2);
+        decode.observe_output_block_boundary();
+
+        // Prefill finishes after decode starts and overwrites the shared finish/OSL fields.
+        prefill.record_metrics(true);
+        tokio::time::advance(Duration::from_millis(20)).await;
+        decode.record_metrics(true);
+        decode.record_metrics(true);
+
+        for (attempt, ttft) in [(&prefill, 0.01), (&decode, 0.03)] {
+            let histogram = &attempt.attempt_metrics.time_to_first_token_seconds;
+            assert_eq!(histogram.get_sample_count(), 1);
+            assert_eq!(histogram.get_sample_sum(), ttft);
+        }
+        assert_eq!(
+            prefill
+                .attempt_metrics
+                .inter_token_latency_seconds
+                .get_sample_count(),
+            0
+        );
+        let decode_itl = &decode.attempt_metrics.inter_token_latency_seconds;
+        assert_eq!(decode_itl.get_sample_count(), 2);
+        assert!((decode_itl.get_sample_sum() - 0.03).abs() < 1e-9);
+        assert_eq!(tracker.ttft_ms(), traced_ttft);
     }
 }
