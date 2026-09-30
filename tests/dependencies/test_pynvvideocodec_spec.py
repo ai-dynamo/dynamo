@@ -169,14 +169,28 @@ def _template_pinned_versions(path: str) -> set[str]:
     image's 2.1.0 in its error text, and holding that to the floor would force an
     unrelated rewrite of the message on every bump.
     """
+    return _pinned_versions_in((ROOT / path).read_text(encoding="utf-8"))
+
+
+def _pinned_versions_in(text: str) -> set[str]:
+    """`_template_pinned_versions` over Dockerfile text rather than a path.
+
+    Diagnostic lines are also left out when deciding which instructions guard this
+    package at all. The DALI guard in trtllm_runtime.Dockerfile explains itself with
+    "the way PyNvVideoCodec 2.2.0 links it into libavformat"; counting that message
+    made the whole DALI instruction a PyNvVideoCodec one and read DALI's own 2.2.0
+    pin as a second PyNvVideoCodec version.
+    """
     versions: set[str] = set()
-    for block in _instruction_blocks((ROOT / path).read_text(encoding="utf-8")):
-        code = [line for line in block if not line.lstrip().startswith("#")]
+    for block in _instruction_blocks(text):
+        code = [
+            line
+            for line in block
+            if not line.lstrip().startswith("#") and not _DIAGNOSTIC.match(line)
+        ]
         if not any(DISTRIBUTION in line.lower() for line in code):
             continue
         for line in code:
-            if _DIAGNOSTIC.match(line):
-                continue
             # `printf '%s\n2.2.3\n'` is the shape of the shell comparisons, and the
             # literal backslash-n leaves no word boundary in front of the version.
             # Without flattening the escape first, that constant matches nothing here
@@ -254,6 +268,27 @@ def test_templates_guard_on_the_same_version(path: str) -> None:
     versions = _template_pinned_versions(path)
     assert versions, f"no PyNvVideoCodec version constant found in {path}"
     assert versions == {EXPECTED_VERSION}, f"{path} guards on {sorted(versions)}"
+
+
+def test_error_text_naming_the_package_does_not_claim_another_pin() -> None:
+    """An error message that mentions PyNvVideoCodec is not a PyNvVideoCodec guard.
+
+    Shaped like the DALI guard in trtllm_runtime.Dockerfile, which compares DALI
+    against 2.2.0 with the same `sort -V` idiom and names PyNvVideoCodec only in
+    the text it prints on failure.
+    """
+    template = r"""RUN set -eu; \
+    newest=$(printf '%s\n2.2.0\n' "$before" | sort -V | tail -1); \
+    if [ "$newest" != "2.2.0" ]; then \
+        echo "ERROR: the way PyNvVideoCodec 2.2.0 links it into libavformat" >&2; \
+        exit 1; \
+    fi; \
+    pip install 'nvidia-dali-cuda130==2.2.0'
+RUN set -eu; \
+    v=$(python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))'); \
+    [ "$v" = "2.2.3" ] || { echo "ERROR: wanted 2.2.3, got $v" >&2; exit 1; }
+"""
+    assert _pinned_versions_in(template) == {"2.2.3"}
 
 
 def main() -> int:
