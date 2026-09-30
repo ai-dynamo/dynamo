@@ -60,7 +60,9 @@ use crate::http::service::RouteDoc;
             crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
             crate::protocols::openai::completions::NvCreateCompletionRequest,
             crate::protocols::openai::embeddings::NvCreateEmbeddingRequest,
-            crate::protocols::openai::responses::NvCreateResponse
+            crate::protocols::openai::responses::NvCreateResponse,
+            crate::protocols::systemone::SystemOneRequest,
+            crate::protocols::systemone::SystemOneResponse
         )
     )
 )]
@@ -92,7 +94,7 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
         let path = parts[1];
 
         // Add operation based on method
-        let operation = create_operation_for_route(method, path);
+        let operation = create_operation_for_route(method, route.documentation_path());
 
         // Create PathItem with the operation
         use utoipa::openapi::HttpMethod;
@@ -156,6 +158,30 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
             .build(),
     );
 
+    if path == super::systemone::DEFAULT_PATH {
+        use utoipa::openapi::ContentBuilder;
+        operation = operation.response("200", ResponseBuilder::new()
+            .description("Ordered typed answers with uncalibrated label probabilities")
+            .content("application/json", ContentBuilder::new()
+                .schema(Some(<crate::protocols::systemone::SystemOneResponse as utoipa::PartialSchema>::schema()))
+                .build())
+            .build());
+        for (status, description) in [
+            ("413", "Request body exceeds 4 MiB"),
+            (
+                "422",
+                "Invalid question, unsupported control, or prompt/token budget",
+            ),
+            ("499", "Request cancelled"),
+            ("500", "Malformed or incomplete native scoring response"),
+        ] {
+            operation = operation.response(
+                status,
+                ResponseBuilder::new().description(description).build(),
+            );
+        }
+    }
+
     operation = operation.response(
         "400",
         ResponseBuilder::new()
@@ -196,6 +222,16 @@ fn add_request_body_for_path(
     use utoipa::openapi::request_body::RequestBodyBuilder;
 
     let (description, schema, example) = match path {
+        "/v1/systemone" => (
+            "Experimental aggregate SGLang scoring request; unknown nested fields are rejected",
+            <crate::protocols::systemone::SystemOneRequest as utoipa::PartialSchema>::schema(),
+            serde_json::json!({
+                "model": "Qwen/Qwen3-0.6B", "state": "The payment failed.",
+                "questions": {"route": {"type": "choice", "criteria": {
+                    "billing": "Payment issues", "technical": "Integration failures"
+                }}}
+            }),
+        ),
         "/v1/chat/completions" => (
             "Chat completion request with model, messages, and optional parameters",
             create_chat_completion_schema(),
@@ -313,6 +349,7 @@ fn create_response_example() -> serde_json::Value {
 /// Generate a human-readable summary for a path
 fn generate_summary_for_path(path: &str) -> String {
     match path {
+        "/v1/systemone" => "Score System One questions".to_string(),
         "/v1/chat/completions" => "Create chat completion".to_string(),
         "/v1/completions" => "Create text completion".to_string(),
         "/v1/embeddings" => "Create embeddings".to_string(),
@@ -330,6 +367,7 @@ fn generate_summary_for_path(path: &str) -> String {
 /// Generate a detailed description for a path
 fn generate_description_for_path(path: &str) -> String {
     match path {
+        "/v1/systemone" => "Experimental aggregate SGLang API. Each question is scored in one prefill-only operation; answers contain probabilities normalized over the permitted labels, not calibrated probabilities of correctness.".to_string(),
         "/v1/chat/completions" => {
             "Creates a completion for a chat conversation. Supports both streaming and non-streaming modes. \
             Compatible with OpenAI's chat completions API."
@@ -406,6 +444,41 @@ pub fn openapi_router(route_docs: Vec<RouteDoc>, _path: Option<String>) -> (Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn systemone_openapi_describes_typed_requests_answers_and_errors() {
+        let spec =
+            generate_openapi_spec(&[RouteDoc::new(axum::http::Method::POST, "/v1/systemone")]);
+        let value = serde_json::to_value(spec).unwrap();
+        let operation = &value["paths"]["/v1/systemone"]["post"];
+        assert_eq!(operation["summary"], "Score System One questions");
+        assert!(operation["requestBody"]["content"]["application/json"]["schema"].is_object());
+        assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
+        for status in ["400", "404", "413", "422", "499", "500", "503", "529"] {
+            assert!(
+                operation["responses"].get(status).is_some(),
+                "missing {status}"
+            );
+        }
+        let schemas = &value["components"]["schemas"];
+        assert!(schemas["SystemOneQuestion"]["oneOf"].is_array());
+        assert!(schemas["SystemOneAnswer"]["oneOf"].is_array());
+    }
+
+    #[test]
+    fn systemone_custom_path_preserves_its_schema() {
+        let spec = generate_openapi_spec(&[RouteDoc::new(
+            axum::http::Method::POST,
+            "/experimental/score",
+        )
+        .with_documentation_path(super::super::systemone::DEFAULT_PATH)]);
+        let value = serde_json::to_value(spec).unwrap();
+        assert_eq!(
+            value["paths"]["/experimental/score"]["post"]["summary"],
+            "Score System One questions"
+        );
+        assert!(value["paths"].get("/v1/systemone").is_none());
+    }
 
     #[test]
     fn test_generate_openapi_spec() {

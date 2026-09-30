@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use utoipa::ToSchema;
 
 const MAX_QUESTIONS: usize = 128;
 const MAX_CHOICES: usize = 255;
@@ -20,7 +21,7 @@ pub enum SystemOneError {
     CandidateScores(String),
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct SystemOneRequest {
     pub model: String,
     pub state: Value,
@@ -83,7 +84,7 @@ impl SystemOneRequest {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SystemOneQuestion {
     Noul {
@@ -191,7 +192,7 @@ impl SystemOneQuestion {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NoulCriteria {
     #[serde(default, rename = "true")]
@@ -212,20 +213,20 @@ impl NoulCriteria {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct SystemOneResponse {
     pub model: String,
     pub answers: IndexMap<String, SystemOneAnswer>,
     pub usage: SystemOneUsage,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct SystemOneUsage {
     pub input_tokens: usize,
     pub output_tokens: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SystemOneAnswer {
     Noul(NoulAnswer),
@@ -233,13 +234,13 @@ pub enum SystemOneAnswer {
     Score(ScoreAnswer),
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct NoulAnswer {
     pub noul: f64,
     pub x_label_mass: f64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ChoiceAnswer {
     pub choice: String,
     pub probabilities: IndexMap<String, f64>,
@@ -247,7 +248,7 @@ pub struct ChoiceAnswer {
     pub x_label_mass: f64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ScoreAnswer {
     pub score: f64,
     pub probabilities: IndexMap<String, f64>,

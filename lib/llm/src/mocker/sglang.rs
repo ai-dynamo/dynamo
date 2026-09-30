@@ -196,7 +196,7 @@ mod tests {
         let response = metadata.response(&[42], 1, Some(json!({"type": "length"})));
         assert_eq!(
             response["meta_info"]["output_token_ids_logprobs"],
-            json!([[[-0.8, 17, null], [-0.5, 4, null]]])
+            json!([[[-10.8, 17, null], [-10.5, 4, null]]])
         );
     }
 }

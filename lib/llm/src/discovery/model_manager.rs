@@ -22,8 +22,8 @@ use tokio_util::sync::CancellationToken;
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
-    SystemOneExecutionSelection, WorkerSet, kv_source_watch::KvSourceMembershipCoordinator,
-    runtime_config_watch,
+    SystemOneExecutionSelection, SystemOneSelectionError, WorkerSet,
+    kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
 use dynamo_runtime::{
@@ -1506,7 +1506,7 @@ impl ModelManager {
         &self,
         requested_model: &str,
         capability: &str,
-    ) -> Result<SystemOneExecutionSelection, ModelManagerError> {
+    ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         let catalog = self.catalog.load();
         let canonical_model = catalog
             .aliases
@@ -1517,20 +1517,23 @@ impl ModelManager {
             return model.get_systemone_execution_selection(capability);
         }
 
-        // The Jev SDK defaults to `jev-latest`, while a single-engine SGLang
-        // server accepts any model name and reports the served model. Preserve
-        // that behavior only when the target is unambiguous.
+        if requested_model != "jev-latest" {
+            return Err(SystemOneSelectionError::NotFound);
+        }
+
+        // Resolve the SDK default only when exactly one model is capable,
+        // including temporarily unavailable models so churn cannot retarget it.
         let mut eligible = catalog
             .models
             .values()
-            .filter_map(|model| model.get_systemone_execution_selection(capability).ok());
+            .map(|model| model.get_systemone_execution_selection(capability))
+            .filter(|selection| !matches!(selection, Err(SystemOneSelectionError::Unsupported)));
         let only = eligible.next();
-        if only.is_some() && eligible.next().is_none() {
-            return Ok(only.expect("checked as some"));
+        match (only, eligible.next()) {
+            (Some(selection), None) => selection,
+            (None, None) if !catalog.models.is_empty() => Err(SystemOneSelectionError::Unsupported),
+            _ => Err(SystemOneSelectionError::NotFound),
         }
-        Err(ModelManagerError::ModelNotFound(
-            requested_model.to_string(),
-        ))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -2848,11 +2851,15 @@ mod tests {
         DistributedRuntime, Runtime,
         discovery::{Discovery, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
-        pipeline::RouterMode,
+        pipeline::{Error, ManyOut, RouterMode, SingleIn},
         transports::event_plane::EventScope,
     };
 
     use crate::model_card::ModelDeploymentCard;
+    use crate::protocols::{
+        Annotated,
+        common::{llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest},
+    };
     use crate::{
         discovery::{KvEventSource, KvSourceStatus},
         local_model::runtime_config::ModelRuntimeConfig,
@@ -2864,6 +2871,104 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    struct SystemOneStubEngine;
+
+    #[async_trait::async_trait]
+    impl
+        dynamo_runtime::engine::AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            Error,
+        > for SystemOneStubEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            unreachable!("selection test does not dispatch")
+        }
+    }
+
+    fn register_systemone_model(
+        manager: &ModelManager,
+        name: &str,
+    ) -> tokio::sync::watch::Sender<Vec<u64>> {
+        let mut card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.set_name(name);
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+        let preprocessor = crate::preprocessor::OpenAIPreprocessor::new(card.clone()).unwrap();
+        let mut worker_set = WorkerSet::new(name.to_string(), name.to_string(), card);
+        worker_set.generate_engine = Some(Arc::new(SystemOneStubEngine));
+        worker_set.systemone_preprocessor = Some(preprocessor);
+        let (workers, receiver) = tokio::sync::watch::channel(vec![1]);
+        worker_set.set_instance_watcher(receiver);
+        assert!(manager.add_worker_set(name, name, worker_set));
+        workers
+    }
+
+    #[test]
+    fn systemone_model_resolution_limits_fallback_to_sdk_default() {
+        let manager = ModelManager::new();
+        let _workers = register_systemone_model(&manager, "model-a");
+        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+        assert_eq!(
+            manager
+                .get_systemone_execution_selection("jev-latest", capability)
+                .unwrap()
+                .canonical_model,
+            "model-a"
+        );
+        assert!(manager.register_alias("public-model", "model-a"));
+        assert_eq!(
+            manager
+                .get_systemone_execution_selection("public-model", capability)
+                .unwrap()
+                .canonical_model,
+            "model-a"
+        );
+        assert!(matches!(
+            manager.get_systemone_execution_selection("typo", capability),
+            Err(SystemOneSelectionError::NotFound)
+        ));
+        manager.add_worker_set("unsupported", "other", make_worker_set("other", "other"));
+        assert!(matches!(
+            manager.get_systemone_execution_selection("unsupported", capability),
+            Err(SystemOneSelectionError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn systemone_default_model_does_not_retarget_during_worker_churn() {
+        let manager = ModelManager::new();
+        let workers_a = register_systemone_model(&manager, "model-a");
+        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+        workers_a.send(vec![]).unwrap();
+        assert!(matches!(
+            manager.get_systemone_execution_selection("jev-latest", capability),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let _workers_b = register_systemone_model(&manager, "model-b");
+        assert!(matches!(
+            manager.get_systemone_execution_selection("jev-latest", capability),
+            Err(SystemOneSelectionError::NotFound)
+        ));
+        assert_eq!(
+            manager
+                .get_systemone_execution_selection("model-b", capability)
+                .unwrap()
+                .canonical_model,
+            "model-b"
+        );
     }
 
     fn insert_runtime_configs(

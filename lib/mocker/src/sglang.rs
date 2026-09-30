@@ -140,7 +140,7 @@ impl ResponseMetadata {
                                     candidate_token_ids
                                         .iter()
                                         .copied()
-                                        .map(logprob_entry)
+                                        .map(candidate_logprob_entry)
                                         .collect(),
                                 )
                             })
@@ -193,6 +193,12 @@ fn selected_logprob(token_id: u32) -> f64 {
 
 fn logprob_entry(token_id: u32) -> Value {
     json!([selected_logprob(token_id), token_id, null])
+}
+
+fn candidate_logprob_entry(token_id: u32) -> Value {
+    // A fixed offset keeps up to 255 candidate scores below unit mass without
+    // changing their relative probabilities or depending on the requested set.
+    json!([selected_logprob(token_id) - 10.0, token_id, null])
 }
 
 fn top_logprob_entries(token_id: u32, count: usize) -> Value {
@@ -277,7 +283,7 @@ mod tests {
 
         assert_eq!(
             response["meta_info"]["output_token_ids_logprobs"],
-            json!([[[-0.8, 17, null], [-0.5, 4, null]]])
+            json!([[[-10.8, 17, null], [-10.5, 4, null]]])
         );
     }
 
@@ -291,7 +297,23 @@ mod tests {
         assert_eq!(response["output_ids"], json!([]));
         assert_eq!(
             response["meta_info"]["output_token_ids_logprobs"],
-            json!([[[-0.8, 17, null], [-0.5, 4, null]]])
+            json!([[[-10.8, 17, null], [-10.5, 4, null]]])
         );
+    }
+
+    #[test]
+    fn candidate_scores_have_valid_full_vocabulary_mass() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata = ResponseMetadata::new("score", &[10, 11], options)
+            .with_candidate_token_ids((0..255).collect());
+        let response = metadata.response(&[], 0, Some(json!({"type": "length"})));
+        let entries = response["meta_info"]["output_token_ids_logprobs"][0]
+            .as_array()
+            .unwrap();
+        let mass: f64 = entries
+            .iter()
+            .map(|entry| entry[0].as_f64().unwrap().exp())
+            .sum();
+        assert!(mass > 0.0 && mass <= 1.0);
     }
 }

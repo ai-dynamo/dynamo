@@ -184,12 +184,13 @@ fn rejects_missing_or_non_finite_logprobs() {
 
     assert!(answer_from_logprobs(&request.questions["q"], &[-1.0]).is_err());
     assert!(answer_from_logprobs(&request.questions["q"], &[f64::NAN, -1.0]).is_err());
+    assert!(answer_from_logprobs(&request.questions["q"], &[1000.0, -1.0]).is_err());
 }
 
 #[test]
 fn parses_exact_native_candidate_scores_in_requested_order() {
     let response = json!({
-        "output_ids": [42],
+        "output_ids": [],
         "meta_info": {
             "finish_reason": {"type": "length"},
             "output_token_ids_logprobs": [[
@@ -203,6 +204,22 @@ fn parses_exact_native_candidate_scores_in_requested_order() {
         parse_candidate_scores(&response, &[17, 4]).unwrap(),
         vec![-0.2, -1.3]
     );
+}
+
+#[test]
+fn rejects_decoded_tokens_in_prefill_only_scoring() {
+    let response = json!({
+        "output_ids": [42],
+        "meta_info": {
+            "finish_reason": {"type": "length"},
+            "completion_tokens": 1,
+            "output_token_ids_logprobs": [[[-0.2, 17, null], [-1.3, 4, null]]]
+        }
+    });
+    assert!(parse_candidate_scores(&response, &[17, 4]).is_err());
+    let mut response = response;
+    response["output_ids"] = json!([]);
+    assert!(parse_candidate_scores(&response, &[17, 4]).is_err());
 }
 
 #[test]
@@ -261,6 +278,14 @@ fn renders_sglang_prompt_format_version_one_in_request_order() {
             "Is the following true?\nyes: today\nno: later\nAnswer with yes or no only."
         )
     );
+}
+
+#[test]
+fn rejects_empty_and_impossible_candidate_distributions() {
+    let empty = serde_json::from_value(json!({"type": "choice", "criteria": {}})).unwrap();
+    assert!(answer_from_logprobs(&empty, &[]).is_err());
+    let noul = serde_json::from_value(json!({"type": "noul", "instructions": "valid?"})).unwrap();
+    assert!(answer_from_logprobs(&noul, &[-0.1, -0.1]).is_err());
 }
 
 #[test]

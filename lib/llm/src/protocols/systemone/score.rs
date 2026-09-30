@@ -11,19 +11,31 @@ pub fn answer_from_logprobs(
     question: &SystemOneQuestion,
     logprobs: &[f64],
 ) -> Result<SystemOneAnswer, SystemOneError> {
-    if logprobs.len() != question.candidate_count() {
+    if logprobs.is_empty() || logprobs.len() != question.candidate_count() {
         return Err(candidate_error(format!(
             "expected {} values, received {}",
             question.candidate_count(),
             logprobs.len()
         )));
     }
-    if logprobs.iter().any(|value| !value.is_finite()) {
-        return Err(candidate_error("all values must be finite"));
+    if logprobs
+        .iter()
+        .any(|value| !value.is_finite() || *value > 0.0)
+    {
+        return Err(candidate_error(
+            "log probabilities must be finite and non-positive",
+        ));
     }
 
     let probabilities = stable_softmax(logprobs);
-    let label_mass = logprobs.iter().map(|value| value.exp()).sum();
+    let label_mass: f64 = logprobs.iter().map(|value| value.exp()).sum();
+    // Allow only small floating-point drift in vocabulary-normalized scores.
+    if label_mass > 1.0 + 1e-3 {
+        return Err(candidate_error(
+            "candidate vocabulary probability mass exceeds one",
+        ));
+    }
+    let label_mass = label_mass.min(1.0);
     match question {
         SystemOneQuestion::Noul { .. } => Ok(SystemOneAnswer::Noul(NoulAnswer {
             noul: probabilities[0],

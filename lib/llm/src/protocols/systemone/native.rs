@@ -70,6 +70,17 @@ pub fn parse_candidate_scores(
         .get("meta_info")
         .and_then(Value::as_object)
         .ok_or_else(|| candidate_error("missing meta_info object"))?;
+    if response
+        .get("output_ids")
+        .is_some_and(|ids| ids.as_array().is_none_or(|ids| !ids.is_empty()))
+        || meta
+            .get("completion_tokens")
+            .is_some_and(|count| count.as_u64() != Some(0))
+    {
+        return Err(candidate_error(
+            "prefill-only scoring must not generate tokens",
+        ));
+    }
     let finish = meta
         .get("finish_reason")
         .and_then(Value::as_object)
