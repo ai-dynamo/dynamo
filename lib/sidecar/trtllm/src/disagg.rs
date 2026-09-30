@@ -27,6 +27,8 @@ use crate::proto as pb;
 pub(crate) const REQUEST_TYPE_KEY: &str = "request_type";
 /// `extra.request_type` value marking a prefill-only request.
 pub(crate) const CONTEXT_ONLY: &str = "context_only";
+/// TensorRT-LLM extension carrying Dynamo's stable agent session identity.
+const CONVERSATION_ID_KEY: &str = "conversation_id";
 
 const ATTRIBUTES: &str = "prefill handoff attributes";
 
@@ -141,18 +143,38 @@ pub(crate) fn session_from_json(value: &Value) -> Result<pb::KvSessionRef, Dynam
     })
 }
 
-/// `extra` payload marking a request as prefill-only.
-pub(crate) fn context_only_extra() -> prost_types::Struct {
-    prost_types::Struct {
-        fields: [(
+/// TensorRT-LLM request extensions for token-only output and agent affinity.
+pub(crate) fn request_extra(
+    context_only: bool,
+    conversation_id: Option<&str>,
+) -> prost_types::Struct {
+    let mut fields = std::collections::BTreeMap::new();
+    // Dynamo detokenizes the returned IDs; server-side text is discarded.
+    fields.insert(
+        "detokenize".to_string(),
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::BoolValue(false)),
+        },
+    );
+    if context_only {
+        fields.insert(
             REQUEST_TYPE_KEY.to_string(),
             prost_types::Value {
                 kind: Some(prost_types::value::Kind::StringValue(
                     CONTEXT_ONLY.to_string(),
                 )),
             },
-        )]
-        .into_iter()
-        .collect(),
+        );
     }
+    if let Some(conversation_id) = conversation_id {
+        fields.insert(
+            CONVERSATION_ID_KEY.to_string(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue(
+                    conversation_id.to_string(),
+                )),
+            },
+        );
+    }
+    prost_types::Struct { fields }
 }

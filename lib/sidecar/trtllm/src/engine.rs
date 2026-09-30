@@ -130,6 +130,7 @@ impl TrtllmSidecarEngine {
             disaggregation_mode: mode,
             route_to_encoder: false,
             enable_rl: args.sidecar.common.enable_rl,
+            default_thinking_mode: args.default_thinking_mode,
             ..Default::default()
         };
         Ok((engine, config))

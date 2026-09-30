@@ -10,6 +10,10 @@ use super::*;
 #[test]
 fn prefill_request_is_marked_context_only() {
     let mut req = request();
+    req.agent_context = Some(
+        serde_json::from_value(json!({"session_id": " agentx-session "}))
+            .expect("valid agent context"),
+    );
     req.stop_conditions.max_tokens = Some(128);
     req.stop_conditions.min_tokens = Some(8);
     req.output_options.logprobs = Some(1);
@@ -19,6 +23,22 @@ fn prefill_request_is_marked_context_only() {
     assert!(
         is_context_only(&proto),
         "prefill must set extra.request_type"
+    );
+    assert_eq!(
+        proto
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.fields.get("conversation_id"))
+            .and_then(|value| value.kind.as_ref()),
+        Some(&prost_types::value::Kind::StringValue(
+            "agentx-session".to_string()
+        )),
+        "prefill must preserve both its request type and AgentX session"
+    );
+    assert_eq!(
+        proto.extra.as_ref().unwrap().fields["detokenize"].kind,
+        Some(prost_types::value::Kind::BoolValue(false)),
+        "token-only output must coexist with the prefill session extensions"
     );
     let stopping = proto.stopping.expect("stopping options");
     assert_eq!(stopping.max_tokens, Some(1));
@@ -47,7 +67,12 @@ async fn prefill_ready_is_the_terminal_handoff() {
     let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Prefill);
     engine.start(0).await.expect("start");
 
-    let outputs = collect(&engine, request()).await;
+    let mut req = request();
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        prefill_dp_rank: Some(0),
+        ..Default::default()
+    });
+    let outputs = collect(&engine, req).await;
     let terminal = outputs
         .iter()
         .find(|output| output.finish_reason.is_some())
@@ -75,10 +100,21 @@ async fn prefill_ready_is_the_terminal_handoff() {
 async fn decode_request_replays_the_prefill_session() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
 
+    let mut agent_request = request();
+    agent_request.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(0),
+        prefill_dp_rank: Some(0),
+        ..Default::default()
+    });
+    agent_request.agent_context = Some(
+        serde_json::from_value(json!({"session_id": "agentx-session"}))
+            .expect("valid agent context"),
+    );
+
     // Phase 1: prefill produces the handoff.
     let prefill = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Prefill);
     prefill.start(0).await.expect("start prefill");
-    let handoff = collect(&prefill, request())
+    let handoff = collect(&prefill, agent_request.clone())
         .await
         .into_iter()
         .find_map(|output| output.disaggregated_params)
@@ -87,7 +123,7 @@ async fn decode_request_replays_the_prefill_session() {
     // Phase 2: decode replays it.
     let decode = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
     decode.start(0).await.expect("start decode");
-    let mut req = request();
+    let mut req = agent_request;
     req.prefill_result = Some(dynamo_backend_common::PrefillResult {
         disaggregated_params: handoff,
         prompt_tokens_details: None,
@@ -98,7 +134,22 @@ async fn decode_request_replays_the_prefill_session() {
         "the decode worker streams the completion"
     );
 
-    let session = server.service.requests.lock().await[1]
+    let requests = server.service.requests.lock().await;
+    for request in requests.iter() {
+        let extra = request.extra.as_ref().expect("request extensions");
+        assert_eq!(
+            extra.fields["detokenize"].kind,
+            Some(prost_types::value::Kind::BoolValue(false))
+        );
+        assert_eq!(
+            extra.fields["conversation_id"].kind,
+            Some(prost_types::value::Kind::StringValue(
+                "agentx-session".into()
+            )),
+            "both RPC legs must retain the same conversation identity"
+        );
+    }
+    let session = requests[1]
         .kv
         .as_ref()
         .and_then(|kv| kv.session.as_ref())
@@ -125,12 +176,16 @@ fn decode_without_a_prefill_result_runs_the_whole_request() {
     )
     .expect("a decode request without a handoff is the bypass path");
     assert!(
-        proto.kv.and_then(|kv| kv.session).is_none(),
+        proto
+            .kv
+            .as_ref()
+            .and_then(|kv| kv.session.as_ref())
+            .is_none(),
         "no session should be replayed when none was handed off"
     );
     assert!(
-        proto.extra.is_none(),
-        "a bypassed request is not context_only"
+        !is_context_only(&proto),
+        "a bypassed request must not be marked context_only"
     );
 }
 
