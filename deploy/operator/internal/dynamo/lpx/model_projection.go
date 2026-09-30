@@ -42,7 +42,7 @@ type ModelProjectionInput struct {
 	// RuntimeBuildRef is the build reference projected into runtime configuration.
 	RuntimeBuildRef string
 	// BuildSnapshot is the normalized immutable build input.
-	BuildSnapshot NormalizedBuildSnapshot
+	BuildSnapshot *BuildSnapshot
 	// LocalPartitions selects hybrid runtime partitions that run on the Cyborg GPU.
 	// Nil runs every partition on LPUs.
 	LocalPartitions *dynamov1beta1.LPXLocalPartitions

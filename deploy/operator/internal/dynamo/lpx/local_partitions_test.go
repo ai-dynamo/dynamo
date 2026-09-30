@@ -80,7 +80,7 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			t.Parallel()
 
 			t.Log("Create a hybrid build with chain 7-8 and an independent partition 11")
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 			build := normalized.build
 			build.Partitions[0].topology = localPartitionTopologyA
 			build.Partitions[0].NumChips = 8
@@ -219,7 +219,7 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			t.Parallel()
 
 			t.Log("Project a hybrid build with chain 7-8 and an independent partition 11")
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 			build := normalized.build
 			build.Partitions[0].topology = localPartitionTopologyA
 			build.Partitions[0].NumChips = 8
@@ -270,7 +270,7 @@ func TestProjectModelV2LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Create a hybrid build with one more physical partition than the LPX limit")
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized.build
 	build.SelectedPropSyncChains = nil
 	template := build.Partitions[0]
@@ -362,7 +362,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			}
 			fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 5, deviceType: manifestcapnp.DeviceType_cuda})
 			fixture.selectedPropSyncChains = [][]uint32{{2, 3}}
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 
 			t.Log("Project the build with the selected local partitions")
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
@@ -442,7 +442,7 @@ func TestProjectModelV3LocalPartitionsRejectsUnsupportedBuilds(t *testing.T) {
 			second.id = 2
 			fixture.partitions = append(fixture.partitions, second)
 			fixture.selectedPropSyncChains = [][]uint32{{1, 2}}
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 
 			t.Log("Reject a local selection that the build cannot serve")
 			_, err := appendModelProjections(nil, ModelProjectionInput{
@@ -465,7 +465,7 @@ func TestProjectModelV3LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 		partition.id = id
 		fixture.partitions = append(fixture.partitions, partition)
 	}
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 
 	t.Log("Reject the oversized build even when every partition runs locally")
 	_, err := appendModelProjections(nil, ModelProjectionInput{

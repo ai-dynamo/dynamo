@@ -17,7 +17,7 @@ func TestProjectModelV2UsesManifestPropSync(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Acquire a V2 build with compiler-selected prop-sync metadata")
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized.build
 	require.Equal(t, [][]int{{7, 8}}, build.SelectedPropSyncChains)
 
@@ -50,7 +50,7 @@ func TestProjectModelV2SingleEmbeddingPlacementFromManifest(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Prepare a selected V2 chain with explicit embedding placement capabilities")
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 			build := normalized.build
 			build.Partitions[0].SourcePartitionID = 0
 			build.Partitions[1].SourcePartitionID = 1
@@ -78,7 +78,7 @@ func TestProjectModelV2SingleEmbeddingPlacementFromManifest(t *testing.T) {
 
 func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 	t.Log("Prepare a hybrid V2 build with a standalone embedding partition")
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized.build
 	build.Partitions[0].SourcePartitionID = 0
 	build.Partitions[1].SourcePartitionID = 1
@@ -102,7 +102,7 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Prepare a selected adjacent chain between unselected physical partitions")
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized.build
 	prefix, suffix := build.Partitions[0], build.Partitions[1]
 	prefix.SourcePartitionID, prefix.PartPath = 3, "part-3"
@@ -131,7 +131,7 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 
 func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T) {
 	t.Parallel()
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized.build
 
 	t.Log("Use individually schedulable physical shapes whose collapsed runtime total is not a scheduler shape")
@@ -185,7 +185,7 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 
 func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T) {
 	t.Parallel()
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized.build
 
 	t.Log("Model a selected chain starting at Cyborg's standalone embedding partition")
@@ -225,7 +225,7 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	t.Parallel()
 
 	t.Log("Prepare two selected V2 sub-host partitions")
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized.build
 
 	for index := range build.Partitions {

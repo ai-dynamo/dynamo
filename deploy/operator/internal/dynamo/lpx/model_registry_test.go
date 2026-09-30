@@ -8,7 +8,6 @@ package lpx
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -178,133 +177,6 @@ func TestAcquireLocalBuildSnapshotRejectsFIFOManifest(t *testing.T) {
 	require.NoError(t, err, "%s", output)
 }
 
-func TestLocalBuildFilePathsBudget(t *testing.T) {
-	t.Parallel()
-
-	for _, tt := range []struct {
-		name        string
-		directories []string
-		files       []string
-		maxBytes    int
-		wantErr     bool
-	}{
-		{name: "empty"},
-		{name: "files exact", files: []string{"a", "b"}, maxBytes: 2},
-		{name: "files over", files: []string{"a", "b"}, maxBytes: 1, wantErr: true},
-		{name: "nested exact", directories: []string{"d"}, files: []string{"d/f"}, maxBytes: 4},
-		{name: "nested over", directories: []string{"d"}, files: []string{"d/f"}, maxBytes: 3, wantErr: true},
-		{name: "directories exact", directories: []string{"a", "b"}, maxBytes: 2},
-		{name: "directories over", directories: []string{"a", "b"}, maxBytes: 1, wantErr: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Create the selected tree of files and empty directories")
-			root := t.TempDir()
-			for _, directory := range tt.directories {
-				require.NoError(t, os.MkdirAll(filepath.Join(root, directory), 0o700))
-			}
-			for _, file := range tt.files {
-				require.NoError(t, os.WriteFile(filepath.Join(root, file), nil, 0o600))
-			}
-
-			t.Log("Charge every visited relative path and never return a truncated inventory")
-			paths, err := localBuildFilePaths(t.Context(), root, tt.maxBytes)
-			if tt.wantErr {
-				require.ErrorContains(t, err, "path limit")
-				require.Nil(t, paths)
-				return
-			}
-			require.NoError(t, err)
-			require.ElementsMatch(t, tt.files, paths)
-		})
-	}
-}
-
-type cancelAfterChecksContext struct {
-	context.Context
-	cancel    context.CancelFunc
-	remaining int
-}
-
-func (ctx *cancelAfterChecksContext) Err() error {
-	// Cancel the real context deterministically at the selected cooperative check.
-	ctx.remaining--
-	if ctx.remaining == 0 {
-		ctx.cancel()
-	}
-	return ctx.Context.Err()
-}
-
-func TestLocalBuildFilePathsBatchesAndCancellation(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Create more files than fit in one directory batch")
-	root := t.TempDir()
-	files := make([]string, 300)
-	for index := range files {
-		files[index] = fmt.Sprintf("%03d", index)
-		require.NoError(t, os.WriteFile(filepath.Join(root, files[index]), nil, 0o600))
-	}
-
-	t.Log("Read all batches at the exact aggregate path limit")
-	paths, err := localBuildFilePaths(t.Context(), root, 3*len(files))
-	require.NoError(t, err)
-	require.ElementsMatch(t, files, paths)
-
-	t.Log("Cancel after traversal has passed the first batch without relying on a timer")
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	walkCtx := &cancelAfterChecksContext{Context: ctx, cancel: cancel, remaining: 5}
-	paths, err = localBuildFilePaths(walkCtx, root, 3*len(files))
-	require.ErrorIs(t, err, context.Canceled)
-	require.Nil(t, paths)
-}
-
-func TestLocalBuildFilePathsSymlinks(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Create a symlinked root with a file, a child directory link and a dangling link")
-	parent := t.TempDir()
-	root := filepath.Join(parent, "build")
-	require.NoError(t, os.Mkdir(root, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "file"), nil, 0o600))
-	require.NoError(t, os.Symlink(".", filepath.Join(root, "loop")))
-	require.NoError(t, os.Symlink("missing", filepath.Join(root, "dangling")))
-	rootLink := filepath.Join(parent, "linked-build")
-	require.NoError(t, os.Symlink(root, rootLink))
-
-	t.Log("Resolve only the root link and inventory child links without following them")
-	paths, err := localBuildFilePaths(t.Context(), rootLink, maxBuildSnapshotMetadataBytes)
-	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"file", "loop", "dangling"}, paths)
-}
-
-func TestLocalBuildFilePathsRejectsNonDirectoryRoot(t *testing.T) {
-	t.Parallel()
-
-	for _, name := range []string{"file", "fifo"} {
-		t.Run(name, func(t *testing.T) {
-			t.Log("Create a non-directory build root")
-			root := filepath.Join(t.TempDir(), name)
-			if name == "fifo" {
-				require.NoError(t, syscall.Mkfifo(root, 0o600))
-
-				t.Log("Keep both FIFO ends open so a missing root check fails without hanging the test")
-				fifo, err := os.OpenFile(root, os.O_RDWR|syscall.O_NONBLOCK, 0)
-				require.NoError(t, err)
-				t.Cleanup(func() { require.NoError(t, fifo.Close()) })
-			} else {
-				require.NoError(t, os.WriteFile(root, nil, 0o600))
-			}
-
-			t.Log("Reject the root before opening it for directory reads")
-			paths, err := localBuildFilePaths(t.Context(), root, maxBuildSnapshotMetadataBytes)
-			require.ErrorContains(t, err, "build root ")
-			require.ErrorContains(t, err, "not a directory")
-			require.Nil(t, paths)
-		})
-	}
-}
-
 func TestReadBuildFileBoundsLocalFileAtAcquisition(t *testing.T) {
 	t.Parallel()
 
@@ -446,9 +318,6 @@ func TestGCSModelRegistrySnapshot_StreamFailures(t *testing.T) {
 				}
 				client.fileStreams = []*fakeModelFileStream{stream}
 			}
-			client.list = &modelpb.ModelFileList{
-				Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}},
-			}
 
 			registry, err := NewModelRegistry("gs://bucket/registry", client)
 			if err != nil {
@@ -470,17 +339,6 @@ func TestGCSModelRegistrySnapshot_StreamFailures(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestDefinitiveBuildMemberAbsenceIncludesLocalENOTDIR(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Classify local ENOTDIR as definitive build-member absence")
-	err := &os.PathError{Op: "open", Path: "/build/manifest.v2.capnp.bin", Err: syscall.ENOTDIR}
-	require.True(t, isDefinitiveBuildMemberAbsence(err))
-
-	t.Log("Keep transient read failures outside definitive absence")
-	require.False(t, isDefinitiveBuildMemberAbsence(errors.New("temporary read failure")))
 }
 
 func TestRegistryEnsureDownloadedSkipsLocalBuilds(t *testing.T) {

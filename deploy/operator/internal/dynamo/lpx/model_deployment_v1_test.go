@@ -228,9 +228,8 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 			t.Log("Acquire and normalize exactly the scheduler contract")
 			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), root)
 			require.NoError(t, err)
-			require.Equal(t, payload, snapshot.manifestBytes)
 			require.Equal(t, buildContractDeploymentV1, snapshot.format)
-			normalized, err := normalizeBuildSnapshot(snapshot)
+			normalized := snapshot
 			require.NoError(t, err)
 			require.Equal(t, buildContractDeploymentV1, normalized.format)
 			require.EqualValues(t, 4, normalized.build.IOFPGACount)
@@ -284,35 +283,29 @@ func TestDeploymentContractCorruptionNeverUsesLegacy(t *testing.T) {
 
 			t.Log("Reject ambiguous publication before any legacy decoder can accept it")
 			_, err = registry.AcquireBuildSnapshot(t.Context(), root)
-			require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
+			require.ErrorIs(t, err, errInvalidBuildManifest)
 			require.ErrorContains(t, err, "ambiguous")
 		})
 	}
 }
 
-func TestDeploymentContractFencesRemoteBytes(t *testing.T) {
-	t.Log("Serve differing deployment reads with a stable inventory")
+func TestDeploymentContractReadsRemoteBytesOnce(t *testing.T) {
+	t.Log("Serve one deployment contract with a separate opaque execution artifact")
+	payload, err := newDeploymentV1ContractFixture(t).Message().Marshal()
+	require.NoError(t, err)
 	client := &fakeModelServiceClient{
-		list: &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{
-			{RelativePath: gbuildDeploymentV1CapnpFile}, {RelativePath: "execution.v1.capnp.bin"},
-		}},
-		fileStreams: []*fakeModelFileStream{
-			{chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, "first")},
-			{chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, "second")},
-		},
+		list:        &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildDeploymentV1CapnpFile}}},
+		fileStreams: []*fakeModelFileStream{{chunks: modelFileChunks(gbuildDeploymentV1CapnpFile, string(payload))}},
 	}
 	registry, err := NewModelRegistry("gs://bucket/registry", client)
 	require.NoError(t, err)
-
-	t.Log("Reject changes between the two bounded reads")
-	_, err = registry.AcquireBuildSnapshot(t.Context(), "model/build")
-	require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
-	require.ErrorContains(t, err, "compiler metadata deployment.v1.capnp.bin changed while acquiring")
-	require.Len(t, client.listRequests, 2)
-	require.Len(t, client.filesRequests, 2)
-	for _, request := range client.filesRequests {
-		require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, request.GetFileSelector().GetPaths())
-	}
+	snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "model/build")
+	require.NoError(t, err)
+	require.Equal(t, buildContractDeploymentV1, snapshot.format)
+	require.Len(t, client.listRequests, 1)
+	require.Equal(t, []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile}, client.listRequests[0].GetFileSelector().GetPaths())
+	require.Len(t, client.filesRequests, 1)
+	require.Equal(t, []string{gbuildDeploymentV1CapnpFile}, client.filesRequests[0].GetFileSelector().GetPaths())
 }
 
 func TestDeploymentContractBoundsAcquisition(t *testing.T) {
@@ -327,7 +320,6 @@ func TestDeploymentContractBoundsAcquisition(t *testing.T) {
 
 	t.Log("Reject oversized metadata before a decoder or runtime sees it")
 	_, err = registry.AcquireBuildSnapshot(t.Context(), root)
-	require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
 	require.ErrorIs(t, err, errBuildFileTooLarge)
 }
 
@@ -430,10 +422,6 @@ func TestDeploymentContractRejectsCorruptNewOnly(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), []byte("corrupt"), 0o600))
 	registry, err := NewModelRegistry("", nil)
 	require.NoError(t, err)
-	snapshot, err := registry.AcquireBuildSnapshot(t.Context(), root)
-	require.NoError(t, err)
-
-	t.Log("Reject the selected deployment during normalization")
-	_, err = normalizeBuildSnapshot(snapshot)
+	_, err = registry.AcquireBuildSnapshot(t.Context(), root)
 	require.ErrorContains(t, err, "parsing deployment.v1.capnp.bin")
 }
