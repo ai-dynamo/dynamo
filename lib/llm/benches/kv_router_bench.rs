@@ -20,7 +20,6 @@ use dynamo_bench::common::{
     compute_time_bucket_stats, fetch_model_name, print_time_bucket_report,
 };
 use dynamo_runtime::transports::event_plane::EventEnvelope;
-use hf_hub;
 use indicatif::{ProgressBar, ProgressStyle};
 use minijinja::{Environment, context, value::Value};
 use rayon::prelude::*;
@@ -31,15 +30,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, Semaphore};
 
-use dynamo_llm::kv_router::protocols::{
+use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_hash,
+    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_block_hash,
     compute_seq_hash_for_block,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_llm::preprocessor::prompt::{
-    ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-};
+use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
+use dynamo_mocker::loadgen::RouterSequence;
+use dynamo_renderer::{ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter};
 
 /// KV Router event subject suffix (appended to Component.subject())
 /// Full subject format: namespace.{namespace}.component.{component}.kv-events
@@ -145,6 +144,10 @@ struct Args {
     #[arg(long, default_value = "backend")]
     component: String,
 
+    /// Endpoint name used to discover routable workers
+    #[arg(long, default_value = "generate")]
+    endpoint: String,
+
     // Output
     /// Write results to JSON file
     #[arg(long)]
@@ -191,7 +194,7 @@ fn compute_block_hashes(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHas
         .chunks_exact(kv_block_size as usize)
         .map(|chunk| {
             let bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
-            LocalBlockHash(compute_hash(&bytes))
+            compute_block_hash(&bytes)
         })
         .collect()
 }
@@ -318,7 +321,7 @@ fn try_load_prompt_renderer(model_or_path: &str) -> Option<PromptRenderer> {
     }
 
     let card = ModelDeploymentCard::load_from_disk(path, None).ok()?;
-    let formatter = PromptFormatter::from_mdc(&card).ok()?;
+    let formatter = prompt_formatter_from_mdc(&card).ok()?;
     Some(PromptRenderer::Formatter(formatter))
 }
 
@@ -532,52 +535,45 @@ impl PrefixData {
 }
 
 /// Pre-generated sequence data for benchmarking
-#[derive(Clone)]
-struct SequenceData {
+type SequenceData = RouterSequence;
+
+fn sequence_from_request_content(
+    content: &str,
     worker_id: WorkerId,
-    local_hashes: Vec<LocalBlockHash>,
-    external_hashes: Vec<ExternalSequenceBlockHash>,
+    kv_block_size: u32,
+    tokenizer: &Tokenizer,
+    prompt_renderer: Option<&PromptRenderer>,
+) -> Result<SequenceData> {
+    let (local_hashes, external_hashes) =
+        compute_hashes_for_content(content, tokenizer, kv_block_size, prompt_renderer)?;
+
+    Ok(SequenceData {
+        worker_id,
+        local_hashes,
+        external_hashes,
+    })
 }
 
-impl SequenceData {
-    /// Create a sequence from the exact request content.
-    fn from_request_content(
-        content: &str,
-        worker_id: WorkerId,
-        kv_block_size: u32,
-        tokenizer: &Tokenizer,
-        prompt_renderer: Option<&PromptRenderer>,
-    ) -> Result<Self> {
-        let (local_hashes, external_hashes) =
-            compute_hashes_for_content(content, tokenizer, kv_block_size, prompt_renderer)?;
-
-        Ok(Self {
-            worker_id,
-            local_hashes,
-            external_hashes,
-        })
-    }
-
-    fn to_router_event(&self, event_id: u64) -> RouterEvent {
-        let kv_event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                blocks: self
-                    .local_hashes
-                    .iter()
-                    .zip(self.external_hashes.iter())
-                    .map(|(local, ext)| KvCacheStoredBlockData {
-                        block_hash: *ext,
-                        tokens_hash: *local,
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: 0,
-        };
-        RouterEvent::new(self.worker_id, kv_event)
-    }
+fn sequence_to_router_event(sequence: &SequenceData, event_id: u64) -> RouterEvent {
+    let kv_event = KvCacheEvent {
+        event_id,
+        data: KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: None,
+            start_position: None,
+            blocks: sequence
+                .local_hashes
+                .iter()
+                .zip(sequence.external_hashes.iter())
+                .map(|(local, ext)| KvCacheStoredBlockData {
+                    block_hash: *ext,
+                    tokens_hash: *local,
+                    mm_extra_info: None,
+                })
+                .collect(),
+        }),
+        dp_rank: 0,
+    };
+    RouterEvent::new(sequence.worker_id, kv_event)
 }
 
 /// Response from the frontend's /health endpoint
@@ -592,14 +588,20 @@ struct HealthResponse {
 #[derive(Debug, Deserialize)]
 struct HealthInstance {
     instance_id: u64,
-    #[allow(dead_code)]
+    namespace: String,
+    component: String,
     endpoint: String,
 }
 
 /// Discover worker IDs from the frontend's /health endpoint.
 ///
 /// Returns a list of instance_ids (worker_ids) that are currently registered.
-async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
+async fn discover_worker_ids(
+    frontend_url: &str,
+    namespace: &str,
+    component: &str,
+    endpoint: &str,
+) -> Result<Vec<WorkerId>> {
     let client = reqwest::Client::new();
     let url = format!("{}/health", frontend_url);
 
@@ -620,17 +622,33 @@ async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
         .await
         .context("Failed to parse health response")?;
 
-    let worker_ids: Vec<WorkerId> = health.instances.iter().map(|i| i.instance_id).collect();
+    let worker_ids: Vec<WorkerId> = health
+        .instances
+        .iter()
+        .filter(|i| i.namespace == namespace && i.component == component && i.endpoint == endpoint)
+        .map(|i| i.instance_id)
+        .collect();
 
-    // Deduplicate (in case of multiple endpoints per worker)
+    // Deduplicate in case discovery reports the same endpoint instance more than once.
     let mut unique_ids: Vec<WorkerId> = worker_ids.clone();
     unique_ids.sort_unstable();
     unique_ids.dedup();
 
-    println!("  Discovered {} workers", unique_ids.len());
+    println!(
+        "  Discovered {} workers for {}.{}.{}",
+        unique_ids.len(),
+        namespace,
+        component,
+        endpoint
+    );
 
     if unique_ids.is_empty() {
-        anyhow::bail!("No workers discovered from frontend. Are kv_stress_workers running?");
+        anyhow::bail!(
+            "No workers discovered from frontend for {}.{}.{}. Are kv_stress_workers running?",
+            namespace,
+            component,
+            endpoint
+        );
     }
 
     Ok(unique_ids)
@@ -648,6 +666,7 @@ async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
 ///
 /// Worker IDs are taken from the provided list (discovered from frontend).
 /// Uses parallel processing for tokenization to speed up generation.
+#[allow(clippy::too_many_arguments)]
 fn generate_sequences_for_requests(
     num_sequences: usize,
     worker_ids: &[WorkerId],
@@ -692,7 +711,7 @@ fn generate_sequences_for_requests(
                 num_prefix_prompts,
                 seed,
             );
-            let seq = SequenceData::from_request_content(
+            let seq = sequence_from_request_content(
                 &content,
                 worker_id,
                 kv_block_size,
@@ -749,8 +768,9 @@ async fn build_tree_via_nats(
     };
 
     for (event_id, seq) in sequences.iter().enumerate() {
-        let event = seq.to_router_event(event_id as u64);
-        let data = encode_event_with_envelope(&event, KV_EVENT_SUBJECT)?;
+        let event = sequence_to_router_event(seq, event_id as u64);
+        let event_batch = vec![event];
+        let data = encode_event_with_envelope(&event_batch, KV_EVENT_SUBJECT)?;
         nats_client
             .publish(subject.clone(), data.into())
             .await
@@ -954,6 +974,7 @@ fn build_routing_request_with_prefix(
 
 /// Send HTTP requests at a specified rate.
 /// Returns the Unix timestamp (seconds since epoch) when warmup ended.
+#[allow(clippy::too_many_arguments)]
 async fn send_requests_at_rate(
     client: reqwest::Client,
     frontend_url: String,
@@ -1165,9 +1186,10 @@ async fn publish_events_at_rate(
 
     while start.elapsed() < duration {
         let seq = &sequences[(event_id as usize) % sequences.len()];
-        let event = seq.to_router_event(event_id);
+        let event = sequence_to_router_event(seq, event_id);
+        let event_batch = vec![event];
 
-        match encode_event_with_envelope(&event, KV_EVENT_SUBJECT) {
+        match encode_event_with_envelope(&event_batch, KV_EVENT_SUBJECT) {
             Ok(data) => {
                 if let Err(e) = nats_client.publish(subject.clone(), data.into()).await {
                     publish_failures += 1;
@@ -1346,6 +1368,7 @@ async fn main() -> Result<()> {
     println!("  Tokenizer: {}", tokenizer_path);
     println!("  Namespace: {}", args.namespace);
     println!("  Component: {}", args.component);
+    println!("  Endpoint: {}", args.endpoint);
     println!(
         "  NATS subject: namespace.{}.component.{}.kv-events",
         args.namespace, args.component
@@ -1411,7 +1434,8 @@ async fn main() -> Result<()> {
         if let Some(contents) = contents {
             match serde_json::from_str::<ChatTemplate>(&contents) {
                 Ok(chat_template) => {
-                    match PromptFormatter::from_parts(chat_template, ContextMixins::new(&[])) {
+                    match PromptFormatter::from_parts(chat_template, ContextMixins::new(&[]), true)
+                    {
                         Ok(formatter) => {
                             println!(
                                 "  Prompt formatter loaded from tokenizer_config.json (using frontend-compatible renderer)"
@@ -1509,7 +1533,13 @@ async fn main() -> Result<()> {
     println!("\nPhase 2: Discover Workers & Generate Sequences");
 
     // Discover actual worker IDs from the frontend
-    let discovered_worker_ids = discover_worker_ids(&args.frontend_url).await?;
+    let discovered_worker_ids = discover_worker_ids(
+        &args.frontend_url,
+        &args.namespace,
+        &args.component,
+        &args.endpoint,
+    )
+    .await?;
 
     if discovered_worker_ids.len() != args.num_workers {
         println!(

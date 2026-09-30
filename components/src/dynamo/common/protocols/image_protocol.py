@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel
 
@@ -38,6 +38,11 @@ class NvCreateImageRequest(BaseModel):
     Matches the flattened Rust NvCreateImageRequest in lib/llm/src/protocols/openai/images.rs
     """
 
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
+
     prompt: str
     """The text prompt for image generation."""
 
@@ -65,6 +70,9 @@ class NvCreateImageRequest(BaseModel):
     moderation: Optional[str] = None
     """Content moderation level: auto or low."""
 
+    input_reference: Optional[str] = None
+    """Optional image reference that guides generation (for I2I)."""
+
     nvext: Optional[ImageNvExt] = None
     """NVIDIA extensions."""
 
@@ -72,7 +80,7 @@ class NvCreateImageRequest(BaseModel):
 class ImageData(BaseModel):
     """Individual image data in a response.
 
-    Matches the flattened Rust Image enum in lib/async-openai/src/types/image.rs.
+    Matches the flattened Rust Image enum in lib/protocols/src/types/mod.rs.
     """
 
     url: Optional[str] = None

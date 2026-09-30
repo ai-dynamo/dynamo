@@ -3,28 +3,62 @@
 
 import asyncio
 import inspect
+import json
 import logging
 import random
-import socket
+import re
+import threading
 from abc import ABC, abstractmethod
-from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, Generic, Optional, Tuple, TypeVar
 
 import sglang as sgl
-from sglang.srt.utils import get_local_ip_auto
+from sglang.srt.managers.io_struct import ProfileReq
+from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Context
+from dynamo.common.constants import DisaggregationMode
+from dynamo.common.lora.manager import get_lora_manager
+from dynamo.common.model_taints import MODEL_TAINT_ROUTE, register_model_taint_route
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.structural_tag import serialize_structural_tag
+from dynamo.llm import (
+    HttpError,
+    KvEventPublisher,
+    ModelInput,
+    ModelType,
+    WorkerMetricsPublisher,
+    WorkerType,
+    lora_name_to_id,
+    register_llm,
+    unregister_llm,
+)
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import supports_disagg_prefill_cancel_anytime
 from dynamo.sglang.args import Config
+from dynamo.sglang.capacity import kv_event_block_size
+from dynamo.sglang.engine_routes import resolve_configured_engine_routes
+from dynamo.sglang.gateway import follow_pause_broadcasts
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_handlers.cancellation import CancellationMixin
 
-# Keep default tags minimal and safe for general use.
-# "cuda_graph" can still be requested explicitly, but it requires LD_PRELOAD setup.
-DEFAULT_MEMORY_OCCUPATION_TAGS = ["kv_cache", "weights"]
+logger = logging.getLogger(__name__)
 
 
-class BaseGenerativeHandler(ABC):
+_DEFAULT_NATIVE_ENGINE_ROUTES = (
+    ("pause_generation", "pause_generation:tm"),
+    ("continue_generation", "continue_generation:tm"),
+    ("release_memory_occupation", "release_memory_occupation:tm"),
+    ("resume_memory_occupation", "resume_memory_occupation:tm"),
+)
+
+
+RequestT = TypeVar("RequestT")
+ResponseT = TypeVar("ResponseT")
+
+
+class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
     """Minimal base class for all generative handlers (LLM, diffusion, etc.).
 
     Provides common infrastructure for:
@@ -45,51 +79,478 @@ class BaseGenerativeHandler(ABC):
             publisher: Optional metrics publisher for the worker.
         """
         self.config = config
+        self.enable_trace = getattr(config.server_args, "enable_trace", False)
 
         # Set up metrics and KV publishers
+        self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
+        self.kv_publisher: Optional[KvEventPublisher] = None
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
-        else:
-            self.metrics_publisher = None
-            self.kv_publisher = None
 
     @abstractmethod
-    async def generate(
-        self, request: Dict[str, Any], context: Context
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         """Generate response from request.
 
         Args:
-            request: Request dict with input and parameters.
+            request: Request with input and parameters.
             context: Context object for cancellation handling.
 
         Yields:
             Response data (format varies by handler implementation).
         """
-        pass
+        ...
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
         pass
 
-    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
-        """Get trace header dict for passing to generation functions.
 
-        Args:
-            context: Dynamo Context object containing trace information.
+class LoraMixin:
+    """Mixin providing LoRA adapter load/unload/list management.
 
-        Returns:
-            Dict with traceparent header if trace context available, None otherwise.
+    Requires the host class to have ``self.engine``, ``self.config``,
+    and ``self.generate_endpoint``.
+    """
+
+    engine: sgl.Engine  # provided by BaseWorkerHandler
+    config: Config
+    generate_endpoint: Any
+
+    def _init_lora_tracking(self) -> None:
+        """Initialize LoRA tracking state. Call from host __init__."""
+        self.lora_id_for_name: dict[str, int] = {}
+        self.lora_name_to_path: dict[str, str] = {}
+        # Per-LoRA locks to prevent concurrent load/unload for the same adapter.
+        # Matches the vLLM pattern (handlers.py) for cross-backend consistency.
+        self._lora_load_locks: dict[str, asyncio.Lock] = {}
+        self._lora_load_locks_guard = threading.Lock()
+
+    def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
+        """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
+        with self._lora_load_locks_guard:
+            lock = self._lora_load_locks.get(lora_name)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._lora_load_locks[lora_name] = lock
+            return lock
+
+    def _resolve_lora(self, request: Dict[str, Any]) -> Optional[str]:
+        """Return the LoRA name to pass as ``lora_path`` to SGLang, or *None*.
+
+        SGLang's lora_registry and lora_ref_cache are keyed by lora_name,
+        so we pass the name (not the filesystem path) as lora_path.
         """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
+        model_name = request.get("model")
+        if model_name and model_name in self.lora_id_for_name:
+            return model_name
+        return None
+
+    async def load_lora(self, request: Optional[Dict[str, Any]] = None):
+        """
+        Load a LoRA adapter dynamically into the SGLang engine.
+
+        Request format:
+        {
+            "lora_name": str,
+            "source": {
+                "uri": str  # e.g., "s3://bucket/path" or "file:///path"
+            }
+        }
+
+        This method is idempotent - concurrent calls for the same LoRA will be
+        serialized and only one load operation will happen.
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' and 'source.uri'",
+                }
+                return
+
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            source = request.get("source")
+            if not source or not isinstance(source, dict):
+                yield {
+                    "status": "error",
+                    "message": "'source' object is required in request",
+                }
+                return
+
+            lora_uri = source.get("uri")
+            if not lora_uri:
+                yield {
+                    "status": "error",
+                    "message": "'source.uri' is required in request",
+                }
+                return
+
+            # Use LoRAManager to download from URI
+            lora_manager = get_lora_manager()
+            if lora_manager is None:
+                yield {
+                    "status": "error",
+                    "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
+                }
+                return
+
+            # Serialize load/unload operations per lora_name.
+            lock = self._get_lora_lock(lora_name)
+            async with lock:
+                try:
+                    # Idempotency check after acquiring lock — another concurrent
+                    # request may have loaded this LoRA while we waited.
+                    if lora_name in self.lora_id_for_name:
+                        lora_id = self.lora_id_for_name[lora_name]
+                        logger.info(
+                            f"LoRA adapter already loaded (concurrent request completed): "
+                            f"{lora_name} with ID {lora_id}"
+                        )
+                        yield {
+                            "status": "success",
+                            "message": f"LoRA adapter '{lora_name}' already loaded",
+                            "lora_name": lora_name,
+                            "lora_id": lora_id,
+                        }
+                        return
+
+                    logger.info(
+                        f"Downloading LoRA adapter: {lora_name} from {lora_uri}"
+                    )
+                    download_result = await lora_manager.download_lora(lora_uri)
+
+                    if download_result["status"] != "success":
+                        yield {
+                            "status": "error",
+                            "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                        }
+                        return
+
+                    lora_path = download_result["local_path"]
+
+                    # Generate deterministic ID from lora_name
+                    lora_id = lora_name_to_id(lora_name)
+
+                    # Add the LoRA to the SGLang engine via tokenizer_manager
+                    if (
+                        hasattr(self.engine, "tokenizer_manager")
+                        and self.engine.tokenizer_manager
+                    ):
+                        from sglang.srt.managers.io_struct import (
+                            LoadLoRAAdapterReqInput,
+                        )
+
+                        load_req = LoadLoRAAdapterReqInput(
+                            lora_name=lora_name,
+                            lora_path=lora_path,
+                        )
+                        load_result = (
+                            await self.engine.tokenizer_manager.load_lora_adapter(
+                                load_req
+                            )
+                        )
+                        if not load_result.success:
+                            yield {
+                                "status": "error",
+                                "message": f"SGLang failed to load LoRA adapter '{lora_name}': {load_result.error_message}",
+                            }
+                            return
+                    else:
+                        yield {
+                            "status": "error",
+                            "message": "SGLang engine does not support LoRA loading (tokenizer_manager not available)",
+                        }
+                        return
+
+                    # Track the LoRA
+                    self.lora_id_for_name[lora_name] = lora_id
+                    self.lora_name_to_path[lora_name] = lora_path
+                    logger.info(
+                        f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+                    )
+
+                    # Publish LoRA as a ModelDeploymentCard
+                    if self.generate_endpoint is not None and self.config is not None:
+                        try:
+                            user_data = {
+                                "lora_adapter": True,
+                                "lora_id": lora_id,
+                            }
+
+                            # Match the base-model registration topology so the
+                            # prefill router activates for the LoRA model name
+                            # the same way it does for the base model. The prefill
+                            # role is carried by `worker_type=Prefill`; we register
+                            # the legacy `ModelType.Prefill` marker bit (not a
+                            # surface) so an old frontend still detects it during
+                            # the cross-version rollout. Non-prefill workers honor
+                            # --endpoint-types so the LoRA is exposed on the same
+                            # endpoints as the base model.
+                            if self.config.serving_mode == DisaggregationMode.PREFILL:
+                                lora_model_type = ModelType.Prefill
+                                lora_worker_type = WorkerType.Prefill
+                                lora_needs: list[list[WorkerType]] = [
+                                    [WorkerType.Decode]
+                                ]
+                            else:
+                                lora_model_type = parse_endpoint_types(
+                                    self.config.dynamo_args.endpoint_types
+                                )
+                                if (
+                                    self.config.serving_mode
+                                    == DisaggregationMode.DECODE
+                                ):
+                                    lora_worker_type = WorkerType.Decode
+                                    lora_needs = [[WorkerType.Prefill]]
+                                else:
+                                    lora_worker_type = WorkerType.Aggregated
+                                    lora_needs = []
+
+                            # Reuse the base-model metadata builder so LoRA
+                            # cards advertise the same token-overflow policy,
+                            # parser configuration, and routing capabilities.
+                            # Lazy import: static test collection lacks parts of SGLang.
+                            from dynamo.sglang.register import get_runtime_config
+
+                            runtime_config = await get_runtime_config(
+                                self.engine,
+                                self.config.server_args,
+                                self.config.dynamo_args,
+                            )
+                            await register_llm(
+                                model_input=ModelInput.Tokens,
+                                model_type=lora_model_type,
+                                endpoint=self.generate_endpoint,
+                                model_path=self.config.server_args.model_path,
+                                kv_cache_block_size=kv_event_block_size(
+                                    self.config.server_args
+                                ),
+                                user_data=user_data,
+                                lora_name=lora_name,
+                                base_model_path=self.config.server_args.model_path,
+                                worker_type=lora_worker_type,
+                                needs=lora_needs,
+                                # LoRA cards need base-model metadata, not weights.
+                                ignore_weights=True,
+                                runtime_config=runtime_config,
+                                # Publish the worker's per-worker LoRA slot budget so the frontend
+                                # allocator sizes placement against real capacity instead of the
+                                # hard-coded default.
+                                max_gpu_lora_count=getattr(
+                                    self.config.server_args, "max_loras_per_batch", None
+                                ),
+                            )
+                            logger.info(
+                                f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                f"Failed to publish LoRA {lora_name} ModelDeploymentCard"
+                            )
+                            # Rollback: remove the LoRA from the engine
+                            try:
+                                from sglang.srt.managers.io_struct import (
+                                    UnloadLoRAAdapterReqInput,
+                                )
+
+                                rollback_req = UnloadLoRAAdapterReqInput(
+                                    lora_name=lora_name
+                                )
+                                await self.engine.tokenizer_manager.unload_lora_adapter(
+                                    rollback_req
+                                )
+                                self.lora_id_for_name.pop(lora_name, None)
+                                self.lora_name_to_path.pop(lora_name, None)
+                            except Exception:
+                                logger.exception(f"Failed to rollback LoRA {lora_name}")
+
+                            yield {
+                                "status": "error",
+                                "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
+                                "lora_name": lora_name,
+                            }
+                            return
+
+                    yield {
+                        "status": "success",
+                        "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                        "lora_name": lora_name,
+                        "lora_id": lora_id,
+                    }
+                finally:
+                    # Avoid lock-map growth on failed loads: if this attempt did
+                    # not leave the LoRA loaded, remove the lock entry.
+                    with self._lora_load_locks_guard:
+                        if (
+                            lora_name not in self.lora_id_for_name
+                            and self._lora_load_locks.get(lora_name) is lock
+                        ):
+                            self._lora_load_locks.pop(lora_name, None)
+        except Exception as e:
+            logger.exception("Failed to load LoRA adapter")
+            yield {"status": "error", "message": str(e)}
+
+    async def unload_lora(self, request: Optional[Dict[str, Any]] = None):
+        """
+        Unload a LoRA adapter dynamically from the SGLang engine.
+
+        Request format:
+        {
+            "lora_name": str,
+        }
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' field",
+                }
+                return
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            # Serialize load/unload operations per lora_name.
+            lock = self._get_lora_lock(lora_name)
+            async with lock:
+                try:
+                    # Check after acquiring lock — a concurrent unload may have
+                    # already removed this LoRA while we waited.
+                    if lora_name not in self.lora_id_for_name:
+                        yield {
+                            "status": "error",
+                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.lora_id_for_name.keys())}",
+                        }
+                        return
+
+                    lora_id = self.lora_id_for_name[lora_name]
+                    lora_path = self.lora_name_to_path.get(lora_name)
+
+                    # Unload from SGLang engine
+                    if (
+                        hasattr(self.engine, "tokenizer_manager")
+                        and self.engine.tokenizer_manager
+                    ):
+                        from sglang.srt.managers.io_struct import (
+                            UnloadLoRAAdapterReqInput,
+                        )
+
+                        unload_req = UnloadLoRAAdapterReqInput(lora_name=lora_name)
+                        unload_result = (
+                            await self.engine.tokenizer_manager.unload_lora_adapter(
+                                unload_req
+                            )
+                        )
+                        if not unload_result.success:
+                            yield {
+                                "status": "error",
+                                "message": f"SGLang failed to unload LoRA adapter '{lora_name}': {unload_result.error_message}",
+                            }
+                            return
+                    else:
+                        yield {
+                            "status": "error",
+                            "message": "SGLang engine does not support LoRA unloading (tokenizer_manager not available)",
+                        }
+                        return
+
+                    # Remove from tracking
+                    del self.lora_id_for_name[lora_name]
+                    self.lora_name_to_path.pop(lora_name, None)
+
+                    # Unregister from discovery
+                    if self.generate_endpoint is not None:
+                        try:
+                            await unregister_llm(
+                                endpoint=self.generate_endpoint,
+                                lora_name=lora_name,
+                            )
+                            logger.info(
+                                f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                f"Failed to unregister LoRA {lora_name} ModelDeploymentCard"
+                            )
+                            # Rollback: re-add the LoRA to engine
+                            try:
+                                from sglang.srt.managers.io_struct import (
+                                    LoadLoRAAdapterReqInput,
+                                )
+
+                                rollback_req = LoadLoRAAdapterReqInput(
+                                    lora_name=lora_name,
+                                    lora_path=lora_path,
+                                )
+                                await self.engine.tokenizer_manager.load_lora_adapter(
+                                    rollback_req
+                                )
+                                self.lora_id_for_name[lora_name] = lora_id
+                                if lora_path:
+                                    self.lora_name_to_path[lora_name] = lora_path
+                            except Exception:
+                                logger.exception(f"Failed to rollback LoRA {lora_name}")
+
+                            yield {
+                                "status": "error",
+                                "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
+                                "lora_name": lora_name,
+                            }
+                            return
+
+                    logger.info(
+                        f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+                    )
+                    yield {
+                        "status": "success",
+                        "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                        "lora_name": lora_name,
+                        "lora_id": lora_id,
+                    }
+                finally:
+                    # Remove lock entry once the LoRA is not loaded (or never was).
+                    with self._lora_load_locks_guard:
+                        if (
+                            lora_name not in self.lora_id_for_name
+                            and self._lora_load_locks.get(lora_name) is lock
+                        ):
+                            self._lora_load_locks.pop(lora_name, None)
+        except Exception as e:
+            logger.exception("Failed to unload LoRA adapter")
+            yield {"status": "error", "message": str(e)}
+
+    async def list_loras(self, _request: Optional[Dict[str, Any]] = None):
+        """
+        List all loaded LoRA adapters.
+        Returns a dictionary of lora_name -> lora_id mappings.
+        """
+        try:
+            loras = dict(self.lora_id_for_name)
+            yield {
+                "status": "success",
+                "loras": loras,
+                "count": len(loras),
+            }
+        except Exception as e:
+            logger.exception("Failed to list LoRA adapters")
+            yield {"status": "error", "message": str(e)}
 
 
-class BaseWorkerHandler(BaseGenerativeHandler):
+class BaseWorkerHandler(
+    CancellationMixin, LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]
+):
     """Abstract base class for SGLang LLM worker handlers.
 
     Extends BaseGenerativeHandler with LLM-specific functionality:
@@ -124,20 +585,27 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         self.generate_endpoint = generate_endpoint
         self.publisher = publisher
         self.shutdown_event = shutdown_event
+        self._abort_tasks: set[asyncio.Task[Any]] = set()
+        self._supports_ordered_cancellation = (
+            engine is not None and supports_disagg_prefill_cancel_anytime(engine)
+        )
+        logger.info(
+            "SGLang ordered cancellation support: %s",
+            self._supports_ordered_cancellation,
+        )
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
-        else:
-            self.metrics_publisher = None
-            self.kv_publisher = None
         self.serving_mode = config.serving_mode
-        self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
-        self.enable_trace = config.server_args.enable_trace
+        self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
+        self.enable_trace = getattr(config.server_args, "enable_trace", False)
+        self._max_input_token_id: Optional[int] = None
 
         if engine is not None:
+            self._max_input_token_id = self._resolve_max_input_token_id(engine)
             self.input_param_manager = InputParamManager(
                 self.engine.tokenizer_manager.tokenizer
-                if not self.skip_tokenizer_init
+                if self.use_sglang_tokenizer
                 else None
             )
             self._engine_supports_priority = (
@@ -148,122 +616,75 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
-        self._memory_occupation_lock = asyncio.Lock()
-        self._memory_released = False
+        self._engine_route_lock = asyncio.Lock()
+
+        # Serializes elastic-EP scaling: SGLang tracks a single in-flight scale
+        # phase, so concurrent scale_elastic_ep calls must not overlap.
+        self._scale_ep_lock = asyncio.Lock()
+
+        # LoRA tracking (via LoraMixin)
+        self._init_lora_tracking()
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
-            return {"priority": priority}
+            normalized = int(priority)
+            if getattr(
+                self.config.server_args, "schedule_low_priority_values_first", False
+            ):
+                normalized = -normalized
+            return {"priority": normalized}
         return {}
 
-    async def release_memory_occupation(self, body: dict) -> dict:
-        """Release GPU memory occupation and unregister from discovery.
-
-        Args:
-            body: Unused. Release always targets default tags.
-
-        Order of operations:
-        1. Unregister from discovery - stop accepting new requests
-        2. Pause generation - drain in-flight requests
-        3. Release memory - safe now that no requests are active
-        """
-        from sglang.srt.managers.io_struct import (
-            PauseGenerationReqInput,
-            ReleaseMemoryOccupationReqInput,
-        )
-
-        tags = list(DEFAULT_MEMORY_OCCUPATION_TAGS)
+    async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
+        """Flush SGLang's local cache when no requests are active."""
         tokenizer_manager = (
             getattr(self.engine, "tokenizer_manager", None)
             if self.engine is not None
             else None
         )
         if tokenizer_manager is None:
-            return {
+            yield {
                 "status": "error",
-                "message": "memory control not supported on this worker",
+                "message": "KV cache clear not supported on this worker",
             }
+            return
 
-        async with self._memory_occupation_lock:
-            if self._memory_released:
-                return {
-                    "status": "ok",
-                    "message": "Memory already released",
-                }
+        try:
+            async with self._engine_route_lock:
+                if getattr(tokenizer_manager, "rid_to_state", None):
+                    yield {
+                        "status": "error",
+                        "message": "Cannot clear KV cache while requests are active",
+                    }
+                    return
 
-            try:
-                # Stop new requests and drain in-flight work before releasing memory.
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.unregister_endpoint_instance()
+                if hasattr(tokenizer_manager, "auto_create_handle_loop"):
+                    tokenizer_manager.auto_create_handle_loop()
+                result = await tokenizer_manager.flush_cache()
 
-                pause_req = PauseGenerationReqInput()
-                await tokenizer_manager.pause_generation(pause_req)
+                if not result.success:
+                    yield {
+                        "status": "error",
+                        "message": getattr(result, "message", None)
+                        or "KV cache clear failed",
+                    }
+                    return
 
-                release_req = ReleaseMemoryOccupationReqInput(tags=tags)
-                await tokenizer_manager.release_memory_occupation(release_req, None)
-                self._memory_released = True
+                backend = tokenizer_manager.server_args.hicache_storage_backend
+                if backend and backend != "none":
+                    result = await tokenizer_manager.clear_hicache_storage()
+                    if not result.success:
+                        yield {
+                            "status": "error",
+                            "message": getattr(result, "message", None)
+                            or "External KV cache clear failed",
+                        }
+                        return
 
-                return {
-                    "status": "ok",
-                    "message": f"Memory released for tags: {tags}",
-                }
-            except Exception as e:
-                logging.error(f"Failed to release memory occupation: {e}")
-                return {"status": "error", "message": str(e)}
-
-    async def resume_memory_occupation(self, body: dict) -> dict:
-        """Resume GPU memory occupation and re-register to discovery.
-
-        Args:
-            body: Unused. Resume always targets default tags.
-
-        Order of operations:
-        1. Resume memory - restore GPU allocations
-        2. Continue generation - ready to serve requests
-        3. Re-register to discovery - allow frontend to route here
-        """
-        from sglang.srt.managers.io_struct import (
-            ContinueGenerationReqInput,
-            ResumeMemoryOccupationReqInput,
-        )
-
-        tags = list(DEFAULT_MEMORY_OCCUPATION_TAGS)
-        tokenizer_manager = (
-            getattr(self.engine, "tokenizer_manager", None)
-            if self.engine is not None
-            else None
-        )
-        if tokenizer_manager is None:
-            return {
-                "status": "error",
-                "message": "memory control not supported on this worker",
-            }
-
-        async with self._memory_occupation_lock:
-            if not self._memory_released:
-                return {
-                    "status": "ok",
-                    "message": "Memory already resumed",
-                }
-
-            try:
-                resume_req = ResumeMemoryOccupationReqInput(tags=tags)
-                await tokenizer_manager.resume_memory_occupation(resume_req, None)
-                continue_req = ContinueGenerationReqInput()
-                await tokenizer_manager.continue_generation(continue_req)
-
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.register_endpoint_instance()
-
-                self._memory_released = False
-
-                return {
-                    "status": "ok",
-                    "message": f"Memory resumed for tags: {tags}",
-                }
-            except Exception as e:
-                logging.error(f"Failed to resume memory occupation: {e}")
-                return {"status": "error", "message": str(e)}
+                yield {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            logging.error("Failed to clear KV cache: %s", e)
+            yield {"status": "error", "message": str(e)}
 
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
@@ -271,7 +692,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         Args:
             body: Dict with profiling parameters passed to start_profile.
         """
-        await self.engine.tokenizer_manager.start_profile(**body)
+        await self.engine.tokenizer_manager.start_profile(ProfileReq(**body))
         return {"status": "ok", "message": "Profiling started"}
 
     async def stop_profile(self, body: dict) -> dict:
@@ -343,53 +764,151 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         if req.abort_all_requests:
             self.engine.tokenizer_manager.abort_request(abort_all=True)
 
-        self.engine.tokenizer_manager.server_args.weight_version = req.new_version
+        self.engine.tokenizer_manager._update_weight_version_if_provided(
+            req.new_version
+        )
         return {
             "success": True,
             "message": f"Weight version updated to {req.new_version}",
             "new_version": req.new_version,
         }
 
-    async def pin_prefix(self, body: dict) -> dict:
-        """Pin a prefix by token_ids to resist eviction.
+    def _supports_elastic_ep(self) -> bool:
+        """Whether this handler's engine can serve runtime elastic-EP scaling.
 
-        Args:
-            body: Dict with "token_ids" list of token IDs and optional
-                  "ttl_seconds" (default 300).
+        Not every worker qualifies: encode-only workers run with ``engine=None``,
+        and some engine stand-ins (e.g. route unit-test doubles) have no
+        ``tokenizer_manager``. Probe for the ``scale_elastic_ep`` entry point so
+        those cases skip the route instead of registering one that fails at call
+        time.
         """
-        token_ids = body.get("token_ids", [])
-        ttl_seconds = body.get("ttl_seconds", 300)
-        if not token_ids:
-            return {"status": "error", "message": "token_ids required"}
-        try:
-            result = await self.engine.tokenizer_manager.pin_prefix(
-                token_ids, ttl_seconds
-            )
+        if self.engine is None:
+            return False
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        return tokenizer_manager is not None and hasattr(
+            tokenizer_manager, "scale_elastic_ep"
+        )
+
+    def _require_elastic_ep_backend(self) -> Optional[dict]:
+        """Return an error dict if elastic EP is not enabled, else ``None``."""
+        if self.engine.tokenizer_manager.server_args.elastic_ep_backend is None:
             return {
-                "status": "ok" if result.success else "error",
-                "nodes_pinned": result.nodes_pinned,
-                "message": result.message,
+                "status": "error",
+                "message": "elastic EP is not enabled (set --elastic-ep-backend)",
             }
-        except Exception as e:
-            logging.error(f"Failed to pin prefix: {e}")
-            return {"status": "error", "message": str(e)}
+        return None
 
-    async def cache_control(self, request, context=None):
-        """Service mesh endpoint for cache control operations.
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        """Scale up the expert-parallel group to ``new_ep_size`` ranks.
 
-        Args:
-            request: Dict with "action" key and action-specific parameters.
-            context: Optional Dynamo context (unused but required by protocol).
+        SGLang integrates the GPUs contributed by a separately-launched joining
+        group (``--elastic-ep-join-mode scale``), redistributes experts (ePLB)
+        across the widened EP group, and keeps serving on the leader — no
+        restart.
 
-        Yields:
-            Single dict with operation result.
+        Only scale-up is supported today: SGLang rejects a target smaller than
+        the current EP size. ``new_ep_size`` is the target number of EP ranks.
         """
-        action = request.get("action")
-        if action == "pin_prefix":
-            result = await self.pin_prefix(request)
+
+        def err(message: str) -> dict:
+            return {"status": "error", "message": message}
+
+        body = body or {}
+        if not isinstance(body, dict):
+            return err("request body must be a JSON object")
+
+        new_ep_size = body.get("new_ep_size")
+        if new_ep_size is None:
+            return err("Missing required field: new_ep_size")
+        # bool is an int subclass — reject it so True/False can't pose as a size.
+        if isinstance(new_ep_size, bool) or not isinstance(new_ep_size, int):
+            return err(f"new_ep_size must be an integer, got: {new_ep_size!r}")
+        if new_ep_size <= 0:
+            return err("new_ep_size must be a positive integer")
+
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
+
+        from sglang.srt.managers.io_struct import ScaleElasticEPReqInput
+
+        tokenizer_manager = self.engine.tokenizer_manager
+        async with self._scale_ep_lock:
+            try:
+                result = await tokenizer_manager.scale_elastic_ep(
+                    ScaleElasticEPReqInput(new_ep_size=new_ep_size)
+                )
+            except Exception as e:
+                logger.error("[ElasticEP] Scaling failed: %s", e)
+                return err(str(e))
+
+        response = {
+            "status": "ok" if result.success else "error",
+            "message": result.message
+            or (
+                f"Scaled to ep_size={new_ep_size}"
+                if result.success
+                else "scale_elastic_ep failed"
+            ),
+            "old_ep_size": result.old_ep_size,
+            "new_ep_size": result.new_ep_size,
+        }
+        if not result.success:
+            response["pending_ep_size"] = result.pending_ep_size
+        return response
+
+    async def is_scaling_elastic_ep(self, body: dict) -> dict:
+        """Return the engine's current elastic-EP scale state.
+
+        Lets a caller poll for scale-up completion (``scale_phase`` reaches
+        ``serving_expanded``).
+        """
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
+        return dict(self.engine.tokenizer_manager.get_elastic_ep_state())
+
+    async def _sync_discovery_with_sglang_pause_state(self) -> None:
+        """Make discovery match SGLang's authoritative generation pause state."""
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if (
+            self.generate_endpoint is None
+            or tokenizer_manager is None
+            or not hasattr(tokenizer_manager, "is_pause")
+        ):
+            return
+
+        if tokenizer_manager.is_pause:
+            await self.generate_endpoint.unregister_endpoint_instance()
         else:
-            result = {"status": "error", "message": f"Unknown action: {action}"}
-        yield result
+            await self.generate_endpoint.register_endpoint_instance()
+
+    def follow_shared_pause_state(self) -> None:
+        async def resync() -> None:
+            async with self._engine_route_lock:
+                await self._sync_discovery_with_sglang_pause_state()
+
+        follow_pause_broadcasts(getattr(self.engine, "tokenizer_manager", None), resync)
+
+    async def _invoke_engine_route(self, route_handler, body: dict) -> dict:
+        """Invoke one engine route and then synchronize worker discovery."""
+        async with self._engine_route_lock:
+            try:
+                return await route_handler(body)
+            finally:
+                await self._sync_discovery_with_sglang_pause_state()
+
+    def _wrap_engine_route(self, route_handler):
+        """Add discovery synchronization to an SGLang route."""
+
+        async def synchronized_handler(body: dict) -> dict:
+            return await self._invoke_engine_route(route_handler, body)
+
+        return synchronized_handler
 
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
@@ -397,57 +916,228 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
-        runtime.register_engine_route("start_profile", self.start_profile)
-        runtime.register_engine_route("stop_profile", self.stop_profile)
-        runtime.register_engine_route(
-            "release_memory_occupation", self.release_memory_occupation
+        configured_routes = resolve_configured_engine_routes(
+            self.engine,
+            self.config.dynamo_args.engine_routes,
         )
-        runtime.register_engine_route(
-            "resume_memory_occupation", self.resume_memory_occupation
-        )
-        runtime.register_engine_route("pin_prefix", self.pin_prefix)
-        runtime.register_engine_route(
-            "update_weights_from_disk", self.update_weights_from_disk
-        )
-        runtime.register_engine_route(
-            "update_weights_from_tensor", self.update_weights_from_tensor
-        )
-        runtime.register_engine_route(
-            "update_weights_from_distributed", self.update_weights_from_distributed
-        )
-        runtime.register_engine_route(
-            "update_weights_from_ipc", self.update_weights_from_ipc
-        )
-        runtime.register_engine_route(
-            "update_weight_version", self.update_weight_version
+        built_in_routes = {
+            "control/start_profile": self.start_profile,
+            "control/stop_profile": self.stop_profile,
+            "control/update_weights_from_disk": self.update_weights_from_disk,
+            "control/update_weights_from_tensor": self.update_weights_from_tensor,
+            "control/update_weights_from_distributed": (
+                self.update_weights_from_distributed
+            ),
+            "control/update_weights_from_ipc": self.update_weights_from_ipc,
+            "control/update_weight_version": self.update_weight_version,
+        }
+        # Register elastic-EP scaling only on workers whose engine can serve it
+        # (see _supports_elastic_ep); the rest simply don't expose the route.
+        if self._supports_elastic_ep():
+            built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep
+            built_in_routes[
+                "control/is_scaling_elastic_ep"
+            ] = self.is_scaling_elastic_ep
+        reserved_routes = {*built_in_routes, MODEL_TAINT_ROUTE}
+        for path, _ in configured_routes:
+            if path in reserved_routes:
+                raise ValueError(
+                    f"Configured SGLang engine route /engine/{path} collides "
+                    "with a built-in route"
+                )
+
+        configured_paths = {path for path, _ in configured_routes}
+        # Expose the SGLang lifecycle methods without requiring --engine-route.
+        # An explicit route with the same public path overrides the default.
+        default_native_routes = resolve_configured_engine_routes(
+            self.engine,
+            [
+                descriptor
+                for path, descriptor in _DEFAULT_NATIVE_ENGINE_ROUTES
+                if path not in configured_paths
+            ],
         )
 
+        register_model_taint_route(runtime, self.generate_endpoint)
+        for path, handler in built_in_routes.items():
+            runtime.register_engine_route(path, handler)
+        for path, route_handler in [*default_native_routes, *configured_routes]:
+            runtime.register_engine_route(path, self._wrap_engine_route(route_handler))
+
     @abstractmethod
-    async def generate(self, request: Dict[str, Any], context: Context):
+    def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         """Generate response from request.
 
         Args:
-            request: Request dict with input and parameters.
+            request: Request with input and parameters.
             context: Context object for cancellation handling.
 
         Yields:
             Response data (format varies by handler implementation).
         """
-        pass
+        ...
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
+        self._cancel_abort_tasks()
         if self.publisher is not None:
             self.publisher.cleanup()
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         request_input = self.input_param_manager.get_input_param(
-            request, use_tokenizer=not self.skip_tokenizer_init
+            request, use_tokenizer=self.use_sglang_tokenizer
         )
+        self._validate_nvext_token_data(request, request_input)
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    @staticmethod
+    def _resolve_max_input_token_id(engine: sgl.Engine) -> Optional[int]:
+        """Resolve the largest token ID accepted by the model embedding table."""
+        tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+        model_config = getattr(tokenizer_manager, "model_config", None)
+        return BaseWorkerHandler._resolve_max_input_token_id_from_model_config(
+            model_config
+        )
+
+    @staticmethod
+    def _resolve_max_input_token_id_from_model_config(
+        model_config: Any,
+    ) -> Optional[int]:
+        model_vocab_size: object = getattr(model_config, "vocab_size", None)
+
+        # Compatibility fallback for SGLang model configs that expose the
+        # Hugging Face text config but not the derived vocab_size attribute.
+        if model_vocab_size is None:
+            hf_text_config = getattr(model_config, "hf_text_config", None)
+            model_vocab_size = getattr(hf_text_config, "vocab_size", None)
+
+        if (
+            isinstance(model_vocab_size, bool)
+            or not isinstance(model_vocab_size, int)
+            or model_vocab_size <= 0
+        ):
+            return None
+        return model_vocab_size - 1
+
+    def _resolve_request_multimodal_token_ids(
+        self, request: Dict[str, Any]
+    ) -> frozenset[int]:
+        mm_data = request.get("multi_modal_data")
+        if not isinstance(mm_data, dict):
+            return frozenset()
+
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        mm_processor = getattr(tokenizer_manager, "mm_processor", None)
+        mm_tokens = getattr(mm_processor, "mm_tokens", None)
+        token_ids = set()
+
+        if mm_tokens is not None:
+            for modality in ("image", "video", "audio"):
+                if not mm_data.get(f"{modality}_url"):
+                    continue
+                token_id = getattr(mm_tokens, f"{modality}_token_id", None)
+                if isinstance(token_id, int) and not isinstance(token_id, bool):
+                    token_ids.add(token_id)
+
+        # Some processors, including LLaVA's wrapper, expose only the image
+        # token on ModelConfig. LLaVA also represents video frames as images.
+        if mm_data.get("image_url") or mm_data.get("video_url"):
+            model_config = getattr(tokenizer_manager, "model_config", None)
+            image_token_id = getattr(model_config, "image_token_id", None)
+            if isinstance(image_token_id, int) and not isinstance(image_token_id, bool):
+                token_ids.add(image_token_id)
+
+        return frozenset(token_ids)
+
+    def _validate_token_ids(
+        self,
+        token_ids: Any,
+        allowed_oov_ids: frozenset[int] = frozenset(),
+    ) -> None:
+        if not isinstance(token_ids, list):
+            raise HttpError(400, "nvext.token_data must resolve to a token ID list")
+
+        max_input_token_id = self._max_input_token_id
+        for index, token_id in enumerate(token_ids):
+            if isinstance(token_id, bool) or not isinstance(token_id, int):
+                raise HttpError(
+                    400,
+                    f"nvext.token_data[{index}] must be an integer token ID",
+                )
+            # Dynamo's Rust frontend uses u32 token IDs, so negatives are not expected.
+            if (
+                max_input_token_id is not None and token_id > max_input_token_id
+            ) and token_id not in allowed_oov_ids:
+                raise HttpError(400, f"Token id {token_id} is out of vocabulary")
+
+    def _validate_nvext_token_data(
+        self,
+        request: Dict[str, Any],
+        token_ids: Any,
+    ) -> None:
+        """Reject out-of-vocabulary IDs supplied through ``nvext.token_data``."""
+        extra_args = request.get("extra_args")
+        if not isinstance(extra_args, dict):
+            return
+        nvext = extra_args.get("nvext")
+        if not isinstance(nvext, dict) or nvext.get("token_in") is not True:
+            return
+
+        self._validate_token_ids(
+            token_ids,
+            self._resolve_request_multimodal_token_ids(request),
+        )
+
+    @staticmethod
+    def _get_guided_decoding_params(
+        guided_decoding: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Map one guided-decoding constraint to SGLang sampling_params.
+
+        Upstream validation admits at most one constraint, so the order below is a
+        formality rather than a precedence policy.
+
+        whitespace_pattern and backend are deliberately absent. SGLang exposes both
+        as server options (server_args.constrained_json_whitespace_pattern and the
+        --grammar-backend flag); SamplingParams has no field for either and raises
+        TypeError on an unknown keyword rather than ignoring it.
+        """
+        if not isinstance(guided_decoding, dict):
+            return {}
+
+        json_schema = guided_decoding.get("json")
+        if json_schema is not None:
+            reject_nonprogressing_guided_json_ref_cycles(json_schema)
+            return {"json_schema": json.dumps(json_schema)}
+
+        regex = guided_decoding.get("regex")
+        if regex is not None:
+            return {"regex": regex}
+
+        # SGLang has no choice constraint, so an alternation stands in for one.
+        # Its regex is a full-match FSM, so no anchors are needed.
+        choices = [
+            str(value)
+            for value in guided_decoding.get("choice") or []
+            if value is not None
+        ]
+        if choices:
+            return {
+                "regex": "(" + "|".join(re.escape(value) for value in choices) + ")"
+            }
+
+        grammar = guided_decoding.get("grammar")
+        if grammar is not None:
+            return {"ebnf": grammar}
+
+        structural_tag = guided_decoding.get("structural_tag")
+        if structural_tag is not None:
+            return {"structural_tag": serialize_structural_tag(structural_tag)}
+
+        return {}
 
     @staticmethod
     def _generate_bootstrap_room() -> int:
@@ -472,175 +1162,17 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
 
         if inner_tm.server_args.dist_init_addr:
-            # IPv6-ready host extraction and resolution:
-            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
-            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
-            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
-            addr = inner_tm.server_args.dist_init_addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host_core = addr[1:end] if end != -1 else addr.strip("[]")
-            else:
-                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
-                if addr.count(":") == 1:
-                    host_candidate, maybe_port = addr.rsplit(":", 1)
-                    host_core = host_candidate if maybe_port.isdigit() else addr
-                else:
-                    host_core = addr
-            try:
-                infos = socket.getaddrinfo(
-                    host_core,
-                    None,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM,
-                )
-                resolved = infos[0][4][0]  # let OS policy pick v4/v6
-                bootstrap_host = resolved
-            except socket.gaierror:
-                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
-                bootstrap_host = host_core
+            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
+            bootstrap_host = (
+                NetworkAddress(dist_init.resolved().host, bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
         else:
-            bootstrap_host = get_local_ip_auto()
-
-        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
-        assert isinstance(bootstrap_host, str)
-        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
-            bootstrap_host = f"[{bootstrap_host}]"
+            bootstrap_host = (
+                NetworkAddress(get_local_ip_auto(), bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
 
         return bootstrap_host, bootstrap_port
-
-    async def _handle_cancellation(
-        self, request_id_future: asyncio.Future, context: Context
-    ):
-        """Background task to handle cancellation and shutdown by monitoring both signals.
-
-        Args:
-            request_id_future: Future that will be set with the SGLang request ID
-                              when the first response arrives.
-            context: Context object for cancellation handling.
-
-        Raises:
-            GeneratorExit: If shutdown event was triggered.
-        """
-        try:
-            logging.debug(f"Cancellation monitor started for Context: {context.id()}")
-
-            # Always wait for the request ID to ensure we can abort the request
-            sglang_request_id = await request_id_future
-            logging.debug(
-                f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
-            )
-            logging.debug(f"Request ID future cancelled for Context: {context.id()}")
-
-            # Get the cancellation future
-            cancellation_future = context.async_killed_or_stopped()
-
-            # Build list of futures/tasks to wait for
-            wait_for: list[asyncio.Future[Any]] = [cancellation_future]
-            shutdown_task = None
-
-            if self.shutdown_event:
-                # Create task for shutdown monitoring and add to wait list
-                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
-                wait_for.append(shutdown_task)
-
-            # Wait for whichever happens first
-            done, pending = await asyncio.wait(
-                wait_for,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            # Cancel the pending task/future
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-            logging.info(
-                f"Cancellation or shutdown signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
-            )
-
-            # Call abort_request on the tokenizer_manager through the engine
-            if (
-                hasattr(self.engine, "tokenizer_manager")
-                and self.engine.tokenizer_manager
-            ):
-                logging.info(
-                    f"Calling SGLang abort_request for Request ID {sglang_request_id}"
-                )
-                self.engine.tokenizer_manager.abort_request(
-                    rid=sglang_request_id, abort_all=False
-                )
-                logging.info(f"Aborted Request ID: {context.id()}")
-            else:
-                logging.error(
-                    f"SGLang tokenizer_manager not found for abort request: {context.id()}"
-                )
-
-            # Check which event triggered and raise GeneratorExit if shutdown
-            if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during token generation")
-
-        except asyncio.CancelledError:
-            # Task was cancelled, which is expected when generation completes
-            request_id = "unknown"
-            if request_id_future.done() and not request_id_future.cancelled():
-                try:
-                    request_id = request_id_future.result()
-                except Exception:
-                    pass
-            logging.debug(
-                f"Cancellation monitor task cancelled for SGLang Request ID {request_id}, Context: {context.id()}"
-            )
-            raise
-
-    @asynccontextmanager
-    async def _cancellation_monitor(
-        self, request_id_future: asyncio.Future, context: Context
-    ) -> AsyncGenerator[asyncio.Task, None]:
-        """
-        Context manager for monitoring request cancellation and shutdown.
-        Automatically creates a background task to monitor for cancellation and
-        shutdown events, cleaning it up when the context exits.
-
-        If shutdown event was triggered, raises GeneratorExit on exit.
-
-        Args:
-            request_id_future: Future that will be set with the SGLang request ID
-                              when the first response arrives.
-            context: Context object for cancellation handling
-
-        Yields:
-            asyncio.Task: The cancellation monitoring task being managed
-        """
-        logging.debug(f"Creating cancellation monitor task for Context: {context.id()}")
-
-        # Start the cancellation monitoring task
-        cancellation_task = asyncio.create_task(
-            self._handle_cancellation(request_id_future, context)
-        )
-
-        try:
-            yield cancellation_task
-        finally:
-            # Clean up the background cancellation task
-            request_id = "unknown"
-            if request_id_future.done() and not request_id_future.cancelled():
-                try:
-                    request_id = request_id_future.result()
-                except Exception:
-                    pass
-
-            if not cancellation_task.done():
-                logging.debug(
-                    f"Cancelling cancellation monitor task for SGLang Request ID {request_id}, Context: {context.id()}"
-                )
-                cancellation_task.cancel()
-                try:
-                    await cancellation_task
-                except asyncio.CancelledError:
-                    pass
-            else:
-                cancellation_task.result()

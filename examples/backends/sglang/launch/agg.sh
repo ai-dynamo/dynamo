@@ -9,7 +9,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default values
 MODEL="Qwen/Qwen3-0.6B"
@@ -54,6 +55,8 @@ if [ "$ENABLE_OTEL" = true ]; then
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving" "$MODEL" "$HTTP_PORT"
 
@@ -63,15 +66,17 @@ OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 
 # run worker with metrics enabled
+WORKER_MODULE="dynamo.sglang"
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-python3 -m dynamo.sglang \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --skip-tokenizer-init \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
+  $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" &
 

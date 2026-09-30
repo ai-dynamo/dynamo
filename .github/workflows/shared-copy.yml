@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Shared Copy Image
+
+on:
+  workflow_call:
+    inputs:
+      target_tag_plain:
+        description: 'Plain runtime image tag prefix from the build workflow'
+        required: true
+        type: string
+      target_image:
+        description: 'Target image repository in ACR'
+        required: false
+        type: string
+        default: ''
+      cuda_version:
+        description: 'CUDA versions to copy as a JSON array'
+        required: true
+        type: string
+      copy_timeout_minutes:
+        description: 'Timeout in minutes for the copy step'
+        required: false
+        type: number
+        default: 10
+      override_arch:
+        description: 'Override architecture for the copied image (e.g., "amd64")'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      runtime_version:
+        description: 'Dynamo runtime version from Cargo.toml'
+        value: ${{ jobs.copy-to-acr.outputs.runtime_version }}
+      image_tag:
+        description: 'Image tag published to ACR'
+        value: ${{ jobs.copy-to-acr.outputs.image_tag }}
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+
+jobs:
+  copy-to-acr:
+    permissions:
+      contents: read
+    outputs:
+      runtime_version: ${{ steps.calculate-target-tag.outputs.runtime_version }}
+      image_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version: ${{ fromJson(inputs.cuda_version) }}
+    name: Copy to ACR cuda${{ matrix.cuda_version }}${{ inputs.override_arch != '' && format(', {0}', inputs.override_arch) || '' }}
+    runs-on: prod-default-small-v2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          CUDA_VERSION="${{ matrix.cuda_version }}"
+          TARGET_TAG_PLAIN="${{ inputs.target_tag_plain }}"
+
+          SOURCE_TAG=${{ github.sha }}-${TARGET_TAG_PLAIN}
+          if [ -n "${CUDA_VERSION}" ]; then
+            CUDA_MAJOR=${CUDA_VERSION%%.*}
+            # cuda13 is the implicit default — the primary ECR tag carries
+            # no cuda suffix. Non-13 majors (e.g. cuda12) stay explicit.
+            # Keep in sync with shared-build-image.yml and shared-test.yml.
+            if [ "${CUDA_MAJOR}" != "13" ]; then
+              SOURCE_TAG="${SOURCE_TAG}-cuda${CUDA_MAJOR}"
+            fi
+          fi
+
+          DYNAMO_VERSION=$(sed -n \
+            '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"/\1/p' \
+            Cargo.toml)
+          DYNAMO_VERSION=${DYNAMO_VERSION%%[-+]*}
+          if [[ ! "${DYNAMO_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Invalid Dynamo workspace version: ${DYNAMO_VERSION}"
+            exit 1
+          fi
+          IMAGE_TAG="${DYNAMO_VERSION}-ci-${SOURCE_TAG}"
+
+          echo "source_tag=${SOURCE_TAG}" >> $GITHUB_OUTPUT
+          echo "runtime_version=${DYNAMO_VERSION}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+      - name: Copy image to target registry
+        timeout-minutes: ${{ inputs.copy_timeout_minutes }}
+        uses: $/.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ vars.ECR_REGISTRY }}
+          source_image: ${{ vars.ECR_REPOSITORY }}
+          source_tag: ${{ steps.calculate-target-tag.outputs.source_tag }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ${{ inputs.target_image || vars.ACR_REPOSITORY }}
+          target_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
+          source_aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          source_ecr_registry: ${{ vars.ECR_REGISTRY }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          override_arch: ${{ inputs.override_arch }}

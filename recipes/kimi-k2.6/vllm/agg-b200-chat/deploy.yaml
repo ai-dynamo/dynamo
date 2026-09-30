@@ -1,0 +1,210 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kimi-k26-agg-b200-chat-specdec-config
+  labels:
+    app.kubernetes.io/name: kimi-k26-agg-b200-chat
+    app.kubernetes.io/part-of: dynamo
+data:
+  attention-config: |-
+    {
+      "backend": "TOKENSPEED_MLA",
+      "mla_prefill_backend": "TOKENSPEED_MLA",
+      "use_prefill_query_quantization": true
+    }
+  speculative-config-synthetic: |-
+    {
+      "method": "eagle3",
+      "model": "lightseekorg/kimi-k2.6-eagle3-mla",
+      "num_speculative_tokens": 3,
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_length": 2.49
+    }
+  speculative-config: |-
+    {
+      "method": "eagle3",
+      "model": "lightseekorg/kimi-k2.6-eagle3-mla",
+      "num_speculative_tokens": 3
+    }
+  kv-transfer-config: |-
+    {
+      "kv_connector": "LMCacheConnectorV1",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {
+        "lmcache.enable_kv_events": false,
+        "lmcache.local_cpu": true,
+        "lmcache.max_local_cpu_size": 500,
+        "lmcache.pre_caching_hash_algorithm": "sha256_cbor",
+        "lmcache.extra_config": {
+          "save_only_first_rank": true
+        }
+      }
+    }
+  compilation-config: |-
+    {
+      "pass_config": {
+        "fuse_allreduce_rms": true,
+        "fuse_attn_quant": true
+      },
+      "max_cudagraph_capture_size": 512
+    }
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k26-agg-b200-chat
+  labels:
+    app.kubernetes.io/name: kimi-k26-agg-b200-chat
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --trust-remote-code
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-kimi-k2.6-dev.1
+              resources: {}
+      replicas: 1
+
+    - name: agg
+      type: worker
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+          containers:
+            - name: main
+              args:
+                - --model=nvidia/Kimi-K2.6-NVFP4
+                - --served-model-name=moonshotai/Kimi-K2.6
+                - --trust-remote-code
+                - --max-model-len=262144
+                - --kv-cache-dtype=fp8
+                - --gpu-memory-utilization=0.95
+                - --enable-flashinfer-autotune
+                - --moe-backend=flashinfer_trtllm
+                - --mm-encoder-tp-mode=data
+                - --tensor-parallel-size=4
+                  # - --enable-expert-parallel
+                  # - --all2all-backend deepep_low_latency
+                  # - --all2all-backend flashinfer_all2allv
+                - --attention-config=$(ATTENTION_CONFIG)
+                - --compilation-config=$(COMPILATION_CONFIG)
+                - --speculative-config=$(SPECULATIVE_CONFIG)
+                - --kv-transfer-config=$(KV_TRANSFER_CONFIG)
+                - --enable-multimodal
+                - --dyn-tool-call-parser
+                - kimi_k2
+                - --dyn-reasoning-parser
+                - kimi_k25
+                # - --no-async-scheduling
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CONFIG_ROOT
+                  value: /tmp/vllm-config
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: ATTENTION_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: kimi-k26-agg-b200-chat-specdec-config
+                      key: attention-config
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: kimi-k26-agg-b200-chat-specdec-config
+                      key: speculative-config # speculative-config-synthetic for benchmarking
+                - name: KV_TRANSFER_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: kimi-k26-agg-b200-chat-specdec-config
+                      key: kv-transfer-config
+                - name: COMPILATION_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: kimi-k26-agg-b200-chat-specdec-config
+                      key: compilation-config
+                - name: NCCL_IB_DISABLE
+                  value: "1"
+                # consistent LMCache hashes across ranks
+                - name: PYTHONHASHSEED
+                  value: "42"
+                # NCCL symmetric AR backend with SHARP
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-kimi-k2.6-dev.1
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  memory: "750Gi"
+                limits:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+              startupProbe:
+                failureThreshold: 60
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
+              workingDir: /workspace/
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 1

@@ -17,7 +17,7 @@ from tests.fault_tolerance.etcd_ha.utils import (
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.engine_process import FRONTEND_PORT
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class DynamoWorkerProcess(ManagedProcess):
         self,
         request,
         etcd_endpoints: list,
-        mode: str = "prefill_and_decode",
+        mode: str = "agg",
     ):
         """
         Initialize TRT-LLM worker process with ETCD HA support.
@@ -43,7 +43,7 @@ class DynamoWorkerProcess(ManagedProcess):
         Args:
             request: pytest request object
             etcd_endpoints: List of ETCD endpoints for HA
-            mode: One of "prefill_and_decode", "prefill", "decode"
+            mode: One of "agg", "prefill", "decode"
         """
         command = [
             "python3",
@@ -60,7 +60,7 @@ class DynamoWorkerProcess(ManagedProcess):
         ]
 
         # Add disaggregation-specific configuration
-        if mode != "prefill_and_decode":
+        if mode != "agg":
             with open("test_etcd_ha_trtllm_config.yaml", "w") as f:
                 f.write("cache_transceiver_config:\n  backend: DEFAULT\n")
                 f.write("disable_overlap_scheduler: true\n")
@@ -77,11 +77,15 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set port based on worker type
         if mode == "prefill":
             port = "8082"
-            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+            health_check_urls = [
+                (f"http://localhost:{port}/health", check_health_ready)
+            ]
         elif mode == "decode":
             port = "8081"
-            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
-        else:  # prefill_and_decode
+            health_check_urls = [
+                (f"http://localhost:{port}/health", check_health_ready)
+            ]
+        else:  # agg
             port = "8081"
 
         # Set debug logging and ETCD endpoints
@@ -112,22 +116,6 @@ class DynamoWorkerProcess(ManagedProcess):
         )
 
         self.mode = mode
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                logger.info(f"{self.mode.capitalize()} worker status is ready")
-                return True
-            logger.warning(
-                f"{self.mode.capitalize()} worker status is not ready: {data.get('status')}"
-            )
-        except ValueError:
-            logger.warning(
-                f"{self.mode.capitalize()} worker health response is not valid JSON"
-            )
-        return False
 
 
 @pytest.mark.gpu_1
@@ -169,9 +157,7 @@ def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
                 logger.info("Frontend started successfully")
 
                 # Step 4: Start an aggregated TRT-LLM worker
-                with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode="prefill_and_decode"
-                ):
+                with DynamoWorkerProcess(request, etcd_endpoints, mode="agg"):
                     logger.info("Aggregated TRT-LLM worker started successfully")
 
                     # Step 5: Send initial inference request to verify system is working
@@ -316,9 +302,7 @@ def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
                 logger.info("Frontend started successfully")
 
                 # Step 4: Start an aggregated TRT-LLM worker
-                with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode="prefill_and_decode"
-                ) as worker:
+                with DynamoWorkerProcess(request, etcd_endpoints, mode="agg") as worker:
                     logger.info("Aggregated TRT-LLM worker started successfully")
 
                     # TODO: Fix disagg health checks

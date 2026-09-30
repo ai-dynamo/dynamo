@@ -13,18 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import json
 import logging
 import math
 import re
+import struct
 import time
+import wave
 from copy import deepcopy
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
 import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.http_checks import check_health_generate as check_health_generate
+from tests.utils.http_checks import check_models_api as check_models_api
+from tests.utils.prometheus import find_metric_samples, sum_metric_samples
+from tests.utils.router_nvext import (
+    RouterNvextExpectation,
+    require_router_worker_id,
+    validate_router_nvext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +49,13 @@ class BasePayload:
     body: Dict[str, Any]
     expected_response: List[Any]  # Can be List[str] or List[List[str]] for alternatives
     expected_log: List[str]
+    expected_status_code: int = field(default=200, kw_only=True)
+    # Number of times to send this exact request in sequence. Each call must
+    # pass validation independently. Use >1 for cache/repeatability tests
+    # (e.g., CachedTokensChatPayload asserts a cache hit on the 2nd+ call).
+    # Independent of max_attempts: repeat_count=N means "N independent
+    # successes required"; max_attempts=N means "at least one success out of
+    # N tries".
     repeat_count: int = 1
     timeout: int = 60
 
@@ -49,6 +69,12 @@ class BasePayload:
     system_ports: list[int] = field(default_factory=list)
     # When True, the HTTP request is made with stream=True (for SSE responses).
     http_stream: bool = False
+    # Maximum number of attempts for validation inside run_serve_deployment.
+    # ``1`` (default) means no retry — first validation failure surfaces
+    # immediately. Set >1 only when the test target is non-deterministic and
+    # you've confirmed via tests/README.md "Flaky Tests" that retry is the
+    # right mitigation; the underlying flakiness still needs a tracking ticket.
+    max_attempts: int = 1
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")
@@ -59,6 +85,10 @@ class BasePayload:
         if "model" not in p.body:
             p.body = {**p.body, "model": model}
         return p
+
+    def body_for_iteration(self, _iteration: int) -> Dict[str, Any]:
+        """Return the request body for one repeat_count iteration."""
+        return self.body
 
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
@@ -108,10 +138,21 @@ class BasePayload:
 
 
 @dataclass
+class HttpErrorPayload(BasePayload):
+    """Payload that validates an expected HTTP error response."""
+
+    expected_status_code: int = field(default=400, kw_only=True)
+
+    def response_handler(self, response: Any) -> str:
+        return response.text
+
+
+@dataclass
 class ChatPayload(BasePayload):
     """Payload for chat completions endpoint."""
 
     endpoint: str = "/v1/chat/completions"
+    expected_num_choices: Optional[int] = None
 
     @staticmethod
     def extract_content(response):
@@ -154,7 +195,7 @@ class ChatPayload(BasePayload):
             if field_content:
                 return field_content
 
-        raise ValueError(
+        raise AssertionError(
             "All possible content fields are empty in message. "
             f"Checked: content={repr(content)}, reasoning_content={repr(reasoning_content)}, "
             f"refusal={repr(refusal)}, tool_calls={tool_calls}"
@@ -162,6 +203,77 @@ class ChatPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return ChatPayload.extract_content(response)
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+
+        if self.expected_num_choices is None:
+            return
+
+        result = response.json()
+        choices = result.get("choices")
+        assert isinstance(choices, list), f"Missing choices list: {result}"
+        assert len(choices) == self.expected_num_choices, (
+            f"Expected {self.expected_num_choices} choices, "
+            f"got {len(choices)}: {result}"
+        )
+
+
+class DisaggregatedChatPayload(ChatPayload):
+    """Require a completed chat request served by distinct prefill and decode workers."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        choices = result["choices"]
+        if len(choices) != 1:
+            raise AssertionError(f"Expected one completion, got {choices!r}")
+        if not isinstance(content, str) or not content.strip():
+            raise AssertionError("Completion is empty")
+        if choices[0].get("finish_reason") not in {"stop", "length"}:
+            raise AssertionError(f"Unexpected finish reason: {choices[0]!r}")
+
+        usage = result.get("usage")
+        if not isinstance(usage, dict):
+            raise AssertionError(f"Missing usage: {result!r}")
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        if type(prompt_tokens) is not int or prompt_tokens <= 0:
+            raise AssertionError(f"Expected positive prompt usage: {usage!r}")
+        if type(completion_tokens) is not int or completion_tokens <= 1:
+            raise AssertionError(
+                f"Expected decode to generate more than the prefill token: {usage!r}"
+            )
+
+        workers = require_router_worker_id(result, context=type(self).__name__)
+        for role in ("prefill_worker_id", "decode_worker_id"):
+            if type(workers.get(role)) is not int or workers[role] < 0:
+                raise AssertionError(f"Expected a valid {role}: {dict(workers)!r}")
+        if workers["prefill_worker_id"] == workers["decode_worker_id"]:
+            raise AssertionError(
+                f"Expected distinct prefill and decode workers: {dict(workers)!r}"
+            )
+
+
+class RouterNvextChatPayload(ChatPayload):
+    """Chat payload that validates structured router metadata in nvext."""
+
+    def __init__(
+        self,
+        *args,
+        router_nvext_expectation: RouterNvextExpectation | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.router_nvext_expectation = router_nvext_expectation
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        validate_router_nvext(
+            response.json(),
+            self.router_nvext_expectation,
+            context=type(self).__name__,
+        )
 
 
 @dataclass
@@ -200,6 +312,33 @@ class ChatPayloadWithLogprobs(ChatPayload):
                         logprob_val <= 0
                     ), f"logprob should be <= 0, got {logprob_val}"
 
+                    # Validate bytes field is populated for the selected token
+                    assert "bytes" in item, "Missing 'bytes' in logprobs content item"
+                    token_str = item["token"]
+                    if token_str:
+                        assert (
+                            item["bytes"] is not None
+                        ), f"'bytes' should be populated for non-empty token {token_str!r}"
+                        assert isinstance(
+                            item["bytes"], list
+                        ), f"'bytes' should be a list, got {type(item['bytes'])}"
+
+                    # Validate top_logprobs entries have token, logprob, and bytes
+                    for top_lp in item["top_logprobs"]:
+                        assert (
+                            "token" in top_lp
+                        ), "Missing 'token' in top_logprobs entry"
+                        assert (
+                            "logprob" in top_lp
+                        ), "Missing 'logprob' in top_logprobs entry"
+                        assert (
+                            "bytes" in top_lp
+                        ), "Missing 'bytes' in top_logprobs entry"
+                        if top_lp["token"]:
+                            assert (
+                                top_lp["bytes"] is not None
+                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
+
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(content_logprobs)} tokens with logprobs"
                 )
@@ -214,11 +353,14 @@ class ToolCallingChatPayload(ChatPayload):
         self.expected_tool_name = expected_tool_name
 
     def validate(self, response, content: str) -> None:
-        """Validate that tool calls exist in the response."""
-        # First run the standard validation
-        super().validate(response, content)
+        """Validate that tool calls exist in the response.
 
-        # Then validate tool calls specifically
+        Skips the parent's expected_response substring check because tool call
+        responses produce structured JSON arguments, not natural-language text.
+        The expected_response keywords are instead matched against the
+        concatenated tool call arguments so callers can still assert that the
+        model "understood" the input (e.g. expected_response=["purple"]).
+        """
         response_data = response.json()
         choices = response_data.get("choices", [])
         assert choices, "Response missing choices"
@@ -230,13 +372,16 @@ class ToolCallingChatPayload(ChatPayload):
         logger.info(f"Tool calls detected: {len(tool_calls)} call(s)")
 
         # Validate tool call structure
+        all_args = []
         for i, tc in enumerate(tool_calls):
             assert "function" in tc, f"Tool call {i} missing 'function' field"
             function = tc.get("function", {})
             assert "name" in function, f"Tool call {i} missing function name"
             assert "arguments" in function, f"Tool call {i} missing function arguments"
+            args_str = function.get("arguments", "")
+            all_args.append(args_str)
             logger.info(
-                f"  [{i}] Function: {function.get('name')}, Args: {function.get('arguments')[:100]}..."
+                f"  [{i}] Function: {function.get('name')}, Args: {args_str[:100]}..."
             )
 
         # If expected tool name is provided, validate it
@@ -246,6 +391,55 @@ class ToolCallingChatPayload(ChatPayload):
                 self.expected_tool_name in tool_names
             ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
             logger.info(f"Expected tool '{self.expected_tool_name}' was called")
+
+        # Check expected_response keywords against tool call arguments (OR logic)
+        if self.expected_response:
+            combined_args = " ".join(all_args).lower()
+            found = [kw for kw in self.expected_response if kw.lower() in combined_args]
+            if not found:
+                logger.error(
+                    f"VALIDATION FAILED - Expected to find at least one of "
+                    f"{self.expected_response} in tool call arguments"
+                )
+                logger.error(f"Tool call arguments: {combined_args}")
+                raise AssertionError(
+                    f"Expected content not found in tool call arguments. "
+                    f"Expected at least one of: {self.expected_response}. "
+                    f"Tool call arguments: {combined_args}"
+                )
+            else:
+                logger.info(f"Found expected keywords in tool args: {found}")
+
+
+@dataclass
+class GuidedDecodingChatPayload(ChatPayload):
+    """ChatPayload that validates a json_schema response_format produces valid JSON."""
+
+    def __init__(self, *args, required_keys: Optional[List[str]] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.required_keys = required_keys or []
+
+    def validate(self, response, content: str) -> None:
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError) as e:
+            raise AssertionError(
+                "Guided decoding response is not valid JSON — grammar backend "
+                f"likely disabled. Content: {content!r}"
+            ) from e
+
+        assert isinstance(parsed, dict), (
+            "Guided decoding response should be a JSON object, "
+            f"got {type(parsed).__name__}: {content!r}"
+        )
+
+        for key in self.required_keys:
+            assert key in parsed, (
+                f"Guided decoding response missing required key {key!r}. "
+                f"Parsed: {parsed}"
+            )
+
+        logger.info(f"Guided decoding validation passed: {parsed}")
 
 
 @dataclass
@@ -268,17 +462,57 @@ class CachedTokensChatPayload(ChatPayload):
         expected_log: Optional[List[str]] = None,
         timeout: int = 60,
         min_cached_tokens: int = 1,
+        min_routing_total_blocks: int = 0,
+        router_nvext_expectation: RouterNvextExpectation | None = None,
+        require_rust_processor_init: bool = False,
+        require_vllm_mm_processor_init: bool = False,
+        min_avg_kv_hit_rate: float = 0.0,
     ):
+        # MM-aware routing checks: piggyback on engine_process.validate_expected_logs.
+        log_patterns: List[str] = list(expected_log or [])
+        if require_rust_processor_init:
+            log_patterns.append(r"MM-aware KV routing enabled")
+        if require_vllm_mm_processor_init:
+            log_patterns.append(r"\[mm-routing\] Transfer mode:")
+        if min_routing_total_blocks > 0:
+            # The regex below gates by digit-count, so the threshold must
+            # be a power of 10 (1, 10, 100, ...). Reject any non-conforming
+            # value at construction time — otherwise the assertion would
+            # under-enforce (e.g. min_routing_total_blocks=25 would still
+            # only require 2-digit counts ≥10, not ≥25).
+            n_str = str(min_routing_total_blocks)
+            if n_str[0] != "1" or any(c != "0" for c in n_str[1:]):
+                raise ValueError(
+                    f"min_routing_total_blocks must be a power of 10 "
+                    f"(1, 10, 100, ...); got {min_routing_total_blocks}"
+                )
+            min_digits = len(n_str)
+            log_patterns.append(
+                rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
+            )
         super().__init__(
             body=body,
             repeat_count=repeat_count,
             expected_response=expected_response or [],
-            expected_log=expected_log or [],
+            expected_log=log_patterns,
             timeout=timeout,
         )
         self.min_cached_tokens = min_cached_tokens
         self._request_count = 0
         self._cached_tokens_found = False
+        self.router_nvext_expectation = router_nvext_expectation
+        # Asserts the post-R1 mean of router_kv_hit_rate >= threshold. Catches
+        # router/worker hash divergence (overlap=0) that cached_tokens alone
+        # can miss via load-balance luck on vLLM's per-worker prefix cache.
+        #
+        # TODO(mm-routing): this field + _metrics_baseline + the kv_hit_rate
+        # delta assertion in final_validation() are router-metric-specific
+        # logic accreting onto a general-purpose Cached*Payload base. If
+        # more strong-gate metrics get added (decode-imbalance, routing-
+        # block-count, etc.), move into a RouterMetricsAssertion
+        # mixin/subclass.
+        self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
+        self._metrics_baseline: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -287,21 +521,35 @@ class CachedTokensChatPayload(ChatPayload):
 
         self._request_count += 1
         result = response.json()
+        validate_router_nvext(
+            result,
+            self.router_nvext_expectation,
+            context=f"{type(self).__name__} request {self._request_count}",
+        )
 
         # Check usage field for cached tokens
         # Expected structure: usage.prompt_tokens_details.cached_tokens
-        usage = result.get("usage", {})
-        prompt_tokens_details = usage.get("prompt_tokens_details") or {}
+        usage = result.get("usage")
+        prompt_tokens_details = (usage or {}).get("prompt_tokens_details") or {}
         cached_tokens = prompt_tokens_details.get("cached_tokens", 0) or 0
+        prompt_tokens = (usage or {}).get("prompt_tokens")
 
         logger.info(
-            f"Request {self._request_count}: prompt_tokens={usage.get('prompt_tokens')}, "
+            f"Request {self._request_count}: prompt_tokens={prompt_tokens}, "
             f"cached_tokens={cached_tokens}, prompt_tokens_details={prompt_tokens_details}"
         )
 
-        # For requests after the first one, we expect cached tokens > 0
-        # (since identical prompts should hit the prefix cache)
-        if self._request_count > 1:
+        # On repeats we expect a cache hit. Require usage with prompt_tokens > 0
+        # so a backend that reports no usage fails instead of passing by default.
+        # An absent cached_tokens field is a legit miss (vLLM/SGLang omit it when
+        # cached==0), so treat it as a soft miss below, not a hard error.
+        if self._request_count > 1 and self.min_cached_tokens > 0:
+            if usage is None or prompt_tokens is None or prompt_tokens <= 0:
+                raise AssertionError(
+                    f"Request {self._request_count}: response carried no usage "
+                    f"evidence (usage={usage!r}); cannot validate cached tokens. "
+                    f"Expected a usage block with prompt_tokens > 0."
+                )
             if cached_tokens >= self.min_cached_tokens:
                 self._cached_tokens_found = True
                 logger.info(
@@ -314,21 +562,200 @@ class CachedTokensChatPayload(ChatPayload):
                     f"(expected >= {self.min_cached_tokens})"
                 )
 
-    def final_validation(self) -> None:
-        """Called after all requests are processed to ensure we saw cached tokens.
+        # Snapshot after R1 so the delta in final_validation isolates R2+.
+        if (
+            self._metrics_baseline is None
+            and self._request_count == 1
+            and self.min_avg_kv_hit_rate > 0
+        ):
+            self._metrics_baseline = self._scrape_router_kv_hit_rate()
 
-        Raises AssertionError if cached tokens were not found on any repeated request.
+    def _scrape_router_kv_hit_rate(self) -> Optional[tuple[float, float]]:
+        """Return ``(sum, count)`` for ``router_kv_hit_rate`` from the
+        frontend /metrics endpoint, or ``None`` if the endpoint is
+        unreachable. The component MetricsHierarchy auto-prepends
+        ``dynamo_component_`` to the exported name.
         """
-        if self.repeat_count > 1 and not self._cached_tokens_found:
+        url = f"http://localhost:{self.port}/metrics"
+        try:
+            text = requests.get(url, timeout=5).text
+        except requests.RequestException as e:
+            # Narrow to HTTP/network errors per .ai/python-guidelines.md:
+            # we expect transient endpoint flakes here (timeout, connection
+            # refused while the frontend is still binding /metrics) and
+            # the strong gate has its own `is None` guard. Programming
+            # errors propagate so they surface at test-time instead of
+            # being swallowed.
+            logger.warning("Failed to scrape %s: %s", url, e)
+            return None
+        # Compose from canonical constants so a metric rename in
+        # prometheus_names cascades here instead of silently breaking
+        # the kv_hit_rate strong gate.
+        full = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.router.KV_HIT_RATE}"
+        )
+        return (
+            sum_metric_samples(text, f"{full}_sum"),
+            sum_metric_samples(text, f"{full}_count"),
+        )
+
+    def final_validation(self) -> None:
+        """Assert cached_tokens >= min_cached_tokens on at least one repeat
+        (only when min_cached_tokens > 0), and (if set) router_kv_hit_rate
+        post-R1 mean >= min_avg_kv_hit_rate.
+        """
+        # Only assert cached tokens when a positive threshold is set; a caller
+        # validating purely via the router metric passes min_cached_tokens=0.
+        if self.min_cached_tokens > 0:
+            if self.repeat_count > 1 and not self._cached_tokens_found:
+                raise AssertionError(
+                    f"Expected cached_tokens >= {self.min_cached_tokens} in "
+                    f"prompt_tokens_details for at least one repeated request, "
+                    f"but none found after {self._request_count} requests. "
+                    f"Verify that prefix caching is enabled and working correctly."
+                )
+            logger.info(
+                "✓ Final validation PASSED: cached_tokens found in repeated requests"
+            )
+
+        if self.min_avg_kv_hit_rate <= 0:
+            return
+        if self._metrics_baseline is None:
             raise AssertionError(
-                f"Expected cached_tokens >= {self.min_cached_tokens} in "
-                f"prompt_tokens_details for at least one repeated request, "
-                f"but none found after {self._request_count} requests. "
-                f"Verify that prefix caching is enabled and working correctly."
+                "min_avg_kv_hit_rate set but no metrics baseline captured "
+                "(R1 validate() didn't run or /metrics was unreachable)."
+            )
+        after = self._scrape_router_kv_hit_rate()
+        if after is None:
+            raise AssertionError(
+                "router_kv_hit_rate scrape failed at final_validation; "
+                "/metrics endpoint unreachable from test."
+            )
+        bsum, bcount = self._metrics_baseline
+        asum, acount = after
+        d_sum, d_count = asum - bsum, acount - bcount
+        if d_count <= 0:
+            raise AssertionError(
+                f"router_kv_hit_rate: no new observations between R1 and final "
+                f"(baseline_count={bcount}, after_count={acount}); "
+                f"MM-routing likely not engaging on repeat requests."
+            )
+        avg = d_sum / d_count
+        if avg < self.min_avg_kv_hit_rate:
+            raise AssertionError(
+                f"router_kv_hit_rate: mean over R2+ ({avg:.3f}) below required "
+                f"min ({self.min_avg_kv_hit_rate}). delta_n={d_count}, "
+                f"delta_sum={d_sum:.3f}. Router-side block hashes did not "
+                f"match the worker — MM-aware routing degraded silently."
             )
         logger.info(
-            "✓ Final validation PASSED: cached_tokens found in repeated requests"
+            f"✓ router_kv_hit_rate: mean over R2+ = {avg:.3f} "
+            f"(>= {self.min_avg_kv_hit_rate})"
         )
+
+
+@dataclass
+class ClearKVBlocksPayload(ChatPayload):
+    """Warm the prefix cache, clear it through the system server, and infer.
+
+    The two warm-up requests happen before the request driven by the regular
+    serve-test harness. The second warm-up must report a cache hit; the harness
+    request then proves the clear removed that prefix without breaking serving.
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        system_port: int = DefaultPort.SYSTEM1.value,
+        timeout: int = 60,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=1,
+            expected_response=[],
+            expected_log=[],
+            timeout=timeout,
+        )
+        self.system_ports = [system_port]
+        self._cleared = False
+
+    @staticmethod
+    def _cached_tokens(response: Any, phase: str) -> int:
+        result = response.json()
+        usage = result.get("usage")
+        prompt_tokens = (usage or {}).get("prompt_tokens")
+        if usage is None or prompt_tokens is None or prompt_tokens <= 0:
+            raise AssertionError(
+                f"{phase}: response carried no prompt-token usage evidence: "
+                f"{usage!r}"
+            )
+        details = usage.get("prompt_tokens_details")
+        if not isinstance(details, dict) or "cached_tokens" not in details:
+            raise AssertionError(
+                f"{phase}: response did not report cached_tokens: {usage!r}"
+            )
+        cached_tokens = details["cached_tokens"]
+        if not isinstance(cached_tokens, int):
+            raise AssertionError(
+                f"{phase}: cached_tokens was not an integer: {cached_tokens!r}"
+            )
+        return cached_tokens
+
+    def _warm_then_clear(self) -> None:
+        if self._cleared:
+            return
+
+        inference_url = super().url()
+        warm_responses = []
+        for request_number in (1, 2):
+            response = requests.post(
+                inference_url,
+                json=self.body,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            ChatPayload.extract_content(response)
+            warm_responses.append(response)
+            logger.info(
+                "KV-clear warm-up request %d reported %d cached tokens",
+                request_number,
+                self._cached_tokens(response, f"warm-up request {request_number}"),
+            )
+
+        second_cached_tokens = self._cached_tokens(
+            warm_responses[1], "second warm-up request"
+        )
+        if second_cached_tokens <= 0:
+            raise AssertionError(
+                "Second warm-up request did not report cached tokens; "
+                "prefix caching is not active"
+            )
+
+        clear_url = (
+            f"http://{self.host}:{self.system_ports[0]}"
+            "/engine/control/clear_kv_blocks"
+        )
+        response = requests.post(clear_url, json={}, timeout=self.timeout)
+        response.raise_for_status()
+        result = response.json()
+        expected = {"status": "success", "message": "KV cache cleared"}
+        if result != expected:
+            raise AssertionError(f"Unexpected clear_kv_blocks response: {result}")
+        self._cleared = True
+
+    def url(self) -> str:
+        self._warm_then_clear()
+        return super().url()
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        cached_tokens = self._cached_tokens(response, "first post-clear request")
+        if cached_tokens != 0:
+            raise AssertionError(
+                "First post-clear request unexpectedly reused "
+                f"{cached_tokens} cached tokens"
+            )
 
 
 @dataclass
@@ -419,6 +846,71 @@ class LoraTestChatPayload(ChatPayload):
 
 
 @dataclass
+class ElasticEPScalePayload(ChatPayload):
+    """Scales the vLLM data-parallel size live, then verifies the worker still
+    serves a chat request post-scale.
+
+    POSTs ``/engine/control/scale_elastic_ep`` on the worker's system port
+    before the chat request (mirroring LoraTestChatPayload's admin-then-infer
+    pattern), so a single payload exercises both the scale control and that
+    generation survives the reconfigure. Requires a worker started with the Ray
+    DP backend + ePLB (see ``examples/backends/vllm/launch/elastic_ep.sh``).
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        new_data_parallel_size: int,
+        system_port: int = DefaultPort.SYSTEM1.value,
+        repeat_count: int = 1,
+        expected_response: Optional[list] = None,
+        expected_log: Optional[list] = None,
+        timeout: int = 300,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=repeat_count,
+            expected_response=expected_response or [],
+            expected_log=expected_log or [],
+            timeout=timeout,
+        )
+        self.system_ports = [system_port]
+        self.new_data_parallel_size = new_data_parallel_size
+        self._scaled = False
+
+    def _ensure_scaled(self) -> None:
+        """Drive the scale control once before the first chat request."""
+        if self._scaled:
+            return
+        scale_url = (
+            f"http://{self.host}:{self.system_ports[0]}"
+            "/engine/control/scale_elastic_ep"
+        )
+        logger.info(
+            "Scaling elastic EP to data_parallel_size=%s via %s",
+            self.new_data_parallel_size,
+            scale_url,
+        )
+        response = requests.post(
+            scale_url,
+            json={"new_data_parallel_size": self.new_data_parallel_size},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") != "ok":
+            raise RuntimeError(f"scale_elastic_ep failed: {result}")
+        if result.get("new_data_parallel_size") != self.new_data_parallel_size:
+            raise RuntimeError(f"unexpected scale_elastic_ep result: {result}")
+        self._scaled = True
+
+    def url(self) -> str:
+        """Scale before the first chat request, then return the chat URL."""
+        self._ensure_scaled()
+        return super().url()
+
+
+@dataclass
 class CompletionPayload(BasePayload):
     """Payload for completions endpoint."""
 
@@ -438,6 +930,32 @@ class CompletionPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return CompletionPayload.extract_text(response)
+
+
+@dataclass
+class ImagesPayload(BasePayload):
+    """Payload for the image-generation endpoint (raw-media / DiffusionEngine).
+
+    Targets ``/v1/images/generations`` and validates the OpenAI-shaped
+    response: a non-empty ``data`` list whose first item carries either a
+    ``b64_json`` or a ``url``.
+    """
+
+    endpoint: str = "/v1/images/generations"
+
+    @staticmethod
+    def extract_image(response):
+        response.raise_for_status()
+        result = response.json()
+        assert "data" in result, "Missing 'data' in image response"
+        assert len(result["data"]) > 0, "Empty 'data' in image response"
+        item = result["data"][0]
+        # Return whichever representation the engine produced — either is a
+        # valid image result.
+        return item.get("b64_json") or item.get("url") or ""
+
+    def response_handler(self, response: Any) -> str:
+        return ImagesPayload.extract_image(response)
 
 
 @dataclass
@@ -481,6 +999,26 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
                         assert (
                             logprob_val <= 0
                         ), f"logprob at index {i} should be <= 0, got {logprob_val}"
+
+                # Validate top_logprobs entries have token, logprob, and bytes when present
+                top_logprobs_list = logprobs_data.get("top_logprobs", [])
+                for i, token_top_lps in enumerate(top_logprobs_list):
+                    if not token_top_lps:
+                        continue
+                    for top_lp in token_top_lps:
+                        assert (
+                            "token" in top_lp
+                        ), f"Missing 'token' in top_logprobs[{i}] entry"
+                        assert (
+                            "logprob" in top_lp
+                        ), f"Missing 'logprob' in top_logprobs[{i}] entry"
+                        assert (
+                            "bytes" in top_lp
+                        ), f"Missing 'bytes' in top_logprobs[{i}] entry"
+                        if top_lp["token"]:
+                            assert (
+                                top_lp["bytes"] is not None
+                            ), f"'bytes' should be populated for top_logprob token {top_lp['token']!r}"
 
                 logger.info(
                     f"✓ Logprobs validation passed: found {len(token_logprobs)} tokens with logprobs"
@@ -746,6 +1284,14 @@ class EmbeddingPayload(BasePayload):
     def extract_embeddings(response):
         """
         Process embeddings API responses.
+
+        Accepts both shapes from the OpenAI spec:
+        - ``encoding_format="float"`` (default) -- each ``data[].embedding``
+          is a JSON array of floats.
+        - ``encoding_format="base64"`` -- each ``data[].embedding`` is a
+          base64-encoded string of little-endian f32 bytes. The string
+          is decoded here so the dimension count in the summary string
+          stays comparable across both shapes.
         """
         response.raise_for_status()
         result = response.json()
@@ -764,17 +1310,366 @@ class EmbeddingPayload(BasePayload):
                 item["object"] == "embedding"
             ), f"Expected object='embedding', got {item['object']}"
             assert "embedding" in item, "Missing 'embedding' vector in item"
-            assert isinstance(
-                item["embedding"], list
-            ), "Embedding should be a list of floats"
-            assert len(item["embedding"]) > 0, "Embedding vector should not be empty"
-            embeddings.append(item["embedding"])
+            raw = item["embedding"]
+            if isinstance(raw, str):
+                # base64: decode to a float list so downstream dimension
+                # checks are uniform.
+                decoded = base64.b64decode(raw)
+                assert (
+                    len(decoded) % 4 == 0
+                ), f"base64 payload not f32-aligned: {len(decoded)} bytes"
+                count = len(decoded) // 4
+                vec = list(struct.unpack(f"<{count}f", decoded))
+            elif isinstance(raw, list):
+                vec = raw
+            else:
+                raise AssertionError(
+                    f"Embedding should be a list of floats or a base64 "
+                    f"string, got {type(raw).__name__}"
+                )
+            assert len(vec) > 0, "Embedding vector should not be empty"
+            embeddings.append(vec)
 
         # Return a summary string for validation
         return f"Generated {len(embeddings)} embeddings with dimension {len(embeddings[0])}"
 
     def response_handler(self, response: Any) -> str:
         return EmbeddingPayload.extract_embeddings(response)
+
+
+@dataclass
+class ClassifyPayload(BasePayload):
+    """Payload for the ``/v1/classify`` endpoint."""
+
+    endpoint: str = "/v1/classify"
+    expected_prompt_tokens: Optional[int] = None
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
+        assert result.get("data"), "Empty classification data"
+
+        for index, item in enumerate(result["data"]):
+            assert item.get("index") == index
+            probs = item.get("probs")
+            assert isinstance(probs, list) and probs, "probs must be a non-empty list"
+            assert item.get("num_classes") == len(probs)
+            assert all(isinstance(prob, (int, float)) for prob in probs)
+            assert item.get("label") is None or isinstance(item["label"], str)
+
+        usage = result.get("usage")
+        assert isinstance(usage, dict), "Missing usage in classification response"
+        assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        assert usage.get("completion_tokens") == 0
+        if self.expected_prompt_tokens is not None:
+            assert usage.get("prompt_tokens") == self.expected_prompt_tokens
+
+        return f"Classified {len(result['data'])} inputs"
+
+
+@dataclass
+class PoolingPayload(BasePayload):
+    """Payload for JSON and binary ``/v1/pooling`` responses."""
+
+    endpoint: str = "/v1/pooling"
+    expected_prompt_tokens: Optional[int] = None
+
+    # Tasks whose output is one vector per token, so the response must stay a
+    # matrix. Validating only ``data[0]`` would accept a flattened vector here,
+    # which is the exact regression these cases exist to catch.
+    _TOKEN_WISE_TASKS = frozenset(("token_embed", "token_classify"))
+
+    _DTYPE_WIDTHS = {
+        "float32": 4,
+        "float16": 2,
+        "bfloat16": 2,
+        "fp8_e4m3": 1,
+        "fp8_e5m2": 1,
+    }
+
+    def _validate_json_data(self, data: Any) -> None:
+        assert isinstance(data, list) and data, "pooling data must be non-empty"
+
+        if self.body.get("task") in self._TOKEN_WISE_TASKS:
+            self._validate_token_wise_data(data)
+            return
+
+        self._validate_sequence_wise_data(data)
+
+    @staticmethod
+    def _validate_sequence_wise_data(data: Any) -> None:
+        """Require a flat numeric vector: exactly one vector per input.
+
+        Sequence-level tasks (``embed``, ``classify``) return one vector per
+        input, which the worker enforces itself. Accepting a matrix here and
+        validating only ``data[0]`` would let a rank regression pass while
+        clients can no longer read the result as a vector.
+        """
+        assert all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in data
+        ), f"sequence-level output must be a flat numeric vector, got {data!r}"
+
+    @staticmethod
+    def _validate_token_wise_data(data: Any) -> None:
+        """Require a non-empty matrix of numeric rows with a consistent width.
+
+        Rejects a flattened vector, ragged rows, empty rows, and non-numeric
+        values — every row is checked, not just the first.
+        """
+        assert all(
+            isinstance(row, list) for row in data
+        ), f"token-wise output must be a list of rows, got {data!r}"
+
+        width = len(data[0])
+        assert width, "token-wise rows must be non-empty"
+        for position, row in enumerate(data):
+            assert len(row) == width, (
+                f"token-wise rows must have a consistent width; row {position} "
+                f"has {len(row)}, expected {width}"
+            )
+            assert all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in row
+            ), f"token-wise row {position} has non-numeric values: {row!r}"
+
+    def _handle_json_response(self, response: Any) -> str:
+        result = response.json()
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
+        assert result.get("data"), "Empty pooling data"
+
+        encoding_format = self.body.get("encoding_format", "float")
+        dtype_width = self._DTYPE_WIDTHS[self.body.get("embed_dtype", "float32")]
+        for index, item in enumerate(result["data"]):
+            assert item.get("index") == index
+            assert item.get("object") == "pooling"
+            data = item.get("data")
+            if encoding_format == "base64":
+                assert isinstance(data, str)
+                decoded = base64.b64decode(data, validate=True)
+                assert decoded and len(decoded) % dtype_width == 0
+            else:
+                self._validate_json_data(data)
+
+        usage = result.get("usage")
+        assert isinstance(usage, dict), "Missing usage in pooling response"
+        assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        assert usage.get("completion_tokens") == 0
+        if self.expected_prompt_tokens is not None:
+            assert usage.get("prompt_tokens") == self.expected_prompt_tokens
+
+        return f"Pooled {len(result['data'])} inputs as {encoding_format}"
+
+    def _handle_binary_response(self, response: Any) -> str:
+        assert response.headers.get("content-type") == "application/octet-stream"
+        assert response.content, "Empty binary pooling response"
+
+        encoding_format = self.body["encoding_format"]
+        metadata_header = response.headers.get("metadata")
+        if encoding_format == "bytes_only":
+            assert metadata_header is None
+            return f"Pooled bytes_only response with {len(response.content)} bytes"
+
+        assert metadata_header is not None, "bytes response is missing metadata"
+        metadata = json.loads(metadata_header)
+        assert metadata.get("data"), "bytes metadata has no tensor entries"
+
+        # A client reconstructs each tensor from (start, end, shape, dtype,
+        # endianness) alone, so metadata that merely stays in bounds is not
+        # enough — it must agree with the body byte-for-byte. Checking only
+        # bounds lets an offset/shape serialization regression pass here while
+        # clients cannot reconstruct anything.
+        dtype_width = self._DTYPE_WIDTHS[self.body.get("embed_dtype", "float32")]
+        expected_start = 0
+        for index, item in enumerate(metadata["data"]):
+            assert item.get("index") == index
+            assert item.get("embed_dtype") == self.body.get("embed_dtype", "float32")
+            assert item.get("endianness") == self.body.get("endianness", "native")
+            assert item["start"] < item["end"] <= len(response.content)
+
+            shape = item.get("shape")
+            assert shape, "bytes metadata entry is missing shape"
+            assert all(
+                isinstance(dim, int) and dim > 0 for dim in shape
+            ), f"tensor {index} has a non-positive shape: {shape!r}"
+
+            # Rank matters as much as the byte count: [2, 2] and [4] cover the
+            # same span, but only one is the shape the task promises.
+            expected_rank = 2 if self.body.get("task") in self._TOKEN_WISE_TASKS else 1
+            assert len(shape) == expected_rank, (
+                f"tensor {index} has rank {len(shape)} (shape {shape!r}), "
+                f"expected rank {expected_rank} for task "
+                f"{self.body.get('task', 'embed')!r}"
+            )
+
+            element_count = math.prod(shape)
+            expected_bytes = element_count * dtype_width
+            actual_bytes = item["end"] - item["start"]
+            assert actual_bytes == expected_bytes, (
+                f"tensor {index} span is {actual_bytes} bytes but shape {shape} "
+                f"at {dtype_width} bytes/element needs {expected_bytes}"
+            )
+
+            # Spans must tile the body in order: contiguous and non-overlapping.
+            assert item["start"] == expected_start, (
+                f"tensor {index} starts at {item['start']}, expected "
+                f"{expected_start} (spans must be contiguous and non-overlapping)"
+            )
+            expected_start = item["end"]
+
+        assert expected_start == len(response.content), (
+            f"metadata spans cover {expected_start} bytes but the body is "
+            f"{len(response.content)} bytes"
+        )
+
+        usage = metadata.get("usage")
+        assert isinstance(usage, dict), "bytes metadata is missing usage"
+        assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        if self.expected_prompt_tokens is not None:
+            assert usage.get("prompt_tokens") == self.expected_prompt_tokens
+
+        return f"Pooled {len(metadata['data'])} binary tensors"
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        if self.body.get("encoding_format") in ("bytes", "bytes_only"):
+            return self._handle_binary_response(response)
+        return self._handle_json_response(response)
+
+
+@dataclass
+class EmbeddingMultiWorkerDispatchPayload(BasePayload):
+    """Send ``repeat_count`` embedding requests to the frontend, capturing a
+    per-worker ``/metrics`` snapshot on the FIRST iteration and on the LAST
+    iteration. Assert the delta — i.e. requests attributed during *this*
+    burst — matches an expected per-worker pattern.
+
+    Diff semantics are important because the same fixture may run multiple
+    bursts back-to-back (e.g. one per model in a multi-model dispatch
+    test): the prior burst leaves a worker's absolute counter > 0, so only
+    deltas can prove the second burst did not also reach that worker.
+
+    Two routing properties of the embedding worker pool are checked
+    through this payload:
+
+    1. **Same-model load balancing** — when multiple workers serve the
+       same embedding model, ``select_worker_set_with()`` does
+       weighted-random selection across them, so both workers should see
+       ``>0`` delta. Set ``expected_workers_with_delta={port1, port2}``.
+
+    2. **Multi-model dispatch** — when workers serve different models,
+       the name-keyed ``get_embeddings_engine(model)`` lookup must route
+       only to the worker registered for the requested model. Set
+       ``expected_workers_with_delta={port_of_requested_model}`` so the
+       check asserts the wrong-model worker observed exactly 0 delta
+       during this burst.
+
+    The per-worker counter sampled is
+    ``dynamo_component_requests_total`` — the same counter exercised by
+    ``MetricsPayload`` for single-worker tests. The dispatch assertion
+    fires once after the last repeat.
+    """
+
+    endpoint: str = "/v1/embeddings"
+
+    # Indices into ``self.system_ports`` (inherited from BasePayload, with
+    # DefaultPort.SYSTEM{1,2} entries remapped to per-test dynamic ports
+    # by the harness). Each indexed worker must have observed >0 delta
+    # during this burst; other workers must observe exactly 0 delta.
+    #
+    # Index-based on purpose: the actual port values are not known at
+    # config-construction time because the harness assigns dynamic ports.
+    expected_worker_indices_with_delta: set[int] = field(default_factory=set)
+
+    # Lower bound on the SUM of per-worker deltas across all workers. Use
+    # ``repeat_count`` for an exact-match expectation in clean fixtures.
+    # Defaults to 0 (predicate-only — workers_with_delta must match).
+    min_total_delta: int = 0
+
+    # Settle delay applied around each /metrics scrape so the worker has
+    # time to flush the most recent counter increment.
+    settle_seconds: float = 1.0
+
+    # Internal: iteration counter and baseline snapshot. Both are mutated
+    # in validate(); the dataclass machinery treats them as normal
+    # attributes once the instance is constructed.
+    _calls_seen: int = 0
+    _baseline: dict[int, float] = field(default_factory=dict)
+
+    def with_model(self, model):
+        # Embedding body is set externally; this is a no-op.
+        return self
+
+    def response_handler(self, response: Any) -> str:
+        # Validate the per-iteration response shape so an HTML/JSON error
+        # surfaces immediately. The *dispatch* assertion happens in
+        # validate() on the final repeat.
+        return EmbeddingPayload.extract_embeddings(response)
+
+    def _scrape(self) -> dict[int, float]:
+        prefix = prometheus_names.name_prefix.COMPONENT
+        counter_name = f"{prefix}_{prometheus_names.work_handler.REQUESTS_TOTAL}"
+
+        counts: dict[int, float] = {}
+        for port in self.system_ports:
+            r = requests.get(
+                f"http://{self.host}:{port}/metrics",
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+            counts[port] = sum_metric_samples(r.text, counter_name)
+        return counts
+
+    def validate(self, response: Any, content: str) -> None:
+        """First repeat: snapshot baseline counts. Last repeat: scrape
+        again, compute deltas, and assert the dispatch pattern.
+        """
+        self._calls_seen += 1
+
+        if self._calls_seen == 1:
+            # Snapshot AFTER the first request; this is fine because the
+            # baseline is subtracted out below — we only care that the
+            # delta from this point forward matches expectations.
+            time.sleep(self.settle_seconds)
+            self._baseline = self._scrape()
+            logger.info("Baseline per-worker counts: %s", self._baseline)
+            return
+
+        if self._calls_seen < self.repeat_count:
+            return
+
+        # Last repeat — compute delta.
+        time.sleep(self.settle_seconds)
+        final = self._scrape()
+        delta = {p: final[p] - self._baseline.get(p, 0.0) for p in final}
+        logger.info(
+            "Per-worker delta (final - baseline) over %d requests: %s",
+            self.repeat_count - 1,
+            delta,
+        )
+
+        workers_with_delta_idx = {
+            i for i, port in enumerate(self.system_ports) if delta.get(port, 0) > 0
+        }
+        assert workers_with_delta_idx == self.expected_worker_indices_with_delta, (
+            f"Expected worker indices with delta "
+            f"{self.expected_worker_indices_with_delta}, got "
+            f"{workers_with_delta_idx}. Per-worker delta: {delta} "
+            f"(baseline={self._baseline}, final={final}, "
+            f"system_ports={self.system_ports})"
+        )
+
+        if self.min_total_delta > 0:
+            total_delta = sum(delta.values())
+            assert total_delta >= self.min_total_delta, (
+                f"Expected at least {self.min_total_delta} total delta across "
+                f"workers, got {int(total_delta)}. Per-worker delta: {delta}"
+            )
 
 
 @dataclass
@@ -790,17 +1685,109 @@ class MetricCheck:
 
 
 @dataclass
+class KvEventMetricsPayload(BasePayload):
+    """Validate structured KV event counters instead of grepping event logs."""
+
+    endpoint: str = "/metrics"
+    method: str = "GET"
+    port: int = DefaultPort.SYSTEM1.value
+    event_type: str = "stored"
+    min_received: int = 1
+    min_accepted: int = 1
+    settle_seconds: float = 0.5
+
+    def with_model(self, model):
+        return self
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        if self.settle_seconds > 0:
+            time.sleep(self.settle_seconds)
+
+        contents = []
+        seen_ports: set[int] = set()
+
+        for port in [self.port, *self.system_ports]:
+            if port in seen_ports:
+                continue
+            seen_ports.add(port)
+            metrics_response = requests.get(
+                f"http://{self.host}:{port}/{self.endpoint.lstrip('/')}",
+                timeout=self.timeout,
+            )
+            metrics_response.raise_for_status()
+            contents.append(metrics_response.text)
+
+        return "\n".join(contents)
+
+    def validate(self, response: Any, content: str) -> None:
+        metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kv_publisher.ZMQ_EVENTS_TOTAL}"
+        )
+        received = sum_metric_samples(
+            content,
+            metric_name,
+            {"stage": "received", "event_type": self.event_type},
+        )
+        accepted = sum_metric_samples(
+            content,
+            metric_name,
+            {"stage": "accepted", "event_type": self.event_type},
+        )
+
+        assert received >= self.min_received, (
+            f"Expected at least {self.min_received} received KV events with "
+            f"event_type={self.event_type!r}, got {received:g}"
+        )
+        assert accepted >= self.min_accepted, (
+            f"Expected at least {self.min_accepted} accepted KV events with "
+            f"event_type={self.event_type!r}, got {accepted:g}"
+        )
+
+        # Regression guard: this counter silently failed to register
+        # because it declared `worker_id` as a variable label, which
+        # collides with the const label the runtime auto-injects under the same
+        # name. It only increments on an event_id gap, so a healthy run leaves it
+        # at zero -- assert that it is exposed at all, not that it has a value.
+        dropped_metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kv_publisher.ENGINES_DROPPED_EVENTS_TOTAL}"
+        )
+        assert find_metric_samples(content, dropped_metric_name), (
+            f"{dropped_metric_name} is absent from /metrics. The KV publisher "
+            "registers it unconditionally at startup, so absence means it never "
+            "reached the metrics registry"
+        )
+
+        logger.info(
+            "SUCCESS: KV event metrics found for event_type=%s: "
+            "received=%s accepted=%s; %s is registered",
+            self.event_type,
+            received,
+            accepted,
+            dropped_metric_name,
+        )
+
+
+@dataclass
 class MetricsPayload(BasePayload):
     """Base class for Prometheus metrics validation payloads.
 
     Validates common dynamo_component_* metrics shared across all backends.
     Backend-specific subclasses handle engine-specific metrics.
+
+    Set ``check_lifecycle_gauges=True`` to additionally assert the unified-
+    only framework gauges (``cleanup_time_seconds``, ``drain_time_seconds``,
+    ``kv_cache_hit_rate``). Off by default because legacy entry points
+    don't emit them.
     """
 
     endpoint: str = "/metrics"
     method: str = "GET"
     port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
+    check_lifecycle_gauges: bool = False
 
     def with_model(self, model):
         # Metrics does not use model in request body
@@ -890,6 +1877,46 @@ class MetricsPayload(BasePayload):
             ),
         ]
 
+    def _get_lifecycle_gauge_checks(self) -> list[MetricCheck]:
+        """Unified-only framework lifecycle gauges. Legacy entry points
+        don't emit these — gated by ``check_lifecycle_gauges`` so legacy
+        callers don't trip on the absence.
+
+        - cleanup_time / drain_time: Rust-side ``LifecycleGauges``, owned
+          by ``dynamo_backend_common::Worker``. While the worker is
+          serving the values are 0 (set at shutdown). The "name appears"
+          check catches regressions where the gauges silently fail to
+          register against the runtime's ``MetricsRegistry``.
+
+        ``kv_cache_hit_rate`` is INTENTIONALLY not in this list. With the
+        Rust ``prometheus`` crate, a ``GaugeVec`` family with no labeled
+        children is skipped by the text encoder — so an engine that
+        legitimately reports ``kv_cache_hit_rate=None`` (no prefix cache,
+        or no requests observed) has no HELP line. That's the tri-state
+        contract working as designed; not a regression to test for here.
+        """
+        prefix = prometheus_names.name_prefix.COMPONENT
+
+        def metric_pattern(name):
+            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
+
+        return [
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.lifecycle.CLEANUP_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) >= 0,
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.lifecycle.DRAIN_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) >= 0,
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+        ]
+
     def _get_backend_specific_checks(self) -> list[MetricCheck]:
         """Get backend-specific metric checks. Override in subclasses."""
         return []
@@ -949,12 +1976,70 @@ class MetricsPayload(BasePayload):
         """Validate Prometheus metrics output"""
         content = self._filter_bucket_metrics(content)
 
-        # Collect all checks: common + backend-specific
+        # Collect all checks: common + backend-specific (+ lifecycle if opted in)
         metrics_to_check = self._get_common_metric_checks()
         metrics_to_check.extend(self._get_backend_specific_checks())
+        if self.check_lifecycle_gauges:
+            metrics_to_check.extend(self._get_lifecycle_gauge_checks())
 
         # Run all validations
         self._validate_metric_checks(metrics_to_check, content)
+
+
+@dataclass
+class ImageTokenMetricsPayload(MetricsPayload):
+    """Validate frontend image-token usage aggregates for one model."""
+
+    model: Optional[str] = None
+    port: int = DefaultPort.FRONTEND.value
+
+    def with_model(self, model: str) -> "ImageTokenMetricsPayload":
+        payload = deepcopy(self)
+        payload.model = model
+        return payload
+
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        if self.model is None:
+            raise ValueError("ImageTokenMetricsPayload requires a model")
+
+        prefix = prometheus_names.name_prefix.FRONTEND
+        metric = prometheus_names.frontend_service.IMAGE_TOKENS_PER_REQUEST
+        count_name = f"{prefix}_{metric}_count"
+        sum_name = f"{prefix}_{metric}_sum"
+        escaped_model = re.escape(self.model)
+
+        def model_metric_pattern(name: str) -> str:
+            return (
+                rf'{re.escape(name)}\{{(?:[^}}]*,)?model="{escaped_model}"'
+                r"(?:,[^}]*)?\}"
+                r"\s+([\d.eE+-]+)"
+            )
+
+        return [
+            MetricCheck(
+                name=count_name,
+                pattern=model_metric_pattern,
+                validator=lambda value: int(float(value)) >= self.min_num_requests,
+                error_msg=lambda name, value: (
+                    f"{name} has count {value}, expected at least "
+                    f"{self.min_num_requests}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {name} with count: {value}"
+                ),
+            ),
+            MetricCheck(
+                name=sum_name,
+                pattern=model_metric_pattern,
+                validator=lambda value: float(value) > 0,
+                error_msg=lambda name, value: (
+                    f"{name} should contain positive image-token usage, got {value}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {name} with aggregate image-token usage: {value}"
+                ),
+            ),
+        ]
 
 
 @dataclass
@@ -1105,11 +2190,107 @@ class SGLangMetricsPayload(MetricsPayload):
 
 
 @dataclass
+class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
+    """Metrics validation for SGLang disaggregated workers.
+
+    Disagg workers (prefill/decode) expose fewer sglang:* metrics than
+    aggregated workers because each only runs half the scheduler pipeline.
+    Observed: ~14 unique sglang:* metrics vs ~25 for aggregated.
+    """
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        checks = super()._get_backend_specific_checks()
+        for check in checks:
+            if check.name == "sglang:*":
+                check.validator = lambda value: len(set(value)) >= 10
+                check.error_msg = lambda name, value: (
+                    f"Expected at least 10 unique sglang:* metrics, but found only {len(set(value))}"
+                )
+                check.success_msg = lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 10)"
+                )
+        return checks
+
+
+@dataclass
+class SGLangDisaggRouterMetricsPayload(MetricsPayload):
+    """Validate request accounting across disaggregated prefill workers."""
+
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        request_counter_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        return [
+            check
+            for check in super()._get_common_metric_checks()
+            if check.name != request_counter_name
+        ]
+
+    def validate(self, response: Any, content: str) -> None:
+        # Preserve the existing common metrics checks on the primary prefill
+        # worker, but account for routed requests across every configured
+        # prefill worker.
+        super().validate(response, content)
+
+        if not self.system_ports:
+            raise AssertionError("No prefill worker metrics ports were configured")
+
+        counter_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        labels = {
+            prometheus_names.labels.COMPONENT: "prefill",
+            prometheus_names.labels.ENDPOINT: "generate",
+        }
+        counts: dict[int, float] = {}
+
+        for port in self.system_ports:
+            worker_content = content
+            if port != self.port:
+                worker_response = requests.get(
+                    f"http://{self.host}:{port}/metrics",
+                    timeout=self.timeout,
+                )
+                worker_response.raise_for_status()
+                worker_content = worker_response.text
+
+            samples = find_metric_samples(worker_content, counter_name, labels)
+            if not samples:
+                raise AssertionError(
+                    f"Metric {counter_name} with labels {labels} was not found "
+                    f"on prefill worker metrics port {port}"
+                )
+            counts[port] = sum(samples)
+
+        total_requests = sum(counts.values())
+        per_worker = ", ".join(
+            f"port {port}={count:g}" for port, count in counts.items()
+        )
+        if total_requests < self.min_num_requests:
+            raise AssertionError(
+                f"{counter_name} has aggregate count {total_requests:g}, less than "
+                f"required {self.min_num_requests} across prefill workers "
+                f"({per_worker})"
+            )
+        logger.info(
+            "SUCCESS: Found %s with aggregate count %g across prefill workers (%s)",
+            counter_name,
+            total_requests,
+            per_worker,
+        )
+
+
+@dataclass
 class TRTLLMMetricsPayload(MetricsPayload):
     """Metrics validation for TensorRT-LLM backend"""
 
     def _get_backend_specific_checks(self) -> list[MetricCheck]:
         """TRT-LLM-specific metric checks"""
+        component_prefix = prometheus_names.name_prefix.COMPONENT
+        total_blocks = f"{component_prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}"
+
         checks = [
             MetricCheck(
                 # Check: Minimum count of unique trtllm_* metrics
@@ -1125,7 +2306,54 @@ class TRTLLMMetricsPayload(MetricsPayload):
                     f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)"
                 ),
                 multiline=True,
-            )
+            ),
+            # The checks above and in the base class count metric *names* and
+            # accept a zero block count. Prometheus registers names when the
+            # collector is constructed, so both pass on a worker whose stats
+            # thread never published a sample and whose engine never recorded
+            # a request. The two checks below require an observation on each
+            # path, so one going dead cannot pass as the other still working.
+            MetricCheck(
+                # Stats path: the per-rank gauges are seeded at 0 by
+                # _init_publish_metrics_thread and only move when iteration
+                # stats arrive from the engine. Any rank reporting a positive
+                # block count proves the polling thread published.
+                name=f"{total_blocks} (positive on some rank)",
+                pattern=lambda name: (
+                    rf"{total_blocks}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
+                ),
+                validator=lambda value: any(float(v) > 0 for v in value),
+                error_msg=lambda name, value: (
+                    f"{name}: every rank reported a non-positive block count "
+                    f"(values: {value}). The stats polling thread never "
+                    f"published iteration stats."
+                ),
+                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                multiline=True,
+            ),
+            MetricCheck(
+                # Request path: TRT-LLM's own per-request series, recorded by
+                # MetricsCollector as requests finish. Several names are
+                # matched because they come from tensorrt_llm.metrics and one
+                # upstream rename should not silently void the check.
+                name="trtllm_* per-request observations",
+                pattern=lambda name: (
+                    r"trtllm_(?:request_success_total"
+                    r"|e2e_request_latency_seconds_count"
+                    r"|time_to_first_token_seconds_count"
+                    r"|time_per_output_token_seconds_count"
+                    r"|request_queue_time_seconds_count)"
+                    r"(?:\{[^}]*\})?\s+([\d.eE+-]+)"
+                ),
+                validator=lambda value: any(float(v) > 0 for v in value),
+                error_msg=lambda name, value: (
+                    f"{name}: TRT-LLM recorded no per-request observations "
+                    f"(values: {value}). The engine's request metrics are not "
+                    f"reaching the collector."
+                ),
+                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                multiline=True,
+            ),
         ]
 
         # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend
@@ -1166,56 +2394,6 @@ class TRTLLMMetricsPayload(MetricsPayload):
         return checks
 
 
-def check_models_api(response):
-    """Check if models API is working and returns models"""
-    try:
-        if response.status_code != 200:
-            return False
-        data = response.json()
-        time.sleep(
-            1
-        )  # temporary to avoid /completions race condition where we get 404 error
-        return data.get("data") and len(data["data"]) > 0
-    except Exception:
-        return False
-
-
-# Additional health check helpers
-def check_health_generate(response):
-    """Validate /health reports a 'generate' endpoint.
-
-    Returns True if either of the following is found:
-      - "endpoints" contains a string mentioning 'generate'
-      - "instances" contains an object with endpoint == 'generate'
-    """
-    try:
-        if response.status_code != 200:
-            return False
-        data = response.json()
-
-        # Check endpoints list for any entry containing 'generate'
-        endpoints = data.get("endpoints", []) or []
-        for ep in endpoints:
-            if isinstance(ep, str) and "generate" in ep:
-                time.sleep(
-                    1
-                )  # temporary to avoid /completions race condition where we get 404 error
-                return True
-
-        # Check instances for an entry with endpoint == 'generate'
-        instances = data.get("instances", []) or []
-        for inst in instances:
-            if isinstance(inst, dict) and inst.get("endpoint") == "generate":
-                time.sleep(
-                    1
-                )  # temporary to avoid /completions race condition where we get 404 error
-                return True
-
-        return False
-    except Exception:
-        return False
-
-
 # backwards compatiability
 def completions_response_handler(response):
     return CompletionPayload.extract_text(response)
@@ -1223,3 +2401,166 @@ def completions_response_handler(response):
 
 def chat_completions_response_handler(response):
     return ChatPayload.extract_content(response)
+
+
+@dataclass
+class ImageGenerationPayload(BasePayload):
+    """Payload for /v1/images/generations endpoint (diffusion image generation)."""
+
+    endpoint: str = "/v1/images/generations"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in image response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Image response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Image response b64_json is empty"
+        return "b64_image_returned"
+
+
+@dataclass
+class VideoGenerationPayload(BasePayload):
+    """Payload for /v1/videos endpoint (diffusion video generation)."""
+
+    endpoint: str = "/v1/videos"
+    timeout: int = 600
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert result.get("status") == "completed", (
+            f"Video generation not completed. Status: {result.get('status')}, "
+            f"Error: {result.get('error', 'none')}"
+        )
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in video response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Video response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Video response b64_json is empty"
+        return "b64_video_returned"
+
+    def validate(self, response: Any, content: str) -> None:
+        assert content, "Video response content is empty"
+        if self.expected_response and not any(
+            expected.lower() in content.lower() for expected in self.expected_response
+        ):
+            raise AssertionError(
+                f"Expected at least one of {self.expected_response} in {content!r}"
+            )
+
+
+@dataclass
+class I2VPayload(VideoGenerationPayload):
+    """Payload for image-to-video via /v1/videos with input_reference."""
+
+    def __post_init__(self):
+        from PIL import Image
+
+        image_buffer = BytesIO()
+        Image.new("RGB", (64, 64), color="red").save(image_buffer, format="PNG")
+        image_b64 = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+        self.body["input_reference"] = f"data:image/png;base64,{image_b64}"
+
+
+@dataclass
+class AudioSpeechPayload(BasePayload):
+    """Payload for /v1/audio/speech endpoint.
+
+    The byte-count check alone passes on a WAV that carries a header and a
+    fraction of a second of silence, which is what a broken decoder or a
+    mis-assembled chunk stream produces. Set the waveform expectations below to
+    assert the audio is actually as long and as loud as the request implies;
+    they apply to WAV responses (binary or base64) and are skipped for URL
+    responses.
+    """
+
+    endpoint: str = "/v1/audio/speech"
+    timeout: int = 300
+    # Minimum decoded duration in seconds; 0 disables the check.
+    min_duration_s: float = 0.0
+    # Minimum RMS amplitude, normalized to [0, 1]; 0 disables the check.
+    min_rms: float = 0.0
+    # Expected sample rate in Hz; None disables the check.
+    expected_sample_rate: Optional[int] = None
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        if "audio" in content_type:
+            audio_bytes = response.content
+            assert len(audio_bytes) > 100, (
+                f"Audio response too small ({len(audio_bytes)} bytes), "
+                f"likely not valid audio"
+            )
+            self._validate_waveform(audio_bytes)
+            return f"binary_audio_{len(audio_bytes)}_bytes"
+        result = response.json()
+        assert (
+            result.get("status") != "failed"
+        ), f"Audio generation failed: {result.get('error', 'unknown')}"
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in audio response"
+        entry = result["data"][0]
+        if "url" in entry and entry["url"]:
+            return entry["url"]
+        assert entry.get("b64_json"), "Audio response b64_json is empty"
+        self._validate_waveform(base64.b64decode(entry["b64_json"]))
+        return "b64_audio_returned"
+
+    def _validate_waveform(self, audio_bytes: bytes) -> None:
+        """Assert the decoded WAV meets the configured expectations."""
+        if (
+            self.min_duration_s <= 0
+            and self.min_rms <= 0
+            and self.expected_sample_rate is None
+        ):
+            return
+
+        with wave.open(BytesIO(audio_bytes), "rb") as wav:
+            sample_rate = wav.getframerate()
+            frame_count = wav.getnframes()
+            sample_width = wav.getsampwidth()
+            channels = wav.getnchannels()
+            frames = wav.readframes(frame_count)
+
+        if self.expected_sample_rate is not None:
+            assert sample_rate == self.expected_sample_rate, (
+                f"Expected {self.expected_sample_rate} Hz audio, "
+                f"got {sample_rate} Hz"
+            )
+
+        duration_s = frame_count / sample_rate if sample_rate else 0.0
+        assert duration_s >= self.min_duration_s, (
+            f"Audio is {duration_s:.3f}s, shorter than the expected minimum "
+            f"{self.min_duration_s:.3f}s ({frame_count} frames at {sample_rate} Hz)"
+        )
+
+        if self.min_rms <= 0:
+            return
+
+        assert sample_width == 2, (
+            f"RMS check supports 16-bit PCM only, got {sample_width * 8}-bit "
+            f"audio; drop min_rms for this payload"
+        )
+        sample_count = len(frames) // 2
+        assert sample_count > 0, "Decoded WAV carries no samples"
+        samples = struct.unpack(f"<{sample_count}h", frames[: sample_count * 2])
+        rms = math.sqrt(sum(s * s for s in samples) / sample_count) / 32768.0
+        assert rms >= self.min_rms, (
+            f"Audio RMS {rms:.5f} is below the expected minimum {self.min_rms:.5f}; "
+            f"the waveform is silent or near-silent "
+            f"({duration_s:.3f}s, {channels}ch at {sample_rate} Hz)"
+        )

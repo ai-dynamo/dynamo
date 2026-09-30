@@ -19,8 +19,11 @@ package webhook
 
 import (
 	"context"
+	"net/http"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,8 +40,8 @@ type ExcludedNamespacesChecker interface {
 	Contains(namespace string) bool
 }
 
-// webhookExcludedNamespaces holds the excluded namespaces checker (usually leaseWatcher)
-// This is set by main.go and shared across all webhook validators
+// webhookExcludedNamespaces holds the excluded namespaces checker (usually leaseWatcher).
+// This is set by main.go and shared across admission handlers.
 var webhookExcludedNamespaces ExcludedNamespacesChecker
 
 // SetExcludedNamespaces sets the excluded namespaces checker for all webhooks.
@@ -52,56 +55,94 @@ func GetExcludedNamespaces() ExcludedNamespacesChecker {
 	return webhookExcludedNamespaces
 }
 
-// LeaseAwareValidator wraps a CustomValidator and adds lease-based namespace exclusion logic.
+// LeaseAwareValidator wraps a Validator and adds lease-based namespace exclusion logic.
 // It checks if a namespace-restricted operator is managing the namespace (via active lease)
 // before delegating validation to the underlying validator.
 //
 // This implements the Decorator pattern to transparently add coordination logic without
 // modifying the actual validation implementations.
-type LeaseAwareValidator struct {
-	validator          admission.CustomValidator
+type LeaseAwareValidator[T client.Object] struct {
+	validator          admission.Validator[T]
 	excludedNamespaces ExcludedNamespacesChecker
+}
+
+// LeaseAwareDefaulter skips defaulting in namespaces owned by namespace-restricted operators.
+type LeaseAwareDefaulter struct {
+	defaulter          admission.Defaulter[runtime.Object]
+	excludedNamespaces ExcludedNamespacesChecker
+}
+
+// WithGate makes gate available through the admission request context and fails if it is missing.
+func WithGate(webhook *admission.Webhook, gate features.Gate) *admission.Webhook {
+	handler := webhook.Handler
+	webhook.Handler = admission.HandlerFunc(func(ctx context.Context, req admission.Request) admission.Response {
+		features.MustGateFrom(ctx)
+		return handler.Handle(ctx, req)
+	})
+	webhook.WithContextFunc = func(ctx context.Context, _ *http.Request) context.Context {
+		return features.WithGate(ctx, gate)
+	}
+	return webhook
 }
 
 // NewLeaseAwareValidator creates a new LeaseAwareValidator that wraps the given validator.
 // If excludedNamespaces is nil, the wrapper acts as a pass-through (no filtering).
-func NewLeaseAwareValidator(validator admission.CustomValidator, excludedNamespaces ExcludedNamespacesChecker) admission.CustomValidator {
+func NewLeaseAwareValidator[T client.Object](validator admission.Validator[T], excludedNamespaces ExcludedNamespacesChecker) admission.Validator[T] {
 	if excludedNamespaces == nil {
 		// No exclusion logic needed, return validator as-is
 		return validator
 	}
-	return &LeaseAwareValidator{
+	return &LeaseAwareValidator[T]{
 		validator:          validator,
 		excludedNamespaces: excludedNamespaces,
 	}
 }
 
-// ValidateCreate implements admission.CustomValidator
-func (v *LeaseAwareValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	if v.shouldSkipValidation(obj) {
+// NewLeaseAwareDefaulter creates a defaulter that skips namespaces claimed by a Lease.
+// If excludedNamespaces is nil, the defaulter is returned unchanged.
+func NewLeaseAwareDefaulter(defaulter admission.Defaulter[runtime.Object], excludedNamespaces ExcludedNamespacesChecker) admission.Defaulter[runtime.Object] {
+	if excludedNamespaces == nil {
+		return defaulter
+	}
+	return &LeaseAwareDefaulter{
+		defaulter:          defaulter,
+		excludedNamespaces: excludedNamespaces,
+	}
+}
+
+// ValidateCreate implements admission.Validator.
+func (v *LeaseAwareValidator[T]) ValidateCreate(ctx context.Context, obj T) (admission.Warnings, error) {
+	if shouldSkipAdmission(obj, v.excludedNamespaces) {
 		return nil, nil
 	}
 	return v.validator.ValidateCreate(ctx, obj)
 }
 
-// ValidateUpdate implements admission.CustomValidator
-func (v *LeaseAwareValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	if v.shouldSkipValidation(newObj) {
+// ValidateUpdate implements admission.Validator.
+func (v *LeaseAwareValidator[T]) ValidateUpdate(ctx context.Context, oldObj, newObj T) (admission.Warnings, error) {
+	if shouldSkipAdmission(newObj, v.excludedNamespaces) {
 		return nil, nil
 	}
 	return v.validator.ValidateUpdate(ctx, oldObj, newObj)
 }
 
-// ValidateDelete implements admission.CustomValidator
-func (v *LeaseAwareValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	if v.shouldSkipValidation(obj) {
+// ValidateDelete implements admission.Validator.
+func (v *LeaseAwareValidator[T]) ValidateDelete(ctx context.Context, obj T) (admission.Warnings, error) {
+	if shouldSkipAdmission(obj, v.excludedNamespaces) {
 		return nil, nil
 	}
 	return v.validator.ValidateDelete(ctx, obj)
 }
 
-// shouldSkipValidation checks if validation should be skipped for the given object
-func (v *LeaseAwareValidator) shouldSkipValidation(obj runtime.Object) bool {
+// Default implements admission.CustomDefaulter.
+func (d *LeaseAwareDefaulter) Default(ctx context.Context, obj runtime.Object) error {
+	if shouldSkipAdmission(obj, d.excludedNamespaces) {
+		return nil
+	}
+	return d.defaulter.Default(ctx, obj)
+}
+
+func shouldSkipAdmission(obj runtime.Object, excludedNamespaces ExcludedNamespacesChecker) bool {
 	// Try to extract namespace from object using client.Object interface
 	clientObj, ok := obj.(client.Object)
 	if !ok {
@@ -110,8 +151,8 @@ func (v *LeaseAwareValidator) shouldSkipValidation(obj runtime.Object) bool {
 	}
 
 	namespace := clientObj.GetNamespace()
-	if v.excludedNamespaces.Contains(namespace) {
-		webhookCommonLog.Info("skipping validation - namespace has namespace-restricted operator",
+	if excludedNamespaces.Contains(namespace) {
+		webhookCommonLog.Info("skipping admission - namespace has namespace-restricted operator",
 			"name", clientObj.GetName(),
 			"namespace", namespace,
 			"kind", obj.GetObjectKind().GroupVersionKind().Kind)
@@ -121,52 +162,39 @@ func (v *LeaseAwareValidator) shouldSkipValidation(obj runtime.Object) bool {
 	return false
 }
 
-// DGDReplicasModifierSuffixes defines suffixes for service accounts that are authorized
-// to modify DGD replicas when scaling adapter is enabled.
-// Service accounts matching any of these suffixes are allowed regardless of namespace.
-var DGDReplicasModifierSuffixes = []string{
-	// Dynamo operator controller manager (handles DGDSA reconciliation)
-	// Example: "dynamo-platform-dynamo-operator-controller-manager"
-	"-dynamo-operator-controller-manager",
-
-	// Planner service account (manages DGD replicas for autoscaling)
-	// Example: "planner-serviceaccount"
-	"planner-serviceaccount",
-}
-
 // CanModifyDGDReplicas checks if the request comes from a service account authorized
 // to modify DGD replicas when scaling adapter is enabled.
-// Service accounts are identified by username format: system:serviceaccount:<namespace>:<name>
 //
-// Authorized service accounts (by suffix):
-// - *-dynamo-operator-controller-manager (for DGDSA reconciliation)
-// - *planner-serviceaccount (for Planner autoscaling)
-func CanModifyDGDReplicas(userInfo authenticationv1.UserInfo) bool {
+// operatorPrincipal is the full Kubernetes username
+// (system:serviceaccount:<namespace>:<name>) of the operator's own service account,
+// auto-detected at startup via the Kubernetes Downward API. It may be empty if
+// the Downward API env vars were not set.
+//
+// Authorization is checked in two ways:
+//  1. Exact match against operatorPrincipal.
+//  2. Name-only match for the planner SA, which the operator creates in every DGD
+//     namespace with a well-known constant name. Because the namespace is only known
+//     at runtime, it cannot be enumerated statically.
+func CanModifyDGDReplicas(operatorPrincipal string, userInfo authenticationv1.UserInfo) bool {
 	username := userInfo.Username
 
-	// Service accounts have username format: system:serviceaccount:<namespace>:<name>
 	if !strings.HasPrefix(username, "system:serviceaccount:") {
 		return false
 	}
 
-	// Parse: system:serviceaccount:<namespace>:<name>
-	parts := strings.Split(username, ":")
-	if len(parts) != 4 {
-		return false
+	if operatorPrincipal != "" && username == operatorPrincipal {
+		webhookCommonLog.V(1).Info("allowing DGD replicas modification",
+			"username", username,
+			"matchType", "operatorPrincipal")
+		return true
 	}
 
-	namespace := parts[2]
-	saName := parts[3]
-
-	// Check against authorized suffixes
-	for _, suffix := range DGDReplicasModifierSuffixes {
-		if strings.HasSuffix(saName, suffix) {
-			webhookCommonLog.V(1).Info("allowing DGD replicas modification",
-				"serviceAccount", saName,
-				"namespace", namespace,
-				"matchedSuffix", suffix)
-			return true
-		}
+	parts := strings.Split(username, ":")
+	if len(parts) == 4 && parts[3] == consts.PlannerServiceAccountName {
+		webhookCommonLog.V(1).Info("allowing DGD replicas modification",
+			"username", username,
+			"matchType", "plannerSA")
+		return true
 	}
 
 	return false

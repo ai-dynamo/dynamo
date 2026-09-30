@@ -7,6 +7,35 @@ use serde::{Deserialize, Serialize};
 
 use super::tracker::EventSource;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvEventConsolidationMode {
+    #[default]
+    Dedup,
+    Passthrough,
+}
+
+impl KvEventConsolidationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dedup => "dedup",
+            Self::Passthrough => "passthrough",
+        }
+    }
+}
+
+impl std::str::FromStr for KvEventConsolidationMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "dedup" => Ok(Self::Dedup),
+            "passthrough" => Ok(Self::Passthrough),
+            _ => Err(format!("Unknown KV event consolidator mode: {s}")),
+        }
+    }
+}
+
 /// Configuration for the KV Event Consolidator
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvEventConsolidatorConfig {
@@ -19,6 +48,9 @@ pub struct KvEventConsolidatorConfig {
 
     /// Engine source for events (vLLM or TensorRT-LLM)
     pub engine_source: EventSource,
+
+    /// How the consolidator should process store/remove events.
+    pub mode: KvEventConsolidationMode,
 }
 
 impl Default for KvEventConsolidatorConfig {
@@ -27,6 +59,7 @@ impl Default for KvEventConsolidatorConfig {
             engine_event_endpoint: "tcp://localhost:5557".to_string(),
             consolidated_event_endpoint: "tcp://*:5558".to_string(),
             engine_source: EventSource::Vllm,
+            mode: KvEventConsolidationMode::Dedup,
         }
     }
 }
@@ -36,29 +69,41 @@ impl KvEventConsolidatorConfig {
         engine_event_endpoint: String,
         consolidated_event_endpoint: String,
         engine_source: EventSource,
+        mode: KvEventConsolidationMode,
     ) -> Self {
         Self {
             engine_event_endpoint,
             consolidated_event_endpoint,
             engine_source,
+            mode,
         }
     }
 
     /// Create config for vLLM
-    pub fn new_vllm(engine_event_endpoint: String, consolidated_event_endpoint: String) -> Self {
+    pub fn new_vllm(
+        engine_event_endpoint: String,
+        consolidated_event_endpoint: String,
+        mode: KvEventConsolidationMode,
+    ) -> Self {
         Self {
             engine_event_endpoint,
             consolidated_event_endpoint,
             engine_source: EventSource::Vllm,
+            mode,
         }
     }
 
     /// Create config for TensorRT-LLM
-    pub fn new_trtllm(engine_event_endpoint: String, consolidated_event_endpoint: String) -> Self {
+    pub fn new_trtllm(
+        engine_event_endpoint: String,
+        consolidated_event_endpoint: String,
+        mode: KvEventConsolidationMode,
+    ) -> Self {
         Self {
             engine_event_endpoint,
             consolidated_event_endpoint,
             engine_source: EventSource::Trtllm,
+            mode,
         }
     }
 }

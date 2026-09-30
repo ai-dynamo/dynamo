@@ -5,8 +5,8 @@
 //!
 //! This module provides a ZMQ transport for the [crate::DistributedRuntime].
 //!
-//! Currently, the [Server] consists of a [async_zmq::Router] and the [Client] leverages
-//! a [async_zmq::Dealer].
+//! Currently, the [Server] consists of a [tmq::router::Router] and the [Client] leverages
+//! a [tmq::dealer::Dealer].
 //!
 //! The distributed service pattern we will use is based on the Harmony pattern described in
 //! [Chapter 8: A Framework for Distributed Computing](https://zguide.zeromq.org/docs/chapter8/#True-Peer-Connectivity-Harmony-Pattern).
@@ -16,18 +16,42 @@
 //! equivalent of a connection pool per upstream service at the cost of needing an extra internal
 //! routing step per service endpoint.
 
-use anyhow::{Result, anyhow};
-use async_zmq::{Context, Dealer, Router, Sink, SinkExt, StreamExt};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use derive_getters::Dissolve;
-use futures::TryStreamExt;
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, os::fd::FromRawFd, sync::Arc, time::Duration, vec::IntoIter};
+use std::{collections::HashMap, sync::Arc};
+use tmq::{AsZmqSocket, Context as TmqContext, dealer, router};
 use tokio::{
     sync::{Mutex, mpsc},
-    task::{JoinError, JoinHandle},
+    task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+
+pub type MultipartMessage = Vec<Vec<u8>>;
+
+/// Returns whether `endpoint` needs `ZMQ_IPV6`.
+///
+/// Set the option before each bind or connect; libzmq applies it per connection.
+/// Rejects unbracketed IPv6 literals: without `ZMQ_IPV6`, libzmq resolves them
+/// as IPv4 and retries the connection forever without reporting an error.
+pub fn ipv6_option_for(endpoint: &str) -> Result<bool> {
+    let Some(address) = endpoint.strip_prefix("tcp://") else {
+        return Ok(false);
+    };
+    if address.starts_with('[') {
+        return Ok(true);
+    }
+    if let Some((host, _port)) = address.rsplit_once(':')
+        && host.parse::<std::net::Ipv6Addr>().is_ok()
+    {
+        anyhow::bail!(
+            "Invalid ZMQ endpoint '{endpoint}': IPv6 addresses must be bracketed, for example tcp://[{host}]:<port>"
+        );
+    }
+    Ok(false)
+}
 
 // Core message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,8 +113,8 @@ pub struct Server {
 }
 
 impl Server {
-    /// Create a new [Server] which is a [async_zmq::Router] with the given [async_zmq::Context] and address to bind
-    /// the ZMQ [async_zmq::Router] socket.
+    /// Create a new [Server] which is a [tmq::router::Router] with the given [tmq::Context]
+    /// and address to bind the ZMQ router socket.
     ///
     /// If the event loop processing the router fails with an error, the signal is propagated through the [CancellationToken]
     /// by issuing a [CancellationToken::cancel].
@@ -99,12 +123,12 @@ impl Server {
     ///
     /// The [ServerExecutionHandle] is the handle for background task executing the [Server].
     pub async fn new(
-        context: &Context,
+        context: &TmqContext,
         address: &str,
         cancel_token: CancellationToken,
     ) -> Result<(Self, ServerExecutionHandle)> {
-        let router = async_zmq::router(address)?.with_context(context).bind()?;
-        let fd = router.as_raw_socket().get_fd()?;
+        let router = router(context).bind(address)?;
+        let fd = router.get_socket().get_fd()?;
         let state = Arc::new(Mutex::new(RouterState::new()));
 
         // can cancel the router's event loop
@@ -142,7 +166,7 @@ impl Server {
     // pub async fn register_stream(&)
 
     async fn run(
-        router: Router<IntoIter<Vec<u8>>, Vec<u8>>,
+        router: tmq::router::Router,
         state: Arc<Mutex<RouterState>>,
         token: CancellationToken,
     ) -> Result<()> {
@@ -298,19 +322,17 @@ impl ServerExecutionHandle {
 
 // Client implementation
 pub struct Client {
-    dealer: Dealer<IntoIter<Vec<u8>>, Vec<u8>>,
+    dealer: tmq::dealer::Dealer,
 }
 
 impl Client {
-    fn new(context: &Context, address: &str) -> Result<Self> {
-        let dealer = async_zmq::dealer(address)?
-            .with_context(context)
-            .connect()?;
+    fn new(context: &TmqContext, address: &str) -> Result<Self> {
+        let dealer = dealer(context).connect(address)?;
 
         Ok(Self { dealer })
     }
 
-    fn dealer(&mut self) -> &mut Dealer<IntoIter<Vec<u8>>, Vec<u8>> {
+    fn dealer(&mut self) -> &mut tmq::dealer::Dealer {
         &mut self.dealer
     }
 
@@ -354,9 +376,33 @@ mod tests {
     use super::*;
     use tokio::time::timeout;
 
+    #[test]
+    fn ipv6_option_follows_endpoint_address_family() {
+        for (endpoint, expected) in [
+            ("tcp://[::1]:5555", true),
+            ("tcp://[::]:*", true),
+            ("tcp://[2001:db8::10]:5555", true),
+            ("tcp://127.0.0.1:5555", false),
+            ("tcp://0.0.0.0:*", false),
+            ("tcp://localhost:5555", false),
+            ("tcp://*:5555", false),
+            ("inproc://events", false),
+        ] {
+            assert_eq!(ipv6_option_for(endpoint).unwrap(), expected, "{endpoint}");
+        }
+
+        for endpoint in ["tcp://::1:5555", "tcp://2001:db8::10:5555"] {
+            let error = ipv6_option_for(endpoint).unwrap_err().to_string();
+            assert!(
+                error.contains("IPv6 addresses must be bracketed"),
+                "{endpoint}: {error}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_basic_communication() -> Result<()> {
-        let context = Context::new();
+        let context = TmqContext::new();
         let address = "tcp://127.0.0.1:1337";
         let token = CancellationToken::new();
 
@@ -373,7 +419,10 @@ mod tests {
 
         client
             .dealer()
-            .send(vec![id.as_bytes().to_vec(), id.as_bytes().to_vec()].into())
+            .send(tmq::Multipart::from(vec![
+                id.as_bytes().to_vec(),
+                id.as_bytes().to_vec(),
+            ]))
             .await?;
 
         let receive_result = rx.recv().await;
@@ -384,7 +433,7 @@ mod tests {
         let received_str = String::from_utf8_lossy(&received).to_string();
         assert_eq!(received_str, "test-request");
 
-        client.dealer().close().await?;
+        drop(client);
 
         handle.cancel();
         handle.join().await?;

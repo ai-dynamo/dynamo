@@ -21,13 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Checkpoint storage type constants
-const (
-	CheckpointStorageTypePVC = "pvc"
-	CheckpointStorageTypeS3  = "s3"
-	CheckpointStorageTypeOCI = "oci"
-)
-
 // +kubebuilder:object:root=true
 
 // OperatorConfiguration is the Schema for the operator configuration.
@@ -46,11 +39,18 @@ type OperatorConfiguration struct {
 	// Orchestrator configuration with optional overrides
 	Orchestrators OrchestratorConfiguration `json:"orchestrators"`
 
+	// DRA (Dynamic Resource Allocation) settings with optional override
+	DRA DRAConfiguration `json:"dra,omitempty"`
+
 	// Service mesh and infrastructure addresses
 	Infrastructure InfrastructureConfiguration `json:"infrastructure"`
 
 	// Ingress configuration
 	Ingress IngressConfiguration `json:"ingress"`
+
+	// ServiceMesh configures automatic generation of service-mesh resources
+	// (e.g., Istio DestinationRules) for EPP components.
+	ServiceMesh ServiceMeshConfiguration `json:"serviceMesh"`
 
 	// RBAC configuration for cross-namespace resource management (cluster-wide mode)
 	RBAC RBACConfiguration `json:"rbac"`
@@ -144,13 +144,14 @@ type LeaderElectionConfiguration struct {
 
 // NamespaceConfiguration determines operator namespace mode.
 type NamespaceConfiguration struct {
-	// Restricted is the namespace to restrict to. Empty = cluster-wide mode.
+	// Restricted enables namespace-restricted mode for development and testing.
+	// Namespace-restricted mode is not supported for production.
 	Restricted string `json:"restricted"`
-	// Scope holds namespace scope lease settings (namespace-restricted mode only)
+	// Scope configures the namespace ownership claim in namespace-restricted mode.
 	Scope NamespaceScopeConfiguration `json:"scope"`
 }
 
-// NamespaceScopeConfiguration holds lease settings for namespace-restricted mode.
+// NamespaceScopeConfiguration configures the development/test namespace ownership claim.
 type NamespaceScopeConfiguration struct {
 	// LeaseDuration is the duration of namespace scope marker lease before expiration
 	// +kubebuilder:default="30s"
@@ -168,6 +169,8 @@ type OrchestratorConfiguration struct {
 	LWS LWSConfiguration `json:"lws"`
 	// KaiScheduler configuration
 	KaiScheduler KaiSchedulerConfiguration `json:"kaiScheduler"`
+	// VolcanoScheduler configuration
+	VolcanoScheduler VolcanoSchedulerConfiguration `json:"volcanoScheduler"`
 }
 
 // GroveConfiguration holds Grove orchestrator settings.
@@ -191,6 +194,30 @@ type KaiSchedulerConfiguration struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
+// VolcanoSchedulerConfiguration holds Volcano scheduler settings.
+type VolcanoSchedulerConfiguration struct {
+	// EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io/v1) settings.
+//
+// NOTE: auto-detection here only verifies that the resource.k8s.io/v1 API is
+// registered on the apiserver (Kubernetes 1.34+). It does NOT verify that a
+// GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
+// installed, that its DeviceClass exists, or that node-level GPU drivers are
+// compatible. An admin can use `enabled: false` to force-off DRA integration
+// on clusters where the API is present but the GPU driver stack is not wired
+// up — this makes the operator fail GMS / inter-pod failover admissions early
+// with a clear error instead of letting pods Pend with a confusing
+// "resourceclaim not found" at schedule time.
+type DRAConfiguration struct {
+	// Enabled overrides auto-detection of the resource.k8s.io/v1 API.
+	// nil = auto-detect. Setting true requires detection to also succeed (the
+	// operator will exit at startup otherwise).
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
 // InfrastructureConfiguration holds service mesh and backend addresses.
 type InfrastructureConfiguration struct {
 	// NATSAddress is the address of the NATS server
@@ -201,6 +228,28 @@ type InfrastructureConfiguration struct {
 	ModelExpressURL string `json:"modelExpressURL"`
 	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
 	PrometheusEndpoint string `json:"prometheusEndpoint"`
+	// NATSTLSCAPath is the CA certificate path for verifying the NATS server
+	NATSTLSCAPath string `json:"natsTLSCAPath,omitempty"`
+	// NATSTLSClientCertPath is the client certificate path for NATS mTLS
+	NATSTLSClientCertPath string `json:"natsTLSClientCertPath,omitempty"`
+	// NATSTLSClientKeyPath is the client private key path for NATS mTLS
+	NATSTLSClientKeyPath string `json:"natsTLSClientKeyPath,omitempty"`
+	// TCPTLSCertPath is the server certificate path for TCP TLS
+	TCPTLSCertPath string `json:"tcpTLSCertPath,omitempty"`
+	// TCPTLSKeyPath is the server private key path for TCP TLS
+	TCPTLSKeyPath string `json:"tcpTLSKeyPath,omitempty"`
+	// TCPTLSCAPath is the CA certificate path for verifying TCP peers
+	TCPTLSCAPath string `json:"tcpTLSCAPath,omitempty"`
+	// TCPTLSClientCertPath is the client certificate path for TCP mTLS
+	TCPTLSClientCertPath string `json:"tcpTLSClientCertPath,omitempty"`
+	// TCPTLSClientKeyPath is the client private key path for TCP mTLS
+	TCPTLSClientKeyPath string `json:"tcpTLSClientKeyPath,omitempty"`
+	// TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS)
+	TCPTLSClientCAPath string `json:"tcpTLSClientCAPath,omitempty"`
+	// TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when
+	// verifying the server certificate. Useful when dialing by IP (pod address)
+	// to a server whose certificate has a DNS SAN.
+	TCPTLSServerName string `json:"tcpTLSServerName,omitempty"`
 }
 
 // IngressConfiguration holds ingress settings.
@@ -218,6 +267,61 @@ type IngressConfiguration struct {
 // UseVirtualService returns true if a VirtualService gateway is configured.
 func (i *IngressConfiguration) UseVirtualService() bool {
 	return i.VirtualServiceGateway != ""
+}
+
+// ServiceMeshProvider enumerates the supported service mesh implementations.
+type ServiceMeshProvider string
+
+const (
+	// ServiceMeshProviderIstio selects Istio as the service mesh.
+	ServiceMeshProviderIstio ServiceMeshProvider = "istio"
+)
+
+// ServiceMeshConfiguration holds service mesh integration settings.
+// The operator uses this to generate mesh-specific resources (e.g., Istio
+// DestinationRules) for EPP components so that sidecar proxies connect
+// correctly without double-TLS issues.
+type ServiceMeshConfiguration struct {
+	// Enabled overrides service mesh auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Provider selects the service mesh implementation. Supported: "istio", "".
+	// Empty string disables service mesh resource generation.
+	Provider string `json:"provider"`
+	// Istio holds Istio-specific settings. Only used when Provider is "istio".
+	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
+}
+
+// IsEnabled returns true if service mesh resources should be created or updated.
+// Cleanup of previously owned resources is handled separately during reconcile.
+func (s *ServiceMeshConfiguration) IsEnabled() bool {
+	if s.Enabled != nil && !*s.Enabled {
+		return false
+	}
+	return ServiceMeshProvider(s.Provider) == ServiceMeshProviderIstio
+}
+
+// IstioMeshConfiguration holds Istio-specific mesh settings.
+type IstioMeshConfiguration struct {
+	// TLSMode is the Istio TLS mode for DestinationRules.
+	// Supported values: "DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL".
+	// Defaults to "SIMPLE".
+	TLSMode string `json:"tlsMode"`
+	// InsecureSkipVerify skips TLS certificate verification in DestinationRules.
+	// Defaults to true (matching upstream GAIE behavior with self-signed certs).
+	InsecureSkipVerify *bool `json:"insecureSkipVerify,omitempty"`
+	// ClientCertificate is the path (in the istio-proxy sidecar's filesystem)
+	// to the file holding the client-side TLS certificate used for mTLS.
+	// REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+	ClientCertificate string `json:"clientCertificate,omitempty"`
+	// PrivateKey is the path (in the istio-proxy sidecar's filesystem) to the
+	// file holding the client-side TLS private key used for mTLS.
+	// REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+	PrivateKey string `json:"privateKey,omitempty"`
+	// CaCertificates is the optional path (in the istio-proxy sidecar's
+	// filesystem) to the file holding CA certificates used to verify the
+	// server certificate. Used only when TLSMode is "MUTUAL"; for other modes
+	// the field is ignored.
+	CaCertificates string `json:"caCertificates,omitempty"`
 }
 
 // RBACConfiguration holds RBAC settings for cluster-wide mode.
@@ -238,54 +342,51 @@ type MPIConfiguration struct {
 	SSHSecretNamespace string `json:"sshSecretNamespace"`
 }
 
+// DefaultSeccompProfile is the localhost seccomp profile applied to checkpoint
+// and restore pods when the operator config does not specify one explicitly.
+const DefaultSeccompProfile = "profiles/block-iouring.json"
+
 // CheckpointConfiguration holds checkpoint/restore settings.
 type CheckpointConfiguration struct {
 	// Enabled indicates if checkpoint functionality is enabled
 	Enabled bool `json:"enabled"`
-	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
-	// +kubebuilder:default="/tmp/ready-for-checkpoint"
-	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
-	// Storage holds storage backend configuration
-	Storage CheckpointStorageConfiguration `json:"storage"`
+	// Seccomp controls the localhost seccomp profile applied to checkpoint and
+	// restore pods. A nil value means "use the default profile"; set
+	// Seccomp.Disabled=true to disable seccomp injection entirely.
+	Seccomp *CheckpointSeccompConfiguration `json:"seccomp,omitempty"`
 }
 
-// CheckpointStorageConfiguration holds storage backend configuration for checkpoints.
-type CheckpointStorageConfiguration struct {
-	// Type is the storage backend type: pvc, s3, or oci
-	// +kubebuilder:default="pvc"
-	Type string `json:"type"`
-	// PVC configuration (used when Type=pvc)
-	PVC CheckpointPVCConfig `json:"pvc"`
-	// S3 configuration (used when Type=s3)
-	S3 CheckpointS3Config `json:"s3"`
-	// OCI configuration (used when Type=oci)
-	OCI CheckpointOCIConfig `json:"oci"`
+// CheckpointSeccompConfiguration controls the localhost seccomp profile applied
+// to checkpoint and restore pods. The profile blocks io_uring syscalls (which
+// CRIU cannot dump). Default behavior (zero-value substruct, or absent
+// substruct) applies DefaultSeccompProfile. Set Disabled=true on OpenShift
+// (custom localhost profiles require privileged SCC) or when using a CRIU
+// build with io_uring support. Set Profile to override the default path.
+type CheckpointSeccompConfiguration struct {
+	// Disabled, when true, suppresses seccomp profile injection entirely.
+	// Use this for clusters where custom localhost profiles are not allowed
+	// (e.g. OpenShift's restricted-v2 SCC) or for CRIU builds that handle
+	// io_uring natively.
+	Disabled bool `json:"disabled,omitempty"`
+	// Profile is the localhost seccomp profile path. Empty falls back to
+	// DefaultSeccompProfile. Ignored when Disabled is true.
+	Profile string `json:"profile,omitempty"`
 }
 
-// CheckpointPVCConfig holds PVC storage configuration.
-type CheckpointPVCConfig struct {
-	// PVCName is the name of the PVC
-	// +kubebuilder:default="snapshot-pvc"
-	PVCName string `json:"pvcName"`
-	// BasePath is the base directory within the PVC
-	// +kubebuilder:default="/checkpoints"
-	BasePath string `json:"basePath"`
-}
-
-// CheckpointS3Config holds S3 storage configuration.
-type CheckpointS3Config struct {
-	// URI is the S3 URI (s3://[endpoint/]bucket/prefix)
-	URI string `json:"uri"`
-	// CredentialsSecretRef is the name of the credentials secret
-	CredentialsSecretRef string `json:"credentialsSecretRef"`
-}
-
-// CheckpointOCIConfig holds OCI registry storage configuration.
-type CheckpointOCIConfig struct {
-	// URI is the OCI URI (oci://registry/repository)
-	URI string `json:"uri"`
-	// CredentialsSecretRef is the name of the docker config secret
-	CredentialsSecretRef string `json:"credentialsSecretRef"`
+// EffectiveSeccompProfile returns the seccomp profile to use, or "" to disable.
+// A nil substruct or zero-value substruct uses DefaultSeccompProfile. Disabled=true
+// disables injection. Profile override takes effect when Disabled is false.
+func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
+	if c.Seccomp == nil {
+		return DefaultSeccompProfile
+	}
+	if c.Seccomp.Disabled {
+		return ""
+	}
+	if c.Seccomp.Profile == "" {
+		return DefaultSeccompProfile
+	}
+	return c.Seccomp.Profile
 }
 
 // DiscoveryConfiguration holds discovery backend settings.
@@ -303,6 +404,16 @@ const (
 	DiscoveryBackendKubernetes DiscoveryBackend = "kubernetes"
 	// DiscoveryBackendEtcd is the etcd discovery backend
 	DiscoveryBackendEtcd DiscoveryBackend = "etcd"
+)
+
+// KubeDiscoveryMode is the kube discovery identity granularity.
+type KubeDiscoveryMode string
+
+const (
+	// KubeDiscoveryModePod is the default: one identity per pod.
+	KubeDiscoveryModePod KubeDiscoveryMode = "pod"
+	// KubeDiscoveryModeContainer: each container registers independently with the discovery plane.
+	KubeDiscoveryModeContainer KubeDiscoveryMode = "container"
 )
 
 // GPUConfiguration holds GPU discovery settings.

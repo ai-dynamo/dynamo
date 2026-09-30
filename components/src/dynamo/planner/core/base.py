@@ -1,0 +1,1057 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Environment-backed planner runtime plumbing.
+
+This is the candidate replacement for ``core/base.py``.  Planner decision logic
+still lives in the engine/plugins; this class owns engine lifecycle,
+diagnostics, tick orchestration, and delegates deployment/metrics I/O to a
+``PlannerEnvironment``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Optional
+
+import aiohttp.web
+from prometheus_client import start_http_server
+
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.control_api import (
+    _MinimumEndpointUnavailableError,
+    _MinimumEndpointValidationError,
+    _start_control_api,
+)
+from dynamo.planner.core import util
+from dynamo.planner.core.budget import minimum_power_footprint_fits
+from dynamo.planner.core.engine_protocol import EngineProtocol
+from dynamo.planner.core.types import (
+    EngineCapabilities,
+    FpmObservations,
+    PlannerEffects,
+    ScheduledTick,
+    TickDiagnostics,
+    TickInput,
+    TrafficObservation,
+    WorkerCapabilities,
+    WorkerCounts,
+)
+from dynamo.planner.environment.interface import PlannerEnvironment
+from dynamo.planner.environment.state import DeploymentState
+from dynamo.planner.errors import DeploymentValidationError, GPUShapeUnavailableError
+from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
+from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
+from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
+from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
+from dynamo.runtime import DistributedRuntime
+
+if TYPE_CHECKING:
+    from dynamo.planner.monitoring.worker_info import WorkerInfo
+
+logger = logging.getLogger(__name__)
+
+_CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
+# A tick waits briefly for the common fast submission path, then leaves the
+# task running. It is deliberately not cancelled: a remote request may have
+# been accepted even when its response has not arrived, so retrying could
+# duplicate an unacknowledged action.
+_EFFECT_SUBMISSION_WAIT_SECONDS = 5.0
+_GPU_SHAPE_RETRY_MIN_SECONDS = 0.1
+_GPU_SHAPE_RETRY_MAX_SECONDS = 5.0
+
+
+def _engine_caps(
+    worker_info,
+    num_gpu: Optional[int],
+    gpu_cost_per_replica: Optional[int],
+    power_watts_per_replica: Optional[int] = None,
+) -> Optional[EngineCapabilities]:
+    if (
+        worker_info is None
+        and num_gpu is None
+        and gpu_cost_per_replica is None
+        and power_watts_per_replica is None
+    ):
+        return None
+    return EngineCapabilities(
+        num_gpu=num_gpu,
+        gpu_cost_per_replica=gpu_cost_per_replica,
+        max_num_batched_tokens=(
+            worker_info.max_num_batched_tokens if worker_info else None
+        ),
+        max_num_seqs=worker_info.max_num_seqs if worker_info else None,
+        context_length=worker_info.context_length if worker_info else None,
+        max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
+        kv_cache_block_size=worker_info.kv_cache_block_size if worker_info else None,
+        speculative_nextn=worker_info.speculative_nextn if worker_info else None,
+        power_watts_per_replica=power_watts_per_replica,
+    )
+
+
+def build_worker_capabilities(state: DeploymentState) -> WorkerCapabilities:
+    return WorkerCapabilities(
+        prefill=_engine_caps(
+            state.prefill.info,
+            state.prefill.num_gpus,
+            state.prefill.gpus_per_replica,
+            state.prefill.power_watts_per_replica,
+        ),
+        decode=_engine_caps(
+            state.decode.info,
+            state.decode.num_gpus,
+            state.decode.gpus_per_replica,
+            state.decode.power_watts_per_replica,
+        ),
+    )
+
+
+class NativePlannerBase:
+    """Base adapter shared by planner modes."""
+
+    require_prefill: bool = False
+    require_decode: bool = False
+
+    def __init__(
+        self,
+        runtime: Optional[DistributedRuntime],
+        config: PlannerConfig,
+        environment: PlannerEnvironment,
+    ) -> None:
+        self.runtime = runtime
+        self.config = config
+        self.environment = environment
+        self.namespace = config.namespace
+
+        self.prometheus_port = config.metric_reporting_prometheus_port
+        self.prometheus_metrics = PlannerPrometheusMetrics()
+        if self.prometheus_port != 0:
+            try:
+                start_http_server(self.prometheus_port)
+                logger.info(
+                    "Started Prometheus metrics server on port %s",
+                    self.prometheus_port,
+                )
+            except Exception as exc:
+                logger.error("Failed to start Prometheus metrics server: %s", exc)
+            self.prometheus_metrics.sla_target_ttft_ms.set(config.ttft_ms)
+            self.prometheus_metrics.sla_target_itl_ms.set(config.itl_ms)
+
+        self._cumulative_gpu_hours: float = 0.0
+        self._last_gpu_hours_update_ts: Optional[float] = None
+
+        # One-shot guard so the "power budget projected zero" warning (emitted
+        # when a required role has not yet resolved a per-replica watt value)
+        # logs once rather than every tick.
+        self._power_projected_zero_warned: bool = False
+
+        self._recorder = DiagnosticsRecorder(config=config)
+        self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
+        self._control_api_runner: Optional[aiohttp.web.AppRunner] = None
+        self._config_lock = asyncio.Lock()
+        self._effect_admission_lock = asyncio.Lock()
+        self._config_generation = 0
+        self._effect_submission_task: Optional[asyncio.Task[None]] = None
+        self._effect_submission_outcome_unknown: Optional[str] = None
+        self._effect_submission_hold_logged = False
+        self._diagnostics_finalized = False
+        self._environment_initialized = False
+        self._engine: Optional[EngineProtocol] = None
+        self._last_worker_counts: Optional[WorkerCounts] = None
+
+    async def _async_init(self) -> None:
+        # Shutdown is safe for a partially initialized environment and is
+        # required if initialize() created subscriptions before failing.
+        self._environment_initialized = True
+        try:
+            await self.environment.initialize()
+            self._validate_min_endpoint_budgets_at_startup()
+
+            await self._bootstrap_regression()
+            await self._bootstrap_engine_plugins_if_needed()
+
+            if self.config.advisory:
+                logger.info(
+                    "[ADVISORY] Planner started in advisory mode; "
+                    "scaling decisions will be logged but NOT executed."
+                )
+
+            if self.config.live_dashboard_port:
+                try:
+                    self._dashboard_runner = await start_live_dashboard(
+                        self._recorder, self.config.live_dashboard_port
+                    )
+                except Exception as exc:
+                    logger.error("Failed to start live dashboard: %s", exc)
+
+            if self.config.control_api_port:
+                try:
+                    self._control_api_runner = await _start_control_api(
+                        self, self.config.control_api_port
+                    )
+                except OSError as exc:
+                    logger.error(
+                        "Failed to start planner runtime configuration API: %s",
+                        exc,
+                    )
+        except BaseException:
+            await self._shutdown_runtime()
+            raise
+
+    async def _shutdown_runtime(self) -> None:
+        """Release initialized planner resources after normal or failed startup."""
+
+        if not self._diagnostics_finalized:
+            self._diagnostics_finalized = True
+            try:
+                self._recorder.finalize()
+            except Exception:
+                logger.exception("Failed to finalize planner diagnostics")
+
+        control_api_runner = self._control_api_runner
+        self._control_api_runner = None
+        if control_api_runner is not None:
+            try:
+                await control_api_runner.cleanup()
+            except Exception:
+                logger.exception("Failed to stop planner runtime configuration API")
+
+        dashboard_runner = self._dashboard_runner
+        self._dashboard_runner = None
+        if dashboard_runner is not None:
+            try:
+                await dashboard_runner.cleanup()
+            except Exception:
+                logger.exception("Failed to stop planner live dashboard")
+
+        engine = self._engine
+        self._engine = None
+        if engine is not None:
+            try:
+                await engine.shutdown()
+            except Exception:
+                logger.exception("Failed to stop planner engine")
+
+        effect_submission_task = self._effect_submission_task
+        self._effect_submission_task = None
+        if effect_submission_task is not None:
+            if not effect_submission_task.done():
+                effect_submission_task.cancel()
+            try:
+                await effect_submission_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Failed pending planner effect submission")
+
+        if self._environment_initialized:
+            self._environment_initialized = False
+            try:
+                await self.environment.shutdown()
+            except Exception:
+                logger.exception("Failed to stop planner environment")
+
+    def _build_worker_capabilities(self) -> WorkerCapabilities:
+        return build_worker_capabilities(self.environment.deployment_state())
+
+    def _runtime_configuration_errors(
+        self,
+        prefill_min_endpoint: Optional[int],
+        decode_min_endpoint: Optional[int],
+        min_gpu_budget: int,
+        max_gpu_budget: int,
+    ) -> list[str]:
+        capabilities = self._build_worker_capabilities()
+        errors: list[str] = []
+
+        if (
+            min_gpu_budget >= 0
+            and max_gpu_budget >= 0
+            and min_gpu_budget > max_gpu_budget
+        ):
+            errors.append(
+                f"min_gpu_budget={min_gpu_budget} exceeds "
+                f"max_gpu_budget={max_gpu_budget}"
+            )
+
+        required_gpus = 0
+        if prefill_min_endpoint is not None and capabilities.prefill is not None:
+            p_gpu = capabilities.prefill.resolved_gpu_cost_per_replica
+            if p_gpu is not None:
+                required_gpus += prefill_min_endpoint * p_gpu
+        if decode_min_endpoint is not None and capabilities.decode is not None:
+            d_gpu = capabilities.decode.resolved_gpu_cost_per_replica
+            if d_gpu is not None:
+                required_gpus += decode_min_endpoint * d_gpu
+        if max_gpu_budget >= 0 and required_gpus > max_gpu_budget:
+            errors.append(
+                "minimum endpoint footprint requires "
+                f"{required_gpus} GPUs, exceeding max_gpu_budget="
+                f"{max_gpu_budget}"
+            )
+
+        power_budget = self.config.total_gpu_power_limit
+        if power_budget is not None:
+            p_watts = (
+                capabilities.prefill.power_watts_per_replica
+                if capabilities.prefill is not None
+                else None
+            )
+            d_watts = (
+                capabilities.decode.power_watts_per_replica
+                if capabilities.decode is not None
+                else None
+            )
+            power_known = (prefill_min_endpoint is None or p_watts is not None) and (
+                decode_min_endpoint is None or d_watts is not None
+            )
+            prefill_floor = prefill_min_endpoint or 0
+            decode_floor = decode_min_endpoint or 0
+            if power_known and not minimum_power_footprint_fits(
+                total_budget=power_budget,
+                prefill_min_endpoint=prefill_floor,
+                decode_min_endpoint=decode_floor,
+                p_watts=p_watts,
+                d_watts=d_watts,
+            ):
+                required_watts = prefill_floor * (p_watts or 0) + decode_floor * (
+                    d_watts or 0
+                )
+                errors.append(
+                    "minimum endpoint footprint requires "
+                    f"{required_watts}W, exceeding total_gpu_power_limit="
+                    f"{power_budget}W"
+                )
+        return errors
+
+    def _validate_min_endpoint_budgets_at_startup(self) -> None:
+        prefill_min_endpoint, decode_min_endpoint = self.config.active_min_endpoints()
+        errors = self._runtime_configuration_errors(
+            prefill_min_endpoint,
+            decode_min_endpoint,
+            self.config.min_gpu_budget,
+            self.config.max_gpu_budget,
+        )
+        if errors:
+            raise DeploymentValidationError(errors)
+
+    def _min_endpoint_response(self) -> dict[str, object]:
+        mode = self.config.mode
+        if mode == "agg":
+            response: dict[str, object] = {
+                "mode": mode,
+                "min_endpoint": self.config.min_endpoint,
+            }
+        elif mode == "prefill":
+            response = {
+                "mode": mode,
+                "prefill_min_endpoint": self.config.effective_prefill_min_endpoint,
+            }
+        elif mode == "decode":
+            response = {
+                "mode": mode,
+                "decode_min_endpoint": self.config.effective_decode_min_endpoint,
+            }
+        else:
+            response = {
+                "mode": mode,
+                "prefill_min_endpoint": self.config.effective_prefill_min_endpoint,
+                "decode_min_endpoint": self.config.effective_decode_min_endpoint,
+            }
+        response.update(
+            min_gpu_budget=self.config.min_gpu_budget,
+            max_gpu_budget=self.config.max_gpu_budget,
+        )
+        return response
+
+    async def get_min_endpoints(self) -> dict[str, object]:
+        """Return the active endpoint floors and GPU budgets."""
+
+        async with self._bounded_config_lock():
+            return self._min_endpoint_response()
+
+    @asynccontextmanager
+    async def _bounded_config_lock(self) -> AsyncIterator[None]:
+        """Acquire the tick decision lock or ask the caller to retry."""
+
+        try:
+            await asyncio.wait_for(
+                self._config_lock.acquire(), timeout=_CONFIG_LOCK_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            raise _MinimumEndpointUnavailableError(
+                "planner decision in progress; retry the request"
+            ) from None
+        try:
+            yield
+        finally:
+            self._config_lock.release()
+
+    async def patch_min_endpoints(self, updates: dict[str, int]) -> dict[str, object]:
+        """Atomically validate and apply a mode-shaped runtime update."""
+
+        endpoint_fields = {
+            "disagg": {"prefill_min_endpoint", "decode_min_endpoint"},
+            "prefill": {"prefill_min_endpoint"},
+            "decode": {"decode_min_endpoint"},
+            "agg": {"min_endpoint"},
+        }[self.config.mode]
+        allowed_fields = endpoint_fields | {"min_gpu_budget", "max_gpu_budget"}
+        inactive_fields = sorted(set(updates) - allowed_fields)
+        if inactive_fields:
+            raise _MinimumEndpointValidationError(
+                f"fields are not active in mode='{self.config.mode}': "
+                + ", ".join(inactive_fields)
+            )
+
+        # Linearize configuration updates with effect admission. A patch that
+        # wins this lock invalidates the old generation before any remote task
+        # is created; an effect that wins is already admitted before the patch.
+        async with self._effect_admission_lock:
+            async with self._bounded_config_lock():
+                (
+                    prefill_min_endpoint,
+                    decode_min_endpoint,
+                ) = self.config.active_min_endpoints()
+                min_gpu_budget = self.config.min_gpu_budget
+                max_gpu_budget = self.config.max_gpu_budget
+                if "prefill_min_endpoint" in updates:
+                    prefill_min_endpoint = updates["prefill_min_endpoint"]
+                if "decode_min_endpoint" in updates:
+                    decode_min_endpoint = updates["decode_min_endpoint"]
+                if "min_endpoint" in updates:
+                    decode_min_endpoint = updates["min_endpoint"]
+                if "min_gpu_budget" in updates:
+                    min_gpu_budget = updates["min_gpu_budget"]
+                if "max_gpu_budget" in updates:
+                    max_gpu_budget = updates["max_gpu_budget"]
+
+                errors = self._runtime_configuration_errors(
+                    prefill_min_endpoint,
+                    decode_min_endpoint,
+                    min_gpu_budget,
+                    max_gpu_budget,
+                )
+                if errors:
+                    raise _MinimumEndpointValidationError("; ".join(errors))
+
+                before = self._min_endpoint_response()
+                for field, value in updates.items():
+                    setattr(self.config, field, value)
+                self._config_generation += 1
+                after = self._min_endpoint_response()
+                logger.info(
+                    "Updated planner runtime configuration: %s -> %s", before, after
+                )
+                return after
+
+    def _runtime_namespace(self) -> str:
+        return self.environment.runtime_namespace()
+
+    def _required_worker_info(self, component: SubComponentType) -> "WorkerInfo":
+        state = self.environment.deployment_state()
+        info = (
+            state.prefill.info
+            if component == SubComponentType.PREFILL
+            else state.decode.info
+        )
+        if info is None:
+            raise RuntimeError(f"Missing worker info for {component.value}")
+        return info
+
+    def _ensure_engine(self) -> EngineProtocol:
+        if self._engine is not None:
+            return self._engine
+        # Deliberately lazy: importing planner core should not load the plugin stack.
+        from dynamo.planner.plugins.builtins.observe import EnvironmentObservePlugin
+        from dynamo.planner.plugins.orchestrator.engine_adapter import (
+            OrchestratorEngineAdapter,
+        )
+
+        self._engine = OrchestratorEngineAdapter(
+            self.config,
+            self._build_worker_capabilities(),
+            observe_plugin=EnvironmentObservePlugin(
+                self.environment,
+                require_prefill=self.require_prefill,
+                require_decode=self.require_decode,
+            ),
+        )
+        return self._engine
+
+    async def _install_benchmark_fpms(
+        self,
+        *,
+        prefill_fpms=None,
+        decode_fpms=None,
+        agg_fpms=None,
+    ) -> None:
+        # Keep the orchestrator dependency aligned with lazy engine construction.
+        from dynamo.planner.plugins.orchestrator.engine_adapter import (
+            OrchestratorEngineAdapter,
+        )
+
+        engine = self._ensure_engine()
+        assert isinstance(engine, OrchestratorEngineAdapter)
+        await engine.bootstrap_from_fpms(
+            prefill_fpms=prefill_fpms,
+            decode_fpms=decode_fpms,
+            agg_fpms=agg_fpms,
+            historical_traffic=self._load_predictor_warmup_observations(),
+        )
+
+    def _load_predictor_warmup_observations(
+        self,
+    ) -> Optional[list[TrafficObservation]]:
+        if self.config.load_predictor_warmup_trace is None:
+            return None
+        return extract_traffic_observations_from_trace(
+            self.config.load_predictor_warmup_trace,
+            self.config.throughput_adjustment_interval_seconds,
+        )
+
+    async def _bootstrap_engine_plugins_if_needed(self) -> None:
+        # Keep the orchestrator dependency aligned with lazy engine construction.
+        from dynamo.planner.plugins.orchestrator.engine_adapter import (
+            OrchestratorEngineAdapter,
+        )
+
+        engine = self._ensure_engine()
+        if isinstance(engine, OrchestratorEngineAdapter):
+            if engine.plugins_bootstrapped:
+                return
+            await engine.bootstrap_plugins(
+                historical_traffic=self._load_predictor_warmup_observations()
+            )
+
+    async def _bootstrap_regression(self) -> None:
+        pass
+
+    async def _refresh_and_update_capabilities(self) -> None:
+        old_state = self.environment.deployment_state().clone()
+        await self.environment.refresh()
+        new_state = self.environment.deployment_state().clone()
+        if not util.deployment_state_changed(
+            old_state,
+            new_state,
+            self.require_prefill,
+            self.require_decode,
+        ):
+            return
+        update_engine_capabilities = getattr(self._engine, "update_capabilities", None)
+        if callable(update_engine_capabilities):
+            update_engine_capabilities(self._build_worker_capabilities())
+
+    async def _collect_traffic(self) -> Optional[TrafficObservation]:
+        return await self.environment.collect_traffic()
+
+    async def _collect_kv_hit_rate_observation(
+        self, duration_s: float
+    ) -> Optional[TrafficObservation]:
+        return await self.environment.collect_kv_hit_rate_observation(duration_s)
+
+    def _collect_fpm(self) -> FpmObservations:
+        return self.environment.collect_fpm()
+
+    def _emit_observed_traffic_metrics(self) -> None:
+        if self.prometheus_port == 0:
+            return
+        m = self.environment.metrics_state()
+        if not m.is_valid():
+            return
+        # ``is_valid`` enforces these invariants, but mypy cannot narrow
+        # dataclass fields through a separate predicate method.
+        assert m.ttft is not None
+        assert m.itl is not None
+        assert m.num_req is not None
+        assert m.request_duration is not None
+        assert m.isl is not None
+        assert m.osl is not None
+        self.prometheus_metrics.observed_ttft_ms.set(m.ttft)
+        self.prometheus_metrics.observed_itl_ms.set(m.itl)
+        self.prometheus_metrics.observed_requests_per_second.set(
+            m.num_req / self.config.throughput_adjustment_interval_seconds
+        )
+        self.prometheus_metrics.observed_request_duration_seconds.set(
+            m.request_duration
+        )
+        self.prometheus_metrics.observed_input_sequence_tokens.set(m.isl)
+        self.prometheus_metrics.observed_output_sequence_tokens.set(m.osl)
+
+    def _emit_per_engine_fpm(
+        self,
+        prefill_stats: Optional[dict] = None,
+        decode_stats: Optional[dict] = None,
+    ) -> None:
+        pm = self.prometheus_metrics
+        pm.engine_queued_prefill_tokens.clear()
+        pm.engine_queued_decode_kv_tokens.clear()
+        pm.engine_inflight_decode_kv_tokens.clear()
+
+        if prefill_stats:
+            for (wid, dp), fpm in prefill_stats.items():
+                labels = dict(worker_id=wid, dp_rank=str(dp))
+                pm.engine_queued_prefill_tokens.labels(**labels).set(
+                    fpm.queued_requests.sum_prefill_tokens
+                )
+
+        if decode_stats:
+            for (wid, dp), fpm in decode_stats.items():
+                labels = dict(worker_id=wid, dp_rank=str(dp))
+                pm.engine_queued_decode_kv_tokens.labels(**labels).set(
+                    fpm.queued_requests.sum_decode_kv_tokens
+                )
+                pm.engine_inflight_decode_kv_tokens.labels(**labels).set(
+                    fpm.scheduled_requests.sum_decode_kv_tokens
+                )
+
+    async def _collect_worker_counts(self) -> WorkerCounts:
+        state = self.environment.deployment_state()
+        return WorkerCounts(
+            ready_num_prefill=(
+                state.prefill.replicas.active if self.require_prefill else None
+            ),
+            ready_num_decode=(
+                state.decode.replicas.active if self.require_decode else None
+            ),
+            expected_num_prefill=(
+                state.prefill.replicas.expected if self.require_prefill else None
+            ),
+            expected_num_decode=(
+                state.decode.replicas.expected if self.require_decode else None
+            ),
+            prefill_scaling_in_progress=(
+                self.require_prefill and state.prefill.replicas.scaling
+            ),
+            decode_scaling_in_progress=(
+                self.require_decode and state.decode.replicas.scaling
+            ),
+            pending_num_prefill=state.prefill.replicas.pending_startup,
+            pending_num_decode=state.decode.replicas.pending_startup,
+        )
+
+    async def _gather_tick_input(self, tick: ScheduledTick) -> TickInput:
+        now = time.time()
+        traffic = None
+        worker_counts = None
+        fpm_obs = None
+
+        if tick.need_traffic_metrics:
+            if tick.use_full_traffic_metrics:
+                traffic = await self._collect_traffic()
+            else:
+                traffic = await self._collect_kv_hit_rate_observation(
+                    tick.traffic_metrics_duration_s
+                )
+        if tick.need_worker_states:
+            worker_counts = await self._collect_worker_counts()
+        if tick.need_worker_fpm:
+            fpm_obs = self._collect_fpm()
+        return TickInput(
+            now_s=now,
+            traffic=traffic,
+            worker_counts=worker_counts,
+            fpm_observations=fpm_obs,
+        )
+
+    async def _observe_tick(
+        self, engine: EngineProtocol, tick: ScheduledTick
+    ) -> TickInput:
+        observe = getattr(engine, "observe", None)
+        if callable(observe):
+            return await observe(tick, time.time())
+        return await self._gather_tick_input(tick)
+
+    def _publish_observation_metrics(self, tick_input: TickInput) -> None:
+        if tick_input.traffic is not None:
+            self._emit_observed_traffic_metrics()
+        if tick_input.fpm_observations is not None and self.prometheus_port != 0:
+            self._emit_per_engine_fpm(
+                tick_input.fpm_observations.prefill,
+                tick_input.fpm_observations.decode,
+            )
+
+    async def _apply_effects(self, effects: PlannerEffects) -> None:
+        pass
+
+    def _effect_submission_done(self, task: asyncio.Task[None]) -> None:
+        if self._effect_submission_task is not task:
+            return
+        if task.cancelled():
+            self._mark_effect_submission_unknown("submission task was cancelled")
+            return
+        exception = task.exception()
+        if exception is None:
+            self._effect_submission_task = None
+            return
+        self._mark_effect_submission_unknown(
+            f"submission failed: {exception}", exception
+        )
+
+    def _mark_effect_submission_unknown(
+        self, reason: str, exception: Optional[BaseException] = None
+    ) -> None:
+        if self._effect_submission_outcome_unknown is not None:
+            return
+        self._effect_submission_outcome_unknown = reason
+        logger.error(
+            "Planner effect submission outcome is unknown (%s). Automatic "
+            "effect submission is disabled until the Planner is restarted; "
+            "verify the deployment state before restarting to avoid duplicating "
+            "an action that the remote service may already have applied.",
+            reason,
+            exc_info=(
+                (type(exception), exception, exception.__traceback__)
+                if exception is not None
+                else None
+            ),
+        )
+
+    async def _submit_effects(
+        self, effects: PlannerEffects, config_generation: int
+    ) -> None:
+        """Submit at most one effect without cancelling an unacknowledged request."""
+
+        async with self._effect_admission_lock:
+            if self._effect_submission_outcome_unknown is not None:
+                if not self._effect_submission_hold_logged:
+                    logger.error(
+                        "Holding planner effects because a previous submission outcome "
+                        "is unknown; runtime configuration remains available, but "
+                        "automatic submission requires a Planner restart after the "
+                        "deployment state is verified"
+                    )
+                    self._effect_submission_hold_logged = True
+                return
+
+            pending = self._effect_submission_task
+            if pending is not None:
+                if not pending.done():
+                    logger.warning(
+                        "Skipping planner effect submission while the previous request "
+                        "is still awaiting acknowledgement"
+                    )
+                    return
+                if pending.cancelled():
+                    self._mark_effect_submission_unknown(
+                        "submission task was cancelled"
+                    )
+                    return
+                exception = pending.exception()
+                if exception is not None:
+                    self._mark_effect_submission_unknown(
+                        f"submission failed: {exception}", exception
+                    )
+                    return
+                self._effect_submission_task = None
+
+            async with self._config_lock:
+                if config_generation != self._config_generation:
+                    logger.info(
+                        "Discarding planner effects computed at runtime config generation "
+                        "%d; current generation is %d",
+                        config_generation,
+                        self._config_generation,
+                    )
+                    return
+
+                # Creating the remote task is the admission point. PATCH uses
+                # the same outer lock, so no update can linearize between the
+                # generation check and admission.
+                task = asyncio.create_task(self._apply_effects(effects))
+                self._effect_submission_task = task
+                task.add_done_callback(self._effect_submission_done)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=_EFFECT_SUBMISSION_WAIT_SECONDS
+            )
+        except TimeoutError:
+            logger.warning(
+                "Planner effect submission is still awaiting acknowledgement "
+                "after %.1fs; runtime configuration remains available and no "
+                "second effect will be submitted until it completes",
+                _EFFECT_SUBMISSION_WAIT_SECONDS,
+            )
+        else:
+            if self._effect_submission_task is task:
+                self._effect_submission_task = None
+
+    def _current_worker_counts(self) -> tuple[int, int]:
+        """Best-known current (prefill, decode) ready worker counts.
+
+        Reads ``self._last_worker_counts``, cached each tick in ``run()`` from
+        the tick input — the count source the orchestrator engine exposes.
+        Returns ``(0, 0)`` before the first worker-state tick populates it.
+        Consumed by ``_log_decision_summary``.
+        """
+        if self._last_worker_counts is not None:
+            return (
+                self._last_worker_counts.ready_num_prefill or 0,
+                self._last_worker_counts.ready_num_decode or 0,
+            )
+        return 0, 0
+
+    def _publish_power_budget_metrics(self, num_p: int, num_d: int) -> None:
+        """Emit power-budget gauges from DGD-resolved caps (read-only observe path).
+
+        Per-replica watts come from the cached deployment state
+        (``power_watts_per_replica``, resolved once from the DGD worker
+        podTemplate annotation during Planner startup), so this performs no
+        apiserver I/O and never blocks the tick loop. DGD admission rejects
+        changes to the cached power tuple; changing it requires replacing the
+        DGD and starting a new Planner. These gauges are advisory
+        observability; the projected power budget (over the requested caps,
+        not the effective hardware draw) is applied separately by the final
+        budget clamp.
+
+        The projection gauges are published only once every required role has
+        a resolved per-replica watt value and the total budget is a positive
+        integer; the typed parser and Pydantic keep these integral, so there
+        is no NaN to clamp.
+        """
+        if self.prometheus_port == 0 or not self.config.enable_power_awareness:
+            return
+        pm = self.prometheus_metrics
+        state = self.environment.deployment_state()
+
+        budget = self.config.total_gpu_power_limit
+        if budget is None or budget <= 0:
+            # Startup validation already requires budget > 0; guard here so a
+            # degenerate value can never publish a divide-by-zero utilization.
+            return
+
+        p_watts = state.prefill.power_watts_per_replica
+        d_watts = state.decode.power_watts_per_replica
+        if (self.require_prefill and p_watts is None) or (
+            self.require_decode and d_watts is None
+        ):
+            if not self._power_projected_zero_warned:
+                logger.warning(
+                    "power_projected_watts not published: per-replica watts "
+                    "unresolved (prefill=%s, decode=%s). Caps are authored on "
+                    "the DGD worker podTemplate annotation.",
+                    p_watts,
+                    d_watts,
+                )
+                self._power_projected_zero_warned = True
+            return
+
+        projected = num_p * (p_watts or 0) + num_d * (d_watts or 0)
+        pm.power_budget_total_watts.set(budget)
+        pm.power_projected_watts.set(projected)
+        pm.power_budget_utilization.set(projected / budget)
+
+    async def _apply_scaling_targets(
+        self, targets: list[TargetReplica], blocking: bool = False
+    ) -> None:
+        if self.config.advisory or not targets:
+            return
+        await self.environment.apply_scaling(targets, blocking=blocking)
+
+    def _log_decision_summary(self, effects: PlannerEffects) -> None:
+        """Log a one-line summary of the scaling decision after each tick.
+
+        Current worker counts come from ``_current_worker_counts`` — the
+        cached ``self._last_worker_counts`` set in ``run()``.
+        """
+        decision = effects.scale_to
+        diag = effects.diagnostics
+
+        current_p, current_d = self._current_worker_counts()
+        if self._last_worker_counts is not None:
+            current_p += self._last_worker_counts.pending_num_prefill
+            current_d += self._last_worker_counts.pending_num_decode
+
+        rec_p = decision.num_prefill if decision else None
+        rec_d = decision.num_decode if decision else None
+
+        delta_p = (rec_p - current_p) if rec_p is not None else 0
+        delta_d = (rec_d - current_d) if rec_d is not None else 0
+
+        if decision is None or (delta_p == 0 and delta_d == 0):
+            action = "hold"
+        elif (delta_p > 0 or delta_d > 0) and (delta_p < 0 or delta_d < 0):
+            action = "rebalance"
+        elif delta_p > 0 or delta_d > 0:
+            action = "scale_up"
+        else:
+            action = "scale_down"
+
+        logger.info(
+            "[summary] %s | current: prefill=%d decode=%d | "
+            "recommended: prefill=%s decode=%s (delta: %+d / %+d) | "
+            "load_reason=%s throughput_reason=%s | "
+            "est_ttft=%.1fms est_itl=%.1fms",
+            action.upper(),
+            current_p,
+            current_d,
+            rec_p if rec_p is not None else "-",
+            rec_d if rec_d is not None else "-",
+            delta_p,
+            delta_d,
+            diag.load_decision_reason or "n/a",
+            diag.throughput_decision_reason or "n/a",
+            diag.estimated_ttft_ms or 0,
+            diag.estimated_itl_ms or 0,
+        )
+
+    def _publish_inventory_and_gpu_hours(self, tick_input: TickInput) -> None:
+        if tick_input.worker_counts is None:
+            return
+        num_p = tick_input.worker_counts.ready_num_prefill or 0
+        num_d = tick_input.worker_counts.ready_num_decode or 0
+
+        now = tick_input.now_s
+        state = self.environment.deployment_state()
+        prefill_gpus = state.prefill.gpus_per_replica or state.prefill.num_gpus or 0
+        decode_gpus = state.decode.gpus_per_replica or state.decode.num_gpus or 0
+        if self._last_gpu_hours_update_ts is not None:
+            dt_s = max(0.0, now - self._last_gpu_hours_update_ts)
+            self._cumulative_gpu_hours += (
+                (num_p * prefill_gpus + num_d * decode_gpus) * dt_s / 3600.0
+            )
+        self._last_gpu_hours_update_ts = now
+
+        if self.prometheus_port == 0:
+            return
+        self.prometheus_metrics.num_prefill_replicas.set(num_p)
+        self.prometheus_metrics.num_decode_replicas.set(num_d)
+        self.prometheus_metrics.gpu_hours.set(self._cumulative_gpu_hours)
+        self._publish_power_budget_metrics(num_p, num_d)
+
+    @staticmethod
+    def _set_if_observed(gauge, value: Optional[float]) -> None:
+        """None = no new observation this tick -> leave the gauge unchanged.
+
+        A concrete value (including 0.0) = asserted observation -> publish it.
+        Mirrors the set/unset semantics documented on ``PredictionData``.
+        """
+        if value is not None:
+            gauge.set(value)
+
+    def _report_diagnostics(self, tick: ScheduledTick, diag: TickDiagnostics) -> None:
+        if self.prometheus_port == 0:
+            return
+        pm = self.prometheus_metrics
+        interval = self.config.throughput_adjustment_interval_seconds
+
+        self._set_if_observed(pm.estimated_ttft_ms, diag.estimated_ttft_ms)
+        self._set_if_observed(pm.estimated_itl_ms, diag.estimated_itl_ms)
+
+        if tick.run_load_scaling:
+            pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
+
+        # Predicted-load / engine-capacity gauges: ``PredictionData`` supports
+        # partial predictions, so each gauge is gated on its own diagnostic --
+        # a tick that asserts only some fields must not zero the others. Fields
+        # are nulled by _reset_diag() at every tick start, so `is not None`
+        # means "produced this tick" (builtin throughput loop or an
+        # independently-scheduled PREDICT plugin).
+        self._set_if_observed(
+            pm.predicted_requests_per_second,
+            (
+                diag.predicted_num_req / interval
+                if diag.predicted_num_req is not None and interval > 0
+                else None
+            ),
+        )
+        self._set_if_observed(pm.predicted_input_sequence_tokens, diag.predicted_isl)
+        self._set_if_observed(pm.predicted_output_sequence_tokens, diag.predicted_osl)
+        self._set_if_observed(
+            pm.engine_prefill_capacity_requests_per_second, diag.engine_rps_prefill
+        )
+        self._set_if_observed(
+            pm.engine_decode_capacity_requests_per_second, diag.engine_rps_decode
+        )
+        # The throughput-decision enum stays gated on the builtin throughput
+        # cadence: it reflects a builtin-loop decision, not a plugin prediction.
+        if tick.run_throughput_scaling:
+            pm.throughput_scaling_decision.state(
+                diag.throughput_decision_reason or "unset"
+            )
+
+    @staticmethod
+    def _should_emit_tick_diagnostics(
+        tick: ScheduledTick, effects: PlannerEffects
+    ) -> bool:
+        diag = effects.diagnostics
+        return (
+            tick.run_load_scaling
+            or tick.run_throughput_scaling
+            or effects.scale_to is not None
+            or bool(diag.audit_events)
+            or bool(diag.short_circuit_reason)
+        )
+
+    async def _run_one_tick(
+        self, engine: EngineProtocol, tick: ScheduledTick
+    ) -> ScheduledTick:
+        """Execute one complete environment-to-scaling planner tick."""
+        await self._refresh_and_update_capabilities()
+        tick_input = await self._observe_tick(engine, tick)
+        self._publish_observation_metrics(tick_input)
+        self._publish_inventory_and_gpu_hours(tick_input)
+        if tick_input.worker_counts is not None:
+            self._last_worker_counts = tick_input.worker_counts
+
+        # Snapshot the runtime configuration generation with the decision. The
+        # external submission does not hold this lock: it may await a remote
+        # response indefinitely, while GET/PATCH must remain available.
+        async with self._config_lock:
+            config_generation = self._config_generation
+            effects = await engine.tick(tick, tick_input)
+        await self._submit_effects(effects, config_generation)
+        emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
+        if emit_diagnostics:
+            self._report_diagnostics(tick, effects.diagnostics)
+            self._log_decision_summary(effects)
+
+        if self._recorder.enabled and emit_diagnostics:
+            try:
+                self._recorder.record(
+                    tick_input,
+                    effects,
+                    self.environment.metrics_state(),
+                    self._cumulative_gpu_hours,
+                )
+                if self._recorder.should_generate_report(tick_input.now_s):
+                    self._recorder.generate_report()
+            except Exception as exc:
+                logger.error("Diagnostics report failed: %s", exc)
+
+        assert effects.next_tick is not None
+        return effects.next_tick
+
+    async def run(self) -> None:
+        engine = self._ensure_engine()
+        next_tick = engine.initial_tick(time.time())
+        poll_interval = self.config.load_adjustment_interval_seconds / 10
+        gpu_shape_retry_interval = min(
+            max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
+            _GPU_SHAPE_RETRY_MAX_SECONDS,
+        )
+
+        try:
+            while True:
+                now = time.time()
+                if now < next_tick.at_s:
+                    await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
+                    continue
+
+                try:
+                    next_tick = await self._run_one_tick(engine, next_tick)
+                except GPUShapeUnavailableError as exc:
+                    logger.warning(
+                        "Skipping planner tick until the operator publishes a current GPU shape: %s; retrying in %.1fs",
+                        exc,
+                        gpu_shape_retry_interval,
+                    )
+                    await asyncio.sleep(gpu_shape_retry_interval)
+        finally:
+            await self._shutdown_runtime()

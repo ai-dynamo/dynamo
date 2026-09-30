@@ -6,16 +6,18 @@
 This module defines the DiffusionConfig dataclass used for configuring
 video and image diffusion workers.
 
-Fields map to TensorRT-LLM's DiffusionArgs sub-configs:
-- PipelineConfig: torch_compile, CUDA graph, warmup, offloading, fuse_qkv
+Fields map to TensorRT-LLM's VisualGenArgs sub-configs:
+- TorchCompileConfig: torch_compile, fullgraph
+- CudaGraphConfig: CUDA graph capture
 - AttentionConfig: attention backend (VANILLA, TRTLLM)
-- ParallelConfig: dit_*_size parallelism dimensions
+- ParallelConfig: CFG/Ulysses/ring parallelism dimensions
 - TeaCacheConfig: caching optimization
 - QuantConfig: quantization algorithm and dynamic flags
 """
 
-from dataclasses import dataclass, field
-from typing import Optional
+import dataclasses
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from dynamo.common.utils.namespace import get_worker_namespace
 
@@ -39,7 +41,7 @@ class DiffusionConfig:
     endpoint: str = "generate"
     discovery_backend: str = "etcd"
     request_plane: str = "tcp"
-    event_plane: str = "nats"
+    event_plane: Optional[str] = None
 
     # Model config
     model_path: str = DEFAULT_VIDEO_MODEL_PATH
@@ -62,6 +64,7 @@ class DiffusionConfig:
     max_height: int = 4096
     max_width: int = 4096
     default_num_frames: int = 81
+    default_num_images_per_prompt: int = 1
     default_fps: int = 24  # Used for both frame count calculation and video encoding
     default_seconds: int = 4  # Default video duration when only fps is specified
     default_num_inference_steps: int = 50
@@ -69,24 +72,21 @@ class DiffusionConfig:
 
     # ── Pipeline optimization config (maps to PipelineConfig) ──
     disable_torch_compile: bool = False
-    torch_compile_mode: str = "default"
     # Enable torch.compile fullgraph mode (stricter but potentially faster)
     enable_fullgraph: bool = False
-    # QKV fusion for transformer attention layers
-    fuse_qkv: bool = True
     # CUDA graph capture for transformer forward passes
     # (mutually exclusive with torch.compile — torch.compile takes priority)
     enable_cuda_graph: bool = False
     # Enable per-layer NVTX markers for profiling
     enable_layerwise_nvtx_marker: bool = False
-    # Number of denoising steps to run during warmup (0 to disable)
-    warmup_steps: int = 1
+    # Skip warmup inference during initialization (default: run warmup)
+    skip_warmup: bool = False
 
     # ── Attention config (maps to AttentionConfig) ──
     # Attention backend: "VANILLA" (PyTorch SDPA) or "TRTLLM"
     attn_backend: str = "VANILLA"
 
-    # ── Quantization config (maps to DiffusionArgs.quant_config) ──
+    # ── Quantization config (maps to VisualGenArgs.quant_config) ──
     # Quantization algorithm. Options:
     #   None (no quantization), "FP8", "FP8_BLOCK_SCALES", "NVFP4",
     #   "W4A16_AWQ", "W4A8_AWQ", "W8A8_SQ_PER_CHANNEL"
@@ -100,21 +100,23 @@ class DiffusionConfig:
     teacache_thresh: float = 0.2
 
     # ── Parallelism config (maps to ParallelConfig) ──
-    dit_dp_size: int = 1
-    dit_tp_size: int = 1
     dit_ulysses_size: int = 1
     dit_ring_size: int = 1
     dit_cfg_size: int = 1
-    dit_fsdp_size: int = 1
 
-    # ── Offloading config (maps to PipelineConfig) ──
-    enable_async_cpu_offload: bool = False
+    @classmethod
+    def from_config(cls, config: Any) -> "DiffusionConfig":
+        """Build a DiffusionConfig from a worker Config, mapping matching field names automatically.
 
-    # ── Component loading options ──
-    # Components to skip loading (e.g., ["text_encoder", "vae"]).
-    # Valid values: "transformer", "vae", "text_encoder", "tokenizer",
-    #               "scheduler", "image_encoder", "image_processor"
-    skip_components: list[str] = field(default_factory=list)
+        Special cases:
+          - model_path  ← config.model  (field name differs)
+          - max_height, max_width, default_fps, default_seconds use DiffusionConfig defaults
+            (they are not exposed as CLI args in Config)
+        """
+        field_names = {f.name for f in dataclasses.fields(cls)}
+        kwargs = {k: getattr(config, k) for k in field_names if hasattr(config, k)}
+        kwargs["model_path"] = config.model
+        return cls(**kwargs)
 
     def __str__(self) -> str:
         return (
@@ -128,12 +130,14 @@ class DiffusionConfig:
             f"default_height={self.default_height}, "
             f"default_width={self.default_width}, "
             f"default_num_frames={self.default_num_frames}, "
+            f"default_num_images_per_prompt={self.default_num_images_per_prompt}, "
             f"default_num_inference_steps={self.default_num_inference_steps}, "
             f"enable_teacache={self.enable_teacache}, "
             f"attn_backend={self.attn_backend}, "
             f"quant_algo={self.quant_algo}, "
             f"enable_cuda_graph={self.enable_cuda_graph}, "
-            f"warmup_steps={self.warmup_steps}, "
-            f"dit_dp_size={self.dit_dp_size}, "
-            f"dit_tp_size={self.dit_tp_size})"
+            f"skip_warmup={self.skip_warmup}, "
+            f"dit_cfg_size={self.dit_cfg_size}, "
+            f"dit_ulysses_size={self.dit_ulysses_size}, "
+            f"dit_ring_size={self.dit_ring_size})"
         )

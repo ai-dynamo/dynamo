@@ -3,8 +3,9 @@
 
 import asyncio
 import os
+import warnings
 from functools import wraps
-from typing import Any, AsyncGenerator, Callable, Type, Union
+from typing import Any, AsyncGenerator, Callable, Optional, Type, Union
 
 from pydantic import BaseModel, ValidationError
 
@@ -14,17 +15,29 @@ from dynamo._core import Client as Client
 from dynamo._core import Context as Context
 from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
+from dynamo._core import PyAsyncRequestStream as PyAsyncRequestStream
+
+from ._unary import UnaryClient as UnaryClient
+from ._unary import serve_unary_endpoint as serve_unary_endpoint
 
 
-def dynamo_worker(enable_nats: bool = True):
+def dynamo_worker(enable_nats: Optional[bool] = None):
     """
     Decorator that creates a DistributedRuntime and passes it to the worker function.
 
     Args:
-        enable_nats: Whether to enable NATS for KV events. Defaults to True.
-                    If request_plane is "nats", NATS is always enabled.
-                    Pass False (via --no-kv-events flag) to disable NATS initialization.
+        enable_nats: Deprecated. NATS enablement is now determined automatically
+            from the event-plane configuration. This parameter is accepted for
+            backwards compatibility but will be removed in a future release.
     """
+    if enable_nats is not None:
+        warnings.warn(
+            "The 'enable_nats' parameter is deprecated and will be removed in a "
+            "future release. NATS enablement is now determined automatically from "
+            "the event-plane configuration.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     def decorator(func):
         @wraps(func)
@@ -32,26 +45,9 @@ def dynamo_worker(enable_nats: bool = True):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
             discovery_backend = os.environ.get("DYN_DISCOVERY_BACKEND", "etcd")
-            runtime = DistributedRuntime(
-                loop, discovery_backend, request_plane, enable_nats
-            )
+            runtime = DistributedRuntime(loop, discovery_backend, request_plane)
 
             await func(runtime, *args, **kwargs)
-
-            # # wait for one of
-            # # 1. the task to complete
-            # # 2. the task to be cancelled
-
-            # done, pending = await asyncio.wait({task, cancelled}, return_when=asyncio.FIRST_COMPLETED)
-
-            # # i want to catch a SIGINT or SIGTERM or a cancellation event here
-
-            # try:
-            #     # Call the actual function
-            #     return await func(runtime, *args, **kwargs)
-            # finally:
-            #     print("Decorator: Cleaning up runtime resources")
-            #     # Perform cleanup actions here
 
         return wrapper
 
@@ -61,6 +57,44 @@ def dynamo_worker(enable_nats: bool = True):
 def dynamo_endpoint(
     request_model: Union[Type[BaseModel], Type[Any]], response_model: Type[BaseModel]
 ) -> Callable:
+    """Decorator that can parse a request payload into a Pydantic model before the endpoint runs.
+
+    Parsing applies only when ``request_model`` is a ``BaseModel`` subclass
+    *and* the wrapper receives one or two positional arguments -- ``(request)``
+    or ``(self, request)``. With three or more positional arguments, or when the
+    payload arrives by keyword, it is forwarded untouched. A ``str`` payload is
+    parsed with ``parse_raw`` and a ``dict`` with ``parse_obj``; any other type,
+    including an already-constructed ``request_model`` instance, is rejected.
+    ``response_model`` is reserved for future validation; yielded items pass
+    through unchanged today.
+
+    Args:
+        request_model: Request class used to parse ``str`` or ``dict`` payloads.
+            Pass a non-``BaseModel`` type, as ``examples/custom_backend``
+            does with ``str``, to skip parsing entirely.
+        response_model: Expected response class. Currently accepted but not enforced.
+
+    Raises:
+        ValueError: On the first ``__anext__()`` of the returned generator, not
+            when the decorated function is called, because the wrapper is
+            itself an async generator. Raised when the payload fails validation
+            or is neither ``str`` nor ``dict``.
+
+    Examples:
+        >>> from pydantic import BaseModel
+        >>> from dynamo.runtime import dynamo_endpoint
+        >>>
+        >>> class Request(BaseModel):
+        ...     data: str
+        >>> class Response(BaseModel):
+        ...     char: str
+        >>>
+        >>> @dynamo_endpoint(Request, Response)
+        ... async def generate(request):
+        ...     for char in request.data:
+        ...         yield char
+    """
+
     def decorator(
         func: Callable[..., AsyncGenerator[Any, None]],
     ) -> Callable[..., AsyncGenerator[Any, None]]:

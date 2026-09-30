@@ -20,6 +20,8 @@ $(LOCALBIN):
 HELM_DOCS_VERSION ?= 1.14.2
 HELM_DOCS ?= $(LOCALBIN)/helm-docs-$(HELM_DOCS_VERSION)
 
+HELM_UNITTEST_VERSION ?= 0.7.2
+
 ##@ General
 
 .PHONY: help
@@ -55,3 +57,35 @@ generate-helm-docs: helm-docs-install ## Generate README.md from values.yaml and
 helm-docs-clean: ## Remove generated helm documentation
 	@rm -f README.md
 	@echo "Cleaned generated README.md"
+
+##@ Helm Testing
+
+.PHONY: helm-unittest-install
+helm-unittest-install: ## Install helm-unittest plugin if not present
+	@helm plugin list | grep -q unittest || \
+		helm plugin install https://github.com/helm-unittest/helm-unittest --version $(HELM_UNITTEST_VERSION)
+
+.PHONY: charts-prep
+charts-prep: ## Package operator subchart for local testing
+	@helm package components/operator -d charts/ 2>/dev/null
+
+.PHONY: verify-operator-chart-crds
+verify-operator-chart-crds: ## Verify operator CRDs are managed from the image, not the Helm chart
+	@tmp="$$(mktemp)"; \
+	trap 'rm -f "$$tmp"' EXIT; \
+	if ! helm show crds components/operator >"$$tmp"; then \
+		echo "ERROR: failed to inspect operator chart CRDs"; \
+		exit 1; \
+	fi; \
+	if grep -q . "$$tmp"; then \
+		echo "ERROR: operator CRDs must be managed by crd-apply from the operator image, not bundled in the Helm chart"; \
+		exit 1; \
+	fi
+
+.PHONY: test
+test: helm-unittest-install charts-prep verify-operator-chart-crds ## Run helm-unittest chart tests
+	@helm unittest .
+
+.PHONY: lint
+lint: charts-prep verify-operator-chart-crds ## Run helm lint
+	@helm lint .

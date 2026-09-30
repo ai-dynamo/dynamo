@@ -230,6 +230,7 @@ impl KvBlockManagerConfigBuilder {
         engine_endpoint: String,
         output_endpoint: Option<String>,
         engine_source: crate::block_manager::kv_consolidator::EventSource,
+        mode: crate::block_manager::kv_consolidator::KvEventConsolidationMode,
     ) -> Self {
         let config = match engine_source {
             crate::block_manager::kv_consolidator::EventSource::Vllm => {
@@ -237,6 +238,7 @@ impl KvBlockManagerConfigBuilder {
                 crate::block_manager::kv_consolidator::KvEventConsolidatorConfig::new_vllm(
                     engine_endpoint,
                     output_ep,
+                    mode,
                 )
             }
             crate::block_manager::kv_consolidator::EventSource::Trtllm => {
@@ -248,6 +250,7 @@ impl KvBlockManagerConfigBuilder {
                 crate::block_manager::kv_consolidator::KvEventConsolidatorConfig::new_trtllm(
                     engine_endpoint,
                     output_ep,
+                    mode,
                 )
             }
             crate::block_manager::kv_consolidator::EventSource::Kvbm => {

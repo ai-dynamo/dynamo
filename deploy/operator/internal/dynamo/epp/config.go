@@ -9,7 +9,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,14 +24,21 @@ const (
 	ConfigKey = "epp-config-dynamo.yaml"
 )
 
+// IsLegacyGoEPP reports whether the component still uses the deprecated Go EPP
+// Pod contract. Presence of eppConfig is the explicit signal: clearing it
+// starts migration to the native Rust EPP.
+func IsLegacyGoEPP(eppConfig *v1beta1.EPPConfig) bool {
+	return eppConfig != nil
+}
+
 // GenerateConfigMap generates a ConfigMap for EPP configuration
 // Returns nil if ConfigMapRef is used (user provides their own ConfigMap)
 // Returns error if neither ConfigMapRef nor Config is provided
 func GenerateConfigMap(
 	ctx context.Context,
-	dgd *v1alpha1.DynamoGraphDeployment,
+	dgd *v1beta1.DynamoGraphDeployment,
 	componentName string,
-	eppConfig *v1alpha1.EPPConfig,
+	eppConfig *v1beta1.EPPConfig,
 ) (*corev1.ConfigMap, error) {
 	// If user provides ConfigMapRef, they manage the ConfigMap themselves
 	if eppConfig != nil && eppConfig.ConfigMapRef != nil {
@@ -91,7 +98,7 @@ func marshalEndpointPickerConfig(config *apixv1alpha1.EndpointPickerConfig) (str
 }
 
 // GetConfigMapVolumeMount returns the volume and volumeMount for EPP config
-func GetConfigMapVolumeMount(dgdName string, eppConfig *v1alpha1.EPPConfig) (corev1.Volume, corev1.VolumeMount) {
+func GetConfigMapVolumeMount(dgdName string, eppConfig *v1beta1.EPPConfig) (corev1.Volume, corev1.VolumeMount) {
 	configMapName := dgdName + "-" + ConfigMapSuffix
 	configKey := ConfigKey
 

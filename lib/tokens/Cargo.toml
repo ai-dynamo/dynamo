@@ -14,6 +14,7 @@ repository.workspace = true
 [dependencies]
 dashmap = { workspace = true }
 derive-getters = { workspace = true }
+rustc-hash = "2"
 serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
@@ -21,3 +22,8 @@ xxhash-rust = { workspace = true }
 bs58 = "0.5"
 
 bytemuck = "1.22"
+
+[dev-dependencies]
+itertools = "0.14"
+rmp-serde = { workspace = true }
+serde_json = { workspace = true }

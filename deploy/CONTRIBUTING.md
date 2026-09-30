@@ -14,16 +14,18 @@ Welcome to the Dynamo Deploy project! This guide will help you get started with 
 The deploy directory contains several key components:
 
 ```
-├── discovery # How to use Dynamo kubernetes discovery backend
 ├── helm
 │   └── charts
-│       ├── crds # Dynamo CRD helm chart
-│       ├── platform # Dynamo platform helm chart
-├── inference-gateway # Dynamo intregration with inference gateway
-├── observability # Observability tools for Dynamo k8s
-├── operator # Source code for the Dynamo operator
-├── pre-deployment # Pre-deployment scripts to check your k8s cluster meets the requirements for deploying Dynamo
-└── utils # Utilities and manifests for Dynamo benchmarking and profiling workflows
+│       ├── platform     # Dynamo platform helm chart
+│       ├── power-agent  # Helm chart for the GPU power-cap DaemonSet
+│       └── snapshot     # Helm chart for the CRIU snapshot DaemonSet
+├── inference-gateway    # Dynamo integration with inference gateway
+├── observability        # Observability tools for Dynamo k8s
+├── operator             # Source code for the Dynamo operator
+├── power-agent          # Privileged DaemonSet for GPU power-cap enforcement
+├── pre-deployment       # Pre-deployment scripts to check your k8s cluster meets the requirements for deploying Dynamo
+├── snapshot             # CRIU-based checkpoint/restore DaemonSet
+└── utils                # Utilities and manifests for Dynamo benchmarking and profiling workflows
 ```
 
 ## Development Environment
@@ -45,17 +47,7 @@ The deploy directory contains several key components:
 - We do signed commits
 
 ```bash
-commit -S
-```
-
-- Every time you modify `deploy/helm/charts/crds/templates/*.yaml`, please bump up the version of the CRD helm chart in
-    1. deploy/helm/charts/platform/components/operator/Chart.yaml
-    2. deploy/helm/charts/platform/Chart.yaml
-then
-
-```bash
-deploy/helm/charts/platform
-helm dependency update
+git commit -s -S
 ```
 
 #### Commit Message Guidelines
@@ -135,12 +127,16 @@ pytest tests/serve/test_dynamo_serve.py -v
 pytest tests/serve/test_dynamo_serve.py::test_serve_deployment[agg] -v
 ```
 
-**Operator Integration Tests:**
+**Operator API-Only Integration Tests:**
 
 ```bash
 cd deploy/operator
-make test-e2e
+make envtest
 ```
+
+For the Kind-backed `make integration` workflow, including the required local image
+builds and environment variables, follow the
+[cluster environment setup](operator/internal/testing/clusterenv/DESIGN.md#external-setup).
 
 ### Writing Tests
 

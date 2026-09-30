@@ -8,17 +8,30 @@ from typing import Any, Dict, Optional
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.arg_group import ArgGroup
+from dynamo.common.configuration.groups.ais_perf_args import (
+    AisPerfArgGroup,
+    AisPerfConfigBase,
+)
 from dynamo.common.configuration.groups.kv_router_args import (
+    CONDITIONAL_DISAGG_POLICY_CHOICES,
     KvRouterArgGroup,
     KvRouterConfigBase,
+)
+from dynamo.common.configuration.groups.router_args import (
+    RouterArgGroup,
+    RouterConfigBase,
 )
 from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+    parse_bool,
 )
 
 from . import __version__
+
+_U32_MAX = 2**32 - 1
+_MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 
 
 def validate_model_name(value: str) -> str:
@@ -39,7 +52,7 @@ def validate_model_path(value: str) -> str:
     return value
 
 
-class FrontendConfig(KvRouterConfigBase):
+class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     """Configuration for the Dynamo frontend."""
 
     interactive: bool
@@ -48,16 +61,23 @@ class FrontendConfig(KvRouterConfigBase):
     http_port: int
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
+    tls_client_ca_cert_path: Optional[pathlib.Path]
+    tcp_tls_cert_path: Optional[str] = None
+    tcp_tls_key_path: Optional[str] = None
+    tcp_tls_ca_cert_path: Optional[str] = None
+    tcp_tls_client_cert_path: Optional[str] = None
+    tcp_tls_client_key_path: Optional[str] = None
+    tcp_tls_client_ca_cert_path: Optional[str] = None
+    nats_tls_ca_cert_path: Optional[str] = None
+    nats_tls_insecure: bool = False
+    nats_tls_client_cert_path: Optional[str] = None
+    nats_tls_client_key_path: Optional[str] = None
 
-    router_mode: str
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
-    enforce_disagg: bool
 
     migration_limit: int
-    active_decode_blocks_threshold: Optional[float]
-    active_prefill_tokens_threshold: Optional[int]
-    active_prefill_tokens_threshold_frac: Optional[float]
+    migration_max_seq_len: Optional[int]
     model_name: Optional[str]
     model_path: Optional[str]
     metrics_prefix: Optional[str] = None
@@ -68,26 +88,133 @@ class FrontendConfig(KvRouterConfigBase):
 
     discovery_backend: str
     request_plane: str
-    event_plane: str
+    response_plane: str = "tcp"
+    event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
     strip_anthropic_preamble: bool
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
+    reasoning_field_name: str
+    exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
+    tokenizer_backend: str
+    tokenizer_fallback: bool
+    trust_remote_code: bool
+    frontend_route_extensions: list[str]
+
+    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
+        if self.load_aware:
+            self.router_mode = "kv"
+        self.apply_router_config()
+
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
             )
-        if self.migration_limit < 0 or self.migration_limit > 4294967295:
+        if self.tls_client_ca_cert_path and not (
+            self.tls_cert_path and self.tls_key_path
+        ):
             raise ValueError(
-                "--migration-limit must be between 0 and 4294967295 (0=disabled)"
+                "--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path"
             )
-        if self.router_enable_cache_control and self.router_mode != "kv":
-            raise ValueError("--enable-cache-control requires --router-mode=kv")
+        if self.frontend_route_extensions and (
+            self.interactive or self.kserve_grpc_server
+        ):
+            mode_flag = "--interactive" if self.interactive else "--kserve-grpc-server"
+            raise ValueError(
+                "--frontend-route-extension is only supported by the HTTP frontend, "
+                f"so it cannot be combined with {mode_flag}"
+            )
+        if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
+            raise ValueError(
+                f"--migration-limit must be between 0 and {_U32_MAX} (0=disabled)"
+            )
+        if self.migration_max_seq_len is not None and (
+            self.migration_max_seq_len < 1 or self.migration_max_seq_len > _U32_MAX
+        ):
+            raise ValueError(
+                f"--migration-max-seq-len must be between 1 and {_U32_MAX}"
+            )
+        if self.min_initial_workers < 0:
+            raise ValueError("--router-min-initial-workers must be >= 0")
+        if self.session_affinity_ttl_secs is not None and not (
+            1 <= self.session_affinity_ttl_secs <= _MAX_SESSION_AFFINITY_TTL_SECS
+        ):
+            raise ValueError(
+                "--router-session-affinity-ttl-secs must be between 1 and "
+                f"{_MAX_SESSION_AFFINITY_TTL_SECS}"
+            )
+        if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
+            raise ValueError(
+                f"--tokenizer: invalid value '{self.tokenizer_backend}' "
+                f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
+            )
+        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
+            raise ValueError(
+                "--ais-perf-config requires --router-prefill-load-model=ais"
+            )
+        if self.router_prefill_load_model == "ais":
+            if self.router_mode != "kv":
+                raise ValueError(
+                    "--router-prefill-load-model=ais requires --router-mode=kv"
+                )
+            if self.chat_processor != "dynamo":
+                raise ValueError(
+                    "--router-prefill-load-model=ais currently requires "
+                    "--dyn-chat-processor=dynamo"
+                )
+            self.ais_perf_kwargs()
+            if not self.router_track_prefill_tokens:
+                raise ValueError(
+                    "--router-prefill-load-model=ais requires "
+                    "--router-track-prefill-tokens"
+                )
+        if self.serve_indexer:
+            if self.router_mode != "kv":
+                raise ValueError("--serve-indexer requires --router-mode=kv")
+            if self.use_remote_indexer:
+                raise ValueError(
+                    "--serve-indexer and --use-remote-indexer are mutually exclusive"
+                )
+        if self.conditional_disagg_policy not in CONDITIONAL_DISAGG_POLICY_CHOICES:
+            raise ValueError(
+                "--router-conditional-disagg-config policy must be one of "
+                + ", ".join(
+                    f"'{choice}'" for choice in CONDITIONAL_DISAGG_POLICY_CHOICES
+                )
+            )
+        if self.conditional_disagg_eff_isl_threshold < 0:
+            raise ValueError(
+                "--router-conditional-disagg-config eff_isl_threshold must be >= 0"
+            )
+        if not 0.0 <= self.conditional_disagg_eff_isl_ratio_threshold <= 1.0:
+            raise ValueError(
+                "--router-conditional-disagg-config eff_isl_ratio_threshold must be in [0.0, 1.0]"
+            )
+        if (
+            self.conditional_disagg_prefill_busy_threshold is not None
+            and self.conditional_disagg_prefill_busy_threshold < 0
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config prefill_busy_threshold must be >= 0"
+            )
+        if (
+            self.conditional_disagg_decode_busy_threshold is not None
+            and self.conditional_disagg_decode_busy_threshold < 0
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config decode_busy_threshold must be >= 0"
+            )
+        if self.conditional_disagg_enabled and self.router_mode != "kv":
+            raise ValueError("--router-conditional-disagg requires --router-mode=kv")
+        if self.conditional_disagg_enabled and not self.use_kv_events:
+            raise ValueError("--router-conditional-disagg requires --router-kv-events")
+        self.validate_rejection_thresholds()
+        self.log_rejection_thresholds()
 
 
 @register_encoder(FrontendConfig)
@@ -151,6 +278,14 @@ class FrontendArgGroup(ArgGroup):
             help="HTTP port for the engine (u16).",
             arg_type=int,
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--serve-indexer",
+            env_var="DYN_SERVE_INDEXER",
+            default=False,
+            help="Serve this frontend's local KV indexers over the request plane.",
+            dest="serve_indexer",
+        )
         add_argument(
             g,
             flag_name="--tls-cert-path",
@@ -167,18 +302,104 @@ class FrontendArgGroup(ArgGroup):
             help="TLS certificate key path, PEM format.",
             arg_type=pathlib.Path,
         )
+        add_argument(
+            g,
+            flag_name="--tls-client-ca-cert-path",
+            env_var="DYN_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Client CA certificate path for mutual TLS, PEM format.",
+            arg_type=pathlib.Path,
+        )
 
         add_argument(
             g,
-            flag_name="--router-mode",
-            env_var="DYN_ROUTER_MODE",
-            default="round-robin",
-            help="How to route the request.",
-            choices=["round-robin", "random", "kv", "direct"],
+            flag_name="--tcp-tls-cert-path",
+            env_var="DYN_TCP_TLS_CERT_PATH",
+            default=None,
+            help="Path to PEM certificate for the TCP server.",
         )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-key-path",
+            env_var="DYN_TCP_TLS_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP server certificate.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-ca-cert-path",
+            env_var="DYN_TCP_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate used to verify the TCP peer's certificate.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the TCP server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-key-path",
+            env_var="DYN_TCP_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP client certificate (mTLS).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-ca-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate the TCP server uses to verify client "
+            "certificates. When set, clients must present a trusted certificate (mTLS enforced).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-ca-cert-path",
+            env_var="NATS_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate for verifying the NATS server.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--nats-tls-insecure",
+            env_var="NATS_TLS_INSECURE",
+            default=False,
+            help="Disable NATS TLS certificate verification. For local development only.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-cert-path",
+            env_var="NATS_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the NATS server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-key-path",
+            env_var="NATS_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the NATS client certificate (mTLS).",
+        )
+
+        # Router options (shared with dynamo.router)
+        RouterArgGroup(
+            default_router_mode="round-robin", include_frontend_only=True
+        ).add_arguments(parser)
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)
+        AisPerfArgGroup().add_arguments(parser)
 
         add_argument(
             g,
@@ -192,20 +413,6 @@ class FrontendArgGroup(ArgGroup):
             ),
         )
 
-        add_negatable_bool_argument(
-            g,
-            flag_name="--enforce-disagg",
-            env_var="DYN_ENFORCE_DISAGG",
-            default=False,
-            dest="enforce_disagg",
-            help=(
-                "Strictly enforce disaggregated mode. Requests will fail if the prefill router "
-                "has not activated yet (e.g., prefill workers still registering). This is stricter "
-                "than the default: without this flag, requests arriving before prefill workers are "
-                "discovered fall through to aggregated decode-only routing."
-            ),
-        )
-
         add_argument(
             g,
             flag_name="--migration-limit",
@@ -213,46 +420,26 @@ class FrontendArgGroup(ArgGroup):
             default=0,
             help=(
                 "Maximum number of times a request may be migrated to a different engine worker. "
-                "When > 0, enables request migration on worker disconnect."
+                "When > 0, enables migration after worker disconnects, response timeouts, "
+                "incomplete streams, and worker-local overload rejection."
             ),
             arg_type=int,
         )
 
         add_argument(
             g,
-            flag_name="--active-decode-blocks-threshold",
-            env_var="DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
+            flag_name="--migration-max-seq-len",
+            env_var="DYN_MIGRATION_MAX_SEQ_LEN",
             default=None,
             help=(
-                "Threshold percentage (0.0-1.0) for determining when a worker is considered busy "
-                "based on KV cache block utilization. If not set, blocks-based busy detection is disabled."
-            ),
-            arg_type=float,
-        )
-        add_argument(
-            g,
-            flag_name="--active-prefill-tokens-threshold",
-            env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            default=None,
-            help=(
-                "Literal token count threshold for determining when a worker is considered busy "
-                "based on prefill token utilization. When active prefill tokens exceed this "
-                "threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled."
+                "Maximum sequence length (prompt + generated tokens) for migration state tracking. "
+                "Once the accumulated token count exceeds this limit, the request becomes "
+                "non-migratable. Prevents unbounded memory growth from caching long sequences. "
+                "Default: no limit."
             ),
             arg_type=int,
         )
-        add_argument(
-            g,
-            flag_name="--active-prefill-tokens-threshold-frac",
-            env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-            default=None,
-            help=(
-                "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
-                "active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). "
-                "Uses OR logic with --active-prefill-tokens-threshold."
-            ),
-            arg_type=float,
-        )
+
         add_argument(
             g,
             flag_name="--model-name",
@@ -308,6 +495,21 @@ class FrontendArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--frontend-route-extension",
+            env_var="DYN_FRONTEND_ROUTE_EXTENSIONS",
+            default=[],
+            dest="frontend_route_extensions",
+            action="append",
+            help=(
+                "Trusted frontend route extension: a name registered under the "
+                "'dynamo.frontend.routes' entry-point group, or a 'module:function' "
+                "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
+                "whitespace-separated values."
+            ),
+        )
+
+        add_argument(
+            g,
             flag_name="--discovery-backend",
             env_var="DYN_DISCOVERY_BACKEND",
             default="etcd",
@@ -325,16 +527,26 @@ class FrontendArgGroup(ArgGroup):
             default="tcp",
             help=(
                 "Determines how requests are distributed from routers to workers. "
-                "'tcp' is fastest [nats|http|tcp]"
+                "'tcp' is fastest [nats|tcp]"
             ),
-            choices=["nats", "http", "tcp"],
+            choices=["nats", "tcp"],
+        )
+        add_argument(
+            g,
+            flag_name="--response-plane",
+            env_var="DYN_RESPONSE_PLANE",
+            default="tcp",
+            help="Select the response transport. Frontend and workers must match.",
+            choices=["tcp", "quic"],
         )
         add_argument(
             g,
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
-            default="nats",
-            help="Determines how events are published [nats|zmq]",
+            default=None,
+            help="Determines how events are published [nats|zmq]. If unset, "
+            "defaults to 'zmq' for all discovery backends. Set to 'nats' to use a "
+            "NATS-based event plane.",
             choices=["nats", "zmq"],
         )
         add_negatable_bool_argument(
@@ -383,6 +595,32 @@ class FrontendArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--reasoning-field-name",
+            env_var="DYN_REASONING_FIELD_NAME",
+            default="reasoning_content",
+            help=(
+                "OpenAI-compatible response field used for emitted reasoning content."
+            ),
+            choices=["reasoning_content", "reasoning"],
+        )
+        # NOTE: This flag also exists in DynamoRuntimeArgGroup (runtime_args.py).
+        # Both definitions are needed: runtime_args controls the Rust-native
+        # chat template path (oai.rs), while this one controls the Python
+        # frontend processors (vllm_processor / sglang_processor) which parse
+        # arguments independently via FrontendConfig.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--exclude-tools-when-tool-choice-none",
+            env_var="DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+            default=True,
+            help=(
+                "Exclude tool definitions from the chat template when "
+                "tool_choice='none'. Prevents models from generating raw XML "
+                "tool calls in the content field."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--dyn-chat-processor",
             env_var="DYN_CHAT_PROCESSOR",
             default="dynamo",
@@ -423,4 +661,47 @@ class FrontendArgGroup(ArgGroup):
                 "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
             arg_type=int,
+        )
+
+        add_argument(
+            g,
+            flag_name="--tokenizer",
+            env_var="DYN_TOKENIZER",
+            default="default",
+            dest="tokenizer_backend",
+            help=(
+                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library), "
+                "'fastokens' (fastokens crate for high-performance BPE encoding), or "
+                "'basetenkenizer' (Baseten Tokenizer for native encoding and decoding). "
+                "Has no effect on TikToken models."
+            ),
+            choices=["default", "fastokens", "basetenkenizer"],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--tokenizer-fallback",
+            env_var="DYN_TOKENIZER_FALLBACK",
+            default=True,
+            help=(
+                "Automatic fallback to HuggingFace is deprecated and will be "
+                "disabled by default in a future release. The current behavior "
+                "falls back when the selected fastokens or basetenkenizer backend "
+                "cannot load the model tokenizer. Use "
+                "--no-tokenizer-fallback to fail model initialization instead. "
+                "In dynamic mode, discovery retries the load while the frontend "
+                "continues running."
+            ),
+            env_value_type=parse_bool,
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--trust-remote-code",
+            env_var="DYN_TRUST_REMOTE_CODE",
+            default=False,
+            help=(
+                "Trust remote code when loading the tokenizer. Required for models "
+                "that ship custom tokenizer code (e.g. Qwen, Falcon)."
+            ),
         )

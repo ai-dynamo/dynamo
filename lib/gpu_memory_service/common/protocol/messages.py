@@ -3,25 +3,10 @@
 
 """Message types for GPU Memory Service RPC protocol."""
 
-from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import msgspec
-
-
-class RequestedLockType(str, Enum):
-    """Lock type requested by client."""
-
-    RW = "rw"
-    RO = "ro"
-    RW_OR_RO = "rw_or_ro"
-
-
-class GrantedLockType(str, Enum):
-    """Lock type actually granted by server."""
-
-    RW = "rw"
-    RO = "ro"
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
 
 class HandshakeRequest(msgspec.Struct, tag="handshake_request"):
@@ -43,17 +28,38 @@ class CommitResponse(msgspec.Struct, tag="commit_response"):
     success: bool
 
 
+class CommitLayoutRequest(msgspec.Struct, tag="commit_layout_request"):
+    """Seal the allocation set: the shape is final and the pages outlive this session.
+
+    Unlike ``CommitRequest`` this makes no claim about the contents and does not
+    relinquish write access -- the caller is downgraded to RW_DATA and keeps writing.
+    """
+
+    pass
+
+
+class CommitLayoutResponse(msgspec.Struct, tag="commit_layout_response"):
+    success: bool
+    memory_layout_hash: str = ""
+    # What the caller holds now. Like HandshakeResponse, the server is the authority
+    # rather than the client assuming.
+    granted_lock_type: Optional[GrantedLockType] = None
+
+
 class GetLockStateRequest(msgspec.Struct, tag="get_lock_state_request"):
     pass
 
 
 class GetLockStateResponse(msgspec.Struct, tag="get_lock_state_response"):
-    state: str  # "EMPTY", "RW", "COMMITTED", "RO"
+    state: str  # "EMPTY", "RW", "LAYOUT_COMMITTED", "COMMITTED", "RO"
     has_rw_session: bool
     ro_session_count: int
     waiting_writers: int
     committed: bool
     is_ready: bool
+    # Implied by `committed`; reported separately so "held by a live writer" is
+    # distinguishable from "held for reattach".
+    layout_committed: bool = False
 
 
 class GetAllocationStateRequest(msgspec.Struct, tag="get_allocation_state_request"):
@@ -62,7 +68,6 @@ class GetAllocationStateRequest(msgspec.Struct, tag="get_allocation_state_reques
 
 class GetAllocationStateResponse(msgspec.Struct, tag="get_allocation_state_response"):
     allocation_count: int
-    total_bytes: int
 
 
 class AllocateRequest(msgspec.Struct, tag="allocate_request"):
@@ -74,10 +79,19 @@ class AllocateResponse(msgspec.Struct, tag="allocate_response"):
     allocation_id: str
     size: int
     aligned_size: int
+    layout_slot: int
 
 
-class ExportRequest(msgspec.Struct, tag="export_request"):
+class ExportAllocationRequest(msgspec.Struct, tag="export_allocation_request"):
     allocation_id: str
+
+
+class ExportAllocationResponse(msgspec.Struct, tag="export_allocation_response"):
+    allocation_id: str
+    size: int
+    aligned_size: int
+    tag: str
+    layout_slot: int
 
 
 class GetAllocationRequest(msgspec.Struct, tag="get_allocation_request"):
@@ -89,6 +103,7 @@ class GetAllocationResponse(msgspec.Struct, tag="get_allocation_response"):
     size: int
     aligned_size: int
     tag: str
+    layout_slot: int
 
 
 class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):
@@ -96,23 +111,15 @@ class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):
 
 
 class ListAllocationsResponse(msgspec.Struct, tag="list_allocations_response"):
-    allocations: List[Dict[str, Any]] = []
+    allocations: List[GetAllocationResponse] = []
 
 
-class FreeRequest(msgspec.Struct, tag="free_request"):
+class FreeAllocationRequest(msgspec.Struct, tag="free_allocation_request"):
     allocation_id: str
 
 
-class FreeResponse(msgspec.Struct, tag="free_response"):
+class FreeAllocationResponse(msgspec.Struct, tag="free_allocation_response"):
     success: bool
-
-
-class ClearAllRequest(msgspec.Struct, tag="clear_all_request"):
-    pass
-
-
-class ClearAllResponse(msgspec.Struct, tag="clear_all_response"):
-    cleared_count: int
 
 
 class ErrorResponse(msgspec.Struct, tag="error_response"):
@@ -166,26 +173,56 @@ class GetStateHashResponse(msgspec.Struct, tag="get_memory_layout_hash_response"
     memory_layout_hash: str  # Hash of allocations + metadata, empty if not committed
 
 
+class GetRuntimeStateRequest(msgspec.Struct, tag="get_runtime_state_request"):
+    pass
+
+
+class GetRuntimeStateResponse(msgspec.Struct, tag="get_runtime_state_response"):
+    state: str
+    has_rw_session: bool
+    ro_session_count: int
+    waiting_writers: int
+    committed: bool
+    is_ready: bool
+    allocation_count: int = 0
+    memory_layout_hash: str = ""
+    layout_committed: bool = False
+
+
+class GMSRuntimeEvent(msgspec.Struct):
+    kind: str
+    allocation_count: int = 0
+
+
+class GetEventHistoryRequest(msgspec.Struct, tag="get_event_history_request"):
+    pass
+
+
+class GetEventHistoryResponse(msgspec.Struct, tag="get_event_history_response"):
+    events: List[GMSRuntimeEvent] = []
+
+
 Message = Union[
     HandshakeRequest,
     HandshakeResponse,
     CommitRequest,
     CommitResponse,
+    CommitLayoutRequest,
+    CommitLayoutResponse,
     GetLockStateRequest,
     GetLockStateResponse,
     GetAllocationStateRequest,
     GetAllocationStateResponse,
     AllocateRequest,
     AllocateResponse,
-    ExportRequest,
+    ExportAllocationRequest,
+    ExportAllocationResponse,
     GetAllocationRequest,
     GetAllocationResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
-    FreeRequest,
-    FreeResponse,
-    ClearAllRequest,
-    ClearAllResponse,
+    FreeAllocationRequest,
+    FreeAllocationResponse,
     ErrorResponse,
     MetadataPutRequest,
     MetadataPutResponse,
@@ -197,6 +234,10 @@ Message = Union[
     MetadataListResponse,
     GetStateHashRequest,
     GetStateHashResponse,
+    GetRuntimeStateRequest,
+    GetRuntimeStateResponse,
+    GetEventHistoryRequest,
+    GetEventHistoryResponse,
 ]
 
 _encoder = msgspec.msgpack.Encoder()

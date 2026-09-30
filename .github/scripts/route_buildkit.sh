@@ -11,10 +11,18 @@
 # Routing is optimized for Docker layer caching, linear scaling, and
 # 100% pod utilization across any number of BuildKit pods.
 #
-# CACHE GROUPS (3 distinct groups to maximize layer reuse):
-#   - Group 0 (cuda-dl-base-13):    vLLM & SGLang (CUDA 13.x)
-#   - Group 1 (cuda-dl-base-12):    vLLM & SGLang (CUDA 12.x)
-#   - Group 2 (general-trt-combined): TRT-LLM & General Builds
+# CACHE GROUPS (3 groups, one cache domain per dynamo_base image tag):
+#   - Group 0 (vllm-sglang): vLLM & SGLang                    (cuda13.0 base)
+#   - Group 1 (general):     dynamo runtime, planner, frontend,
+#                            operator, snapshot, power-agent  (cuda13.0 base)
+#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa      (cuda13.1 base)
+#
+# Groups follow the dynamo_base image tag, not the framework: that is where the
+# rendered Dockerfiles diverge, since manylinux_${ARCH}, wheel_builder_base and
+# runtime_wheel_builder are shared by every build kind. TRT-LLM is the only
+# build on a different base, so it gets its own group. vLLM and SGLang share
+# one because their build filters differ, and a dedicated pool for either would
+# idle whenever only the other changed.
 #
 # ALGORITHM:
 # 1. SCORING: Each group key is hashed with every active pod index (SHA-256)
@@ -28,19 +36,19 @@
 #    This guarantees every active pod appears in at least one group's pool.
 # 5. RANDOM PICK: ONE pod is randomly selected from the candidate pool.
 #
-# LOAD DISTRIBUTION (cksum-based, all pods utilized):
+# LOAD DISTRIBUTION (example: amd64; arm64 ranks differently, all pods utilized):
 # +------+------+-------------------+-------------------+---------------------+
-# | Pods | Pool | G0: vLLM/SGL C13  | G1: vLLM/SGL C12  | G2: TRT-LLM/General |
+# | Pods | Pool | G0: vLLM/SGLang   | G1: General       | G2: TRT-LLM         |
 # +------+------+-------------------+-------------------+---------------------+
-# |  1   |  1   | {0}               | {0}               | {0}                 |
-# |  2   |  1   | {0}               | {1}               | {1}                 |
-# |  3   |  1   | {0}               | {2}               | {1}                 |
-# |  4   |  2   | {0, 3}            | {2, 1}            | {1, 2}             |
-# |  5   |  2   | {0, 3}            | {2, 4}            | {1, 2}             |
-# |  6   |  2   | {0, 3}            | {5, 1}            | {2, 4}             |
-# |  7   |  3   | {0, 3, 4}         | {5, 1, 2}         | {2, 6, 5}          |
-# |  8   |  3   | {7, 0, 3}         | {5, 1, 4}         | {2, 6, 5}          |
-# |  9   |  3   | {7, 0, 3}         | {8, 5, 1}         | {2, 6, 4}          |
+# | 1    | 1    | {0}               | {0}               | {0}                 |
+# | 2    | 1    | {0}               | {1}               | {1}                 |
+# | 3    | 1    | {2}               | {0}               | {1}                 |
+# | 4    | 2    | {2, 0}            | {3, 2}            | {1, 2}              |
+# | 5    | 2    | {4, 0}            | {2, 3}            | {1, 4}              |
+# | 6    | 2    | {4, 0}            | {2, 3}            | {1, 5}              |
+# | 7    | 3    | {4, 2, 0}         | {6, 3, 2}         | {1, 5, 4}           |
+# | 8    | 3    | {7, 4, 0}         | {6, 2, 3}         | {1, 5, 4}           |
+# | 9    | 3    | {7, 4, 8}         | {6, 2, 3}         | {1, 5, 0}           |
 # +------+------+-------------------+-------------------+---------------------+
 #
 # =============================================================================
@@ -68,7 +76,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <12.9|13.0>]."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <13.0|13.1>]."
       exit 1
       ;;
   esac
@@ -84,11 +92,19 @@ if [ -z "$FLAVOR_INPUT" ]; then
   exit 1
 fi
 
-# CUDA version is required for all flavors except "general"
-if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
-  echo "❌ Error: Must specify --cuda <12.9|13.0> for flavor '$FLAVOR_INPUT'."
-  exit 1
-fi
+# CUDA version no longer affects pod routing: cache groups are keyed by
+# framework (see GROUP_KEYS / flavor_to_group), so --cuda is still accepted for
+# backward compatibility but is neither required nor validated here.
+# To re-enable per-CUDA-version routing in the future: (1) uncomment the
+# requirement block below and the validation block further down, (2) add the
+# CUDA major back into GROUP_KEYS, and (3) take the cuda_version into account in
+# flavor_to_group.
+#
+# # CUDA version is required for all flavors except "general"
+# if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
+#   echo "❌ Error: Must specify --cuda <13.0|13.1> for flavor '$FLAVOR_INPUT'."
+#   exit 1
+# fi
 
 # Validate arch input
 case $ARCH_INPUT in
@@ -108,16 +124,18 @@ case $FLAVOR_INPUT in
     ;;
 esac
 
-# Validate CUDA version input (allow empty for general flavor)
-if [ -n "$CUDA_VERSION" ]; then
-  case $CUDA_VERSION in
-    12.9|13.0|13.1) ;;
-    *)
-      echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 12.9, 13.0, or 13.1."
-      exit 1
-      ;;
-  esac
-fi
+# Validate CUDA version input (allow empty for general flavor) — disabled; see
+# the note above the requirement block. Re-enable alongside it if per-CUDA-version
+# routing is reintroduced.
+# if [ -n "$CUDA_VERSION" ]; then
+#   case $CUDA_VERSION in
+#     13.0|13.1) ;;
+#     *)
+#       echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 13.0 or 13.1."
+#       exit 1
+#       ;;
+#   esac
+# fi
 
 # Determine architectures to process
 if [ "$ARCH_INPUT" = "all" ]; then
@@ -134,9 +152,12 @@ else
 fi
 
 # --- CONFIGURATION ---
-NAMESPACE="buildkit"
+NAMESPACE="${BUILDKIT_NAMESPACE:?BUILDKIT_NAMESPACE must be set}"
 PORT="1234"
-MAX_POD_CHECK=10
+# Highest buildkit pod ordinal to probe, exclusive. Must be >= the KEDA
+# maxReplicaCount for the buildkit StatefulSet, or pods above this ordinal are
+# never discovered and sit idle while builds queue on the pods below it.
+MAX_POD_CHECK=${MAX_POD_CHECK:-16}
 # ---------------------
 
 if ! command -v nslookup &> /dev/null; then
@@ -174,20 +195,17 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-GROUP_KEYS=("cuda-dl-base-13" "cuda-dl-base-12" "general-trt-combined")
+# Group keys are SHA-256 salt: renaming one reshuffles that group's pod pool and
+# cold-starts its cache.
+GROUP_KEYS=("vllm-sglang" "general" "trtllm")
 
-# Map a flavor + CUDA version to a group index (0, 1, or 2)
+# Map a flavor to a group index (0, 1, or 2).
 flavor_to_group() {
   local flavor=$1
-  local cuda_major=${2%%.*}
   case "$flavor" in
-    vllm|sglang)
-      case "$cuda_major" in
-        13) echo 0 ;;
-        *)  echo 1 ;;
-      esac
-      ;;
-    trtllm|general|*) echo 2 ;;
+    vllm|sglang) echo 0 ;;
+    trtllm) echo 2 ;;
+    general|*) echo 1 ;;
   esac
 }
 

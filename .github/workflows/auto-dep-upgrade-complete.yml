@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Auto Dependency Upgrade - Complete
+
+on:
+  workflow_run:
+    workflows: ['Post-Merge CI Pipeline']
+    types: [completed]
+    branches: ['deps/upgrade-*']
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse upgrade branch + status
+        id: ctx
+        env:
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          if [[ ! "$BRANCH" =~ ^deps/upgrade-([a-z]+)-v(.+)$ ]]; then
+            echo "Branch $BRANCH does not match expected pattern; aborting."
+            exit 1
+          fi
+          {
+            echo "framework=${BASH_REMATCH[1]}"
+            echo "version=${BASH_REMATCH[2]}"
+            echo "branch=$BRANCH"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$CONCLUSION" == "success" ]]; then
+            {
+              echo "status_emoji=:white_check_mark:"
+              echo "status_word=Passed"
+              echo "status_note=Post-merge CI passed on this branch."
+              echo "conclusion_note=Ready for review."
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "status_emoji=:warning:"
+              echo "status_word=Failed"
+              echo "status_note=Post-merge CI did not pass (conclusion: \`$CONCLUSION\`). Investigate before merging."
+              echo "conclusion_note=Conclusion: \`$CONCLUSION\`. Investigate before merging."
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or reuse draft PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.OPS_BOT_PAT }}
+          GH_REPO: ${{ github.repository }}
+          FW:    ${{ steps.ctx.outputs.framework }}
+          VER:   ${{ steps.ctx.outputs.version }}
+          BR:    ${{ steps.ctx.outputs.branch }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          STATUS_NOTE: ${{ steps.ctx.outputs.status_note }}
+        run: |
+          gh label create dep-upgrade --color BFD4F2 \
+              --description "Automated dependency upgrade" --force || true
+
+          # Idempotent under reruns: reuse the existing PR if one is already open
+          # for this branch, otherwise create a fresh draft PR.
+          PR_URL=$(gh pr view "$BR" --json url --jq .url 2>/dev/null || true)
+          if [[ -z "$PR_URL" ]]; then
+            BODY=$(cat <<EOF
+          ## Automated dependency upgrade — $FW v$VER
+
+          $STATUS_NOTE
+
+          - **Framework:** $FW
+          - **Target version:** v$VER
+          - **Branch:** $BR
+          - **Validating run:** $RUN_URL
+          EOF
+          )
+            PR_URL=$(gh pr create --draft \
+              --base main --head "$BR" \
+              --title "chore: bump $FW to v$VER" \
+              --label dep-upgrade --label "backend::$FW" \
+              --body "$BODY")
+          fi
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Slack notification
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a  # v2.1.1
+        with:
+          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            blocks:
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: ":package: *Auto Dep Upgrade* ${{ steps.ctx.outputs.status_emoji }} ${{ steps.ctx.outputs.status_word }} — ${{ steps.ctx.outputs.framework }} v${{ steps.ctx.outputs.version }}"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "<${{ steps.pr.outputs.url }}|Draft PR> · <${{ github.event.workflow_run.html_url }}|Post-merge CI run> · branch `${{ steps.ctx.outputs.branch }}`"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "${{ steps.ctx.outputs.conclusion_note }}"

@@ -21,14 +21,14 @@ print_launch_banner "Launching Aggregated + KV Routing (2 GPUs)" "$MODEL" "$HTTP
 # run frontend + KV router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states &
+    --router-mode kv &
 
 # run workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 #
 # If multiple workers are launched, they must not share the same system/metrics port.
 # Use DYN_SYSTEM_PORT{1,2} so tests/launchers can provide a simple numbered port set.
+# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of relying on vLLM defaults
 #
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \

@@ -18,8 +18,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use serde::{Deserialize, Serialize};
+use tokio_util::task::AbortOnDropHandle;
 
 mod mem;
+#[cfg(test)]
+pub(crate) use mem::MEMORY_EVENT_BUFFER_CAPACITY;
 pub use mem::MemoryStore;
 mod nats;
 pub use nats::NATSStore;
@@ -27,8 +30,6 @@ mod etcd;
 pub use etcd::EtcdStore;
 mod file;
 pub use file::FileStore;
-
-const WATCH_SEND_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// String we use as the Key in a key-value storage operation. Simple String wrapper
 /// that can encode / decode a string.
@@ -105,10 +106,17 @@ impl KeyValue {
     }
 }
 
+/// One change reported by a [`Bucket::watch`] stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WatchEvent {
+    /// A key was created or its value changed after the last snapshot.
     Put(KeyValue),
+    /// A key was deleted after the last snapshot.
     Delete(Key),
+    /// The full bucket at one moment: the first event of every stream, possibly empty, and again
+    /// after the backend fell behind. It replaces any state held from earlier events. The NATS
+    /// store is the exception: it sends no initial `Resync` and replays existing keys as `Put`.
+    Resync(HashMap<Key, bytes::Bytes>),
 }
 
 #[async_trait]
@@ -311,58 +319,128 @@ impl Manager {
         })
     }
 
-    /// Returns a receiver that will receive all the existing keys, and
-    /// then block and receive new keys as they are created.
-    /// Starts a task that runs forever, watches the store.
-    pub fn watch(
+    async fn forward_watch_event(
+        tx: &tokio::sync::mpsc::Sender<WatchEvent>,
+        event: WatchEvent,
+        cancel_token: &CancellationToken,
+        bucket_name: &str,
+    ) -> bool {
+        tokio::select! {
+            _ = cancel_token.cancelled() => false,
+            result = tx.send(event) => {
+                if let Err(error) = result {
+                    tracing::error!(
+                        bucket_name,
+                        %error,
+                        "KeyValueStoreManager.watch receiver closed"
+                    );
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    /// Returns a receiver for one snapshot of a bucket, and then for every later change.
+    ///
+    /// The first event is one [`WatchEvent::Resync`] with every existing key, empty when the
+    /// bucket is empty. The NATS store is the exception: it sends no initial `Resync` and replays
+    /// existing keys as [`WatchEvent::Put`] events.
+    ///
+    /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
+    /// initial snapshot, so every change that follows reaches the receiver, as its own event or
+    /// inside a later [`WatchEvent::Resync`] that replaces all earlier state. A caller that also
+    /// reads the bucket directly must read it after this returns. A read before the watch can
+    /// show a key that a delete removes before the snapshot, and the receiver never reports that
+    /// delete.
+    ///
+    /// The spawned task runs until `cancel_token` cancels, the receiver drops, or the backend
+    /// stream ends.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bucket is unavailable, when the backend cannot establish the
+    /// watch, or when `cancel_token` cancels first.
+    pub async fn watch(
         self: Arc<Self>,
         bucket_name: &str,
         bucket_ttl: Option<Duration>,
         cancel_token: CancellationToken,
-    ) -> (
-        tokio::task::JoinHandle<Result<(), StoreError>>,
-        tokio::sync::mpsc::Receiver<WatchEvent>,
-    ) {
+    ) -> Result<
+        (
+            tokio::task::JoinHandle<()>,
+            tokio::sync::mpsc::Receiver<WatchEvent>,
+        ),
+        StoreError,
+    > {
         let bucket_name = bucket_name.to_string();
-        let (tx, rx) = tokio::sync::mpsc::channel(1024);
-        let watch_task = tokio::spawn(async move {
-            // Start listening for changes but don't poll this yet
-            let bucket = self
-                .0
-                .get_or_create_bucket(&bucket_name, bucket_ttl)
-                .await?;
-            let mut stream = bucket.watch().await?;
-
-            // Send all the existing keys
-            for (key, bytes) in bucket.entries().await? {
-                if let Err(err) = tx
-                    .send_timeout(
-                        WatchEvent::Put(KeyValue::new(key, bytes)),
-                        WATCH_SEND_TIMEOUT,
-                    )
-                    .await
-                {
-                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding existing key to channel");
-                }
-            }
-
-            // Now block waiting for new entries
-            loop {
-                let event = tokio::select! {
-                    _ = cancel_token.cancelled() => break,
-                    result = stream.next() => match result {
-                        Some(event) => event,
-                        None => break,
+        // Backpressure is intentional: discovery state events must never be dropped.
+        let (tx, rx) = tokio::sync::mpsc::channel(16384);
+        let (established_tx, established_rx) = tokio::sync::oneshot::channel();
+        // Until the watch is established, a caller that stops waiting aborts the task rather than
+        // detaching it: nobody reads the bucket it would create or the backend watch it would hold.
+        let watch_task = AbortOnDropHandle::new(tokio::spawn({
+            let bucket_name = bucket_name.clone();
+            let cancel_token = cancel_token.clone();
+            async move {
+                // Start listening for changes but don't poll this yet
+                let bucket = match self.0.get_or_create_bucket(&bucket_name, bucket_ttl).await {
+                    Ok(bucket) => bucket,
+                    Err(error) => {
+                        let _ = established_tx.send(Err(error));
+                        return;
                     }
                 };
-                if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
-                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
+                // Bucket::watch atomically establishes its initial snapshot and incremental
+                // stream. A separate entries() read here could replay an older buffered update
+                // after a newer snapshot.
+                let mut stream = match bucket.watch().await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = established_tx.send(Err(error));
+                        return;
+                    }
+                };
+                // The caller stopped waiting, so no receiver reconciles against this snapshot.
+                if established_tx.send(Ok(())).is_err() {
+                    return;
+                }
+
+                loop {
+                    let event = tokio::select! {
+                        () = cancel_token.cancelled() => break,
+                        // A quiet bucket would otherwise park the task until its next change.
+                        () = tx.closed() => break,
+                        result = stream.next() => match result {
+                            Some(event) => event,
+                            None => break,
+                        }
+                    };
+                    if !Self::forward_watch_event(&tx, event, &cancel_token, &bucket_name).await {
+                        break;
+                    }
                 }
             }
+        }));
 
-            Ok::<(), StoreError>(())
-        });
-        (watch_task, rx)
+        let established = tokio::select! {
+            biased;
+            // Await the abort, so the task cannot create the bucket after this returns.
+            () = cancel_token.cancelled() => {
+                watch_task.abort();
+                let _ = watch_task.await;
+                return Err(StoreError::WatchCancelled(bucket_name));
+            }
+            established = established_rx => established,
+        };
+        established.map_err(|_| {
+            StoreError::ProviderError(format!(
+                "the watch task for bucket '{bucket_name}' ended before it established the watch"
+            ))
+        })??;
+
+        Ok((watch_task.detach(), rx))
     }
 
     pub async fn publish<T: Serialize + Versioned + Send + Sync>(
@@ -409,13 +487,34 @@ pub trait Bucket: Send + Sync {
     /// The Key should be the name of the item, not including the bucket name.
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError>;
 
+    /// Replace an existing item only if its current value matches `expected`.
+    ///
+    /// Implementations must perform the comparison and replacement atomically.
+    /// A missing key returns [`StoreError::MissingKey`] and must never be created;
+    /// a value changed by another writer returns [`StoreError::Retry`].
+    /// A successful [`StoreOutcome`] revision is backend-specific and must not be
+    /// compared across backends or treated as a globally monotonic version.
+    async fn compare_and_replace(
+        &self,
+        key: &Key,
+        expected: bytes::Bytes,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError>;
+
     /// Delete an item from the bucket
     /// The Key should be the name of the item, not including the bucket name.
     async fn delete(&self, key: &Key) -> Result<(), StoreError>;
 
-    /// A stream of items inserted into the bucket.
-    /// Every time the stream is polled it will either return a newly created entry, or block until
-    /// such time.
+    /// An atomic initial snapshot followed by changes newer than that snapshot.
+    ///
+    /// Implementations must establish the snapshot and incremental watch without a gap and must
+    /// never emit an incremental value older than a value already emitted in the initial snapshot.
+    /// The first event is exactly one [`WatchEvent::Resync`] with every existing entry, empty for
+    /// an empty bucket. Later events are changes that follow it, or a further `Resync` after the
+    /// backend fell behind.
+    ///
+    /// The NATS store is the exception: it sends no initial `Resync` and replays existing keys as
+    /// [`WatchEvent::Put`] events. Discovery does not select it.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
@@ -466,6 +565,11 @@ pub enum StoreError {
     #[error("Key Value Error: {0} for bucket '{1}'")]
     KeyValueError(String, String),
 
+    /// The caller cancelled before the backend established the watch, so no snapshot exists to
+    /// reconcile against.
+    #[error("Watch on bucket '{0}' was cancelled before it was established")]
+    WatchCancelled(String),
+
     #[error("Error decoding bytes: {0}")]
     JSONDecodeError(#[from] serde_json::error::Error),
 
@@ -485,7 +589,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use futures::{StreamExt, pin_mut};
+    use futures::{FutureExt, StreamExt, pin_mut};
 
     const BUCKET_NAME: &str = "v1/mdc";
 
@@ -523,6 +627,212 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manager_watch_emits_initial_snapshot_once_before_updates() {
+        let manager = Arc::new(Manager::memory());
+        let bucket = manager
+            .get_or_create_bucket(BUCKET_NAME, None)
+            .await
+            .unwrap();
+        let key = Key::new("ns/worker/generate/1".to_string());
+        bucket.insert(&key, "old".into(), 1).await.unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let (watch_task, mut rx) = manager
+            .clone()
+            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .await
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WatchEvent::Resync(snapshot) = first else {
+            panic!("expected the initial resync, got {first:?}");
+        };
+        assert_eq!(
+            snapshot.get(&key).map(|value| value.as_ref()),
+            Some(b"old".as_slice())
+        );
+
+        bucket.insert(&key, "new".into(), 2).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WatchEvent::Put(second) = second else {
+            panic!("expected updated put");
+        };
+        assert_eq!(
+            second.value(),
+            b"new",
+            "the initial value must not be replayed after the snapshot"
+        );
+
+        cancel_token.cancel();
+        watch_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_reports_a_delete_that_follows_establishment() {
+        let manager = Arc::new(Manager::memory());
+        let bucket = manager
+            .get_or_create_bucket(BUCKET_NAME, None)
+            .await
+            .unwrap();
+        let key = Key::new("ns/worker/generate/1".to_string());
+        bucket.insert(&key, "value".into(), 1).await.unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let (watch_task, mut rx) = manager
+            .clone()
+            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .await
+            .unwrap();
+        bucket.delete(&key).await.unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WatchEvent::Resync(snapshot) = first else {
+            panic!("expected the existing key in the initial snapshot, got {first:?}");
+        };
+        assert!(
+            snapshot.contains_key(&key),
+            "snapshot {snapshot:?} lacks {key}"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second,
+            WatchEvent::Delete(key),
+            "a delete after establishment must reach the receiver"
+        );
+
+        cancel_token.cancel();
+        watch_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_reports_an_unavailable_bucket() {
+        // A file as the store root makes every bucket directory unreachable.
+        let root = tempfile::NamedTempFile::new().unwrap();
+        let cancel_token = CancellationToken::new();
+        let manager = Arc::new(Manager::file(cancel_token.clone(), root.path()));
+
+        let error = manager
+            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .await
+            .expect_err("a bucket under a file cannot be created");
+
+        assert!(
+            matches!(error, StoreError::FilesystemError(_)),
+            "expected a filesystem error, got {error:?}"
+        );
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_reports_cancellation_before_establishment() {
+        let manager = Arc::new(Manager::memory());
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let error = manager
+            .clone()
+            .watch(BUCKET_NAME, None, cancel_token)
+            .await
+            .expect_err("a cancelled watch establishes no snapshot");
+
+        assert!(
+            matches!(&error, StoreError::WatchCancelled(bucket) if bucket == BUCKET_NAME),
+            "expected a cancelled watch, got {error:?}"
+        );
+        // Give a task that outlived the failed watch its chance to run.
+        tokio::task::yield_now().await;
+        assert!(
+            manager.get_bucket(BUCKET_NAME).await.unwrap().is_none(),
+            "a cancelled watch created the bucket it gave up on"
+        );
+    }
+
+    #[tokio::test]
+    async fn manager_watch_abandoned_before_establishment_creates_no_bucket() {
+        let manager = Arc::new(Manager::memory());
+
+        let watch = manager
+            .clone()
+            .watch(BUCKET_NAME, None, CancellationToken::new());
+        assert!(
+            watch.now_or_never().is_none(),
+            "the watch completed on its first poll, before its setup task could run"
+        );
+
+        tokio::task::yield_now().await;
+        assert!(
+            manager.get_bucket(BUCKET_NAME).await.unwrap().is_none(),
+            "an abandoned watch created the bucket nobody waits for"
+        );
+    }
+
+    #[tokio::test]
+    async fn manager_watch_task_ends_when_its_receiver_drops() {
+        let manager = Arc::new(Manager::memory());
+        let (watch_task, rx) = manager
+            .watch(BUCKET_NAME, None, CancellationToken::new())
+            .await
+            .unwrap();
+
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(1), watch_task)
+            .await
+            .expect("the watch task outlived its receiver on a quiet bucket")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn saturated_watch_channel_delivers_final_taint_state() {
+        let cancel_token = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let first = WatchEvent::Put(KeyValue::new(
+            Key::new("v1/mdc/ns/worker/generate/1".to_string()),
+            br#"{"runtime_config":{"taints":["slow"]}}"#[..].into(),
+        ));
+        assert!(Manager::forward_watch_event(&tx, first.clone(), &cancel_token, BUCKET_NAME).await);
+
+        let final_event = WatchEvent::Put(KeyValue::new(
+            Key::new("v1/mdc/ns/worker/generate/1".to_string()),
+            br#"{"runtime_config":{"taints":["fast"]}}"#[..].into(),
+        ));
+        let final_event_for_send = final_event.clone();
+        let tx_clone = tx.clone();
+        let cancel_clone = cancel_token.clone();
+        let send_task = tokio::spawn(async move {
+            Manager::forward_watch_event(
+                &tx_clone,
+                final_event_for_send,
+                &cancel_clone,
+                BUCKET_NAME,
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !send_task.is_finished(),
+            "send must wait for channel capacity"
+        );
+        assert_eq!(rx.recv().await, Some(first));
+        assert!(send_task.await.unwrap());
+        assert_eq!(rx.recv().await, Some(final_event));
+    }
+
+    #[tokio::test]
     async fn test_memory_storage() -> anyhow::Result<()> {
         init();
 
@@ -533,14 +843,15 @@ mod tests {
         let res = bucket.insert(&"test1".into(), "value1".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
-        let mut expected = Vec::with_capacity(3);
-        for i in 1..=3 {
-            let item = WatchEvent::Put(KeyValue::new(
-                Key::new(format!("test{i}")),
-                format!("value{i}").into(),
-            ));
-            expected.push(item);
-        }
+        let expected = [
+            WatchEvent::Resync(HashMap::from([(Key::new("test1".into()), "value1".into())])),
+            WatchEvent::Put(KeyValue::new(Key::new("test2".into()), "value2".into())),
+            WatchEvent::Put(KeyValue::new(
+                Key::new("test2".into()),
+                "value2-updated".into(),
+            )),
+            WatchEvent::Put(KeyValue::new(Key::new("test3".into()), "value3".into())),
+        ];
 
         let (got_first_tx, got_first_rx) = tokio::sync::oneshot::channel();
         let ingress = tokio::spawn(async move {
@@ -560,6 +871,9 @@ mod tests {
             let v = stream.next().await.unwrap();
             assert_eq!(v, expected[2]);
 
+            let v = stream.next().await.unwrap();
+            assert_eq!(v, expected[3]);
+
             Ok::<_, StoreError>(())
         });
 
@@ -576,7 +890,9 @@ mod tests {
         assert_eq!(res, StoreOutcome::Exists(0));
 
         // Increment revision
-        let res = bucket.insert(&"test2".into(), "value2".into(), 1).await?;
+        let res = bucket
+            .insert(&"test2".into(), "value2-updated".into(), 1)
+            .await?;
         assert_eq!(res, StoreOutcome::Created(1));
 
         let res = bucket.insert(&"test3".into(), "value3".into(), 0).await?;

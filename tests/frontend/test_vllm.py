@@ -13,14 +13,17 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 from typing import Any, Dict, Generator, Optional, Tuple
 
 import pytest
 import requests
 
 from tests.utils.constants import GPT_OSS
-from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.managed_process import (
+    DynamoFrontendProcess,
+    ManagedProcess,
+    check_health_ready,
+)
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import ServicePorts
 
@@ -30,6 +33,7 @@ TEST_MODEL = GPT_OSS
 
 pytestmark = [
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(TEST_MODEL),
@@ -68,7 +72,7 @@ SYSTEM_HEALTH_TOOL = {
 }
 
 
-class VllmWorkerProcess(ManagedProcess):
+class WorkerProcess(ManagedProcess):
     """Vllm Worker process for GPT-OSS model."""
 
     def __init__(
@@ -89,6 +93,8 @@ class VllmWorkerProcess(ManagedProcess):
             "dynamo.vllm",
             "--model",
             TEST_MODEL,
+            "--max-model-len",
+            "32768",  # 32768 uses ~1.5 GiB (original default 131072 used ~6 GiB KV cache)
             "--dyn-tool-call-parser",
             "harmony",
             "--dyn-reasoning-parser",
@@ -97,6 +103,24 @@ class VllmWorkerProcess(ManagedProcess):
             "32768",
         ]
 
+        # In serial runs the parallel-GPU scheduler isn't injecting this env;
+        # fall back to the test's @requested_vllm_kv_cache_bytes marker so the
+        # advertised profiled_vram_gib matches what the worker actually allocates.
+        kv_bytes = os.environ.get("_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES")
+        if not kv_bytes:
+            kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+            if kv_mark:
+                kv_bytes = str(int(kv_mark.args[0]))
+        if kv_bytes:
+            command.extend(
+                [
+                    "--kv-cache-memory-bytes",
+                    kv_bytes,
+                    "--gpu-memory-utilization",
+                    "0.01",
+                ]
+            )
+
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
@@ -104,17 +128,12 @@ class VllmWorkerProcess(ManagedProcess):
 
         log_dir = f"{request.node.name}_{worker_id}"
 
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
-
         super().__init__(
             command=command,
             env=env,
             health_check_urls=[
                 (f"http://localhost:{self.frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{self.system_port}/health", self.is_ready),
+                (f"http://localhost:{self.system_port}/health", check_health_ready),
             ],
             timeout=500,
             display_output=True,
@@ -123,20 +142,6 @@ class VllmWorkerProcess(ManagedProcess):
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
-
-    def is_ready(self, response) -> bool:
-        try:
-            status = (response.json() or {}).get("status")
-        except ValueError:
-            logger.warning("%s health response is not valid JSON", self.worker_id)
-            return False
-
-        is_ready = status == "ready"
-        if is_ready:
-            logger.info("%s status is ready", self.worker_id)
-        else:
-            logger.warning("%s status is not ready: %s", self.worker_id, status)
-        return is_ready
 
 
 def _send_chat_request(
@@ -183,7 +188,7 @@ def start_services(
         terminate_all_matching_process_names=False,
     ):
         logger.info("Frontend started for tests")
-        with VllmWorkerProcess(
+        with WorkerProcess(
             request,
             frontend_port=frontend_port,
             system_port=system_port,
@@ -222,7 +227,12 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
     return response_json
 
 
-@pytest.mark.timeout(300)  # ~3x measured total (~70s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning_effort
+@pytest.mark.profiled_vram_gib(18.7)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_912_759_000
+)  # KV cache cap (2x safety over min=956_379_136)
+@pytest.mark.timeout(378)  # 6x observed 62.8s avg wall time
 @pytest.mark.post_merge
 def test_reasoning_effort(
     request, start_services: ServicePorts, predownload_models
@@ -288,7 +298,12 @@ def test_reasoning_effort(
         )
 
 
-@pytest.mark.timeout(180)  # ~3x measured total (~50s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling
+@pytest.mark.profiled_vram_gib(18.7)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_912_759_000
+)  # KV cache cap (2x safety over min=956_379_136)
+@pytest.mark.timeout(271)  # 6x observed 45.1s avg wall time (9 runs)
 @pytest.mark.post_merge
 def test_tool_calling(
     request, start_services: ServicePorts, predownload_models
@@ -330,7 +345,12 @@ def test_tool_calling(
     ), "Expected get_current_weather tool to be called"
 
 
-@pytest.mark.timeout(180)  # ~3x measured total (~50s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling_second_round
+@pytest.mark.profiled_vram_gib(18.7)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_912_759_000
+)  # KV cache cap (2x safety over min=956_379_136)
+@pytest.mark.timeout(265)  # 6x observed 44.1s avg wall time (9 runs)
 @pytest.mark.nightly
 def test_tool_calling_second_round(
     request, start_services: ServicePorts, predownload_models
@@ -394,7 +414,12 @@ def test_tool_calling_second_round(
     ), "Expected response to include temperature information from tool call result (20°C)"
 
 
-@pytest.mark.timeout(180)  # ~3x measured total (~57s/test), rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning
+@pytest.mark.profiled_vram_gib(18.7)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_912_759_000
+)  # KV cache cap (2x safety over min=956_379_136)
+@pytest.mark.timeout(281)  # 6x observed 46.7s avg wall time (9 runs)
 @pytest.mark.nightly
 def test_reasoning(request, start_services: ServicePorts, predownload_models) -> None:
     """Test reasoning functionality with a mathematical problem."""

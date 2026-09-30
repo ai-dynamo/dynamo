@@ -56,7 +56,7 @@ fn _vllm_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Add bingings from this crate to the provided module
+/// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pymodule!(_vllm_integration))?;
     Ok(())

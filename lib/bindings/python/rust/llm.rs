@@ -23,10 +23,16 @@
 /// integration between Python tools and the Dynamo runtime.
 use super::*;
 
+pub mod ais_callback;
 pub mod entrypoint;
 pub mod fpm;
+pub mod frontend_routes;
 pub mod kv;
+pub mod kv_dc_relay;
+pub mod kv_state_agent;
 pub mod local_model;
 pub mod lora;
 pub mod model_card;
 pub mod preprocessor;
+pub mod replay;
+pub mod routed_engine;

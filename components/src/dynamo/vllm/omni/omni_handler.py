@@ -1,72 +1,196 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
-import base64
+import copy
+import functools
 import logging
-import tempfile
-import time
-import uuid
-from dataclasses import dataclass
-from io import BytesIO
-from typing import Any, AsyncGenerator, Dict, Optional, Union
+import os
+import random
+from types import SimpleNamespace
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Optional,
+    Union,
+    cast,
+)
 
 import PIL.Image
-from diffusers.utils import export_to_video
 from fsspec.implementations.dirfs import DirFileSystem
+from vllm.lora.request import LoRARequest
+from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
+from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
-from dynamo.common.protocols.image_protocol import (
-    ImageData,
-    NvCreateImageRequest,
-    NvImagesResponse,
+from dynamo.common.protocols import sanitize_media_passthrough
+from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
+from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
+from dynamo.common.rl import RLAdminValidationError
+from dynamo.common.utils.output_modalities import (
+    RequestType,
+    get_output_modalities,
+    parse_request_type,
 )
-from dynamo.common.protocols.video_protocol import (
-    NvCreateVideoRequest,
-    NvVideosResponse,
-    VideoData,
-)
-from dynamo.common.storage import upload_to_fs
-from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import (
+    DEFAULT_VIDEO_NUM_FRAMES,
     compute_num_frames,
-    normalize_video_frames,
     parse_size,
 )
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.vllm.handlers import get_lora_manager
+from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
+
+# Re-exported: EngineInputs moved to its own module so the per-modality
+# builders can annotate it without importing this handler.
+from dynamo.vllm.omni.engine_inputs import EngineInputs
+from dynamo.vllm.omni.output_formatter import (
+    AudioAggregateState,
+    AudioStreamState,
+    OutputFormatter,
+)
+from dynamo.vllm.omni.utils import (
+    audio_output_is_cumulative,
+    build_image_generation_prompt,
+    image_generation_negative_prompt_from_request,
+    image_generation_sampling_overrides,
+    image_generation_size_from_request,
+    image_generation_size_from_str,
+    streaming_sampling_params,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_VIDEO_FPS = 16
 
 
-@dataclass
-class EngineInputs:
-    """Parsed engine inputs ready for AsyncOmni.generate().
+def _apply_media_passthrough(
+    sp: OmniDiffusionSamplingParams, extra_args: Optional[Dict[str, Any]]
+) -> None:
+    """Hand frontend-forwarded passthrough knobs to the engine.
 
-    Attributes:
-        prompt: OmniTextPrompt dict for the engine.
-        sampling_params_list: Per-stage sampling parameters, or None for defaults.
-        request_type: The resolved request type (may differ from the initial parse
-            when a chat completion request carries video params).
-        fps: Frames per second, only meaningful for video requests.
-        response_format: Desired response format (e.g. "url" or "b64_json" for
-            image requests). None means use the default for the request type.
+    The frontend nests a request's unknown top-level fields (an OpenAI
+    client's ``extra_body``) under ``extra_args["media_passthrough"]``.
+    ``sanitize_media_passthrough`` drops the request if any knob names a
+    path/checkpoint or a policy control, then the rest ride ``sp.extra_args``
+    to the engine. Nothing is set on the sampling params by attribute name:
+    a caller-controlled key must not choose which attribute it writes.
     """
-
-    prompt: OmniTextPrompt
-    sampling_params_list: list | None = None
-    request_type: RequestType = RequestType.CHAT_COMPLETION
-    fps: int = 0
-    response_format: str | None = None
+    knobs = sanitize_media_passthrough(extra_args)
+    if not knobs:
+        return
+    existing = getattr(sp, "extra_args", None)
+    if isinstance(existing, dict):
+        existing.update(knobs)
+    else:
+        try:
+            sp.extra_args = knobs
+        except (AttributeError, TypeError):
+            logger.warning(
+                "Dropping media passthrough knobs %s: sampling params expose "
+                "no extra_args",
+                sorted(knobs),
+            )
 
 
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
-    Handles text-to-text, text-to-image, and text-to-video generation.
+    Handles text-to-image, text-to-video, image-to-video, and text-to-audio generation.
+    Audio/TTS logic is delegated to AudioGenerationHandler via composition.
     """
+
+    @staticmethod
+    def _apply_lora_to_sampling_params(
+        sampling_params_list: list | None,
+        lora_request: LoRARequest | None,
+    ) -> None:
+        """Attach LoRA to diffusion sampling params in-place.
+
+        AsyncOmni diffusion stages consume LoRA from OmniDiffusionSamplingParams.
+        The top-level generate(lora_request=...) argument is not sufficient for
+        diffusion-only paths.
+        """
+        if lora_request is None or sampling_params_list is None:
+            return
+
+        for sp in sampling_params_list:
+            if isinstance(sp, OmniDiffusionSamplingParams):
+                try:
+                    sp.lora_request = lora_request
+                except (AttributeError, TypeError) as exc:
+                    raise RuntimeError(
+                        "OmniDiffusionSamplingParams no longer exposes "
+                        "'lora_request'; cannot apply diffusion LoRA"
+                    ) from exc
+
+    def _resolve_and_apply_lora(
+        self,
+        model_name: str | None,
+        sampling_params_list: list | None,
+    ) -> LoRARequest | None:
+        lora_request = super()._resolve_lora_request(model_name)
+        self._apply_lora_to_sampling_params(sampling_params_list, lora_request)
+        return lora_request
+
+    @staticmethod
+    def _extract_lora_name_from_request(request: Any) -> str | None:
+        """Best-effort LoRA name extraction for admin unload compatibility.
+
+        Accepts multiple request shapes used by compatibility aliases and
+        engine-update forwarding layers.
+
+        Note:
+            This is intentionally broader than the base helper
+            ``require_lora_unload_request`` (which expects canonical
+            ``lora_name``). Omni accepts common alias keys here to remain
+            compatible with multiple forwarding layers.
+        """
+        if not isinstance(request, dict):
+            return None
+
+        # Canonical body shape.
+        lora_name = request.get("lora_name")
+        if isinstance(lora_name, str) and lora_name:
+            return lora_name
+
+        # Compatibility shapes that may appear in alias forwarding.
+        for key in ("name", "adapter_name", "model"):
+            value = request.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+        return None
+
+    @staticmethod
+    def _local_path_from_uri(uri: str) -> str:
+        if uri.startswith("file://"):
+            return uri[len("file://") :]
+        return uri
+
+    @staticmethod
+    def _lora_error_payload(
+        lora_name: str, message: str, **extra: Any
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "status": "error",
+            "message": message,
+            "lora_name": lora_name,
+        }
+        payload.update(extra)
+        return payload
 
     def __init__(
         self,
@@ -76,6 +200,7 @@ class OmniHandler(BaseOmniHandler):
         shutdown_event: asyncio.Event | None = None,
         media_output_fs: Optional[DirFileSystem] = None,
         media_output_http_url: Optional[str] = None,
+        generate_endpoint=None,
     ):
         """Initialize the unified Omni handler.
 
@@ -97,10 +222,90 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
+        self.generate_endpoint = generate_endpoint
+
+        # Keep parity with BaseWorkerHandler LoRA resolver contract.
+        self._served_model_name = config.served_model_name or config.model
+        self._served_model_aliases = tuple(
+            getattr(config, "served_model_aliases", ()) or ()
+        )
+        self.engine_args = SimpleNamespace(model=config.model)
+
+        self.output_formatter = OutputFormatter(
+            model_name=config.served_model_name or config.model,
+            media_fs=media_output_fs,
+            media_http_url=media_output_http_url,
+            default_fps=getattr(config, "default_video_fps", 16),
+        )
+
+        # Audio/TTS handler — composition, not inheritance.
+        self.audio = AudioGenerationHandler(
+            config=config,
+            engine_client=self.engine_client,
+            media_output_fs=media_output_fs,
+            media_output_http_url=media_output_http_url,
+        )
+
+    @functools.cached_property
+    def _lora_enabled(self) -> bool:
+        # Match non-Omni LoRA gating: engine must be started with LoRA support
+        # and the LoRA manager must be initialized.
+        return bool(getattr(self.config.engine_args, "enable_lora", False)) and (
+            get_lora_manager() is not None
+        )
+
+    def _parse_lora_unload_request(self, request: Any) -> str:
+        # Keep broad key compatibility via _extract_lora_name_from_request,
+        # but preserve the shared validation contract by raising
+        # RLAdminValidationError when no valid LoRA name is provided.
+        lora_name = self._extract_lora_name_from_request(request)
+        if not lora_name:
+            raise RLAdminValidationError("'lora_name' is required in request")
+        return lora_name
+
+    async def _resolve_lora_source_path(self, lora_uri: str) -> tuple[bool, str]:
+        if lora_uri.startswith("file://"):
+            lora_path = self._local_path_from_uri(lora_uri)
+            if not os.path.exists(lora_path):
+                return False, f"Local LoRA path does not exist: {lora_path}"
+            return True, lora_path
+        return await super()._resolve_lora_source_path(lora_uri)
+
+    async def _register_lora_discovery(self, lora_name: str, lora_id: int) -> None:
+        if self.generate_endpoint is None:
+            logger.debug(
+                "Cannot publish LoRA '%s': generate_endpoint=%s",
+                lora_name,
+                self.generate_endpoint,
+            )
+            return
+
+        runtime_config = ModelRuntimeConfig()
+        model_type = get_output_modalities(
+            self.config.output_modalities,
+            self.config.model,
+        )
+        if model_type is None:
+            model_type = ModelType.Images
+
+        await register_model(
+            model_input=ModelInput.Text,
+            model_type=model_type,
+            endpoint=self.generate_endpoint,
+            model_path=self.config.model,
+            kv_cache_block_size=self.config.engine_args.block_size,
+            runtime_config=runtime_config,
+            user_data={"lora_adapter": True, "lora_id": lora_id},
+            lora_name=lora_name,
+            base_model_path=self.config.model,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+            max_gpu_lora_count=self._advertised_gpu_lora_capacity,
+        )
 
     async def generate(
-        self, request: Dict[str, Any], context
-    ) -> AsyncGenerator[Dict, None]:
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate outputs via the unified OpenAI mode.
 
         Args:
@@ -111,18 +316,23 @@ class OmniHandler(BaseOmniHandler):
             Response dictionaries.
         """
         request_id = context.id()
+        assert request_id is not None, "Request ID is required"
         logger.debug(f"Omni Request ID: {request_id}")
 
         async for chunk in self._generate_openai_mode(request, context, request_id):
             yield chunk
 
     async def _generate_openai_mode(
-        self, request: Dict[str, Any], context, request_id: str
+        self, request: Dict[str, Any], context: Context, request_id: str
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
-        parsed_request, request_type = parse_request_type(
+        parsed_request_raw, request_type = parse_request_type(
             request, self.config.output_modalities
+        )
+        parsed_request = cast(
+            Union[NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]],
+            parsed_request_raw,
         )
 
         # Pre-load input image for I2V requests (async I/O before sync build)
@@ -147,149 +357,466 @@ class OmniHandler(BaseOmniHandler):
                 }
                 return
 
-        inputs = self.build_engine_inputs(parsed_request, request_type, image=image)
+        try:
+            inputs = await self.build_engine_inputs(
+                parsed_request, request_type, image=image, request_id=request_id
+            )
+        except (ValueError, NotImplementedError, RuntimeError) as e:
+            logger.error(f"Invalid request {request_id}: {e}")
+            if isinstance(e, ValueError) and request_type in (
+                RequestType.IMAGE_GENERATION,
+                RequestType.VIDEO_GENERATION,
+            ):
+                # Media endpoints cannot interpret the chat.completion.chunk
+                # returned by _error_chunk as a request rejection. Re-raise as
+                # the registered binding exception so the HTTP layer returns a
+                # 400 with the validation reason before generation begins.
+                raise InvalidArgument(str(e)) from e
+            yield self._error_chunk(request_id, str(e), request_type)
+            return
 
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
             "request_id": request_id,
         }
+        if inputs.request_type == RequestType.AUDIO_GENERATION:
+            inputs.sampling_params_list = streaming_sampling_params(
+                self.engine_client, inputs.sampling_params_list
+            )
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
+            # Note: For diffusion paths, lora_request is embedded in sampling_params_list
+            # and will be refreshed in create_generator under the admission lock.
+            # We do NOT add it here; instead, it's updated via _apply_lora_to_sampling_params.
+        # Keep top-level LoRA only for paths that do not carry stage params.
+        if inputs.lora_request is not None and inputs.sampling_params_list is None:
+            generate_kwargs["lora_request"] = inputs.lora_request
 
         previous_text = ""
+        audio_stream_state = AudioStreamState() if inputs.stream_audio else None
+        # Read the coerced params, not the request's: the coercion above is what
+        # decides whether the engine emits disjoint deltas or whole-waveform
+        # snapshots, so aggregation has to follow its result rather than the
+        # model's identity.
+        audio_aggregate_state = (
+            AudioAggregateState(
+                cumulative=audio_output_is_cumulative(inputs.sampling_params_list)
+            )
+            if inputs.request_type == RequestType.AUDIO_GENERATION
+            and not inputs.stream_audio
+            else None
+        )
+
+        def update_previous_text(stage_output: Any, current: str) -> str:
+            if getattr(stage_output, "final_output_type", None) == "text" and getattr(
+                stage_output, "request_output", None
+            ):
+                outputs = stage_output.request_output.outputs
+                if outputs:
+                    return outputs[0].text
+            return current
+
+        async def create_generator(
+            admitted_lora_request: LoRARequest | None,
+        ) -> AsyncIterator[Dict[str, Any]]:
+            nonlocal previous_text
+
+            per_request_kwargs = dict(generate_kwargs)
+            # Critical: Apply the re-resolved adapter under the admission lock.
+            # This ensures that if a hot-swap occurred between build time and lock
+            # acquisition, the freshly loaded adapter is used for generation.
+            # For diffusion paths, the adapter must be embedded in sampling_params_list
+            # because AsyncOmni diffusion stages read LoRA from the params, not from
+            # the top-level generate() argument.
+            if admitted_lora_request is not None:
+                if inputs.sampling_params_list is not None:
+                    # Diffusion path: update embedded LoRA in sampling params
+                    # This must happen BEFORE generate() is called to take effect
+                    self._apply_lora_to_sampling_params(
+                        inputs.sampling_params_list, admitted_lora_request
+                    )
+                else:
+                    # LLM path: set top-level lora_request for text generation
+                    per_request_kwargs["lora_request"] = admitted_lora_request
+
+            async for stage_output in self.engine_client.generate(**per_request_kwargs):
+                chunk = await self.output_formatter.format(
+                    stage_output,
+                    request_id,
+                    request_type=inputs.request_type,
+                    fps=inputs.fps,
+                    response_format=inputs.response_format,
+                    output_format=inputs.output_format,
+                    previous_text=previous_text,
+                    speed=inputs.speed,
+                    audio_stream_state=audio_stream_state,
+                    audio_aggregate_state=audio_aggregate_state,
+                )
+                previous_text = update_previous_text(stage_output, previous_text)
+                yield {"stage_output": stage_output, "formatted_chunk": chunk}
+
+            if audio_aggregate_state is not None:
+                chunk = await self.output_formatter.finish_audio(
+                    request_id,
+                    audio_aggregate_state,
+                    response_format=inputs.response_format,
+                    output_format=inputs.output_format,
+                    speed=inputs.speed,
+                )
+                yield {"stage_output": None, "formatted_chunk": chunk}
 
         async with self._abort_monitor(context, request_id):
             try:
-                async for stage_output in self.engine_client.generate(
-                    **generate_kwargs,
+                async for chunk in self._generate_with_lora_admission_lock(
+                    inputs.lora_request,
+                    create_generator,
+                    sampling_params_list=inputs.sampling_params_list,
                 ):
-                    if (
-                        stage_output.final_output_type == "text"
-                        and stage_output.request_output
-                    ):
-                        chunk = self._format_text_chunk(
-                            stage_output.request_output,
-                            request_id,
-                            previous_text,
-                        )
-                        if chunk:
-                            output = stage_output.request_output.outputs[0]
-                            previous_text = output.text
-                            yield chunk
+                    if chunk and chunk.get("formatted_chunk"):
+                        yield chunk["formatted_chunk"]
 
-                    elif (
-                        stage_output.final_output_type == "image"
-                        and stage_output.images
-                    ):
-                        # vllm-omni uses final_output_type="image" for both
-                        # image and video diffusion outputs. Use the parsed
-                        # request type to route to the correct formatter.
-                        if inputs.request_type == RequestType.VIDEO_GENERATION:
-                            chunk = await self._format_video_chunk(
-                                stage_output.images,
-                                request_id,
-                                fps=inputs.fps,
-                            )
-                        else:
-                            chunk = await self._format_image_chunk(
-                                stage_output.images,
-                                request_id,
-                                response_format=inputs.response_format,
-                                request_type=inputs.request_type,
-                            )
-                        if chunk:
-                            yield chunk
-
-            except GeneratorExit:
+            except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
-                yield self._error_chunk(request_id, str(e))
+                yield self._error_chunk(request_id, str(e), inputs.request_type)
 
-    def build_engine_inputs(
+    async def _generate_with_lora_admission_lock(
+        self,
+        lora_request: LoRARequest | None,
+        create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
+        sampling_params_list: list | None = None,
+    ) -> AsyncIterator[Any]:
+        """Yield engine outputs after atomically admitting a LoRA request.
+
+        Lock behavior depends on the pipeline structure:
+
+        **Single-stage pipelines (pure LLM or pure diffusion)**:
+        - Hold lock through first output only
+        - Release lock, then stream remaining results (tokens) outside lock
+        - This optimization reduces lock contention for high-throughput text generation
+
+        **Multi-stage pipelines (e.g., image-via-chat with LLM + diffusion stages)**:
+        - Hold lock through entire generation
+        - All stages run inside the lock, ensuring the adapter is protected
+        - This is necessary because later stages (diffusion) still depend on the adapter
+          after the first stage (LLM) completes
+
+        This ensures that concurrent unload_lora cannot call remove_lora while the
+        adapter is in use. This is critical because:
+
+        - For lazy-activated adapters (PREFILL mode): Lock protects vLLM's lazy
+          activation bookkeeping from being deleted during admission.
+        - For preloaded adapters (AGGREGATED/DECODE mode): Lock prevents the engine
+          from removing an adapter while this request is actively using it, which
+          could cause generation to fail or produce incorrect results.
+
+        **Performance Note**: For single-stage diffusion (image/video generation),
+        the first output is the complete result, so the lock is held for the entire
+        generation duration. This means concurrent image/video requests for the same
+        adapter are fully serialized, and unload_lora operations block until
+        generation completes. For LLM/text stages, the first output is one token,
+        so (in single-stage LLM pipelines) the lock is released much earlier and
+        throughput is less impacted. For multi-stage pipelines with diffusion,
+        the lock must be held through all stages regardless of throughput impact,
+        to prevent undefined behavior.
+
+        Args:
+            lora_request: Original LoRA request, or None for base model.
+            create_generator: Factory that creates an async result iterator for
+                the admitted adapter.
+            sampling_params_list: The sampling params list from the request. Used to
+                detect multi-stage pipelines. If this list has multiple entries, the
+                entire generation is kept inside the lock. If None or single-entry,
+                the lock is released after the first output (optimization for LLM).
+        """
+        if lora_request is None:
+            # Base model: no lock needed
+            async for result in create_generator(lora_request):
+                yield result
+            return
+
+        # Hold lock through first result to prevent concurrent unload_lora from
+        # calling remove_lora while this request is in-flight. This applies to
+        # all adapter modes: lazy-activated (PREFILL) and preloaded (AGGREGATED).
+        lock = self._get_lora_lock(lora_request.lora_name)
+        async with lock:
+            # Re-resolve adapter while holding lock; may have been unloaded/reloaded
+            admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
+            if admitted_lora_request is None:
+                logger.warning(
+                    "LoRA adapter %s was unloaded before generation; "
+                    "rejecting the request",
+                    lora_request.lora_name,
+                )
+                raise ValueError(
+                    f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
+                )
+
+            generator = create_generator(admitted_lora_request)
+            try:
+                first_output = await anext(generator)
+            except StopAsyncIteration:
+                return
+
+            yield first_output
+
+            # For multi-stage pipelines (e.g., LLM + diffusion), keep lock held
+            # for the entire generation. For single-stage, release lock for throughput.
+            is_multi_stage = (
+                sampling_params_list is not None and len(sampling_params_list) > 1
+            )
+            if is_multi_stage:
+                # Multi-stage: continue streaming inside the lock
+                async for result in generator:
+                    yield result
+                # Lock is released here when exiting the async with block
+            else:
+                # Single-stage: release lock early and stream remaining results outside
+                pass
+
+        # For single-stage pipelines, stream remaining results outside lock
+        if sampling_params_list is None or len(sampling_params_list) <= 1:
+            async for result in generator:
+                yield result
+
+    async def build_engine_inputs(
         self,
         parsed_request: Union[
-            NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]
+            NvCreateImageRequest,
+            NvCreateVideoRequest,
+            NvCreateAudioSpeechRequest,
+            Dict[str, Any],
         ],
         request_type: RequestType,
         image: PIL.Image.Image | None = None,
+        request_id: str | None = None,
     ) -> EngineInputs:
         """Convert a parsed request into AsyncOmni engine inputs.
 
         Args:
             parsed_request: Output from parse_request_type -- a Pydantic model
-                for image/video requests, or a raw dict for chat completions.
+                for image/video/audio requests, or a raw dict for chat completions.
             request_type: The RequestType determined by parse_request_type.
             image: Pre-loaded PIL Image for I2V requests (from input_reference).
+            request_id: Final request id, used by audio models (Audex) that bind
+                per-request state such as the CFG pair id to it.
 
         Returns:
             EngineInputs ready for engine_client.generate().
         """
         if request_type == RequestType.CHAT_COMPLETION:
+            assert isinstance(parsed_request, dict)
             return self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
+            assert isinstance(parsed_request, NvCreateImageRequest)
             return self._engine_inputs_from_image(parsed_request)
         elif request_type == RequestType.VIDEO_GENERATION:
+            assert isinstance(parsed_request, NvCreateVideoRequest)
             return self._engine_inputs_from_video(parsed_request, image=image)
-
         elif request_type == RequestType.AUDIO_GENERATION:
-            raise NotImplementedError("Audio generation is not yet supported")
+            assert isinstance(parsed_request, NvCreateAudioSpeechRequest)
+            return await self.audio.build_engine_inputs(
+                parsed_request, request_id=request_id
+            )
 
         raise ValueError(f"Unknown request type: {request_type}")
 
     def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
         """Build engine inputs from a chat completions request dict."""
 
-        # Chat completions request does not support extra_body passthrough
-        # So, we can't extract any diffusion related params from the raw_request
-        # It falls back to default sampling params
         text_prompt = self._extract_text_prompt(request)
         if text_prompt is None:
             raise ValueError("No user message found in chat completion request")
 
-        prompt = OmniTextPrompt(prompt=text_prompt)
+        output_modalities = {
+            str(modality).lower() for modality in (self.config.output_modalities or [])
+        }
+        if "image" in output_modalities:
+            width, height = image_generation_size_from_request(request)
+            prompt = build_image_generation_prompt(
+                text_prompt,
+                height,
+                width,
+                negative_prompt=image_generation_negative_prompt_from_request(request),
+                multi_modal_data=request.get("multi_modal_data"),
+            )
+            sp = OmniDiffusionSamplingParams(height=height, width=width)
+            for arg, value in image_generation_sampling_overrides(
+                request, height, width
+            ).items():
+                if hasattr(sp, arg):
+                    setattr(sp, arg, value)
+            sampling_params_list = self._build_sampling_params_list(sp)
+        else:
+            prompt = OmniTextPrompt(prompt=text_prompt)
+            sampling_params_list = None
 
-        sampling_params_list = None
+        lora_request = self._resolve_and_apply_lora(
+            request.get("model"),
+            sampling_params_list,
+        )
 
         return EngineInputs(
             prompt=prompt,
             sampling_params_list=sampling_params_list,
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
+            lora_request=lora_request,
         )
+
+    @staticmethod
+    def _update_if_not_none(object: Any, key: str, val: Any) -> None:
+        if val is not None:
+            setattr(object, key, val)
+
+    def _build_sampling_params_list(
+        self, diffusion_sp: OmniDiffusionSamplingParams
+    ) -> list:
+        # This is in sync with how vllm-omni builds sampling params currently.
+        defaults = list(self.engine_client.default_sampling_params_list or [])
+        result = []
+        for i, default in enumerate(defaults):
+            metadata = self.engine_client.engine.get_stage_metadata(i)
+            stage_type = getattr(metadata, "stage_type", "llm")
+            if stage_type == "diffusion":
+                result.append(diffusion_sp)
+            else:
+                result.append(
+                    default.clone() if hasattr(default, "clone") else SamplingParams()
+                )
+        return result if result else [diffusion_sp]
+
+    def _build_video_sampling_params_list(
+        self, req: NvCreateVideoRequest, nvext: VideoNvExt
+    ) -> tuple[list, OmniDiffusionSamplingParams]:
+        """Clone per-stage model defaults and apply explicit video overrides."""
+        defaults = list(self.engine_client.default_sampling_params_list or [])
+        if not defaults:
+            defaults = [OmniDiffusionSamplingParams()]
+            stage_types = ["diffusion"]
+        else:
+            stage_types = [
+                getattr(
+                    self.engine_client.engine.get_stage_metadata(i),
+                    "stage_type",
+                    "llm",
+                )
+                for i in range(len(defaults))
+            ]
+
+        result = []
+        output_sp = None
+        for default, stage_type in zip(defaults, stage_types, strict=True):
+            if stage_type != "diffusion":
+                result.append(
+                    default.clone() if hasattr(default, "clone") else SamplingParams()
+                )
+                continue
+
+            sp = (
+                copy.deepcopy(default)
+                if isinstance(default, OmniDiffusionSamplingParams)
+                else OmniDiffusionSamplingParams()
+            )
+            self._apply_video_sampling_overrides(sp, req, nvext)
+            result.append(sp)
+            output_sp = sp
+
+        if output_sp is None:
+            raise ValueError("Video generation requires a diffusion stage")
+        return result, output_sp
+
+    def _apply_video_sampling_overrides(
+        self,
+        sp: OmniDiffusionSamplingParams,
+        req: NvCreateVideoRequest,
+        nvext: VideoNvExt,
+    ) -> None:
+        """Overlay only fields explicitly supplied by a video request."""
+        if nvext.num_frames is not None and nvext.num_frames <= 0:
+            raise ValueError("nvext.num_frames must be greater than zero")
+        if nvext.fps is not None and nvext.fps <= 0:
+            raise ValueError("nvext.fps must be greater than zero")
+        if req.seconds is not None and req.seconds <= 0:
+            raise ValueError("seconds must be greater than zero")
+
+        if req.size is not None:
+            width, height = parse_size(req.size)
+            sp.width = width
+            sp.height = height
+
+        if nvext.num_frames is not None:
+            sp.num_frames = nvext.num_frames
+        elif req.seconds is not None:
+            frame_rate = (
+                float(nvext.fps) if nvext.fps is not None else sp.resolved_frame_rate
+            )
+            sp.num_frames = compute_num_frames(
+                seconds=req.seconds,
+                fps=frame_rate,
+                default_fps=int(
+                    getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
+                ),
+            )
+        elif sp.num_frames == 1:
+            # vllm-omni uses 1 as the image-model sentinel. It is not a usable
+            # video default for pipelines that consume num_frames verbatim.
+            sp.num_frames = DEFAULT_VIDEO_NUM_FRAMES
+
+        if nvext.fps is not None:
+            sp.fps = nvext.fps
+            if hasattr(sp, "frame_rate"):
+                sp.frame_rate = float(nvext.fps)
+
+        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
+        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
+        self._update_if_not_none(sp, "seed", nvext.seed)
+        self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
+        self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
+        _apply_media_passthrough(sp, req.extra_args)
 
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
-        width, height = parse_size(req.size, default_w=1024, default_h=1024)
-        nvext = req.nvext
+        # req.size is a free-form client string, so it needs the same bound the
+        # chat path applies -- parse_size alone returns whatever it parses.
+        width, height = image_generation_size_from_str(req.size)
+        nvext = req.nvext or ImageNvExt()
 
-        prompt = OmniTextPrompt(
-            prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt
-            if nvext and nvext.negative_prompt
-            else None,
+        prompt = build_image_generation_prompt(
+            req.prompt,
+            height,
+            width,
+            negative_prompt=nvext.negative_prompt,
         )
 
         sp = OmniDiffusionSamplingParams(
             height=height,
             width=width,
         )
-        if req.n is not None:
-            sp.num_outputs_per_prompt = req.n
-        if nvext:
-            if nvext.num_inference_steps is not None:
-                sp.num_inference_steps = nvext.num_inference_steps
-            if nvext.guidance_scale is not None:
-                sp.guidance_scale = nvext.guidance_scale
-            if nvext.seed is not None:
-                sp.seed = nvext.seed
+        self._update_if_not_none(sp, "num_outputs_per_prompt", req.n)
+
+        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
+        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
+        # If seed is not provided, generate a random one to ensure
+        # a proper generator is initialized in the backend.
+        # This fixes issues where using the default global generator
+        # might produce blurry images in some environments.
+        sp.seed = (
+            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
+        )
+        _apply_media_passthrough(sp, req.extra_args)
+
+        sampling_params_list = self._build_sampling_params_list(sp)
+        lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=[sp],
+            sampling_params_list=sampling_params_list,
             request_type=RequestType.IMAGE_GENERATION,
             response_format=req.response_format,
+            lora_request=lora_request,
         )
 
     def _engine_inputs_from_video(
@@ -304,27 +831,25 @@ class OmniHandler(BaseOmniHandler):
             image: Pre-loaded PIL Image for I2V. When provided, the image is
                 attached to the prompt via ``multi_modal_data`` so vllm-omni's
                 I2V pipeline pre-process can use it.
+
+        Returns:
+            EngineInputs: Validated inputs for video generation.
+
+        Raises:
+            ValueError: If the frame rate or output format is unsupported.
         """
-        width, height = parse_size(req.size)
-        nvext = req.nvext
+        nvext = req.nvext or VideoNvExt()
 
-        nvext_fps = nvext.fps if nvext else None
-        nvext_num_frames = nvext.num_frames if nvext else None
+        output_format = req.output_format.lower() if req.output_format else None
+        if output_format not in (None, "mp4"):
+            raise ValueError(
+                f"Unsupported output_format: {req.output_format!r}; "
+                "only 'mp4' is supported"
+            )
 
-        num_frames = compute_num_frames(
-            num_frames=nvext_num_frames,
-            seconds=req.seconds,
-            fps=nvext_fps,
-            default_fps=DEFAULT_VIDEO_FPS,
-        )
-        fps = nvext_fps if nvext_fps is not None else DEFAULT_VIDEO_FPS
-
-        prompt = OmniTextPrompt(
-            prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt
-            if nvext and nvext.negative_prompt
-            else None,
-        )
+        prompt = OmniTextPrompt(prompt=req.prompt)
+        if nvext.negative_prompt is not None:
+            prompt.negative_prompt = nvext.negative_prompt
 
         if image is not None:
             prompt["multi_modal_data"] = {"image": image}
@@ -334,248 +859,33 @@ class OmniHandler(BaseOmniHandler):
                 image.size[1],
             )
 
-        sp = OmniDiffusionSamplingParams(
-            height=height,
-            width=width,
-            num_frames=num_frames,
+        sampling_params_list, output_sp = self._build_video_sampling_params_list(
+            req, nvext
         )
-        if nvext:
-            if nvext.num_inference_steps is not None:
-                sp.num_inference_steps = nvext.num_inference_steps
-            if nvext.guidance_scale is not None:
-                sp.guidance_scale = nvext.guidance_scale
-            if nvext.seed is not None:
-                sp.seed = nvext.seed
-            if nvext.boundary_ratio is not None:
-                sp.boundary_ratio = nvext.boundary_ratio
-            if nvext.guidance_scale_2 is not None:
-                sp.guidance_scale_2 = nvext.guidance_scale_2
-        if fps is not None:
-            sp.fps = fps
+        lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
+
+        model_fps = output_sp.resolved_frame_rate
+        output_fps = round(
+            model_fps
+            if model_fps is not None
+            else getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
+        )
 
         logger.info(
-            f"Video diffusion request: prompt='{req.prompt[:50]}...', "
-            f"size={width}x{height}, frames={num_frames}, fps={fps}"
+            "Video diffusion request: prompt='%s...', size=%sx%s, frames=%s, fps=%s",
+            req.prompt[:50],
+            getattr(output_sp, "width", None),
+            getattr(output_sp, "height", None),
+            getattr(output_sp, "num_frames", None),
+            model_fps,
         )
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=[sp],
+            sampling_params_list=sampling_params_list,
             request_type=RequestType.VIDEO_GENERATION,
-            fps=fps,
+            fps=output_fps,
+            response_format=req.response_format,
+            output_format=output_format,
+            lora_request=lora_request,
         )
-
-    async def _prepare_image_output(
-        self, images: list, request_id: str, response_format: str | None = None
-    ) -> list:
-        """Prepare image output for response.
-
-        Args:
-            images: List of PIL Image objects.
-            request_id: Unique request identifier.
-            response_format: Response format ("url" or "b64_json").
-
-        Returns:
-            List of image URLs or base64 data-URL strings.
-        """
-        outlist = []
-
-        for img in images:
-            buffer = BytesIO()
-            img.save(buffer, format="PNG")
-            image_bytes = buffer.getvalue()
-
-            if response_format == "url":
-                storage_path = f"images/{request_id}/{uuid.uuid4()}.png"
-                url = await upload_to_fs(
-                    self.media_output_fs,
-                    storage_path,
-                    image_bytes,
-                    self.media_output_http_url,
-                )
-                outlist.append(url)
-            elif response_format == "b64_json" or response_format is None:
-                img_base64 = base64.b64encode(image_bytes).decode("utf-8")
-                data_url = f"data:image/png;base64,{img_base64}"
-                outlist.append(data_url)
-            else:
-                raise ValueError(f"Invalid response format: {response_format}")
-        return outlist
-
-    async def _format_image_chunk(
-        self,
-        images: list,
-        request_id: str,
-        response_format: str | None = None,
-        request_type: RequestType = RequestType.IMAGE_GENERATION,
-    ) -> Dict[str, Any] | None:
-        """Format image output for the appropriate endpoint response.
-
-        Args:
-            images: List of PIL Image objects generated by AsyncOmni engine.
-            request_id: Unique request identifier.
-            response_format: Response format (url, b64_json, None).
-            request_type: Request type (chat completion, image generation).
-
-        Returns:
-            Formatted response dict, or None if no images generated.
-        """
-        if not images:
-            return self._error_chunk(request_id, "No images generated")
-
-        data_urls = await self._prepare_image_output(
-            images, request_id, response_format
-        )
-
-        if request_type == RequestType.CHAT_COMPLETION:
-            chunk = {
-                "id": request_id,
-                "created": int(time.time()),
-                "object": "chat.completion.chunk",
-                "model": self.config.served_model_name or self.config.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": data_url}}
-                                for data_url in data_urls
-                            ],
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
-            return chunk
-        elif request_type == RequestType.IMAGE_GENERATION:
-            image_data_list = []
-            for data_url in data_urls:
-                if response_format == "url":
-                    image_data_list.append(ImageData(url=data_url))
-                elif response_format == "b64_json" or response_format is None:
-                    if data_url.startswith("data:image"):
-                        _, b64_part = data_url.split(",", 1)
-                        image_data_list.append(ImageData(b64_json=b64_part))
-                    else:
-                        image_data_list.append(ImageData(b64_json=data_url))
-                else:
-                    raise ValueError(f"Invalid response format: {response_format}")
-
-            output = NvImagesResponse(created=int(time.time()), data=image_data_list)
-            return output.model_dump()
-        else:
-            return None
-
-    async def _format_video_chunk(
-        self,
-        images: list,
-        request_id: str,
-        fps: int,
-    ) -> Dict[str, Any] | None:
-        """Convert diffusion output frames to MP4 and return as NvVideosResponse.
-
-        Args:
-            images: List of PIL Image frames from the diffusion stage.
-            request_id: Unique request identifier.
-            fps: Frames per second for the output video.
-
-        Returns:
-            ``NvVideosResponse.model_dump()`` dict, or ``None`` if no frames.
-        """
-        if not images:
-            return None
-
-        try:
-            start_time = time.time()
-
-            frame_list = normalize_video_frames(images)
-
-            logger.info(
-                f"Encoding {len(frame_list)} frames to MP4 for request {request_id} "
-                f"(fps={fps})"
-            )
-
-            # Encode frames to MP4 via temp file, then read bytes for upload
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
-                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
-                video_bytes = tmp.read()
-
-            # Upload via filesystem
-            storage_path = f"videos/{request_id}.mp4"
-            video_url = await upload_to_fs(
-                self.media_output_fs,
-                storage_path,
-                video_bytes,
-                self.media_output_http_url,
-            )
-
-            logger.info(f"Video uploaded to {video_url} for request {request_id}")
-
-            inference_time = time.time() - start_time
-
-            response = NvVideosResponse(
-                id=request_id,
-                object="video",
-                model=self.config.served_model_name or self.config.model,
-                status="completed",
-                progress=100,
-                created=int(time.time()),
-                data=[VideoData(url=video_url)],
-                inference_time_s=inference_time,
-            )
-            return response.model_dump()
-
-        except Exception as e:
-            logger.error(f"Failed to encode video for request {request_id}: {e}")
-            error_response = NvVideosResponse(
-                id=request_id,
-                object="video",
-                model=self.config.served_model_name or self.config.model,
-                status="failed",
-                progress=0,
-                created=int(time.time()),
-                data=[],
-                error=str(e),
-            )
-            return error_response.model_dump()
-
-    def _format_text_chunk(
-        self,
-        request_output,
-        request_id: str,
-        previous_text: str,
-    ) -> Dict[str, Any] | None:
-        """Format text output as OpenAI chat completion chunk."""
-        if not request_output.outputs:
-            return self._error_chunk(request_id, "No outputs from engine")
-
-        output = request_output.outputs[0]
-
-        # Calculate delta text (new text since last chunk)
-        delta_text = output.text[len(previous_text) :]
-
-        chunk = {
-            "id": request_id,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "model": self.config.served_model_name or self.config.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": delta_text,
-                    },
-                    "finish_reason": normalize_finish_reason(output.finish_reason)
-                    if output.finish_reason
-                    else None,
-                }
-            ],
-        }
-
-        # Add usage on final chunk
-        if output.finish_reason:
-            chunk["usage"] = self._build_completion_usage(request_output)
-
-        return chunk

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,500 +19,958 @@ package validation
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-const (
-	// maxCombinedResourceNameLength is the maximum allowed combined length for Grove resource names.
-	// This constraint comes from Grove's PodCliqueSet webhook validation which enforces a 45-character
-	// limit on the combined length of PodCliqueSet name + PodCliqueScalingGroup name + PodClique name.
-	// Pod names follow formats like: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
-	// The random string and hyphens consume additional characters, leaving 45 for the resource names.
-	maxCombinedResourceNameLength = 45
-)
-
-// DynamoGraphDeploymentValidator validates DynamoGraphDeployment resources.
-// This validator can be used by both webhooks and controllers for consistent validation.
+// DynamoGraphDeploymentValidator validates v1beta1 DynamoGraphDeployment resources.
 type DynamoGraphDeploymentValidator struct {
-	deployment *nvidiacomv1alpha1.DynamoGraphDeployment
-	mgr        ctrl.Manager // Optional: for API group detection via discovery client
+	mgr ctrl.Manager
 }
 
-// NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
-func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment) *DynamoGraphDeploymentValidator {
+// NewDynamoGraphDeploymentValidator creates a validator for v1beta1 DynamoGraphDeployment.
+// mgr must not be nil.
+func NewDynamoGraphDeploymentValidator(
+	mgr ctrl.Manager,
+) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
-		deployment: deployment,
-		mgr:        nil,
+		mgr: mgr,
 	}
 }
 
-// NewDynamoGraphDeploymentValidatorWithManager creates a validator with a manager for API group detection.
-func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
-	return &DynamoGraphDeploymentValidator{
-		deployment: deployment,
-		mgr:        mgr,
-	}
+// dynamoGraphDeploymentValidation carries DGD-specific request state.
+// API values and derived traversal state remain explicit validator arguments.
+type dynamoGraphDeploymentValidation struct {
+	sharedValidation
+	userInfo          *authenticationv1.UserInfo
+	operatorPrincipal string
 }
 
-// Validate performs stateless validation on the DynamoGraphDeployment.
-// Context is required for operations that may need to query the cluster (e.g., CRD checks).
-// Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
-	// Validate that at least one service is specified
-	if len(v.deployment.Spec.Services) == 0 {
-		return nil, fmt.Errorf("spec.services must have at least one service")
+type dynamoGraphDeploymentSpecValidationOptions struct {
+	dgdName                 string
+	generation              int64
+	workloadProvider        string
+	grovePathway            bool
+	grovePathwayRequirement string
+	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+}
+
+// Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
+// ctx and deployment must not be nil.
+func (v *DynamoGraphDeploymentValidator) Validate(
+	ctx context.Context,
+	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
+	return v.validate(ctx, deployment, nil, runtimeVersionSource, false)
+}
+
+func (v *DynamoGraphDeploymentValidator) validate(
+	ctx context.Context,
+	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+	ratchetRuntimeVersion bool,
+) (admission.Warnings, error) {
+	validation := &dynamoGraphDeploymentValidation{
+		sharedValidation: sharedValidation{
+			ctx:                   ctx,
+			mgr:                   v.mgr,
+			runtimeVersionSource:  runtimeVersionSource,
+			ratchetRuntimeVersion: ratchetRuntimeVersion,
+		},
 	}
 
-	// Validate annotations
-	if err := v.validateAnnotations(); err != nil {
-		return nil, err
+	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
+	alpha, err := alphaDynamoGraphDeploymentForValidation(deployment)
+	if err != nil {
+		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+	}
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha)...)
+
+	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
+}
+
+// ValidateUpdate performs stateful validation comparing old and new v1beta1 DGD objects.
+// ctx, oldDGD, and newDGD must not be nil. runtimeVersionSource identifies the request's source API.
+// If userInfo is nil, replica changes for DGDSA-enabled components fail closed.
+func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
+	ctx context.Context,
+	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	userInfo *authenticationv1.UserInfo,
+	operatorPrincipal string,
+	runtimeVersionSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
+	validation := &dynamoGraphDeploymentValidation{
+		sharedValidation: sharedValidation{
+			ctx:                   ctx,
+			mgr:                   v.mgr,
+			runtimeVersionSource:  runtimeVersionSource,
+			ratchetRuntimeVersion: true,
+		},
+		userInfo:          userInfo,
+		operatorPrincipal: operatorPrincipal,
 	}
 
-	// Validate PVCs
-	if err := v.validatePVCs(); err != nil {
-		return nil, err
-	}
-
-	// Validate restart
-	if err := v.validateRestart(); err != nil {
-		return nil, err
-	}
-
-	var allWarnings admission.Warnings
-
-	// Validate each service
-	for serviceName, service := range v.deployment.Spec.Services {
-		warnings, err := v.validateService(ctx, serviceName, service)
+	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
+	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		newAlpha, err := alphaDynamoGraphDeploymentForValidation(newDGD)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 		}
-		allWarnings = append(allWarnings, warnings...)
+		oldAlpha, err := alphaDynamoGraphDeploymentForValidation(oldDGD)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
+		allErrs = append(allErrs, validation.validateDynamoGraphDeploymentSpecUpdateV1alpha1(
+			&newAlpha.Spec,
+			&oldAlpha.Spec,
+			field.NewPath("spec"),
+		)...)
 	}
-
-	return allWarnings, nil
+	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)
 }
 
-// ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeployment.
-// userInfo is used for identity-based validation (replica protection).
-// If userInfo is nil, replica changes for DGDSA-enabled services are rejected (fail closed).
-// Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) (admission.Warnings, error) {
-	var warnings admission.Warnings
-
-	// Validate immutable fields
-	if err := v.validateImmutableFields(old, &warnings); err != nil {
-		return warnings, err
+// ValidateTerminatingUpdate validates an update to a DynamoGraphDeployment that
+// already carries a deletionTimestamp.
+//
+// Only the metadata update rules run. A finalizer can hold an object terminating
+// for an arbitrary period, so durable controller-owned metadata still has to be
+// protected, but any rule that judges the new object on its own can refuse the
+// cleanup update a legacy object needs and leave it impossible to finalize. The
+// spec update traversal is not purely comparative: it validates new-state GPU
+// memory service settings, and the v1alpha1 compatibility view returns a hard
+// error for an object that cannot round-trip.
+//
+// ctx, oldDGD, and newDGD must not be nil. If userInfo is nil, provider
+// materialization fails closed.
+func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
+	ctx context.Context,
+	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	userInfo *authenticationv1.UserInfo,
+	operatorPrincipal string,
+) (admission.Warnings, error) {
+	// runtimeVersionSource is inert here: the metadata-only path never consults
+	// it, and the Disabled variant went away when runtime-version validation
+	// moved to the ratchet flag, so this carries the v1beta1 default.
+	validation := &dynamoGraphDeploymentValidation{
+		sharedValidation: sharedValidation{
+			ctx:                  ctx,
+			mgr:                  v.mgr,
+			runtimeVersionSource: runtimeVersionSourceV1Beta1,
+		},
+		userInfo:          userInfo,
+		operatorPrincipal: operatorPrincipal,
 	}
 
-	// Validate service topology is unchanged (service names must remain the same)
-	if err := v.validateServiceTopology(old); err != nil {
-		return warnings, err
-	}
-
-	// Validate replicas changes for services with scaling adapter enabled
-	// Pass userInfo (may be nil - will fail closed for DGDSA-enabled services)
-	if err := v.validateReplicasChanges(old, userInfo); err != nil {
-		return warnings, err
-	}
-
-	// Validate no restart.id change during active rolling update
-	if err := v.validateNoRestartDuringRollingUpdate(old); err != nil {
-		return warnings, err
-	}
-
-	return warnings, nil
+	allErrs := validation.validateObjectMetaUpdate(
+		&newDGD.ObjectMeta,
+		&oldDGD.ObjectMeta,
+		field.NewPath("metadata"),
+	)
+	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)
 }
 
-// validateImmutableFields checks that immutable fields have not been changed.
-// Appends warnings to the provided slice.
-func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv1alpha1.DynamoGraphDeployment, warnings *admission.Warnings) error {
-	var errs []error
+// validateDynamoGraphDeployment validates dgd. dgd must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, v.validateObjectMeta(
+		&dgd.ObjectMeta,
+		field.NewPath("metadata"),
+		hasIntraPodFailover(&dgd.Spec),
+	)...)
 
-	if v.deployment.Spec.BackendFramework != old.Spec.BackendFramework {
-		*warnings = append(*warnings, "Changing spec.backendFramework may cause unexpected behavior")
-		errs = append(errs, fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation"))
+	groveEnabled := features.MustGateFrom(v.ctx).Enabled(features.Grove)
+	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(groveEnabled, dgd)
+	workloadProvider := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
+	var oldComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	if oldDGD != nil {
+		oldComponents = componentsByName(oldDGD.Spec.Components)
 	}
+	specOpts := dynamoGraphDeploymentSpecValidationOptions{
+		dgdName:                 dgd.Name,
+		generation:              dgd.Generation,
+		workloadProvider:        workloadProvider,
+		grovePathway:            grovePathway,
+		grovePathwayRequirement: grovePathwayRequirement,
+		oldComponents:           oldComponents,
+	}
+	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
 
-	// Validate that node topology (single-node vs multi-node) is not changed for each service.
-	for serviceName, newService := range v.deployment.Spec.Services {
-		// Get old service (if exists)
-		oldService, exists := old.Spec.Services[serviceName]
-		if !exists {
-			// New service, no comparison needed
-			continue
-		}
+	return allErrs
+}
 
-		if oldService.IsMultinode() != newService.IsMultinode() {
-			errs = append(errs, fmt.Errorf(
-				"spec.services[%s] cannot change node topology (between single-node and multi-node) after creation",
-				serviceName,
+// validateObjectMeta validates DGD objectMeta. objectMeta and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
+	objectMeta *metav1.ObjectMeta,
+	fldPath *field.Path,
+	hasIntraPodFailover bool,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	annotationsPath := fldPath.Child("annotations")
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+		if _, err := semver.NewVersion(value); err != nil {
+			allErrs = append(allErrs, field.Invalid(
+				annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
+				value,
+				"must be valid semver",
 			))
 		}
 	}
+	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(objectMeta.Annotations); invalid {
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
+			value,
+			`must be "mp" or "ray"`,
+		))
+	}
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists &&
+		value != string(grovev1alpha1.RollingRecreateStrategy) &&
+		value != string(grovev1alpha1.OnDeleteStrategy) {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
+			value,
+			[]string{
+				string(grovev1alpha1.RollingRecreateStrategy),
+				string(grovev1alpha1.OnDeleteStrategy),
+			},
+		))
+	}
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists && value != "pod" && value != "container" {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
+			value,
+			[]string{"pod", "container"},
+		))
+	}
 
-	return errors.Join(errs...)
+	// Restrict the durable workload provider to programs implemented by the controller.
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]; exists &&
+		!isSupportedWorkloadProvider(value) {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			value,
+			supportedWorkloadProviders(),
+		))
+	}
 
+	if hasIntraPodFailover && objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode] != "container" {
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
+			objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode],
+			`must be "container" when intra-pod failover is configured`,
+		))
+	}
+
+	return allErrs
 }
 
-// validateServiceTopology ensures the set of service names remains unchanged.
-// Users can modify service specifications, but cannot add or remove services.
-// This maintains graph topology immutability while allowing configuration updates.
-func (v *DynamoGraphDeploymentValidator) validateServiceTopology(old *nvidiacomv1alpha1.DynamoGraphDeployment) error {
-	oldServices := getServiceNames(old.Spec.Services)
-	newServices := getServiceNames(v.deployment.Spec.Services)
+// validateDynamoGraphDeploymentSpec validates spec. spec and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
+	spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
+	fldPath *field.Path,
+	opts dynamoGraphDeploymentSpecValidationOptions,
+) field.ErrorList {
+	const validateInferencePoolAvailability = true
 
-	added := difference(newServices, oldServices)
-	removed := difference(oldServices, newServices)
+	allErrs := field.ErrorList{}
 
-	// Fast path: no changes
-	if len(added) == 0 && len(removed) == 0 {
+	// Validate the root provider fragment against the selected graph workload program.
+	if spec.ProviderOverride != nil {
+		allErrs = append(allErrs, v.validateProviderOverride(
+			spec.ProviderOverride,
+			fldPath.Child("providerOverride"),
+			providerOverrideValidationOptions{
+				supported:        true,
+				workloadProvider: opts.workloadProvider,
+				scope:            provideroverride.ScopeRoot,
+			},
+		)...)
+	}
+
+	if spec.PriorityClassName != "" && !opts.grovePathway {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("priorityClassName"), opts.grovePathwayRequirement))
+	}
+
+	componentsPath := fldPath.Child("components")
+	if len(spec.Components) == 0 {
+		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
+	}
+	components := componentsByName(spec.Components)
+	for i := range spec.Components {
+		component := &spec.Components[i]
+		componentPath := componentsPath.Index(i)
+
+		if opts.grovePathway {
+			combinedLength, detail := dgdComponentResourceNameLength(opts.dgdName, spec.Components, component)
+			if combinedLength > maxCombinedResourceNameLength {
+				allErrs = append(allErrs, field.Invalid(
+					componentPath.Child("name"),
+					component.ComponentName,
+					fmt.Sprintf(
+						"combined resource name length %d exceeds the %d-character pod-name limit (%s); shorten DynamoGraphDeployment name %q or component name %q",
+						combinedLength,
+						maxCombinedResourceNameLength,
+						detail,
+						opts.dgdName,
+						component.ComponentName,
+					),
+				))
+			}
+		}
+
+		gms := gpuMemoryServiceFor(component)
+		if gms != nil && effectiveGMSMode(gms.Mode) == nvidiacomv1beta1.GMSModeInterPod {
+			modePath := componentPath.Child("experimental", "gpuMemoryService", "mode")
+			if !opts.grovePathway {
+				allErrs = append(allErrs, field.Forbidden(modePath, opts.grovePathwayRequirement))
+			}
+			if spec.BackendFramework != string(dynamo.BackendFrameworkVLLM) {
+				detected := spec.BackendFramework
+				if detected == "" {
+					detected = unsetValue
+				}
+				allErrs = append(allErrs, field.Invalid(
+					modePath,
+					gms.Mode,
+					fmt.Sprintf("the inter-pod GMS layout is currently supported only for vLLM (detected backend: %s)", detected),
+				))
+			}
+		}
+
+		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
+		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
+
+		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
+
+		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
+			component,
+			componentPath,
+			dynamoComponentDeploymentSharedSpecValidationOptions{
+				grovePathway:                      opts.grovePathway,
+				validateInferencePoolAvailability: validateInferencePoolAvailability,
+				providerOverridesSupported:        true,
+				workloadProvider:                  opts.workloadProvider,
+				oldComponent:                      opts.oldComponents[component.ComponentName],
+			},
+		)...)
+	}
+
+	if spec.Restart != nil {
+		allErrs = append(allErrs, v.validateRestart(spec.Restart, fldPath.Child("restart"), components)...)
+	}
+
+	constraintPath := fldPath.Child("topologyConstraint")
+	hasComponentConstraint := false
+	for i := range spec.Components {
+		if spec.Components[i].TopologyConstraint != nil {
+			hasComponentConstraint = true
+			break
+		}
+	}
+	hasAnyConstraint := spec.TopologyConstraint != nil || hasComponentConstraint
+	if hasAnyConstraint {
+		allErrs = append(allErrs, groveTopologyOverrideCompositionErrors(
+			spec,
+			opts.workloadProvider,
+			fldPath,
+		)...)
+		topologyErrs := field.ErrorList{}
+		if spec.TopologyConstraint == nil {
+			topologyErrs = append(topologyErrs, field.Required(
+				constraintPath,
+				"is required when any component topology constraint is set",
+			))
+		} else {
+			if spec.TopologyConstraint.PackDomain == "" && !hasComponentConstraint {
+				topologyErrs = append(topologyErrs, field.Required(
+					constraintPath.Child("packDomain"),
+					"is required when no component topologyConstraint is set",
+				))
+			}
+
+			var topologyInfo *clusterTopologyInfo
+			if spec.TopologyConstraint.ClusterTopologyName != "" &&
+				opts.generation <= 1 && opts.grovePathway {
+				var err error
+				topologyInfo, err = readGroveClusterTopology(v.ctx, v.mgr, spec.TopologyConstraint.ClusterTopologyName)
+				if err != nil {
+					detail := fmt.Sprintf("failed to read ClusterTopologyBinding: %v", err)
+					if k8serrors.IsNotFound(err) {
+						detail = "references a ClusterTopologyBinding resource that was not found"
+					}
+					topologyErrs = append(topologyErrs, field.Invalid(
+						constraintPath.Child("clusterTopologyName"),
+						spec.TopologyConstraint.ClusterTopologyName,
+						detail,
+					))
+				}
+			}
+
+			topologyErrs = append(topologyErrs, v.validateSpecTopologyConstraint(
+				spec.TopologyConstraint,
+				constraintPath,
+				topologyInfo,
+			)...)
+			for i := range spec.Components {
+				componentConstraint := spec.Components[i].TopologyConstraint
+				if componentConstraint == nil {
+					continue
+				}
+				topologyErrs = append(topologyErrs, v.validateTopologyConstraint(
+					componentConstraint,
+					componentsPath.Index(i).Child("topologyConstraint"),
+					spec.TopologyConstraint,
+					topologyInfo,
+				)...)
+			}
+		}
+		allErrs = append(allErrs, topologyErrs...)
+	}
+
+	if spec.Experimental != nil {
+		allErrs = append(allErrs, v.validateDynamoGraphDeploymentExperimentalSpec(
+			spec.Experimental,
+			fldPath.Child("experimental"),
+			opts.generation,
+			opts.grovePathway,
+			opts.grovePathwayRequirement,
+		)...)
+	}
+
+	return allErrs
+}
+
+// groveTopologyOverrideCompositionErrors returns conflicts between the typed
+// and provider-native topology APIs. spec and fldPath must not be nil.
+func groveTopologyOverrideCompositionErrors(
+	spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
+	provider string,
+	fldPath *field.Path,
+) field.ErrorList {
+	if provider != consts.WorkloadProviderGrove {
+		return nil
+	}
+	detail := "cannot be combined with spec.topologyConstraint or components[].topologyConstraint; use either the typed topology API or provider-native Grove topology overrides"
+	allErrs := field.ErrorList{}
+	if providerOverrideWritesGroveTopology(spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil) {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride", "value"), detail))
+	}
+	componentsPath := fldPath.Child("components")
+	for i := range spec.Components {
+		component := &spec.Components[i]
+		componentPath := componentsPath.Index(i)
+		if providerOverrideWritesGroveTopology(component.ProviderOverride, provider, provideroverride.ScopeComponent, component) {
+			allErrs = append(allErrs, field.Forbidden(componentPath.Child("providerOverride", "value"), detail))
+		}
+		for roleIndex := range component.Roles {
+			role := &component.Roles[roleIndex]
+			scope, ok := provideroverride.ScopeForComponentRole(role.Name)
+			if ok && providerOverrideWritesGroveTopology(role.ProviderOverride, provider, scope, component) {
+				allErrs = append(allErrs, field.Forbidden(componentPath.Child("roles").Index(roleIndex).Child("providerOverride", "value"), detail))
+			}
+		}
+	}
+	return allErrs
+}
+
+// providerOverrideWritesGroveTopology reports whether an optional override
+// writes topology. component may be nil only for ScopeRoot.
+func providerOverrideWritesGroveTopology(
+	override *nvidiacomv1beta1.ProviderOverride,
+	provider string,
+	scope provideroverride.Scope,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) bool {
+	if override == nil {
+		return false
+	}
+	target := override.Target
+	if target == "" {
+		resolved, err := provideroverride.ExpectedTarget(provider, override.APIVersion, scope, component)
+		if err != nil {
+			return false
+		}
+		target = resolved
+	}
+	return provideroverride.WritesGroveTopology(target, override.Value.Raw)
+}
+
+// validateRestart validates restart. restart and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateRestart(
+	restart *nvidiacomv1beta1.Restart,
+	fldPath *field.Path,
+	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) field.ErrorList {
+	if restart.Strategy == nil {
+		return nil
+	}
+	return v.validateRestartStrategy(restart.Strategy, fldPath.Child("strategy"), components)
+}
+
+// validateRestartStrategy validates strategy. strategy and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateRestartStrategy(
+	strategy *nvidiacomv1beta1.RestartStrategy,
+	fldPath *field.Path,
+	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) field.ErrorList {
+	if len(strategy.Order) == 0 {
 		return nil
 	}
 
-	// Sort for deterministic error messages
+	orderPath := fldPath.Child("order")
+	if strategy.Type == nvidiacomv1beta1.RestartStrategyTypeParallel {
+		return field.ErrorList{field.Forbidden(orderPath, "cannot be specified when strategy is parallel")}
+	}
+
+	allErrs := field.ErrorList{}
+	uniqueOrder := getUnique(strategy.Order)
+	if len(uniqueOrder) != len(strategy.Order) {
+		allErrs = append(allErrs, field.Invalid(orderPath, strategy.Order, "must be unique"))
+	}
+	if len(uniqueOrder) != len(components) {
+		allErrs = append(allErrs, field.Invalid(
+			orderPath,
+			strategy.Order,
+			"must have the same number of unique components as the deployment",
+		))
+	}
+	for i, componentName := range strategy.Order {
+		if _, exists := components[componentName]; !exists {
+			allErrs = append(allErrs, field.NotSupported(orderPath.Index(i), componentName, sortedComponentNames(components)))
+		}
+	}
+	return allErrs
+}
+
+// validateSpecTopologyConstraint validates constraint. constraint and fldPath must not be nil.
+// topologyInfo may be nil when live topology validation is not applicable.
+func (v *dynamoGraphDeploymentValidation) validateSpecTopologyConstraint(
+	constraint *nvidiacomv1beta1.SpecTopologyConstraint,
+	fldPath *field.Path,
+	topologyInfo *clusterTopologyInfo,
+) field.ErrorList {
+	if topologyInfo == nil || constraint.PackDomain == "" {
+		return nil
+	}
+	if _, exists := topologyInfo.domainIndex[string(constraint.PackDomain)]; exists {
+		return nil
+	}
+	return field.ErrorList{field.Invalid(
+		fldPath.Child("packDomain"),
+		constraint.PackDomain,
+		fmt.Sprintf("does not exist in ClusterTopologyBinding %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
+	)}
+}
+
+// validateDynamoGraphDeploymentExperimentalSpec validates experimental. experimental and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentExperimentalSpec(
+	experimental *nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec,
+	fldPath *field.Path,
+	generation int64,
+	grovePathway bool,
+	grovePathwayRequirement string,
+) field.ErrorList {
+	if experimental.KvTransferPolicy == nil {
+		return nil
+	}
+	return v.validateKvTransferPolicy(
+		experimental.KvTransferPolicy,
+		fldPath.Child("kvTransferPolicy"),
+		generation,
+		grovePathway,
+		grovePathwayRequirement,
+	)
+}
+
+// validateKvTransferPolicy validates policy. policy and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicy(
+	policy *nvidiacomv1beta1.KvTransferPolicy,
+	fldPath *field.Path,
+	generation int64,
+	grovePathway bool,
+	grovePathwayRequirement string,
+) field.ErrorList {
+	if policy.ClusterTopologyName == "" {
+		return nil
+	}
+
+	allErrs := field.ErrorList{}
+	namePath := fldPath.Child("clusterTopologyName")
+	if nameErrs := k8svalidation.IsDNS1123Subdomain(policy.ClusterTopologyName); len(nameErrs) > 0 {
+		allErrs = append(allErrs, field.Invalid(
+			namePath,
+			policy.ClusterTopologyName,
+			strings.Join(nameErrs, "; "),
+		))
+	}
+	if !grovePathway {
+		allErrs = append(allErrs, field.Forbidden(namePath, grovePathwayRequirement))
+	}
+	if len(allErrs) != 0 || generation > 1 {
+		return allErrs
+	}
+
+	topologyInfo, err := readGroveClusterTopology(v.ctx, v.mgr, policy.ClusterTopologyName)
+	if err != nil {
+		detail := fmt.Sprintf("failed to read ClusterTopologyBinding: %v", err)
+		if k8serrors.IsNotFound(err) {
+			detail = "references a ClusterTopologyBinding resource that was not found"
+		}
+		return append(allErrs, field.Invalid(namePath, policy.ClusterTopologyName, detail))
+	}
+	if _, exists := topologyInfo.domainIndex[string(policy.Domain)]; !exists {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("domain"),
+			policy.Domain,
+			fmt.Sprintf("does not exist in ClusterTopologyBinding %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
+		))
+	}
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentUpdate validates an update. newDGD and oldDGD must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentUpdate(
+	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, v.validateObjectMetaUpdate(
+		&newDGD.ObjectMeta,
+		&oldDGD.ObjectMeta,
+		field.NewPath("metadata"),
+	)...)
+	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpecUpdate(
+		&newDGD.Spec,
+		&oldDGD.Spec,
+		field.NewPath("spec"),
+	)...)
+
+	if oldDGD.Status.RollingUpdate != nil {
+		phase := oldDGD.Status.RollingUpdate.Phase
+		if phase == nvidiacomv1beta1.RollingUpdatePhasePending || phase == nvidiacomv1beta1.RollingUpdatePhaseInProgress {
+			oldID := k8sptr.Deref(oldDGD.Spec.Restart, nvidiacomv1beta1.Restart{}).ID
+			newID := k8sptr.Deref(newDGD.Spec.Restart, nvidiacomv1beta1.Restart{}).ID
+			if oldID != newID {
+				allErrs = append(allErrs, field.Invalid(
+					field.NewPath("spec", "restart", "id"),
+					newID,
+					fmt.Sprintf("cannot be changed while a rolling update is %s", phase),
+				))
+			}
+		}
+	}
+	return allErrs
+}
+
+// validateObjectMetaUpdate validates a DGD metadata update.
+// newObjectMeta, oldObjectMeta, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
+	newObjectMeta *metav1.ObjectMeta,
+	oldObjectMeta *metav1.ObjectMeta,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	annotationsPath := fldPath.Child("annotations")
+	newProvider, newProviderExists := newObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
+	oldProvider, oldProviderExists := oldObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
+
+	// Reserve the initial legacy-provider materialization for the configured operator identity.
+	if !oldProviderExists && newProviderExists && v.operatorPrincipal != "" &&
+		(v.userInfo == nil || v.userInfo.Username != v.operatorPrincipal) {
+		allErrs = append(allErrs, field.Forbidden(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			"may only be materialized by the Dynamo operator",
+		))
+	}
+
+	// A newly materialized provider must name a program the controller
+	// implements. The create-side metadata rules do not run while an object is
+	// terminating, so this has to hold on the update path as well. Only
+	// materialization needs it: once a provider exists, the immutability rule
+	// below rejects any change to it, so checking the value again there would
+	// report the same annotation twice.
+	if !oldProviderExists && newProviderExists &&
+		!isSupportedWorkloadProvider(newProvider) {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			newProvider,
+			supportedWorkloadProviders(),
+		))
+	}
+
+	// Once materialized, the workload provider cannot be replaced or removed.
+	if oldProviderExists && (!newProviderExists || newProvider != oldProvider) {
+		var invalidValue any
+		if newProviderExists {
+			invalidValue = newProvider
+		}
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
+
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentSpecUpdate validates a spec update. newSpec, oldSpec, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdate(
+	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
+	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Keep an existing root provider identity stable across updates.
+	if newSpec.ProviderOverride != nil && oldSpec.ProviderOverride != nil {
+		allErrs = append(allErrs, validateProviderOverrideUpdate(
+			newSpec.ProviderOverride,
+			oldSpec.ProviderOverride,
+			fldPath.Child("providerOverride"),
+		)...)
+	}
+
+	newComponents := componentsByName(newSpec.Components)
+	oldComponents := componentsByName(oldSpec.Components)
+
+	added := difference(componentNameSet(newComponents), componentNameSet(oldComponents))
+	removed := difference(componentNameSet(oldComponents), componentNameSet(newComponents))
 	sort.Strings(added)
 	sort.Strings(removed)
-
-	// Build descriptive error message
-	var errMsg string
-	switch {
-	case len(added) > 0 && len(removed) > 0:
-		errMsg = fmt.Sprintf(
-			"service topology is immutable and cannot be modified after creation: "+
-				"services added: %v, services removed: %v",
-			added, removed)
-	case len(added) > 0:
-		errMsg = fmt.Sprintf(
-			"service topology is immutable and cannot be modified after creation: "+
-				"services added: %v",
-			added)
-	case len(removed) > 0:
-		errMsg = fmt.Sprintf(
-			"service topology is immutable and cannot be modified after creation: "+
-				"services removed: %v",
-			removed)
-	}
-
-	return errors.New(errMsg)
-}
-
-// validateReplicasChanges checks if replicas were changed for services with scaling adapter enabled.
-// Only authorized service accounts (operator controller, planner) can modify these fields.
-// If userInfo is nil, all replica changes for DGDSA-enabled services are rejected (fail closed).
-func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) error {
-	// If the request comes from an authorized service account, allow the change
-	if userInfo != nil && internalwebhook.CanModifyDGDReplicas(*userInfo) {
-		return nil
-	}
-
-	var errs []error
-
-	for serviceName, newService := range v.deployment.Spec.Services {
-		// Check if scaling adapter is enabled for this service (disabled by default)
-		scalingAdapterEnabled := newService.ScalingAdapter != nil && newService.ScalingAdapter.Enabled
-
-		if !scalingAdapterEnabled {
-			// Scaling adapter is not enabled, users can modify replicas directly
-			continue
-		}
-
-		// Get old service (if exists)
-		oldService, exists := old.Spec.Services[serviceName]
-		if !exists {
-			// New service, no comparison needed
-			continue
-		}
-
-		// Check if replicas changed
-		oldReplicas := int32(1) // default
-		if oldService.Replicas != nil {
-			oldReplicas = *oldService.Replicas
-		}
-
-		newReplicas := int32(1) // default
-		if newService.Replicas != nil {
-			newReplicas = *newService.Replicas
-		}
-
-		if oldReplicas != newReplicas {
-			errs = append(errs, fmt.Errorf(
-				"spec.services[%s].replicas cannot be modified directly when scaling adapter is enabled; "+
-					"scale or update the related DynamoGraphDeploymentScalingAdapter instead",
-				serviceName))
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-// validateService validates a single service configuration using SharedSpecValidator.
-// Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
-	// Validate service name length constraints for Grove PodCliqueSet naming
-	// Only validate when Grove pathway may be in use
-	if v.isGrovePathway() {
-		if err := v.validateServiceNameLength(serviceName, service); err != nil {
-			return nil, err
-		}
-	}
-
-	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
-	fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
-	calculatedNamespace := v.deployment.GetDynamoNamespaceForService(service)
-
-	var sharedValidator *SharedSpecValidator
-	if v.mgr != nil {
-		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr)
-	} else {
-		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
-	}
-
-	return sharedValidator.Validate(ctx)
-}
-
-// validateServiceNameLength validates that the service name combined with the DGD name
-// won't exceed Grove's 45-character limit for resource naming.
-//
-// Grove generates PodCliqueSet resources with the following naming patterns:
-// - PodCliqueSet name: DGD name (e.g., "vllm-agg")
-// - For multinode services:
-//   - PodCliqueScalingGroup name: lowercase(serviceName) (e.g., "vllmprefillworker")
-//   - PodClique names: lowercase(serviceName + "-ldr") and lowercase(serviceName + "-wkr")
-//
-// - For single-node services:
-//   - PodClique name: lowercase(serviceName)
-//
-// The combined length of these names must not exceed 45 characters.
-func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
-	dgdName := v.deployment.Name
-	lowerServiceName := strings.ToLower(serviceName)
-
-	// Check if this is a multinode service
-	isMultinode := service.GetNumberOfNodes() > 1
-
-	if isMultinode {
-		// For multinode: PodCliqueSet name + PodCliqueScalingGroup name + PodClique name (with leader suffix)
-		// The PodClique name is serviceName + "-ldr" (using GroveRoleSuffixLeader)
-		leaderPodCliqueName := lowerServiceName + "-" + consts.GroveRoleSuffixLeader
-		combinedLength := len(dgdName) + len(lowerServiceName) + len(leaderPodCliqueName)
-
-		if combinedLength > maxCombinedResourceNameLength {
-			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
-				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
-				"For multinode services, the combined length of DGD name + service name + service name with role suffix (e.g., '%s-ldr') must not exceed %d characters",
-				serviceName, combinedLength, maxCombinedResourceNameLength,
-				dgdName, len(dgdName), serviceName, len(serviceName),
-				lowerServiceName, maxCombinedResourceNameLength)
-		}
-	} else {
-		// For single-node: PodCliqueSet name + PodClique name
-		combinedLength := len(dgdName) + len(lowerServiceName)
-
-		if combinedLength > maxCombinedResourceNameLength {
-			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
-				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
-				"The combined length of DGD name + service name must not exceed %d characters",
-				serviceName, combinedLength, maxCombinedResourceNameLength,
-				dgdName, len(dgdName), serviceName, len(serviceName),
-				maxCombinedResourceNameLength)
-		}
-	}
-
-	return nil
-}
-
-// isGrovePathway determines if Grove pathway may be used for this deployment.
-// Grove is used when the nvidia.com/enable-grove annotation is NOT explicitly set to "false".
-// This is a conservative check - if Grove might be used, we validate the name length constraints.
-func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
-	return v.deployment.Annotations == nil ||
-		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
-}
-
-// validatePVCs validates the PVC configurations.
-func (v *DynamoGraphDeploymentValidator) validatePVCs() error {
-	for i, pvc := range v.deployment.Spec.PVCs {
-		if err := v.validatePVC(i, &pvc); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// validatePVC validates a single PVC configuration.
-func (v *DynamoGraphDeploymentValidator) validatePVC(index int, pvc *nvidiacomv1alpha1.PVC) error {
-	var err error
-
-	// Validate name is not nil
-	if pvc.Name == nil || *pvc.Name == "" {
-		err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].name is required", index))
-	}
-
-	// Check if create is true
-	if pvc.Create != nil && *pvc.Create {
-		// Validate required fields when create is true
-		if pvc.StorageClass == "" {
-			err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].storageClass is required when create is true", index))
-		}
-
-		if pvc.Size.IsZero() {
-			err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].size is required when create is true", index))
-		}
-
-		if pvc.VolumeAccessMode == "" {
-			err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].volumeAccessMode is required when create is true", index))
-		}
-	}
-
-	return err
-}
-
-func (v *DynamoGraphDeploymentValidator) validateRestart() error {
-	if v.deployment.Spec.Restart == nil {
-		return nil
-	}
-
-	restart := v.deployment.Spec.Restart
-
-	var err error
-	if restart.ID == "" {
-		err = errors.Join(err, fmt.Errorf("spec.restart.id is required"))
-	}
-
-	return errors.Join(err, v.validateRestartStrategyOrder())
-}
-
-func (v *DynamoGraphDeploymentValidator) validateRestartStrategyOrder() error {
-	restart := v.deployment.Spec.Restart
-	if restart.Strategy == nil || len(restart.Strategy.Order) == 0 {
-		return nil
-	}
-
-	if restart.Strategy.Type == nvidiacomv1alpha1.RestartStrategyTypeParallel {
-		return errors.New("spec.restart.strategy.order cannot be specified when strategy is parallel")
-	}
-
-	var err error
-
-	uniqueOrder := getUnique(restart.Strategy.Order)
-
-	if len(uniqueOrder) != len(restart.Strategy.Order) {
-		err = errors.Join(err, fmt.Errorf("spec.restart.strategy.order must be unique"))
-	}
-
-	if len(uniqueOrder) != len(v.deployment.Spec.Services) {
-		err = errors.Join(err, fmt.Errorf("spec.restart.strategy.order must have the same number of unique services as the deployment"))
-	}
-
-	for _, serviceName := range uniqueOrder {
-		if _, exists := v.deployment.Spec.Services[serviceName]; !exists {
-			err = errors.Join(err, fmt.Errorf("spec.restart.strategy.order contains unknown service: %s", serviceName))
-		}
-	}
-
-	return err
-}
-
-// validateAnnotations validates known DGD annotations have valid values.
-func (v *DynamoGraphDeploymentValidator) validateAnnotations() error {
-	annotations := v.deployment.GetAnnotations()
-	if annotations == nil {
-		return nil
-	}
-
-	var errs []error
-
-	// Validate operator origin version is valid semver (if present)
-	if value, exists := annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
-		if _, err := semver.NewVersion(value); err != nil {
-			errs = append(errs, fmt.Errorf("annotation %s has invalid value %q: must be valid semver",
-				consts.KubeAnnotationDynamoOperatorOriginVersion, value))
-		}
-	}
-
-	// Validate vLLM distributed executor backend override
-	if value, exists := annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]; exists {
-		switch strings.ToLower(value) {
-		case "mp", "ray":
-			// valid
+	if len(added) != 0 || len(removed) != 0 {
+		detail := "component topology is immutable and cannot be modified after creation"
+		switch {
+		case len(added) != 0 && len(removed) != 0:
+			detail = fmt.Sprintf("%s: components added: %v, components removed: %v", detail, added, removed)
+		case len(added) != 0:
+			detail = fmt.Sprintf("%s: components added: %v", detail, added)
 		default:
-			errs = append(errs, fmt.Errorf("annotation %s has invalid value %q: must be \"mp\" or \"ray\"",
-				consts.KubeAnnotationVLLMDistributedExecutorBackend, value))
+			detail = fmt.Sprintf("%s: components removed: %v", detail, removed)
+		}
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("components"), detail))
+	}
+
+	canModifyReplicas := v.userInfo != nil && internalwebhook.CanModifyDGDReplicas(v.operatorPrincipal, *v.userInfo)
+	const validateGPUMemoryServiceNewState = true // DGD updates do not run the stateless new-state traversal.
+	componentsPath := fldPath.Child("components")
+	for i := range newSpec.Components {
+		newComponent := &newSpec.Components[i]
+		oldComponent, exists := oldComponents[newComponent.ComponentName]
+		if !exists {
+			continue
+		}
+
+		// Ratchet the shared multinode type contract because DGD updates skip the stateless traversal.
+		allErrs = append(allErrs, validateMultinodeComponentType(
+			newComponent,
+			oldComponent,
+			componentsPath.Index(i).Child("multinode"),
+		)...)
+
+		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdate(
+			newComponent,
+			oldComponent,
+			componentsPath.Index(i),
+			canModifyReplicas,
+			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
+			validateGPUMemoryServiceNewState,
+		)...)
+		allErrs = append(allErrs, v.validateDynamoGraphDeploymentSharedSpecUpdate(
+			newComponent,
+			oldComponent,
+			componentsPath.Index(i),
+		)...)
+	}
+
+	if newSpec.BackendFramework != oldSpec.BackendFramework {
+		v.warn("Changing spec.backendFramework may cause unexpected behavior")
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("backendFramework"),
+			newSpec.BackendFramework,
+			"is immutable and cannot be changed after creation",
+		))
+	}
+
+	topologyPath := fldPath.Child("topologyConstraint")
+	if newSpec.TopologyConstraint != nil {
+		allErrs = append(allErrs, v.validateSpecTopologyConstraintUpdate(
+			newSpec.TopologyConstraint,
+			oldSpec.TopologyConstraint,
+			topologyPath,
+		)...)
+	} else if oldSpec.TopologyConstraint != nil {
+		allErrs = append(allErrs, field.Invalid(
+			topologyPath,
+			newSpec.TopologyConstraint,
+			"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints",
+		))
+	}
+
+	if newSpec.Experimental != nil {
+		allErrs = append(allErrs, v.validateDynamoGraphDeploymentExperimentalSpecUpdate(
+			newSpec.Experimental,
+			oldSpec.Experimental,
+			fldPath.Child("experimental"),
+		)...)
+	} else if oldPolicy := kvTransferPolicyFor(oldSpec.Experimental); oldPolicy != nil {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("experimental", "kvTransferPolicy"),
+			newSpec.Experimental,
+			"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy",
+		))
+	}
+
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentSharedSpecUpdate validates DGD-specific component fields on update.
+// newComponent, oldComponent, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpecUpdate(
+	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	newPowerLimit, newHasPowerLimit := dgdPowerLimit(newComponent)
+	oldPowerLimit, oldHasPowerLimit := dgdPowerLimit(oldComponent)
+
+	// Reject transitions into, out of, or within the power-annotation contract.
+	if newHasPowerLimit != oldHasPowerLimit ||
+		(newHasPowerLimit && newPowerLimit != oldPowerLimit) {
+		var invalidValue any
+		if newHasPowerLimit {
+			invalidValue = newPowerLimit
+		}
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
+
+	if oldHasPowerLimit {
+		// Keep the Planner's remaining cached per-replica power inputs stable.
+		newNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(newComponent, fldPath)
+		oldNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(oldComponent, fldPath)
+		if !newNumberOfGPUs.equal(oldNumberOfGPUs) {
+			allErrs = append(allErrs, field.Invalid(
+				newNumberOfGPUs.path,
+				newNumberOfGPUs.invalidValue(),
+				apivalidation.FieldImmutableErrorMsg,
+			))
 		}
 	}
-
-	return errors.Join(errs...)
+	return allErrs
 }
 
-func getUnique[T comparable](slice []T) []T {
-	seen := make(map[T]struct{}, len(slice))
-	uniqueSlice := make([]T, 0, len(slice))
-	for _, element := range slice {
-		if _, exists := seen[element]; !exists {
-			seen[element] = struct{}{}
-			uniqueSlice = append(uniqueSlice, element)
-		}
-	}
-	return uniqueSlice
-}
-
-// getServiceNames extracts service names from a services map.
-// Returns a set-like map for efficient lookup and comparison.
-func getServiceNames(services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) map[string]struct{} {
-	names := make(map[string]struct{}, len(services))
-	for name := range services {
-		names[name] = struct{}{}
-	}
-	return names
-}
-
-// difference returns elements in set a that are not in set b (a - b).
-// This is used to find added or removed services.
-func difference(a, b map[string]struct{}) []string {
-	var result []string
-	for name := range a {
-		if _, exists := b[name]; !exists {
-			result = append(result, name)
-		}
-	}
-	return result
-}
-
-// validateNoRestartDuringRollingUpdate rejects restart.id changes while a rolling update is active.
-func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment) error {
-	// Check if a rolling update is active (Pending or InProgress)
-	if old.Status.RollingUpdate == nil {
+// validateSpecTopologyConstraintUpdate validates a topology constraint update.
+// newConstraint and fldPath must not be nil; oldConstraint may be nil for an addition.
+func (v *dynamoGraphDeploymentValidation) validateSpecTopologyConstraintUpdate(
+	newConstraint *nvidiacomv1beta1.SpecTopologyConstraint,
+	oldConstraint *nvidiacomv1beta1.SpecTopologyConstraint,
+	fldPath *field.Path,
+) field.ErrorList {
+	if oldConstraint != nil &&
+		newConstraint.ClusterTopologyName == oldConstraint.ClusterTopologyName &&
+		newConstraint.PackDomain == oldConstraint.PackDomain {
 		return nil
 	}
-	phase := old.Status.RollingUpdate.Phase
-	if phase != nvidiacomv1alpha1.RollingUpdatePhasePending && phase != nvidiacomv1alpha1.RollingUpdatePhaseInProgress {
+	return field.ErrorList{field.Invalid(
+		fldPath,
+		newConstraint,
+		"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints",
+	)}
+}
+
+// validateDynamoGraphDeploymentExperimentalSpecUpdate validates an experimental spec update.
+// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentExperimentalSpecUpdate(
+	newExperimental *nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec,
+	oldExperimental *nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	newPolicy := newExperimental.KvTransferPolicy
+	oldPolicy := kvTransferPolicyFor(oldExperimental)
+	if newPolicy != nil {
+		return v.validateKvTransferPolicyUpdate(newPolicy, oldPolicy, fldPath.Child("kvTransferPolicy"))
+	}
+	if oldPolicy == nil {
 		return nil
 	}
+	return field.ErrorList{field.Invalid(
+		fldPath.Child("kvTransferPolicy"),
+		newPolicy,
+		"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy",
+	)}
+}
 
-	// Compare restart IDs
-	oldID := ""
-	if old.Spec.Restart != nil {
-		oldID = old.Spec.Restart.ID
+// validateKvTransferPolicyUpdate validates a policy update.
+// newPolicy and fldPath must not be nil; oldPolicy may be nil for an addition.
+func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicyUpdate(
+	newPolicy *nvidiacomv1beta1.KvTransferPolicy,
+	oldPolicy *nvidiacomv1beta1.KvTransferPolicy,
+	fldPath *field.Path,
+) field.ErrorList {
+	if kvTransferPoliciesEqual(newPolicy, oldPolicy) {
+		return nil
 	}
-	newID := ""
-	if v.deployment.Spec.Restart != nil {
-		newID = v.deployment.Spec.Restart.ID
-	}
+	return field.ErrorList{field.Invalid(
+		fldPath,
+		newPolicy,
+		"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy",
+	)}
+}
 
-	if oldID != newID {
-		return fmt.Errorf("spec.restart.id cannot be changed while a rolling update is %s", phase)
+// validateDGDComponentPowerAnnotation validates the power-limit annotation value and
+// its incompatibility with DRA-backed GPU allocation on a single component.
+// component and componentPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDGDComponentPowerAnnotation(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	componentPath *field.Path,
+) field.ErrorList {
+	powerLimitValue, hasPowerLimit := dgdPowerLimit(component)
+	if !hasPowerLimit {
+		return nil
 	}
-
-	return nil
+	var allErrs field.ErrorList
+	powerLimitPath := componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit)
+	if err := validateDGDPowerLimitValue(powerLimitValue, powerLimitPath); err != nil {
+		allErrs = append(allErrs, err)
+	}
+	if draPath := dgdDRAPath(component, componentPath); draPath != nil {
+		allErrs = append(allErrs, field.Forbidden(
+			draPath,
+			fmt.Sprintf(
+				"cannot be combined with annotation %q: power-aware planning does not support DRA-backed device allocation",
+				consts.KubeAnnotationGPUPowerLimit,
+			),
+		))
+	}
+	return allErrs
 }

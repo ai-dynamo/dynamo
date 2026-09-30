@@ -9,7 +9,7 @@ import uvloop
 from transformers import AutoTokenizer
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
@@ -60,6 +60,7 @@ async def main(runtime: DistributedRuntime):
         model_name,
         model_name=model_name,
         custom_template_path=str(template_path),
+        worker_type=WorkerType.Aggregated,
     )
 
     # Create handler and serve

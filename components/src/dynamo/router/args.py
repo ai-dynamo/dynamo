@@ -4,26 +4,35 @@
 """Router CLI parsing, config, and assembly for the standalone router."""
 
 import argparse
+import os
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
+from dynamo.common.configuration.groups.ais_perf_args import (
+    AisPerfArgGroup,
+    AisPerfConfigBase,
+)
 from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.utils import add_argument
-from dynamo.llm import KvRouterConfig
+from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.utils.namespace import get_worker_namespace
+from dynamo.llm import AisPerfConfig, KvRouterConfig
 
 
-class DynamoRouterConfig(KvRouterConfigBase):
+class DynamoRouterConfig(KvRouterConfigBase, AisPerfConfigBase):
     """Typed configuration for the standalone KV router (router-owned options only)."""
 
     namespace: str
     endpoint: str
     router_block_size: int
+    serve_indexer: bool = False
 
     def validate(self) -> None:
         """Validate config invariants (aligned with Rust KvRouterConfig where applicable)."""
+        self.apply_router_config()
+
         if not self.endpoint:
             raise ValueError(
                 "endpoint is required (set --endpoint or DYN_ROUTER_ENDPOINT)"
@@ -35,7 +44,37 @@ class DynamoRouterConfig(KvRouterConfigBase):
                 f"Invalid endpoint format: {self.endpoint!r}. "
                 "Expected format: namespace.component.endpoint"
             )
-        self.namespace = parts[0]
+        endpoint_namespace, component, endpoint_name = parts
+        self.namespace = os.environ.get("DYN_NAMESPACE") or endpoint_namespace
+
+        worker_namespace = get_worker_namespace(self.namespace)
+        if worker_namespace != endpoint_namespace:
+            self.endpoint = f"{worker_namespace}.{component}.{endpoint_name}"
+
+        if self.serve_indexer and self.use_remote_indexer:
+            raise ValueError(
+                "--serve-indexer and --use-remote-indexer are mutually exclusive"
+            )
+        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
+            raise ValueError(
+                "--ais-perf-config requires --router-prefill-load-model=ais"
+            )
+        if self.router_prefill_load_model == "ais":
+            self.ais_perf_kwargs()
+            if not self.router_track_prefill_tokens:
+                raise ValueError(
+                    "--router-prefill-load-model=ais requires "
+                    "--router-track-prefill-tokens"
+                )
+        if (
+            self.conditional_disagg_enabled
+            or self.conditional_disagg_config is not None
+        ):
+            raise ValueError(
+                "--router-conditional-disagg is only supported by dynamo.frontend "
+                "disaggregated serving; standalone dynamo.router does not run "
+                "conditional disaggregation"
+            )
 
 
 class DynamoRouterArgGroup(ArgGroup):
@@ -66,13 +105,31 @@ class DynamoRouterArgGroup(ArgGroup):
             obsolete_flag="--block-size",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--serve-indexer",
+            env_var="DYN_SERVE_INDEXER",
+            default=False,
+            help="Serve this router's local KV indexer over the request plane.",
+            dest="serve_indexer",
+        )
+
         # KV router options (shared with dynamo.frontend)
         KvRouterArgGroup().add_arguments(parser)
+        AisPerfArgGroup().add_arguments(parser)
 
 
 def build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig:
     """Build KvRouterConfig from DynamoRouterConfig."""
     return KvRouterConfig(**router_config.kv_router_kwargs())
+
+
+def build_ais_perf_config(
+    router_config: DynamoRouterConfig,
+) -> AisPerfConfig | None:
+    if router_config.router_prefill_load_model != "ais":
+        return None
+    return AisPerfConfig(**router_config.ais_perf_kwargs())
 
 
 def parse_args(argv: Optional[list[str]] = None) -> DynamoRouterConfig:

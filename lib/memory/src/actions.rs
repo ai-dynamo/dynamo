@@ -107,7 +107,7 @@ pub trait Slice: MemoryDescriptor + 'static {
     ///
     /// # Safety
     /// The caller must ensure:
-    /// - offset + (len * size_of::<T>()) <= self.size()
+    /// - offset + (len * `size_of::<T>()`) <= self.size()
     /// - offset is properly aligned for type T
     /// - The memory region is valid and initialized
     /// - No concurrent mutable access occurs while the slice is in use
@@ -212,7 +212,7 @@ pub trait SliceMut: MemoryDescriptor + 'static {
     ///
     /// # Safety
     /// The caller must ensure:
-    /// - offset + (len * size_of::<T>()) <= self.size()
+    /// - offset + (len * `size_of::<T>()`) <= self.size()
     /// - offset is properly aligned for type T
     /// - The memory region is valid
     /// - No other references (mutable or immutable) exist to this memory region

@@ -4,7 +4,7 @@
 import logging
 import time
 from contextlib import contextmanager
-from typing import Callable
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +32,8 @@ class Timer:
 
     def __init__(
         self,
-        interval_func: Callable[[float], None] = None,
-        stop_func: Callable[[float], None] = None,
+        interval_func: Optional[Callable[[float], None]] = None,
+        stop_func: Optional[Callable[[float], None]] = None,
     ):
         """Initialize the Timer and start timing immediately.
 

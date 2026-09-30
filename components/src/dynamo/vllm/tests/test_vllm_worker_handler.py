@@ -1,0 +1,2551 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Unit tests for WorkerHandler in combination with multimodal handling."""
+# [gluo FIXME] This suite of tests is added for MultimodalPDWorkerHandler,
+# which is now removed. Yet the concept of this tests is still valid that
+# we need to have unit tests for the worker handlers.
+# Need to revisit the tests and update them to test the worker handlers.
+
+import asyncio
+import base64
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import numpy as np
+import pytest
+import torch
+
+import dynamo.vllm.handlers as mod
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
+from dynamo.vllm.multimodal_utils.protocol import (
+    PatchedTokensPrompt,
+    vLLMMultimodalRequest,
+)
+from dynamo.vllm.multimodal_utils.request_processor import (
+    PreparedMultimodalInput,
+    VllmMultimodalRequestProcessor,
+)
+
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.gpu_0,
+    pytest.mark.multimodal,
+]
+
+
+def test_rl_weight_world_size_accepts_tensor_parallel_topology():
+    parallel_config = SimpleNamespace(
+        data_parallel_size=1,
+        distributed_executor_backend="mp",
+        world_size=4,
+    )
+
+    assert mod.resolve_rl_weight_world_size(parallel_config) == 4
+
+
+@pytest.mark.parametrize(
+    "parallel_config",
+    [
+        SimpleNamespace(
+            data_parallel_size=2,
+            distributed_executor_backend="mp",
+            world_size=4,
+        ),
+        SimpleNamespace(
+            data_parallel_size=1,
+            distributed_executor_backend="external_launcher",
+            world_size=4,
+        ),
+    ],
+)
+def test_rl_weight_world_size_rejects_unsupported_topologies(parallel_config):
+    with pytest.raises(ValueError, match="data parallelism and external launcher"):
+        mod.resolve_rl_weight_world_size(parallel_config)
+
+
+def test_native_generate_cache_salt_applies_to_prefill_prompt():
+    request = {
+        "extra_args": {"vllm_tito": {"cache_salt": "policy-7"}},
+    }
+    prompt = {"prompt_token_ids": [1, 2, 3]}
+
+    mod._apply_nvext_cache_salt(request, prompt)
+
+    assert prompt["cache_salt"] == "dynamo-cache-salt:policy-7"
+
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _make_config(
+    model: str = "test-model",
+    enable_multimodal: bool = True,
+    multimodal_embedding_cache_capacity_gb: float = 0,
+    disaggregation_mode: str | None = None,
+) -> MagicMock:
+    """Create a mock Config with the fields used by MultimodalPDWorkerHandler."""
+    from dynamo.vllm.constants import DisaggregationMode, EmbeddingTransferMode
+
+    config = MagicMock()
+    config.model = model
+    if disaggregation_mode is not None:
+        config.disaggregation_mode = getattr(DisaggregationMode, disaggregation_mode)
+    else:
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+    # NIXL_WRITE / NIXL_READ modes require GPU, the tests may run in CPU-only environments,
+    # so set to LOCAL mode.
+    config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
+    config.enable_multimodal = enable_multimodal
+    config.enable_rl = False
+    config.multimodal_embedding_cache_capacity_gb = (
+        multimodal_embedding_cache_capacity_gb
+    )
+    config.engine_args.create_model_config.return_value.get_diff_sampling_param.return_value = (
+        {}
+    )
+    return config
+
+
+def _make_handler(
+    config: MagicMock | None = None,
+    encode_worker_client: MagicMock | None = None,
+    decode_worker_client: MagicMock | None = None,
+) -> mod.DecodeWorkerHandler:
+    """Construct a handler with BaseWorkerHandler.__init__ bypassed."""
+    if config is None:
+        config = _make_config()
+    model_config = MagicMock(enable_prompt_embeds=True)
+    with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
+        handler = mod.DecodeWorkerHandler(
+            runtime=MagicMock(),
+            config=config,
+            engine=MagicMock(),
+            default_sampling_params={},
+            model_config=model_config,
+            encode_worker_client=encode_worker_client,
+        )
+    handler.model_config = model_config
+    handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model=config.model,
+        enable_multimodal=config.enable_multimodal,
+        use_unified_vision_chunk=False,
+    )
+    # BaseWorkerHandler.__init__ is bypassed above; the decode generate path
+    # registers per-request deferred-abort guards here.
+    handler._deferred_aborts = {}
+    handler._weight_version = mod._WEIGHT_VERSION_UNDECLARED
+    return handler
+
+
+def _make_raw_frontend_request(image_urls: list[str] | None = None) -> dict:
+    """Build a raw dict that mimics what the Rust frontend sends."""
+    mm_data = None
+    if image_urls:
+        mm_data = {
+            "image_url": [{"Url": url} for url in image_urls],
+        }
+    return {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": mm_data,
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+
+def _make_vllm_request(request_id: str = "req-1") -> vLLMMultimodalRequest:
+    """Build a minimal vLLMMultimodalRequest."""
+    from vllm.sampling_params import SamplingParams
+
+    return vLLMMultimodalRequest(
+        engine_prompt=PatchedTokensPrompt(prompt_token_ids=[1, 2, 3]),
+        sampling_params=SamplingParams(),
+        request_id=request_id,
+        multimodal_inputs=[],
+    )
+
+
+def _make_engine_response(request_id: str = "req-1", finished: bool = True):
+    """Create a mock engine response with the fields _format_engine_output needs."""
+    resp = MagicMock()
+    resp.request_id = request_id
+    resp.prompt = "test"
+    resp.prompt_token_ids = [1, 2, 3]
+    resp.prompt_logprobs = None
+    resp.outputs = []
+    resp.finished = finished
+    resp.metrics = None
+    resp.kv_transfer_params = {"do_remote_decode": False}
+    return resp
+
+
+@pytest.mark.parametrize(
+    ("disaggregation_mode", "expected_worker_type"),
+    [
+        (None, mod.WorkerType.Aggregated),
+        ("PREFILL", mod.WorkerType.Prefill),
+        ("DECODE", mod.WorkerType.Decode),
+    ],
+)
+def test_lora_discovery_publishes_engine_generate_capability(
+    disaggregation_mode, expected_worker_type
+):
+    config = _make_config(disaggregation_mode=disaggregation_mode)
+    handler = _make_handler(config)
+    handler.config = config
+    handler.generate_endpoint = MagicMock()
+    handler.dp_range = (0, 1)
+    handler.model_max_len = 4096
+    handler.config.route_to_encoder = False
+    handler.config.engine_args.max_loras = 2
+    handler.engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            lora_config=SimpleNamespace(enable_tower_connector_lora=True)
+        )
+    )
+    runtime_config = MagicMock()
+
+    with (
+        patch.object(mod, "ModelRuntimeConfig", return_value=runtime_config),
+        patch.object(mod, "apply_data_parallel_runtime_config"),
+        patch.object(mod, "publish_kv_hint_capabilities"),
+        patch.object(mod, "publish_vllm_token_budget"),
+        patch.object(mod, "state_agent_settings", return_value=None),
+        patch.object(mod, "get_configured_kv_event_block_size", return_value=16),
+        patch.object(
+            mod,
+            "publish_engine_generate_capability",
+            create=True,
+            return_value=True,
+        ) as publish_generate,
+        patch.object(mod, "register_model", new=AsyncMock()) as register_model,
+    ):
+        asyncio.run(handler._register_lora_discovery("adapter-v1", 42))
+
+    if expected_worker_type == mod.WorkerType.Prefill:
+        publish_generate.assert_not_called()
+    else:
+        publish_generate.assert_called_once()
+        (
+            runtime_arg,
+            input_arg,
+            model_type_arg,
+            worker_arg,
+            tower_lora_arg,
+        ) = publish_generate.call_args.args
+        assert runtime_arg is runtime_config
+        assert input_arg == mod.ModelInput.Tokens
+        assert model_type_arg.supports_chat()
+        assert worker_arg == expected_worker_type
+        assert tower_lora_arg is True
+    assert register_model.await_args.kwargs["runtime_config"] is runtime_config
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_resets_vllm_external_cache():
+    handler = _make_handler()
+    handler.engine_client = SimpleNamespace(
+        reset_prefix_cache=AsyncMock(return_value=True)
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks()]
+
+    assert chunks == [{"status": "success", "message": "KV cache cleared"}]
+    handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+        reset_connector=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_reports_reset_failure():
+    handler = _make_handler()
+    handler.engine_client = SimpleNamespace(
+        reset_prefix_cache=AsyncMock(return_value=False)
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks()]
+
+    assert chunks == [{"status": "error", "message": "KV cache reset failed"}]
+    handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+        reset_connector=True
+    )
+
+
+class TestReasoningParserForwarding:
+    def test_request_reasoning_metadata_reads_extra_args(self):
+        request = {
+            "extra_args": {
+                "reasoning_ended": False,
+                "reasoning_parser_kwargs": {
+                    "chat_template_kwargs": {"reasoning_effort": "high"}
+                },
+            }
+        }
+
+        assert mod._request_reasoning_metadata(request) == (
+            False,
+            {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        )
+
+    def test_generate_signature_support_is_cached(self, monkeypatch):
+        class EngineClient:
+            def generate(
+                self,
+                prompt,
+                sampling_params,
+                request_id,
+                *,
+                reasoning_ended=None,
+                reasoning_parser_kwargs=None,
+            ):
+                pass
+
+        engine_client = EngineClient()
+        signature_calls = 0
+        original_signature = mod.inspect.signature
+
+        def counting_signature(obj):
+            nonlocal signature_calls
+            signature_calls += 1
+            return original_signature(obj)
+
+        monkeypatch.setattr(mod.inspect, "signature", counting_signature)
+
+        assert mod._engine_generate_reasoning_kwargs(
+            engine_client,
+            False,
+            {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        ) == {
+            "reasoning_ended": False,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+        }
+        assert mod._engine_generate_reasoning_kwargs(
+            engine_client,
+            True,
+            {"chat_template_kwargs": {"reasoning_effort": "low"}},
+        ) == {
+            "reasoning_ended": True,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "low"}
+            },
+        }
+        assert signature_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_forwards_reasoning_parser_metadata(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        calls = {}
+
+        async def fake_generate(
+            prompt,
+            sampling_params,
+            request_id,
+            *,
+            lora_request=None,
+            data_parallel_rank=None,
+            trace_headers=None,
+            priority=0,
+            session_id=None,
+            reasoning_ended=None,
+            reasoning_parser_kwargs=None,
+        ):
+            calls["reasoning_ended"] = reasoning_ended
+            calls["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+            if False:
+                yield None
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=1),
+            "req-1",
+            reasoning_ended=False,
+            reasoning_parser_kwargs={
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+        ):
+            chunks.append(chunk)
+
+        assert chunks == []
+        assert calls == {
+            "reasoning_ended": False,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_drops_reasoning_metadata_for_old_vllm(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        calls = {}
+
+        async def fake_generate(
+            prompt,
+            sampling_params,
+            request_id,
+            *,
+            lora_request=None,
+            data_parallel_rank=None,
+            trace_headers=None,
+            priority=0,
+            session_id=None,
+        ):
+            calls["called"] = True
+            if False:
+                yield None
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=1),
+            "req-1",
+            reasoning_ended=True,
+            reasoning_parser_kwargs={
+                "chat_template_kwargs": {"reasoning_effort": "low"}
+            },
+        ):
+            chunks.append(chunk)
+
+        assert chunks == []
+        assert calls == {"called": True}
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_emits_routed_experts_on_final_chunk(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        routed_experts = np.array([[[1]], [[2]]], dtype=np.int16)
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        routed_experts=None,
+                        finish_reason=None,
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+            # DELTA output_kind: each chunk carries only its own new token(s),
+            # and generate_tokens passes output.token_ids through verbatim — so
+            # the second chunk is the delta [12], not the cumulative [11, 12].
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=routed_experts,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=2),
+            "req-1",
+        ):
+            chunks.append(chunk)
+
+        assert [chunk["token_ids"] for chunk in chunks] == [[11], [12]]
+        # routed_experts must ride engine_data (where the Rust postprocessor's
+        # build_response_nvext reads it from), not disaggregated_params. It is
+        # only emitted on the final chunk.
+        assert "engine_data" not in chunks[0]
+        assert "disaggregated_params" not in chunks[1]
+        routed = chunks[1]["engine_data"]["routed_experts"]
+        assert routed["shape"] == [2, 1, 1]
+        assert routed["dtype"] == "int16"
+        # start defaults to 0 when routed_experts_prompt_start is unset.
+        assert routed["start"] == 0
+        decoded = np.frombuffer(
+            base64.b64decode(routed["data"]), dtype=np.dtype(routed["dtype"])
+        )
+        np.testing.assert_array_equal(decoded, routed_experts.reshape(-1))
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_emits_sampling_mask_only_on_final_chunk(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        routed_experts=None,
+                        sampling_mask=None,
+                        finish_reason=None,
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=None,
+                        sampling_mask=SimpleNamespace(token_ids=[[11, 21], [12, 22]]),
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=2),
+            "req-mask",
+        ):
+            chunks.append(chunk)
+
+        assert "engine_data" not in chunks[0]
+        assert chunks[1]["engine_data"]["sampling_mask"] == [[11, 21], [12, 22]]
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_emits_final_kv_transfer_params(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+                kv_transfer_params={"connector": "nixl"},
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_tokens(
+                PatchedTokensPrompt(prompt_token_ids=[1]),
+                SamplingParams(max_tokens=1),
+                "req-kv",
+            )
+        ]
+
+        assert chunks[-1]["engine_data"]["kv_transfer_params"] == {"connector": "nixl"}
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_rejects_sampling_mask_length_mismatch(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11, 12],
+                        routed_experts=None,
+                        sampling_mask=SimpleNamespace(token_ids=[[11]]),
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        with pytest.raises(ValueError, match="sampling mask"):
+            async for _ in handler.generate_tokens(
+                PatchedTokensPrompt(prompt_token_ids=[1]),
+                SamplingParams(max_tokens=2),
+                "req-mask",
+            ):
+                pass
+
+    async def test_generate_tokens_routed_experts_start_echoes_prompt_start(self):
+        """routed_experts.start echoes SamplingParams.routed_experts_prompt_start
+        (the offset vLLM trimmed) so the RL consumer can align the completion."""
+        from vllm.sampling_params import SamplingParams
+
+        # routed_experts_prompt_start is an RL-patch field; set it post-construct
+        # so the test runs against stock vLLM too (the worker reads it via
+        # getattr, defaulting to 0 when absent).
+        sampling_params = SamplingParams(max_tokens=1)
+        try:
+            sampling_params.routed_experts_prompt_start = 5
+        except (AttributeError, TypeError):
+            pytest.skip("installed vLLM has no routed_experts_prompt_start support")
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+        routed_experts = np.array([[[3]], [[4]]], dtype=np.int16)
+
+        # Prompt longer than the requested start, so the echoed offset is not
+        # clamped to the prompt length.
+        prompt_token_ids = [1, 2, 3, 4, 5, 6]
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=routed_experts,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=prompt_token_ids,
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=prompt_token_ids),
+            sampling_params,
+            "req-2",
+        ):
+            chunks.append(chunk)
+
+        assert chunks[-1]["engine_data"]["routed_experts"]["start"] == 5
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_routed_experts_start_clamped_to_prompt_len(self):
+        """An out-of-range routed_experts_prompt_start is clamped to the prompt
+        length (vLLM clamps the returned rows the same way)."""
+        from vllm.sampling_params import SamplingParams
+
+        sampling_params = SamplingParams(max_tokens=1)
+        try:
+            sampling_params.routed_experts_prompt_start = 99
+        except (AttributeError, TypeError):
+            pytest.skip("installed vLLM has no routed_experts_prompt_start support")
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+        routed_experts = np.array([[[3]], [[4]]], dtype=np.int16)
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=routed_experts,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2, 3],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1, 2, 3]),
+            sampling_params,
+            "req-3",
+        ):
+            chunks.append(chunk)
+
+        # start=99 clamped to prompt_len=3
+        assert chunks[-1]["engine_data"]["routed_experts"]["start"] == 3
+
+
+# ── Tests ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.skip(reason="Need to revisit tests, see comment at top of the file")
+class TestInit:
+    def test_embedding_cache_created_when_capacity_set(self):
+        capacity_gb = 0.1
+        handler = _make_handler(
+            config=_make_config(multimodal_embedding_cache_capacity_gb=capacity_gb)
+        )
+        assert isinstance(
+            handler.embedding_cache_manager, MultimodalEmbeddingCacheManager
+        )
+        expected_bytes = int(capacity_gb * 1024**3)
+        assert handler.embedding_cache_manager._capacity_bytes == expected_bytes
+
+
+@pytest.mark.skip(reason="Need to revisit tests, see comment at top of the file")
+class TestParseFrontendRequest:
+    def test_extracts_token_ids_and_sampling_params(self):
+        """Parses token_ids and sampling_params from raw frontend dict."""
+        handler = _make_handler()
+        handler.default_sampling_params = {}
+
+        raw = _make_raw_frontend_request()
+        request, image_urls = handler._parse_frontend_request(raw)
+
+        assert request.engine_prompt["prompt_token_ids"] == [1, 2, 3]
+        assert image_urls == []
+
+    def test_extracts_image_urls(self):
+        """Extracts image URLs from multi_modal_data."""
+        handler = _make_handler()
+        handler.default_sampling_params = {}
+
+        raw = _make_raw_frontend_request(image_urls=["http://a.png", "http://b.png"])
+        request, image_urls = handler._parse_frontend_request(raw)
+
+        assert image_urls == ["http://a.png", "http://b.png"]
+
+
+@pytest.mark.skip(reason="Need to revisit tests, see comment at top of the file")
+class TestGenerateAgg:
+    @pytest.mark.asyncio
+    async def test_streams_serialized_responses(self):
+        """_generate_agg yields dicts formatted by _format_engine_output."""
+        handler = _make_handler()
+        request = _make_vllm_request()
+        engine_resp = _make_engine_response()
+
+        output = MagicMock()
+        output.token_ids = [10, 11]
+        output.finish_reason = "stop"
+        output.stop_reason = None
+        engine_resp.outputs = [output]
+
+        async def fake_generate(**kwargs):
+            yield engine_resp
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler._generate_agg(request, {"image": []}):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert chunks[0]["token_ids"] == [10, 11]
+        assert chunks[0]["finish_reason"] == "stop"
+
+
+@pytest.mark.skip(reason="Need to revisit tests, see comment at top of the file")
+class TestGenerateDisagg:
+    @pytest.mark.asyncio
+    async def test_prefills_then_forwards_to_decode(self):
+        """_generate_disagg prefills locally, then round-robins to decode worker."""
+        config = _make_config(model="test-model", disaggregation_mode="PREFILL")
+        decode_client = MagicMock()
+        handler = _make_handler(config=config, decode_worker_client=decode_client)
+        handler.engine_client = MagicMock()
+
+        prefill_resp = _make_engine_response()
+        prefill_resp.kv_transfer_params = {"block_ids": [0, 1]}
+
+        async def fake_generate(**kwargs):
+            yield prefill_resp
+
+        handler.engine_client.generate = fake_generate
+
+        decode_json = json.dumps(
+            {
+                "request_id": "req-1",
+                "prompt": "test",
+                "prompt_token_ids": [1, 2, 3],
+                "outputs": [
+                    {
+                        "index": 0,
+                        "text": "",
+                        "token_ids": [42],
+                        "cumulative_logprob": None,
+                        "logprobs": None,
+                        "finish_reason": "stop",
+                        "stop_reason": None,
+                    }
+                ],
+                "finished": True,
+                "kv_transfer_params": {"block_ids": [0, 1]},
+            }
+        )
+        decode_resp = MagicMock()
+        decode_resp.data.return_value = decode_json
+
+        async def fake_round_robin(payload, context=None):
+            async def _stream():
+                yield decode_resp
+
+            return _stream()
+
+        decode_client.round_robin = fake_round_robin
+
+        request = _make_vllm_request()
+        chunks = []
+        async for chunk in handler._generate_disagg(request, {"image": []}):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert isinstance(chunks[0], dict)
+        assert chunks[0]["token_ids"] == [42]
+        assert chunks[0]["finish_reason"] == "stop"
+
+
+# ── Decode worker multimodal branching tests ───────────────────────
+
+
+def _make_decode_handler(
+    model: str = "test-model",
+    disaggregation_mode: str = "DECODE",
+) -> mod.DecodeWorkerHandler:
+    """Construct a DecodeWorkerHandler with mocked internals."""
+    config = _make_config(model=model, disaggregation_mode=disaggregation_mode)
+    model_config = MagicMock(enable_prompt_embeds=True)
+    with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
+        handler = mod.DecodeWorkerHandler(
+            runtime=MagicMock(),
+            config=config,
+            engine=MagicMock(),
+            default_sampling_params={},
+            model_config=model_config,
+        )
+    handler.config = config
+    handler.model_config = model_config
+    handler.model_max_len = 4096
+    handler.default_sampling_params = {}
+    handler.kv_event_publisher = None
+    handler.otel_tracing_enabled = False
+    handler.input_param_manager = MagicMock()
+    handler.input_param_manager.get_extra_params.return_value = {}
+    handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model=model,
+        enable_multimodal=True,
+        use_unified_vision_chunk=False,
+    )
+    handler._deferred_aborts = {}
+    # Real BaseWorkerHandler.__init__ (patched out above) sets this; the
+    # aggregated branch in _generate_token_mode reads it, so mirror the default.
+    handler._custom_encoder = None
+    return handler
+
+
+@pytest.mark.asyncio(loop_scope="function")
+class TestDecodeWorkerMultimodalBranching:
+    """Tests for the mode-aware multimodal branching in _generate_token_mode."""
+
+    @pytest.mark.parametrize(
+        "request_payload",
+        [
+            {"multi_modal_data": {"image_url": [{"Url": "http://img.png"}]}},
+            {"extra_args": {"mm_kwargs_shm": {"modality": "image"}}},
+        ],
+    )
+    async def test_text_mode_rejects_multimodal_input_when_disabled(
+        self, request_payload
+    ):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler.use_vllm_tokenizer = True
+        handler._multimodal_request_processor.enable_multimodal = False
+
+        with pytest.raises(ValueError, match="--enable-multimodal"):
+            async for _ in handler.generate(request_payload, MagicMock()):
+                pass
+
+    async def test_decode_only_qwen_with_mm_data_no_prefill_result_errors(self):
+        """Decode-only Qwen worker receiving mm request without prefill_result -> error."""
+        handler = _make_decode_handler(
+            model="Qwen/Qwen3-VL-2B-Instruct",
+            disaggregation_mode="DECODE",
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": "http://img.png"}]},
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+        }
+        context = MagicMock()
+        chunks = []
+        async for chunk in handler._generate_token_mode(request, context, "req-1"):
+            chunks.append(chunk)
+
+        assert chunks == [
+            {
+                "finish_reason": (
+                    "error: Decode worker received multimodal request without "
+                    "prefill result"
+                ),
+                "index": 0,
+                "token_ids": [],
+            }
+        ]
+
+    async def test_decode_only_qwen_missing_embedding_params_errors(self):
+        """Decode-only Qwen VL with prefill_result but no embedding_params -> error."""
+        handler = _make_decode_handler(
+            model="Qwen/Qwen3-VL-2B-Instruct",
+            disaggregation_mode="DECODE",
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": "http://img.png"}]},
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "kv_transfer_params": {"block_ids": [0]},
+                    # embedding_params intentionally missing
+                },
+            },
+        }
+        context = MagicMock()
+        chunks = []
+        async for chunk in handler._generate_token_mode(request, context, "req-1"):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert chunks[0]["token_ids"] == []
+        assert "embedding metadata" in chunks[0]["finish_reason"]
+
+    async def test_decode_only_non_qwen_proceeds_without_embedding_params(self):
+        """Decode-only non-Qwen with prefill_result but no embedding_params -> proceeds.
+
+        Non-Qwen models don't need embedding_params — the KV cache from
+        prefill already contains the vision context.
+        """
+        handler = _make_decode_handler(
+            model="llava-hf/llava-1.5-7b-hf",
+            disaggregation_mode="DECODE",
+        )
+        handler._build_prompt_from_request = MagicMock(
+            side_effect=RuntimeError("test stop")
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": "http://img.png"}]},
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "kv_transfer_params": {"block_ids": [0]},
+                },
+            },
+        }
+        context = MagicMock()
+        with pytest.raises(RuntimeError, match="test stop"):
+            async for _ in handler._generate_token_mode(request, context, "req-1"):
+                pass
+
+        # Should reach _build_prompt_from_request (not error at decode guard)
+        handler._build_prompt_from_request.assert_called_once()
+
+    async def test_aggregated_mode_calls_extract_multimodal_data(self):
+        """Aggregated mode delegates media loading to the shared processor."""
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler._multimodal_request_processor.extract_multimodal_data = AsyncMock(
+            return_value=None
+        )
+
+        # Raise from _build_prompt_from_request so generation stops before the
+        # engine call — no need to mock the engine.
+        handler._build_prompt_from_request = MagicMock(
+            side_effect=RuntimeError("test stop")
+        )
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": "http://img.png"}]},
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+        }
+        context = MagicMock()
+
+        with pytest.raises(RuntimeError, match="test stop"):
+            async for _ in handler._generate_token_mode(request, context, "req-1"):
+                pass
+
+        handler._multimodal_request_processor.extract_multimodal_data.assert_awaited_once()
+
+    async def test_decode_only_bypass_annotation_runs_as_agg(self):
+        """Decode worker with conditional-disagg bypass annotation runs as AGG."""
+        handler = _make_decode_handler(
+            model="Qwen/Qwen3-VL-2B-Instruct",
+            disaggregation_mode="DECODE",
+        )
+        handler._multimodal_request_processor.extract_multimodal_data = AsyncMock(
+            return_value=None
+        )
+        handler._build_prompt_from_request = MagicMock(
+            side_effect=RuntimeError("test stop")
+        )
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": "http://img.png"}]},
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+        context = MagicMock()
+
+        with pytest.raises(RuntimeError, match="test stop"):
+            async for _ in handler._generate_token_mode(request, context, "req-1"):
+                pass
+
+        handler._multimodal_request_processor.extract_multimodal_data.assert_awaited_once()
+
+    async def test_decode_only_bypass_annotation_text_only_does_not_require_prefill_kv_params(
+        self,
+    ):
+        """Text-only bypass does not require incoming prefill KV params."""
+        handler = _make_decode_handler(disaggregation_mode="DECODE")
+        handler._build_prompt_from_request = MagicMock(side_effect=RuntimeError("stop"))
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+        context = MagicMock()
+
+        with pytest.raises(RuntimeError, match="stop"):
+            async for _ in handler._generate_token_mode(request, context, "req-1"):
+                pass
+
+    async def test_decode_only_bypass_annotation_text_mode_runs_as_agg(self):
+        """Text-mode conditional-disagg bypass is not treated as decode-only."""
+        handler = _make_decode_handler(disaggregation_mode="DECODE")
+        handler.input_param_manager = MagicMock()
+        handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
+        handler.engine_client = MagicMock()
+        handler.default_sampling_params = {}
+
+        async def _empty_generate(*args, **kwargs):
+            if False:
+                yield None
+
+        handler.engine_client.generate = _empty_generate
+
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+        context.trace_headers.return_value = {}
+
+        decode_only_values = []
+
+        @asynccontextmanager
+        async def _capture_guard(
+            engine_client,
+            request_id,
+            is_decode_only,
+            registry=None,
+            on_engine_dead=None,
+        ):
+            decode_only_values.append(is_decode_only)
+            yield None
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+
+        with patch.object(mod, "_deferred_abort_guard", _capture_guard):
+            chunks = []
+            async for chunk in handler._generate_text_mode(request, context, "req-1"):
+                chunks.append(chunk)
+
+        assert chunks == []
+        assert decode_only_values == [False]
+
+    @pytest.mark.parametrize(
+        "mm_processor_kwargs",
+        [None, {"use_audio_in_video": True}],
+    )
+    async def test_handler_prompt_builder_delegates_processor_kwargs(
+        self, mm_processor_kwargs
+    ):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+
+        prompt = handler._build_prompt_from_request(
+            {"token_ids": [1, 2, 3]},
+            "request-prompt",
+            multi_modal_data=None,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+
+        if mm_processor_kwargs is None:
+            assert "mm_processor_kwargs" not in prompt
+        else:
+            assert prompt["mm_processor_kwargs"] is mm_processor_kwargs
+
+    async def test_handler_prompt_builder_rejects_disabled_prompt_embeds(self):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler.config.engine_args.enable_prompt_embeds = False
+
+        with pytest.raises(mod.InvalidArgument, match="--enable-prompt-embeds"):
+            handler._build_prompt_from_request(
+                {"prompt_embeds": "unused"},
+                "request-prompt",
+                multi_modal_data=None,
+            )
+
+    async def test_handler_prompt_builder_preserves_server_errors(self):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        server_error = RuntimeError("backend allocation failed")
+        handler._create_prompt_from_embeddings = MagicMock(side_effect=server_error)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            handler._build_prompt_from_request(
+                {"prompt_embeds": "unused"},
+                "request-prompt",
+                multi_modal_data=None,
+            )
+
+        assert exc_info.value is server_error
+
+
+@pytest.mark.asyncio
+async def test_prefill_delegates_mode_policy_to_shared_processor():
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    prepared_request = {"token_ids": [9, 10]}
+    multi_modal_data = {"image": object()}
+    mm_processor_kwargs = {"max_pixels": 4096}
+    processor = SimpleNamespace(
+        prepare_input=AsyncMock(
+            return_value=PreparedMultimodalInput(
+                request=prepared_request,
+                multi_modal_data=multi_modal_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
+        )
+    )
+    handler._multimodal_request_processor = processor
+    handler._build_prompt_from_request = MagicMock(side_effect=RuntimeError("stop"))
+    context = MagicMock()
+
+    with pytest.raises(RuntimeError, match="stop"):
+        async for _ in handler._generate_token_mode(
+            {"token_ids": [1, 2]},
+            context,
+            "request-prefill",
+        ):
+            pass
+    processor.prepare_input.assert_awaited_once_with(
+        {"token_ids": [1, 2]},
+        "request-prefill",
+        context,
+        mod.DisaggregationMode.PREFILL,
+    )
+    handler._build_prompt_from_request.assert_called_once_with(
+        prepared_request,
+        "request-prefill",
+        multi_modal_data,
+        log_prefix="Prefill ",
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefill_returns_structured_error_when_multimodal_is_disabled():
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    processor = SimpleNamespace(
+        validate_multimodal_request=MagicMock(
+            side_effect=ValueError("use --enable-multimodal")
+        )
+    )
+    handler._multimodal_request_processor = processor
+    context = MagicMock()
+    context.id.return_value = "request-prefill-disabled"
+
+    chunks = [chunk async for chunk in handler.generate({}, context)]
+
+    assert chunks == [
+        {
+            "status": "error",
+            "message": "use --enable-multimodal",
+            "disaggregated_params": None,
+        }
+    ]
+
+
+# ── Deferred abort (disagg decode KV-transfer safety) tests ────────
+
+
+class TestDeferredAbort:
+    """Tests for ``_DeferredAbort`` used in disaggregated decode mode.
+
+    Purpose: when a request is cancelled before the decode worker has
+    received the first token, the underlying NIXL KV transfer may still be
+    in flight. Calling ``engine_client.abort(request_id)`` at that moment
+    can crash EngineCore. ``_DeferredAbort`` delays the real abort call
+    until the first engine output has been signalled.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_before_first_token_does_not_fire_immediately(self):
+        """abort() before first token should NOT call engine_client.abort yet.
+
+        abort() awaits the deferred task to completion so the engine abort
+        cannot be dropped under concurrent cancellation, so spawn it as a
+        task to observe the mid-flight state, then use close() to cancel the
+        parked waiter and let abort() return.
+        """
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-1")
+
+        # abort() before first token returns promptly; the real abort is
+        # deferred to a background task and engine.abort is NOT called yet.
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
+        engine_client.abort.assert_not_called()
+        assert guard._abort_task is not None
+        assert not guard._abort_task.done()
+
+        # Cleanup: close() cancels the parked deferred waiter without firing abort.
+        await guard.close()
+        engine_client.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_abort_after_first_token_fires_immediately(self):
+        """abort() after signal_first_token should call engine_client.abort."""
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-2")
+
+        guard.signal_first_token()
+        await guard.abort()
+
+        engine_client.abort.assert_awaited_once_with("req-2")
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_deferred_background_task_fires_after_first_token(self):
+        """Background task should call abort once first token is signalled."""
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-3")
+
+        # abort() returns promptly (deferred); engine.abort not called yet.
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
+        engine_client.abort.assert_not_called()
+        assert guard._abort_task is not None
+        assert not guard._abort_task.done()
+
+        # Signalling first token wakes the deferred waiter, which runs abort().
+        guard.signal_first_token()
+        await guard._abort_task
+
+        engine_client.abort.assert_awaited_once_with("req-3")
+
+    @pytest.mark.asyncio
+    async def test_signal_first_token_is_idempotent(self):
+        """Calling signal_first_token multiple times is safe."""
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-4")
+
+        guard.signal_first_token()
+        guard.signal_first_token()
+        await guard.abort()
+
+        engine_client.abort.assert_awaited_once_with("req-4")
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_monitor_abort_routes_through_guard(self):
+        """_monitor_abort should call guard.abort() instead of engine_client.abort()."""
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        handler.shutdown_event = None
+
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        guard = mod._DeferredAbort(handler.engine_client, "req-5")
+        # _monitor_abort awaits guard.abort() to completion. With first_token
+        # not yet received, that await blocks on the deferred waiter; spawn it
+        # as a task to observe state and then signal first_token to unblock.
+        monitor_task = asyncio.create_task(
+            handler._monitor_abort(
+                context, "req-5", is_prefill=False, abort_guard=guard
+            )
+        )
+        await asyncio.sleep(0)
+        handler.engine_client.abort.assert_not_called()
+        assert not monitor_task.done()
+
+        guard.signal_first_token()
+        await monitor_task
+
+        handler.engine_client.abort.assert_awaited_once_with("req-5")
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_monitor_abort_direct_when_no_guard(self):
+        """Without a guard, _monitor_abort should call engine_client.abort directly."""
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        handler.shutdown_event = None
+
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        await handler._monitor_abort(context, "req-6", is_prefill=False)
+
+        handler.engine_client.abort.assert_awaited_once_with("req-6")
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_waitables_after_normal_completion(self):
+        handler = _make_handler()
+        handler.shutdown_event = asyncio.Event()
+
+        killed_future = asyncio.get_running_loop().create_future()
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        async with handler._abort_monitor(context, "req-cleanup"):
+            for _ in range(10):
+                if handler.shutdown_event._waiters:
+                    break
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_future.cancelled()
+        assert not handler.shutdown_event._waiters
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_preserves_engine_shutdown_during_cleanup(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        handler.shutdown_event = asyncio.Event()
+
+        killed_future = asyncio.get_running_loop().create_future()
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        real_gather = asyncio.gather
+        gather_entered = asyncio.Event()
+        gather_release = asyncio.Event()
+
+        async def delayed_gather(*args, **kwargs):
+            gather_entered.set()
+            await gather_release.wait()
+            return await real_gather(*args, **kwargs)
+
+        with patch.object(mod.asyncio, "gather", side_effect=delayed_gather):
+            with pytest.raises(mod.EngineShutdown):
+                async with handler._abort_monitor(
+                    context, "req-shutdown"
+                ) as monitor_task:
+                    for _ in range(10):
+                        if handler.shutdown_event._waiters:
+                            break
+                        await asyncio.sleep(0)
+                    assert len(handler.shutdown_event._waiters) == 1
+
+                    handler.shutdown_event.set()
+                    for _ in range(10):
+                        if monitor_task.done() or gather_entered.is_set():
+                            break
+                        await asyncio.sleep(0)
+                    assert monitor_task.done() or gather_entered.is_set()
+
+        handler.engine_client.abort.assert_awaited_once_with("req-shutdown")
+        assert killed_future.cancelled()
+        assert not handler.shutdown_event._waiters
+        assert not gather_entered.is_set()
+
+    # close() cleanup tests: case 1b safety
+
+    @pytest.mark.asyncio
+    async def test_close_without_pending_abort_is_noop(self):
+        """close() with no deferred abort must not call engine_client.abort."""
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-close-1")
+
+        await guard.close()
+
+        engine_client.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_close_cancels_waiter_without_abort_when_no_first_token(self):
+        """Case 1b: close() must cancel the waiter without firing abort.
+
+        The abort guard exists to avoid calling engine_client.abort before the
+        first engine output arrives (unsafe during NIXL KV transfer). The
+        cleanup path must preserve that invariant.
+        """
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-close-1b")
+
+        # abort() awaits the deferred waiter, so spawn as a task to observe
+        # the parked state.
+        abort_task = asyncio.create_task(guard.abort())
+        await asyncio.sleep(0)
+        engine_client.abort.assert_not_called()
+        assert guard._abort_task is not None
+        assert not guard._abort_task.done()
+
+        await guard.close()
+        await abort_task
+
+        engine_client.abort.assert_not_called()
+        assert guard._abort_task.done()
+        assert guard._abort_task.cancelled()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_close_awaits_deferred_abort_when_first_token_received(self):
+        """close() after first token must let the now-safe deferred abort finish."""
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-close-first-tok")
+
+        abort_task = asyncio.create_task(guard.abort())
+        await asyncio.sleep(0)
+        engine_client.abort.assert_not_called()
+
+        # Signal first token; the deferred waiter wakes and runs engine.abort,
+        # which unblocks abort_task. close() then observes the completed task.
+        guard.signal_first_token()
+        await abort_task
+        await guard.close()
+
+        engine_client.abort.assert_awaited_once_with("req-close-first-tok")
+        assert guard._abort_task is not None
+        assert guard._abort_task.done()
+        assert not guard._abort_task.cancelled()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_close_observes_already_completed_deferred_abort(self):
+        """close() is safe when the background waiter already ran to completion."""
+        engine_client = MagicMock()
+        engine_client.abort = AsyncMock()
+        guard = mod._DeferredAbort(engine_client, "req-close-done")
+
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
+        guard.signal_first_token()
+        await guard._abort_task
+
+        assert guard._abort_task is not None
+        assert guard._abort_task.done()
+        engine_client.abort.assert_awaited_once_with("req-close-done")
+
+        # close() must not re-issue abort and must not raise.
+        await guard.close()
+        engine_client.abort.assert_awaited_once_with("req-close-done")
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_generate_token_mode_closes_guard_on_no_output(self):
+        """_generate_token_mode awaits guard cleanup when decode yields nothing.
+
+        Verifies that in decode-only mode, when generate_tokens exits without
+        yielding any output, _generate_token_mode still awaits the deferred
+        abort guard's close() method, and does not call engine_client.abort
+        in the pre-first-token window.
+        """
+        config = _make_config(disaggregation_mode="DECODE")
+        handler = _make_handler(config=config)
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        handler.shutdown_event = None
+        handler.runtime = MagicMock()
+        handler.config = config
+        handler.default_sampling_params = {}
+        handler.model_max_len = None
+        handler.input_param_manager = MagicMock()
+        handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
+        handler._resolve_lora_request = MagicMock(return_value=None)
+        handler._build_prompt_from_request = MagicMock(return_value=MagicMock())
+
+        # Capture the guard created inside the handler and wrap close() so
+        # the test can assert that the handler awaited it.
+        created_guards: list[mod._DeferredAbort] = []
+        real_deferred_abort = mod._DeferredAbort
+
+        def _capture(engine_client, request_id, on_engine_dead=None):
+            g = real_deferred_abort(engine_client, request_id, on_engine_dead)
+            g.close = AsyncMock(wraps=g.close)
+            created_guards.append(g)
+            return g
+
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        async def _empty_gen(*args, **kwargs):
+            # Decode yields nothing: the case-1b shape.
+            await asyncio.sleep(0)
+            if False:
+                yield None
+            return
+
+        handler.generate_tokens = _empty_gen
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "prefill_result": None,
+            "routing": {},
+            "model": "test-model",
+        }
+
+        with patch.object(mod, "_DeferredAbort", side_effect=_capture):
+            async for _ in handler._generate_token_mode(
+                request, context, "req-decode-1b"
+            ):
+                pass
+
+        assert len(created_guards) == 1
+        guard = created_guards[0]
+
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        # _generate_token_mode must have awaited guard cleanup, and must not
+        # have called engine_client.abort in the pre-first-token window.
+        guard.close.assert_awaited_once()
+        handler.engine_client.abort.assert_not_called()
+        if guard._abort_task is not None:
+            assert guard._abort_task.done()
+
+
+class TestClassifyEmbeddingInput:
+    """Unit tests for the embedding input classifier.
+
+    Covers the four OpenAI-spec input shapes (str / list[str] / list[int] /
+    list[list[int]]) and the previous bug where `[1, 2, 3]` was silently
+    coerced to three text prompts via `str(item)`. Pure-function logic, no
+    async / vLLM engine needed.
+    """
+
+    def test_single_string(self):
+        assert mod._classify_embedding_input("hello") == ["hello"]
+
+    def test_list_of_strings(self):
+        result = mod._classify_embedding_input(["a", "b", "c"])
+        assert result == ["a", "b", "c"]
+
+    def test_list_of_ints_is_one_tokenized_prompt(self):
+        # The bug: previously this returned ["1", "2", "3"] (three text
+        # prompts). Correct behavior is one tokenized prompt.
+        result = mod._classify_embedding_input([1, 2, 3])
+        assert result == [[1, 2, 3]]
+
+    def test_list_of_list_of_ints_is_batch_of_tokenized_prompts(self):
+        result = mod._classify_embedding_input([[1, 2], [3, 4, 5]])
+        assert result == [[1, 2], [3, 4, 5]]
+
+    def test_mixed_str_and_int_rejected(self):
+        with pytest.raises(TypeError, match="mixes str and non-str"):
+            mod._classify_embedding_input(["hello", 42])
+
+    def test_mixed_int_and_str_rejected(self):
+        with pytest.raises(TypeError, match="mixes int and non-int"):
+            mod._classify_embedding_input([1, "two"])
+
+    def test_mixed_list_of_lists_with_str_rejected(self):
+        with pytest.raises(TypeError, match="must be a list of"):
+            mod._classify_embedding_input([[1, 2], "three"])
+
+    def test_inner_list_with_non_int_rejected(self):
+        with pytest.raises(TypeError, match="must be a list of"):
+            mod._classify_embedding_input([[1, 2], [3.5, 4]])
+
+    def test_bool_is_not_treated_as_int(self):
+        # `bool` is a subclass of `int`; token ids must be real ints.
+        with pytest.raises(TypeError):
+            mod._classify_embedding_input([True, False])
+
+    def test_empty_list_rejected(self):
+        with pytest.raises(ValueError, match="must be non-empty"):
+            mod._classify_embedding_input([])
+
+    def test_unsupported_top_level_type_rejected(self):
+        with pytest.raises(TypeError, match="Invalid 'input' type"):
+            mod._classify_embedding_input({"text": "hi"})
+
+    def test_unsupported_element_type_rejected(self):
+        with pytest.raises(TypeError, match="Unsupported 'input' element"):
+            mod._classify_embedding_input([3.14, 2.71])
+
+
+class TestEmbeddingWorkerHandlerCancellation:
+    """Tests for partial-failure cleanup in ``EmbeddingWorkerHandler.generate``.
+
+    Each prompt's encode runs as its own asyncio task in ``asyncio.gather``.
+    If one task raises, gather re-raises but does NOT cancel the others by
+    default -- they keep consuming vLLM engine capacity for output that the
+    handler would discard. The handler's ``try/finally`` block must cancel
+    every still-pending task and await them with ``return_exceptions=True``
+    before propagating the failure to the frontend.
+    """
+
+    def _make_embedding_handler(self) -> "mod.EmbeddingWorkerHandler":
+        """Construct an ``EmbeddingWorkerHandler`` with the engine monitor
+        stubbed so it does not spawn a real background task during the test.
+        """
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.EmbeddingWorkerHandler(
+                runtime=MagicMock(),
+                engine=MagicMock(),
+                config=MagicMock(served_model_name="test-model"),
+                shutdown_event=None,
+            )
+        # Replace the engine client wholesale: each test installs its own
+        # ``encode`` async generator behaviour. ``abort`` may be called by
+        # the per-prompt ``_monitor_abort`` task on cancellation paths.
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        return handler
+
+    def _make_context(self) -> MagicMock:
+        """Mock dynamo.Context whose ``async_killed_or_stopped()`` never
+        resolves (so the per-prompt ``_monitor_abort`` task parks until
+        cancelled by the wrapping ``_abort_monitor`` context manager).
+        """
+        context = MagicMock()
+        context.id.return_value = "test-req"
+        context.async_killed_or_stopped.return_value = (
+            asyncio.get_event_loop().create_future()
+        )
+        return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_up_all_waiters(self):
+        handler = self._make_embedding_handler()
+        handler.shutdown_event = asyncio.Event()
+        context = self._make_context()
+        killed_or_stopped = context.async_killed_or_stopped.return_value
+
+        async with handler._abort_monitor(context, "test-req"):
+            while not handler.shutdown_event._waiters:
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_or_stopped.cancelled()
+        assert not handler.shutdown_event._waiters
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_partial_failure_cancels_in_flight_encodes(self):
+        """When one prompt's encode raises, the siblings must be cancelled.
+
+        Mocks ``engine_client.encode`` as a per-prompt async generator. For
+        the failing index it raises immediately; for the others it parks on
+        ``asyncio.sleep`` and records cancellation when it occurs. Without
+        the ``finally``-cancel pass the test would hang on the asleep
+        siblings until the 5s pytest timeout fires.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        cancelled: set[int] = set()
+        started: dict[int, asyncio.Event] = {i: asyncio.Event() for i in range(4)}
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            idx = int(request_id.rsplit("-", 1)[-1])
+            started[idx].set()
+            if idx == 1:
+                raise RuntimeError("boom")
+            try:
+                # Would hang past the 5s pytest timeout if not cancelled.
+                await asyncio.sleep(60)
+                yield MagicMock()  # unreachable
+            except asyncio.CancelledError:
+                cancelled.add(idx)
+                raise
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["a", "b", "c", "d"], "model": "test-model"}
+        with pytest.raises(RuntimeError, match="boom"):
+            async for _ in handler.generate(request, context):
+                pass
+
+        # Sibling encodes (0, 2, 3) must have started (so we know they were
+        # in flight when idx=1 failed) AND been observed as cancelled.
+        assert started[0].is_set()
+        assert started[2].is_set()
+        assert started[3].is_set()
+        assert cancelled == {
+            0,
+            2,
+            3,
+        }, f"sibling encodes were not cancelled: cancelled={cancelled}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_happy_path_yields_response_without_cancelling(self):
+        """When every prompt succeeds, the ``finally`` block sees no pending
+        tasks and exits cleanly; the handler yields the OpenAI-shaped
+        response. Guards against the cleanup pass accidentally aborting
+        completed tasks.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        aborted: list[str] = []
+        handler.engine_client.abort = AsyncMock(side_effect=aborted.append)
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["a", "b"], "model": "test-model"}
+        responses = [r async for r in handler.generate(request, context)]
+
+        assert len(responses) == 1
+        response = responses[0]
+        assert response["object"] == "list"
+        assert response["model"] == "test-model"
+        assert len(response["data"]) == 2
+        assert response["data"][0]["index"] == 0
+        assert response["data"][1]["index"] == 1
+        expected_b64 = mod._encode_floats_to_base64([0.1, 0.2, 0.3])
+        assert response["data"][0]["embedding"] == expected_b64
+        assert response["data"][1]["embedding"] == expected_b64
+        # No tasks were in flight at gather completion, so the finally
+        # cancel-and-await pass must not have touched the engine.
+        assert aborted == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize(
+        "encoding_fields",
+        [{}, {"encoding_format": None}, {"encoding_format": "float"}],
+        ids=["omitted", "null", "float"],
+    )
+    async def test_tokens_default_response_uses_base64_engine_output_shape(
+        self, encoding_fields
+    ):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = prompt["prompt_token_ids"]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        responses = [
+            response
+            async for response in handler.generate(
+                {
+                    "token_ids": [[11, 12, 13]],
+                    "model": "test-model",
+                    **encoding_fields,
+                },
+                context,
+            )
+        ]
+
+        assert responses == [
+            {
+                "embeddings": [mod._encode_floats_to_base64([0.1, 0.2, 0.3])],
+                "prompt_tokens": 3,
+                "total_tokens": 3,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_tokens_invalid_encoding_format_is_rejected(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        with pytest.raises(ValueError, match="Invalid 'encoding_format' value"):
+            async for _ in handler.generate(
+                {
+                    "token_ids": [[11, 12, 13]],
+                    "model": "test-model",
+                    "encoding_format": "invalid",
+                },
+                context,
+            ):
+                pass
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_dimensions_forwarded_to_pooling_params(self):
+        """``dimensions`` is forwarded to vLLM via ``PoolingParams`` rather
+        than applied as post-hoc truncation in the handler.
+
+        vLLM's pooler then does the Matryoshka reduction (truncate +
+        re-normalize) and validates that the model supports it. The handler
+        must NOT slice the returned vector itself, so it emits exactly what
+        the engine produced.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: dict = {}
+        # vLLM's pooler has already reduced to the requested ``dimensions``, so
+        # the stub returns the final 128-dim vector.
+        vec = [i * 0.01 for i in range(128)]
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured["pooling_params"] = pooling_params
+            output = MagicMock()
+            output.outputs.data = torch.tensor(vec)
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["hello"], "model": "test-model", "dimensions": 128}
+        responses = [r async for r in handler.generate(request, context)]
+
+        pp = captured["pooling_params"]
+        assert pp.task == "embed"
+        assert pp.dimensions == 128
+        # No post-hoc truncation: the handler transports the vector produced
+        # by vLLM unchanged. A separate defensive guard rejects outputs shorter
+        # than the requested dimensions.
+        assert responses[0]["data"][0]["embedding"] == (
+            mod._encode_floats_to_base64(vec)
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_no_dimensions_omits_pooling_dimensions(self):
+        """Without ``dimensions`` the handler requests ``task="embed"`` only,
+        leaving ``PoolingParams.dimensions`` unset so vLLM returns the model's
+        native embedding size.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: dict = {}
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured["pooling_params"] = pooling_params
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["hello"], "model": "test-model"}
+        _ = [r async for r in handler.generate(request, context)]
+
+        pp = captured["pooling_params"]
+        assert pp.task == "embed"
+        assert pp.dimensions is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_raw_text_truncation_forwarded_to_vllm(self):
+        """Raw text inputs forward ``truncate_prompt_tokens`` to vLLM's
+        tokenizer path, including the ``-1`` sentinel vLLM accepts.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: list[dict] = []
+
+        async def fake_encode(
+            prompt, pooling_params, request_id, *, tokenization_kwargs=None
+        ):
+            captured.append(
+                {"prompt": prompt, "tokenization_kwargs": tokenization_kwargs}
+            )
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        for truncate_prompt_tokens in (2048, -1):
+            request = {
+                "input": "hello",
+                "model": "test-model",
+                "truncate_prompt_tokens": truncate_prompt_tokens,
+            }
+            _ = [r async for r in handler.generate(request, context)]
+
+        assert captured == [
+            {
+                "prompt": "hello",
+                "tokenization_kwargs": {"truncate_prompt_tokens": 2048},
+            },
+            {
+                "prompt": "hello",
+                "tokenization_kwargs": {"truncate_prompt_tokens": -1},
+            },
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_raw_text_add_special_tokens_forwarded_to_vllm(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: list[dict | None] = []
+
+        async def fake_encode(
+            prompt, pooling_params, request_id, *, tokenization_kwargs=None
+        ):
+            captured.append(tokenization_kwargs)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        for add_special_tokens in (True, False):
+            request = {
+                "input": "hello",
+                "model": "test-model",
+                "add_special_tokens": add_special_tokens,
+                "truncate_prompt_tokens": 128,
+            }
+            _ = [r async for r in handler.generate(request, context)]
+
+        assert captured == [
+            {"truncate_prompt_tokens": 128, "add_special_tokens": True},
+            {"truncate_prompt_tokens": 128, "add_special_tokens": False},
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_omitted_add_special_tokens_is_not_forwarded_to_vllm(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: list[dict] = []
+
+        async def fake_encode(prompt, pooling_params, request_id, **kwargs):
+            captured.append(kwargs)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        request = {"input": "hello", "model": "test-model"}
+        _ = [r async for r in handler.generate(request, context)]
+
+        assert captured == [{}]
+
+    @pytest.mark.parametrize("value", ["true", 1, 0, []])
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_add_special_tokens_rejects_non_bool(self, value):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        request = {
+            "input": "hello",
+            "model": "test-model",
+            "add_special_tokens": value,
+        }
+        with pytest.raises(TypeError, match="Invalid 'add_special_tokens' type"):
+            async for _ in handler.generate(request, context):
+                pass
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_rust_preprocessed_token_ids_are_not_retokenized(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured = []
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured.append(prompt)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = prompt["prompt_token_ids"]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        request = {
+            "token_ids": [[11, 12, 13], [21, 22]],
+            "model": "test-model",
+            "add_special_tokens": True,
+            "truncate_prompt_tokens": 2,
+        }
+        _ = [r async for r in handler.generate(request, context)]
+
+        assert [p["prompt_token_ids"] for p in captured] == [
+            [11, 12, 13],
+            [21, 22],
+        ]
+
+    @pytest.mark.parametrize(
+        ("truncate_prompt_tokens", "error_type", "match"),
+        [
+            ("2048", TypeError, "Invalid 'truncate_prompt_tokens' type"),
+            (True, TypeError, "Invalid 'truncate_prompt_tokens' type"),
+            (-2, ValueError, "truncate_prompt_tokens must be >= -1"),
+        ],
+    )
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_truncate_prompt_tokens_rejects_invalid_values(
+        self, truncate_prompt_tokens, error_type, match
+    ):
+        """Invalid truncation values fail before the request reaches vLLM."""
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        request = {
+            "input": "hello",
+            "model": "test-model",
+            "truncate_prompt_tokens": truncate_prompt_tokens,
+        }
+        with pytest.raises(error_type, match=match):
+            async for _ in handler.generate(request, context):
+                pass
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_truncation_uses_default_encode_shape_when_not_tokenizing(self):
+        """Pretokenized inputs stay on the default encode path because callers
+        already control token-id truncation before reaching vLLM.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        prompts = []
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            prompts.append(prompt)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": "hello", "model": "test-model"}
+        _ = [r async for r in handler.generate(request, context)]
+
+        request = {
+            "input": [1, 2, 3],
+            "model": "test-model",
+            "truncate_prompt_tokens": 2,
+        }
+        _ = [r async for r in handler.generate(request, context)]
+
+        assert prompts[0] == "hello"
+        assert prompts[1]["prompt_token_ids"] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_oversized_dimensions_raises(self):
+        """When vLLM silently clamps an oversized ``dimensions`` request (a
+        model enabled via ``--hf-overrides '{"is_matryoshka": true}'`` with no
+        ``matryoshka_dimensions`` list), the handler raises a clear error
+        instead of returning a shorter-than-requested vector.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            # vLLM clamped to the model's native size (3 dims here) even though
+            # 2048 was requested.
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["hello"], "model": "test-model", "dimensions": 2048}
+        with pytest.raises(ValueError, match="exceeds model embedding dimension"):
+            async for _ in handler.generate(request, context):
+                pass
+
+
+class TestRLAdminRouteHardening:
+    """Regressions for the codex round-2 RL admin fixes."""
+
+    @pytest.mark.asyncio
+    async def test_admin_rejects_non_dict_body(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+        for body in ([], "x", 5, ["pause"]):
+            for fn in (
+                handler.pause_generation,
+                handler.resume_generation,
+                handler.flush_cache,
+                handler.abort_request,
+                handler.get_weight_version,
+                handler.set_weight_version,
+            ):
+                resp = await fn(body)
+                assert resp["status"] == "error", (fn.__name__, body, resp)
+                assert "JSON object" in resp["message"]
+
+    @pytest.mark.asyncio
+    async def test_keep_pause_rejects_active_lora_requests(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler._lora_state = mod.LoRAState()
+        handler.engine_client = MagicMock()
+        handler.engine_client.pause_generation = AsyncMock()
+        handler._lora_state.begin_request("adapterA")
+
+        resp = await handler.pause_generation({"mode": "keep"})
+
+        assert resp["status"] == "error"
+        assert "active LoRA requests" in resp["message"]
+        handler.engine_client.pause_generation.assert_not_awaited()
+        handler._lora_state.end_request("adapterA")
+
+    @pytest.mark.asyncio
+    async def test_distributed_update_can_match_async_rl_semantics(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        resp = await handler.update_weights_from_distributed(
+            {
+                "allow_unpaused": True,
+                "reset_prefix_cache": False,
+                "engine_rpc": "update_weights",
+                "weight_version": 7,
+                "update_info": {"names": ["weight"]},
+            }
+        )
+
+        assert resp == {"status": "ok", "version": 7, "version_declared": True}
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "update_weights",
+            kwargs={"update_info": {"names": ["weight"]}},
+        )
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distributed_update_rejects_unpaused_cache_reset(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        resp = await handler.update_weights_from_distributed(
+            {"allow_unpaused": True, "engine_rpc": "update_weights"}
+        )
+
+        assert resp["status"] == "error"
+        assert "cannot reset the prefix cache" in resp["message"]
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distributed_update_preserves_safe_defaults(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        handler._paused = False
+        resp = await handler.update_weights_from_distributed({})
+        assert resp["status"] == "error"
+        handler.engine_client.collective_rpc.assert_not_awaited()
+
+        handler._paused = True
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update"}
+        )
+        assert resp["status"] == "ok"
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "finish_weight_update", kwargs={}
+        )
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+
+    @staticmethod
+    def _make_rl_handler():
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_get_weight_version_reports_undeclared_before_any_update(self):
+        config = _make_config(enable_multimodal=False)
+        config.custom_encoder_class = None
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.DecodeWorkerHandler(
+                runtime=MagicMock(),
+                config=config,
+                engine=MagicMock(),
+                default_sampling_params={},
+            )
+
+        resp = await handler.get_weight_version({})
+
+        assert resp["status"] == "ok"
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", [None, 7, "policy-43"])
+    async def test_set_weight_version_declares_without_touching_the_engine(
+        self, version
+    ):
+        handler = self._make_rl_handler()
+
+        resp = await handler.set_weight_version({"weight_version": version})
+
+        assert resp == {"status": "ok", "version": version}
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_set_weight_version_rejects_a_missing_version(self):
+        handler = self._make_rl_handler()
+
+        resp = await handler.set_weight_version({})
+
+        assert resp["status"] == "error"
+        assert (await handler.get_weight_version({}))["version_declared"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", [None, "initial", "unknown"])
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("update_weights_from_disk", {"model_path": "/models/checkpoint-42"}),
+            ("update_weights_from_distributed", {"engine_rpc": "update_weights"}),
+        ],
+    )
+    async def test_explicit_version_is_declared(self, route, body, version):
+        handler = self._make_rl_handler()
+        handler._paused = True
+
+        response = await getattr(handler, route)({**body, "weight_version": version})
+
+        assert response == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "version",
+        [mod._WEIGHT_VERSION_UNDECLARED, None, "policy-42"],
+        ids=["undeclared", "declared-null", "declared-string"],
+    )
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("update_weights_from_disk", {"model_path": "/models/checkpoint-43"}),
+            ("update_weights_from_distributed", {"engine_rpc": "update_weights"}),
+        ],
+    )
+    async def test_update_without_a_version_preserves_declaration(
+        self, route, body, version
+    ):
+        handler = self._make_rl_handler()
+        handler._paused = True
+        if version is not mod._WEIGHT_VERSION_UNDECLARED:
+            await handler.set_weight_version({"weight_version": version})
+        previous = await handler.get_weight_version({})
+
+        response = await getattr(handler, route)(body)
+
+        assert response == {
+            "status": "ok",
+            "version": "unknown",
+            "version_declared": False,
+        }
+        assert await handler.get_weight_version({}) == previous
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_succeeds_within_timeout(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+
+        resp = await handler.init_weights_update_group(
+            {
+                "engine_rpc": "init_weight_transfer_engine",
+                "init_info": {"master_address": "trainer", "master_port": 29500},
+            }
+        )
+
+        assert resp == {
+            "status": "ok",
+            "message": "Weight update group initialized",
+        }
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "init_weight_transfer_engine",
+            kwargs={
+                "init_info": {
+                    "master_address": "trainer",
+                    "master_port": 29500,
+                }
+            },
+        )
+        assert not handler._pause_lock.locked()
+
+    def test_init_weights_update_group_timeout_defaults_to_30_seconds(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", raising=False)
+
+        assert mod._rl_init_weights_timeout_s() == 30.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_init_weights_update_group_timeout_exits_worker(self, monkeypatch):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+
+        rpc_cancelled = asyncio.Event()
+
+        async def blocked_rpc(*_args, **_kwargs):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                rpc_cancelled.set()
+                raise
+
+        handler.engine_client.collective_rpc = AsyncMock(side_effect=blocked_rpc)
+        monkeypatch.setenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", "0.01")
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+
+        assert exc_info.value.code == 1
+        assert rpc_cancelled.is_set()
+        handler.runtime.shutdown.assert_called_once_with()
+        exit_mock.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_returns_inner_timeout_error(
+        self, monkeypatch
+    ):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=TimeoutError("transport timed out")
+        )
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp == {"status": "error", "message": "transport timed out"}
+        handler.runtime.shutdown.assert_not_called()
+        exit_mock.assert_not_called()
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_engine_dead_exits_worker(
+        self, monkeypatch
+    ):
+        from vllm.v1.engine.exceptions import EngineDeadError
+
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=EngineDeadError("engine dead")
+        )
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+
+        assert exc_info.value.code == 1
+        handler.runtime.shutdown.assert_called_once_with()
+        exit_mock.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_returns_ordinary_errors(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("init failed")
+        )
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp == {"status": "error", "message": "init failed"}
+        handler.runtime.shutdown.assert_not_called()
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_abort_request_surfaces_deferred_abort_failure(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+
+        class _FailingGuard:
+            def __init__(self):
+                self._abort_exc = RuntimeError("engine abort boom")
+
+            async def abort(self):
+                return None
+
+        handler._deferred_aborts = {"req-x": _FailingGuard()}
+        resp = await handler.abort_request({"request_id": "req-x"})
+        assert resp["status"] == "error"
+        assert "boom" in resp["message"]
+
+    @pytest.mark.asyncio
+    async def test_abort_request_ok_when_deferred_clean(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+
+        class _CleanGuard:
+            def __init__(self):
+                self._abort_exc = None
+
+            async def abort(self):
+                return None
+
+        handler._deferred_aborts = {"req-y": _CleanGuard()}
+        resp = await handler.abort_request({"request_id": "req-y"})
+        assert resp["status"] == "ok"
+        assert resp["request_id"] == "req-y"
+
+    @pytest.mark.asyncio
+    async def test_deferred_abort_does_not_block_before_first_token(self):
+        # abort() before the first token must return promptly (the real abort is
+        # deferred to a background task), not hang on the first-token event.
+        guard = mod._DeferredAbort(MagicMock(), "req-z")
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
+        assert guard._abort_exc is None
+        await guard.close()
+
+    @pytest.mark.asyncio
+    async def test_deferred_abort_escalates_engine_dead(self):
+        from vllm.v1.engine.exceptions import EngineDeadError
+
+        escalated = []
+
+        async def boom(_request_id):
+            raise EngineDeadError("engine dead")
+
+        engine = MagicMock()
+        engine.abort = boom
+        guard = mod._DeferredAbort(
+            engine, "req-d", on_engine_dead=lambda e: escalated.append(e)
+        )
+        guard.signal_first_token()  # post-first-token -> immediate abort path
+        await guard.abort()
+        assert len(escalated) == 1
+        assert isinstance(escalated[0], EngineDeadError)

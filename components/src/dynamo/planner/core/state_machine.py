@@ -1,0 +1,792 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Shared builtin planner state and algorithm helpers.
+
+``PlannerScalingState`` owns perf models, worker inventory, throughput floors,
+runtime metadata, and the load/throughput scaling calculations used by the
+builtin plugin bundle.
+
+This module contains **zero I/O** -- no runtime, connector, subscriber, asyncio,
+or Prometheus dependencies.  All external interaction is done by the adapter
+layer, which feeds observations into the plugin pipeline and applies decisions
+out.
+
+Load-based scaling logic lives in ``load_scaling.py``.
+Throughput-based scaling logic lives in ``throughput_scaling.py``.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from typing import TYPE_CHECKING, Literal, Optional
+
+from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endpoint
+from dynamo.planner.core.budget import (
+    fit_directional_budget_pair,
+    guard_disagg_scaling_budget,
+    guard_single_scaling_budget,
+    proportional_clamp_pair,
+    proportional_clamp_single,
+)
+from dynamo.planner.core.load_scaling import LoadScalingMixin
+from dynamo.planner.core.perf_model import PlannerEnginePerfModel
+from dynamo.planner.core.throughput_scaling import ThroughputScalingMixin
+from dynamo.planner.core.types import (
+    FpmObservations,
+    ScalingDecision,
+    TickDiagnostics,
+    TrafficObservation,
+    WorkerCapabilities,
+    WorkerCounts,
+)
+
+if TYPE_CHECKING:
+    from dynamo.common.forward_pass_metrics import ForwardPassMetrics
+
+logger = logging.getLogger(__name__)
+
+
+class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
+    """Shared in-memory scaling state for all planner modes.
+
+    Owns perf models, throughput lower bounds, worker inventory,
+    last-value runtime metadata, and all scaling decision logic. It
+    deliberately has no runtime dependencies. Load prediction state
+    lives in the builtin PREDICT plugin and is passed in explicitly.
+
+    Builtin orchestrator plugins use this class directly as their private
+    shared core while the remaining cross-plugin state is being split into
+    explicit pipeline artifacts.
+    """
+
+    def __init__(
+        self,
+        config: PlannerConfig,
+        capabilities: Optional[WorkerCapabilities] = None,
+    ) -> None:
+        self._config = config
+        self._capabilities = capabilities or WorkerCapabilities()
+
+        self._is_agg = config.mode == "agg"
+        self._has_prefill = config.mode in ("disagg", "prefill")
+        self._has_decode = config.mode in ("disagg", "decode", "agg")
+        self._is_easy = config.optimization_target != "sla"
+
+        # Easy mode uses static thresholds -- no perf models needed.
+        if not self._is_easy:
+            if self._is_agg:
+                self._agg_regression = PlannerEnginePerfModel(
+                    worker_type="aggregated",
+                    config=config,
+                    capabilities=self._capabilities.decode,
+                )
+            else:
+                if self._has_prefill:
+                    self._prefill_regression = PlannerEnginePerfModel(
+                        worker_type="prefill",
+                        config=config,
+                        capabilities=self._capabilities.prefill,
+                    )
+                if self._has_decode:
+                    self._decode_regression = PlannerEnginePerfModel(
+                        worker_type="decode",
+                        config=config,
+                        capabilities=self._capabilities.decode,
+                    )
+        self._num_p_workers: int = 0
+        self._num_d_workers: int = 0
+        self._expected_num_p: Optional[int] = None
+        self._expected_num_d: Optional[int] = None
+        self._prefill_scaling_in_progress: bool = False
+        self._decode_scaling_in_progress: bool = False
+        self._pending_num_p = 0
+        self._pending_num_d = 0
+
+        self._throughput_lower_bound_p: int = 1
+        self._throughput_lower_bound_d: int = 1
+
+        # Most recent observed KV hit rate from the router. Runtime metadata like
+        # this is intentionally last-value only, not fed through the traffic load
+        # predictor. ``None`` means "no observation yet" -> no discount.
+        self._last_kv_hit_rate: Optional[float] = None
+        # Most recent speculative decode accept length. This uses last-value
+        # semantics as runtime metadata; FPM observations remain raw per-forward
+        # data and cold start/no observation falls back to 1.0.
+        self._last_accept_length: float = 1.0
+
+        # Diagnostics scratch fields populated by mixins and read by adapters.
+        self._diag_estimated_ttft_ms: Optional[float] = None
+        self._diag_estimated_itl_ms: Optional[float] = None
+        self._diag_predicted_num_req: Optional[float] = None
+        self._diag_predicted_isl: Optional[float] = None
+        self._diag_predicted_osl: Optional[float] = None
+        self._diag_predicted_kv_hit_rate: Optional[float] = None
+        self._diag_engine_rps_prefill: Optional[float] = None
+        self._diag_engine_rps_decode: Optional[float] = None
+        self._diag_load_reason: Optional[str] = None
+        self._diag_throughput_reason: Optional[str] = None
+        self._diag_load_reason_prefill: Optional[str] = None
+        self._diag_load_reason_decode: Optional[str] = None
+        self._diag_throughput_reason_prefill: Optional[str] = None
+        self._diag_throughput_reason_decode: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
+        """Replace the current worker capabilities."""
+        self._capabilities = capabilities
+        self._last_accept_length = self._clamp_accept_length(self._last_accept_length)
+        if self._is_easy:
+            return
+        if self._is_agg and hasattr(self, "_agg_regression"):
+            self._agg_regression.update_capabilities(self._capabilities.decode)
+        if (
+            self._has_prefill
+            and not self._is_agg
+            and hasattr(self, "_prefill_regression")
+        ):
+            self._prefill_regression.update_capabilities(self._capabilities.prefill)
+        if (
+            self._has_decode
+            and not self._is_agg
+            and hasattr(self, "_decode_regression")
+        ):
+            self._decode_regression.update_capabilities(self._capabilities.decode)
+
+    def load_benchmark_fpms(
+        self,
+        prefill_fpms: Optional[list[ForwardPassMetrics]] = None,
+        decode_fpms: Optional[list[ForwardPassMetrics]] = None,
+        agg_fpms: Optional[list[ForwardPassMetrics]] = None,
+    ) -> None:
+        if self._is_easy:
+            logger.debug("Skipping benchmark FPM loading in easy mode")
+            return
+        if agg_fpms and self._is_agg:
+            self._agg_regression.load_benchmark_fpms(agg_fpms)
+            logger.info(f"Bootstrapped agg perf model with {len(agg_fpms)} FPMs")
+        if prefill_fpms and self._has_prefill and not self._is_agg:
+            self._prefill_regression.load_benchmark_fpms(prefill_fpms)
+            logger.info(
+                f"Bootstrapped prefill perf model with {len(prefill_fpms)} FPMs"
+            )
+        if decode_fpms and self._has_decode and not self._is_agg:
+            self._decode_regression.load_benchmark_fpms(decode_fpms)
+            logger.info(f"Bootstrapped decode perf model with {len(decode_fpms)} FPMs")
+
+    def begin_tick(self) -> None:
+        """Reset per-tick diagnostics before builtin plugins run."""
+        self._reset_diag()
+
+    def observe_worker_counts(self, counts: WorkerCounts) -> None:
+        self._update_inventory(counts)
+
+    def observe_fpm(self, obs: FpmObservations) -> None:
+        if self._is_easy:
+            return
+        self._observe_fpm(obs)
+
+    def observe_runtime_metadata(
+        self,
+        *,
+        kv_hit_rate: Optional[float] = None,
+        accept_length: Optional[float] = None,
+    ) -> None:
+        """Update last-value runtime metadata without touching prediction history."""
+        if kv_hit_rate is not None and not math.isnan(kv_hit_rate):
+            self._last_kv_hit_rate = kv_hit_rate
+        self._observe_accept_length(accept_length)
+
+    def install_regressions(
+        self,
+        *,
+        prefill: Optional[PlannerEnginePerfModel] = None,
+        decode: Optional[PlannerEnginePerfModel] = None,
+        agg: Optional[PlannerEnginePerfModel] = None,
+    ) -> None:
+        if prefill is not None:
+            self._prefill_regression = prefill
+        if decode is not None:
+            self._decode_regression = decode
+        if agg is not None:
+            self._agg_regression = agg
+
+    def advance_load(
+        self,
+        obs: FpmObservations,
+        *,
+        predicted_kv_hit_rate: Optional[float] = None,
+        predicted_accept_length: Optional[float] = None,
+    ) -> Optional[ScalingDecision]:
+        self.observe_runtime_metadata(
+            kv_hit_rate=predicted_kv_hit_rate,
+            accept_length=predicted_accept_length,
+        )
+        decision = self._advance_load(obs)
+        if decision is not None and (self._pending_num_p or self._pending_num_d):
+            decision.num_prefill = self._startup_reduction(
+                decision.num_prefill, self._num_p_workers, self._pending_num_p
+            )
+            decision.num_decode = self._startup_reduction(
+                decision.num_decode, self._num_d_workers, self._pending_num_d
+            )
+            if decision.num_prefill is None and decision.num_decode is None:
+                return None
+        return decision
+
+    @staticmethod
+    def _startup_reduction(
+        target: Optional[int], ready: int, pending: int
+    ) -> Optional[int]:
+        # Never turn a scale-up recommendation into a cancellation. Ready-equal
+        # targets are meaningful only when there are pending replicas to cancel.
+        if target is None or target > ready or target >= ready + pending:
+            return None
+        return target
+
+    def _startup_disagg_decision(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        *,
+        source: Literal["load", "throughput"],
+    ) -> Optional[ScalingDecision]:
+        """Budget startup reductions against the unchanged peer's desired count.
+
+        Serving counts remain the input to load/consolidation prediction. Only
+        allocation accounting includes pending replicas, and an omitted or up
+        recommendation preserves that role's entire allocation.
+        """
+        targets = (
+            self._startup_reduction(num_p, self._num_p_workers, self._pending_num_p),
+            self._startup_reduction(num_d, self._num_d_workers, self._pending_num_d),
+        )
+        if targets == (None, None):
+            return None
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
+        if p_gpu is not None and d_gpu is not None:
+            # Adjustable roles may retain their serving replicas to respect the
+            # floor; fixed peers retain both serving and pending replicas.
+            current_p = self._num_p_workers + (
+                self._pending_num_p if targets[0] is None else 0
+            )
+            current_d = self._num_d_workers + (
+                self._pending_num_d if targets[1] is None else 0
+            )
+            fitted_p, fitted_d = fit_directional_budget_pair(
+                current_p,
+                current_d,
+                targets[0] if targets[0] is not None else current_p,
+                targets[1] if targets[1] is not None else current_d,
+                p_gpu,
+                d_gpu,
+                self._config.min_gpu_budget,
+                # Reductions cannot need a larger ceiling. The final startup
+                # projection checks the hard ceiling and power budget against
+                # the actual applied pair; using a floor-only fit here keeps
+                # its strict floor (no integer-step tolerance) intact.
+                -1,
+                self._min_endpoint_for("prefill"),
+                self._min_endpoint_for("decode"),
+            )
+            targets = (
+                self._startup_reduction(
+                    fitted_p, self._num_p_workers, self._pending_num_p
+                )
+                if targets[0] is not None
+                else None,
+                self._startup_reduction(
+                    fitted_d, self._num_d_workers, self._pending_num_d
+                )
+                if targets[1] is not None
+                else None,
+            )
+        if targets == (None, None):
+            return None
+        if source == "load":
+            self._diag_load_reason = "scale_down"
+        else:
+            self._diag_throughput_reason = "scale"
+        return ScalingDecision(num_prefill=targets[0], num_decode=targets[1])
+
+    def advance_throughput_from_prediction(
+        self,
+        traffic: TrafficObservation,
+        *,
+        predicted_num_req: Optional[float],
+        predicted_isl: Optional[float],
+        predicted_osl: Optional[float],
+        predicted_kv_hit_rate: Optional[float],
+        predicted_accept_length: Optional[float] = None,
+    ) -> Optional[ScalingDecision]:
+        """Run the throughput decision using PREDICT-stage output.
+
+        The PREDICT plugin owns load prediction history. This method consumes
+        only explicit prediction output so PROPOSE never re-runs prediction or
+        depends on hidden predictor state.
+        """
+        if not self._config.enable_throughput_scaling:
+            self._diag_throughput_reason = "disabled"
+            return None
+
+        if predicted_num_req is None or predicted_isl is None or predicted_osl is None:
+            return None
+
+        self._diag_predicted_num_req = predicted_num_req
+        self._diag_predicted_isl = predicted_isl
+        self._diag_predicted_osl = predicted_osl
+        self._diag_predicted_kv_hit_rate = predicted_kv_hit_rate
+        self.observe_runtime_metadata(
+            kv_hit_rate=predicted_kv_hit_rate,
+            accept_length=predicted_accept_length,
+        )
+
+        if traffic.duration_s <= 0:
+            logger.warning("Traffic observation has non-positive duration, skipping")
+            self._diag_throughput_reason = "no_traffic_data"
+            return None
+
+        demand_rps = predicted_num_req / traffic.duration_s
+        mode = self._config.mode
+        if mode == "agg":
+            return self._throughput_agg(
+                demand_rps, predicted_isl, predicted_osl, predicted_kv_hit_rate
+            )
+        if mode == "disagg":
+            return self._throughput_disagg(
+                demand_rps, predicted_isl, predicted_osl, predicted_kv_hit_rate
+            )
+        return self._throughput_single(
+            demand_rps,
+            predicted_isl,
+            predicted_osl,
+            mode,
+            predicted_kv_hit_rate,
+        )
+
+    def diagnostics(self) -> TickDiagnostics:
+        return self._build_diagnostics()
+
+    def _reset_diag(self) -> None:
+        self._diag_estimated_ttft_ms = None
+        self._diag_estimated_itl_ms = None
+        self._diag_predicted_num_req = None
+        self._diag_predicted_isl = None
+        self._diag_predicted_osl = None
+        self._diag_predicted_kv_hit_rate = None
+        self._diag_engine_rps_prefill = None
+        self._diag_engine_rps_decode = None
+        self._diag_load_reason = None
+        self._diag_throughput_reason = None
+        self._diag_load_reason_prefill = None
+        self._diag_load_reason_decode = None
+        self._diag_throughput_reason_prefill = None
+        self._diag_throughput_reason_decode = None
+
+    def _build_diagnostics(self) -> TickDiagnostics:
+        return TickDiagnostics(
+            estimated_ttft_ms=self._diag_estimated_ttft_ms,
+            estimated_itl_ms=self._diag_estimated_itl_ms,
+            predicted_num_req=self._diag_predicted_num_req,
+            predicted_isl=self._diag_predicted_isl,
+            predicted_osl=self._diag_predicted_osl,
+            predicted_kv_hit_rate=self._diag_predicted_kv_hit_rate,
+            engine_rps_prefill=self._diag_engine_rps_prefill,
+            engine_rps_decode=self._diag_engine_rps_decode,
+            throughput_lower_bound_prefill=self._throughput_lower_bound_p,
+            throughput_lower_bound_decode=self._throughput_lower_bound_d,
+            load_decision_reason=self._diag_load_reason,
+            throughput_decision_reason=self._diag_throughput_reason,
+            load_decision_reason_prefill=self._diag_load_reason_prefill,
+            load_decision_reason_decode=self._diag_load_reason_decode,
+            throughput_decision_reason_prefill=self._diag_throughput_reason_prefill,
+            throughput_decision_reason_decode=self._diag_throughput_reason_decode,
+        )
+
+    # ------------------------------------------------------------------
+    # Inventory
+    # ------------------------------------------------------------------
+
+    def _update_inventory(self, counts: WorkerCounts) -> None:
+        if counts.ready_num_prefill is not None:
+            self._num_p_workers = counts.ready_num_prefill
+        if counts.ready_num_decode is not None:
+            self._num_d_workers = counts.ready_num_decode
+        self._expected_num_p = counts.expected_num_prefill
+        self._expected_num_d = counts.expected_num_decode
+        self._prefill_scaling_in_progress = counts.prefill_scaling_in_progress
+        self._decode_scaling_in_progress = counts.decode_scaling_in_progress
+        self._pending_num_p = counts.pending_num_prefill
+        self._pending_num_d = counts.pending_num_decode
+
+    def _pending_startup(self, component: str) -> int:
+        return self._pending_num_p if component == "prefill" else self._pending_num_d
+
+    def _load_scaling_blocked(self, component: str) -> bool:
+        # Startup inventory is only supplied after deployment-wide drain and
+        # rollout checks. Decisions are still bounded to reductions below.
+        return self._scaling_in_progress(component) and not (
+            self._pending_num_p or self._pending_num_d
+        )
+
+    def _scaling_in_progress(self, component: str) -> bool:
+        if component == "prefill":
+            return self._prefill_scaling_in_progress or (
+                self._expected_num_p is not None
+                and self._expected_num_p != self._num_p_workers
+            )
+        return self._decode_scaling_in_progress or (
+            self._expected_num_d is not None
+            and self._expected_num_d != self._num_d_workers
+        )
+
+    # ------------------------------------------------------------------
+    # FPM / traffic observation
+    # ------------------------------------------------------------------
+
+    def _observe_fpm(self, obs: FpmObservations) -> None:
+        if self._is_agg:
+            if obs.decode:
+                self._agg_regression.add_observations(obs.decode)
+                logger.info(f"FPM load stats: {len(obs.decode)} agg engines observed")
+            return
+
+        if obs.prefill and self._has_prefill:
+            self._prefill_regression.add_observations(obs.prefill)
+            logger.info(f"FPM load stats: {len(obs.prefill)} prefill engines observed")
+        if obs.decode and self._has_decode:
+            self._decode_regression.add_observations(obs.decode)
+            logger.info(f"FPM load stats: {len(obs.decode)} decode engines observed")
+
+    def _effective_speculative_nextn(self) -> int:
+        d_caps = self._capabilities.decode
+        if d_caps and d_caps.speculative_nextn and d_caps.speculative_nextn > 0:
+            return d_caps.speculative_nextn
+        return max(0, int(self._config.speculative_nextn))
+
+    def _clamp_accept_length(self, accept_length: Optional[float]) -> float:
+        nextn = self._effective_speculative_nextn()
+        if nextn <= 0:
+            return 1.0
+        if accept_length is None or not math.isfinite(accept_length):
+            return 1.0
+        return min(max(float(accept_length), 1.0), float(nextn + 1))
+
+    def _observe_accept_length(self, accept_length: Optional[float]) -> None:
+        if accept_length is None or not math.isfinite(accept_length):
+            return
+        self._last_accept_length = self._clamp_accept_length(accept_length)
+
+    def _current_decode_accept_length(self) -> float:
+        return self._clamp_accept_length(self._last_accept_length)
+
+    # ------------------------------------------------------------------
+    # Budget
+    # ------------------------------------------------------------------
+
+    def _resolve_disagg_gpu_costs(self) -> tuple[Optional[int], Optional[int]]:
+        """Resolve per-replica GPU costs for prefill and decode."""
+        p_gpu = (
+            self._capabilities.prefill.resolved_gpu_cost_per_replica
+            if self._capabilities.prefill is not None
+            else None
+        )
+        d_gpu = (
+            self._capabilities.decode.resolved_gpu_cost_per_replica
+            if self._capabilities.decode is not None
+            else None
+        )
+        return p_gpu, d_gpu
+
+    def _min_endpoint_for(self, component: Literal["prefill", "decode"]) -> int:
+        """Return the effective floor for a planner component."""
+
+        return resolve_min_endpoint(self._config, component)
+
+    def _apply_single_budget(
+        self, desired: int, component: Literal["prefill", "decode"]
+    ) -> int:
+        caps = (
+            self._capabilities.prefill
+            if component == "prefill"
+            else self._capabilities.decode
+        )
+        gpu = caps.resolved_gpu_cost_per_replica if caps is not None else None
+        if gpu is None:
+            return desired
+        min_endpoint = self._min_endpoint_for(component)
+        return self._budget_clamp(max(desired, min_endpoint), gpu, min_endpoint)
+
+    def _apply_single_scaling_budget(
+        self, desired: int, component: Literal["prefill", "decode"]
+    ) -> tuple[int, Optional[str]]:
+        """Apply the direction-preserving budget policy for builtin scaling."""
+        return self._guard_single_throughput_budget(
+            desired,
+            component,
+            min_gpus=self._config.min_gpu_budget,
+        )
+
+    def _fit_single_throughput_ceiling(
+        self, desired: int, component: Literal["prefill", "decode"]
+    ) -> tuple[int, Optional[str]]:
+        """Fit a throughput lower bound under the hard GPU ceiling only."""
+        return self._guard_single_throughput_budget(desired, component, min_gpus=-1)
+
+    def _guard_single_throughput_budget(
+        self,
+        desired: int,
+        component: Literal["prefill", "decode"],
+        *,
+        min_gpus: int,
+    ) -> tuple[int, Optional[str]]:
+        caps = (
+            self._capabilities.prefill
+            if component == "prefill"
+            else self._capabilities.decode
+        )
+        gpu = caps.resolved_gpu_cost_per_replica if caps is not None else None
+        if gpu is None:
+            return desired, None
+        current = self._num_p_workers if component == "prefill" else self._num_d_workers
+        return guard_single_scaling_budget(
+            current,
+            desired,
+            gpu,
+            min_gpus,
+            self._config.max_gpu_budget,
+            self._min_endpoint_for(component),
+        )
+
+    def _apply_global_budget(self, num_p: int, num_d: int) -> tuple[int, int]:
+        """Apply the GPU budget band (ceiling and optional floor) to
+        ``(num_p, num_d)``. Delegates to ``budget.proportional_clamp_pair``
+        for the actual math; this method only resolves the per-replica GPU
+        costs from capabilities."""
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
+        if p_gpu is None or d_gpu is None:
+            return num_p, num_d
+
+        new_p, new_d = proportional_clamp_pair(
+            num_p,
+            num_d,
+            p_gpu,
+            d_gpu,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            self._min_endpoint_for("prefill"),
+            self._min_endpoint_for("decode"),
+        )
+        if (new_p, new_d) != (num_p, num_d):
+            old_total = num_p * p_gpu + num_d * d_gpu
+            new_total = new_p * p_gpu + new_d * d_gpu
+            logger.warning(
+                f"GPU budget band [min={self._config.min_gpu_budget}, "
+                f"max={self._config.max_gpu_budget}] clamped "
+                f"({num_p}P + {num_d}D = {old_total}) -> "
+                f"({new_p}P + {new_d}D = {new_total})"
+            )
+        return new_p, new_d
+
+    def _fit_disagg_throughput_ceiling(self, num_p: int, num_d: int) -> tuple[int, int]:
+        """Fit a throughput-bounded pair under the hard GPU ceiling.
+
+        ``min_gpu_budget`` guards an actual scale-down; it is not demand and
+        must not inflate a persisted throughput lower bound.  The full budget
+        band is enforced later when the combined load/throughput action is
+        materialized.
+        """
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
+        if p_gpu is None or d_gpu is None:
+            return num_p, num_d
+
+        prefill_min = self._min_endpoint_for("prefill")
+        decode_min = self._min_endpoint_for("decode")
+        endpoint_recovery = (
+            self._num_p_workers < prefill_min or self._num_d_workers < decode_min
+        )
+        if endpoint_recovery:
+            # A runtime endpoint increase is explicit allocation policy and may
+            # select a donor to make its minimum footprint fit the hard ceiling.
+            new_p, new_d = proportional_clamp_pair(
+                max(num_p, prefill_min),
+                max(num_d, decode_min),
+                p_gpu,
+                d_gpu,
+                -1,
+                self._config.max_gpu_budget,
+                prefill_min,
+                decode_min,
+            )
+        else:
+            new_p, new_d = fit_directional_budget_pair(
+                self._num_p_workers,
+                self._num_d_workers,
+                num_p,
+                num_d,
+                p_gpu,
+                d_gpu,
+                -1,
+                self._config.max_gpu_budget,
+                prefill_min,
+                decode_min,
+            )
+        if (new_p, new_d) != (num_p, num_d):
+            logger.warning(
+                "GPU ceiling limited throughput target: current=(%sP, %sD), "
+                "proposed=(%sP, %sD), fitted=(%sP, %sD), max=%s",
+                self._num_p_workers,
+                self._num_d_workers,
+                num_p,
+                num_d,
+                new_p,
+                new_d,
+                self._config.max_gpu_budget,
+            )
+        return new_p, new_d
+
+    def _apply_disagg_scaling_budget(
+        self,
+        num_p: int,
+        num_d: int,
+        *,
+        source: Literal["load", "throughput"],
+    ) -> tuple[int, int, Optional[str]]:
+        """Apply the direction-preserving budget policy for builtin scaling."""
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
+        if p_gpu is None or d_gpu is None:
+            return num_p, num_d, None
+
+        prefill_min = self._min_endpoint_for("prefill")
+        decode_min = self._min_endpoint_for("decode")
+        if self._num_p_workers < prefill_min or self._num_d_workers < decode_min:
+            # Endpoint floors are explicit runtime policy. Reconcile them even
+            # if doing so requires a donor that the ordinary scaling signal did
+            # not nominate; startup/runtime validation guarantees feasibility.
+            new_p, new_d = proportional_clamp_pair(
+                max(num_p, prefill_min),
+                max(num_d, decode_min),
+                p_gpu,
+                d_gpu,
+                self._config.min_gpu_budget,
+                self._config.max_gpu_budget,
+                prefill_min,
+                decode_min,
+            )
+            return new_p, new_d, "gpu_budget_reconcile"
+
+        new_p, new_d, reason = guard_disagg_scaling_budget(
+            self._num_p_workers,
+            self._num_d_workers,
+            num_p,
+            num_d,
+            p_gpu,
+            d_gpu,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            prefill_min,
+            decode_min,
+        )
+        if reason is not None or (new_p, new_d) != (num_p, num_d):
+            old_total = self._num_p_workers * p_gpu + self._num_d_workers * d_gpu
+            proposed_total = num_p * p_gpu + num_d * d_gpu
+            new_total = new_p * p_gpu + new_d * d_gpu
+            logger.warning(
+                "GPU budget %s policy %s: current=(%sP + %sD = %s), "
+                "proposed=(%sP + %sD = %s), final=(%sP + %sD = %s), "
+                "band=[min=%s, max=%s]",
+                source,
+                reason or "gpu_budget_clamped",
+                self._num_p_workers,
+                self._num_d_workers,
+                old_total,
+                num_p,
+                num_d,
+                proposed_total,
+                new_p,
+                new_d,
+                new_total,
+                self._config.min_gpu_budget,
+                self._config.max_gpu_budget,
+            )
+        return new_p, new_d, reason
+
+    def _budget_clamp(self, desired: int, gpu_cost: int, min_endpoint: int) -> int:
+        """Apply the GPU budget band to a single component's desired replica
+        count (agg, prefill-only, or decode-only mode)."""
+        new_replicas = proportional_clamp_single(
+            desired,
+            gpu_cost,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            min_endpoint,
+        )
+        if new_replicas != desired:
+            logger.warning(
+                f"GPU budget band [min={self._config.min_gpu_budget}, "
+                f"max={self._config.max_gpu_budget}] clamped "
+                f"{desired} replicas (= {desired * gpu_cost} GPUs) -> "
+                f"{new_replicas} replicas (= {new_replicas * gpu_cost} GPUs)"
+            )
+        return new_replicas
+
+    # ------------------------------------------------------------------
+    # FPM / worker count reconciliation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _reconcile_fpm_worker_count(
+        fpm_stats: dict[tuple[str, int], ForwardPassMetrics], dgd_count: int, label: str
+    ) -> bool:
+        workers_to_dp: dict[str, set[int]] = {}
+        for wid, dp in fpm_stats:
+            workers_to_dp.setdefault(wid, set()).add(dp)
+
+        if len(workers_to_dp) != dgd_count:
+            logger.warning(
+                f"Worker count mismatch: DGD={dgd_count}, FPM={len(workers_to_dp)} for {label}"
+            )
+            return False
+
+        dp_sizes = {len(dps) for dps in workers_to_dp.values()}
+        if len(dp_sizes) > 1:
+            logger.warning(f"Inconsistent DP ranks for {label}: {dict(workers_to_dp)}")
+            return False
+
+        dp_size = dp_sizes.pop() if dp_sizes else 1
+        if len(fpm_stats) != dgd_count * dp_size:
+            logger.warning(
+                f"Incomplete FPM coverage for {label}: expected {dgd_count}x{dp_size}, got {len(fpm_stats)}"
+            )
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def prefill_regression(self) -> PlannerEnginePerfModel:
+        if not self._has_prefill:
+            raise AttributeError(f"No prefill regression in mode={self._config.mode}")
+        return self._prefill_regression
+
+    @property
+    def decode_regression(self) -> PlannerEnginePerfModel:
+        if not self._has_decode or self._is_agg:
+            raise AttributeError(f"No decode regression in mode={self._config.mode}")
+        return self._decode_regression
+
+    @property
+    def agg_regression(self) -> PlannerEnginePerfModel:
+        if not self._is_agg:
+            raise AttributeError(f"No agg regression in mode={self._config.mode}")
+        return self._agg_regression
+
+    @property
+    def regression(self) -> PlannerEnginePerfModel:
+        return self.agg_regression

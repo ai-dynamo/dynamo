@@ -6,50 +6,187 @@
 import dataclasses
 import logging
 import os
-from collections.abc import Mapping
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import pytest
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
 from tests.utils.client import send_request
-from tests.utils.constants import DefaultPort
-from tests.utils.engine_process import EngineConfig, EngineProcess
+from tests.utils.constants import DefaultPort, DynamoPortRange
+from tests.utils.engine_process import (
+    EngineConfig,
+    EngineProcess,
+    ResponseValidationError,
+)
+from tests.utils.payload_builder import (
+    make_chat_health_check,
+    make_completions_health_check,
+    make_images_health_check,
+)
+from tests.utils.payloads import ChatPayload, CompletionPayload, ImagesPayload
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 DEFAULT_TIMEOUT = 10
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
+logger = logging.getLogger(__name__)
 
 
-def run_serve_deployment(
+def _tail_logs(content: str, *, lines: int = 80) -> str:
+    if not content:
+        return "<no server logs captured>"
+    return "".join(content.splitlines(keepends=True)[-lines:]).rstrip()
+
+
+# Payload-class → factory for an endpoint-readiness check. isinstance matches
+# subclasses (e.g. ChatPayloadWithLogprobs) and is robust to ad-hoc `endpoint`
+# string overrides on derived payloads.
+_ENDPOINT_HEALTH_CHECK_FACTORIES = (
+    (CompletionPayload, make_completions_health_check),
+    (ChatPayload, make_chat_health_check),
+    (ImagesPayload, make_images_health_check),
+)
+
+
+def _is_multimodal_chat(payload: ChatPayload) -> bool:
+    # make_chat_health_check sends a text-only probe; multimodal endpoints
+    # (e.g. Qwen3-VL disagg/EPD) won't accept it, so the probe spins until
+    # pytest-timeout. Detect via OpenAI-style list content with any non-text
+    # part (image_url, video_url, input_audio, ...).
+    messages = (getattr(payload, "body", None) or {}).get("messages") or []
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") not in (None, "text"):
+                    return True
+    return False
+
+
+def _payload_eligible_for_check(payload: Any, payload_cls: type) -> bool:
+    if not isinstance(payload, payload_cls):
+        return False
+    if payload_cls is ChatPayload and _is_multimodal_chat(payload):
+        return False
+    return True
+
+
+def _with_endpoint_readiness_checks(
+    config: EngineConfig, frontend_port: int
+) -> EngineConfig:
+    new_checks = [
+        factory(frontend_port, config.model)
+        for payload_cls, factory in _ENDPOINT_HEALTH_CHECK_FACTORIES
+        if any(
+            _payload_eligible_for_check(p, payload_cls) for p in config.request_payloads
+        )
+    ]
+    if not new_checks:
+        return config
+    return dataclasses.replace(
+        config,
+        health_check_funcs=[*config.health_check_funcs, *new_checks],
+    )
+
+
+def _format_request_failure(
+    *,
+    config: EngineConfig,
+    payload: Any,
+    server_process: EngineProcess,
+    error: Exception,
+) -> str:
+    server_state = "running" if server_process.is_running() else "not running"
+    try:
+        url = payload.url()
+    except Exception:
+        url = "<payload.url() raised>"
+    return (
+        f"{type(payload).__name__} request failed for config '{config.name}' "
+        f"(method={payload.method}, url={url}, timeout={payload.timeout}s, "
+        f"server_pid={server_process.get_pid()}, server_state={server_state}, "
+        f"log_path={server_process.log_path})\n"
+        f"Original error: {type(error).__name__}: {error}\n\n"
+        "Last 80 server log lines:\n"
+        f"{_tail_logs(server_process.read_logs(), lines=80)}"
+    )
+
+
+@dataclasses.dataclass
+class _PreparedDeployment:
+    config: EngineConfig
+    merged_env: dict
+    frontend_port: int
+    system_ports: list
+    disagg_bootstrap_port: Optional[int]
+
+
+def _prepare_deployment(
     config: EngineConfig,
     request: Any,
     *,
-    ports: ServicePorts | None = None,  # pass `dynamo_dynamic_ports` here
-    extra_env: Optional[Dict[str, str]] = None,
-) -> None:
-    """Run a standard serve deployment test for any EngineConfig.
-
-    - Launches the engine via EngineProcess.from_script
-    - Builds a payload (with optional override/mutator)
-    - Iterates configured endpoints and validates responses and logs
-    """
-
-    logger = logging.getLogger(request.node.name)
-    logger.info("Starting %s test_deployment", config.name)
-
-    assert (
-        config.request_payloads is not None and len(config.request_payloads) > 0
-    ), "request_payloads must be provided on EngineConfig"
-
-    logger.info("Using model: %s", config.model)
-    logger.info("Script: %s", config.script_name)
-
+    ports: ServicePorts | None,
+    extra_env: Optional[Dict[str, str]],
+) -> _PreparedDeployment:
+    """Build the launch env (profile/KV overrides, dynamic ports, bootstrap
+    port) and the port-adjusted config shared by all deployment runners."""
     merged_env: dict[str, str] = {}
     if extra_env:
         merged_env.update(extra_env)
+
+    # In serial mode (no parallel scheduler), pass the marker's KV cache budget
+    # so the launch script's small default doesn't starve larger models.
+    # The parallel scheduler already sets this env var per-test.
+    if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in os.environ:
+        kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+        if kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES", str(int(kv_mark.args[0]))
+            )
+
+    if "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS" not in os.environ:
+        sglang_kv_mark = request.node.get_closest_marker("requested_sglang_kv_tokens")
+        if sglang_kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS",
+                str(int(sglang_kv_mark.args[0])),
+            )
+
+    if "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS" not in os.environ:
+        trtllm_kv_mark = request.node.get_closest_marker("requested_trtllm_kv_tokens")
+        if trtllm_kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS",
+                str(int(trtllm_kv_mark.args[0])),
+            )
+
+    if "_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES" not in os.environ:
+        trtllm_vram_mark = request.node.get_closest_marker("requested_trtllm_vram_gib")
+        if trtllm_vram_mark:
+            gib_to_bytes = int(trtllm_vram_mark.args[0] * 1024**3)
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES",
+                str(gib_to_bytes),
+            )
+
+    # Stagger engine startup under xdist to avoid vLLM profiling race
+    # (vLLM bug #10643: concurrent profilers miscount each other's memory).
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker_id.startswith("gw"):
+        worker_num = int(worker_id.removeprefix("gw"))
+        if worker_num > 0:
+            stagger_s = worker_num * 15
+            logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
+            time.sleep(stagger_s)
 
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
@@ -69,15 +206,52 @@ def run_serve_deployment(
                     suffix = k.removeprefix("DYN_SYSTEM_PORT")
                     if suffix.isdigit():
                         merged_env.pop(k, None)
+                        continue
+                if k.startswith("DYN_SYSTEM_PORT_WORKER"):
+                    suffix = k.removeprefix("DYN_SYSTEM_PORT_WORKER")
+                    if suffix.isdigit():
+                        merged_env.pop(k, None)
         else:
             # Alias for PORT1 (many scripts only read this).
             merged_env["DYN_SYSTEM_PORT"] = str(dynamic_system_ports[0])
             merged_env["DYN_SYSTEM_PORT1"] = str(dynamic_system_ports[0])
             for idx, port in enumerate(dynamic_system_ports, start=1):
                 merged_env[f"DYN_SYSTEM_PORT{idx}"] = str(port)
+                merged_env[f"DYN_SYSTEM_PORT_WORKER{idx}"] = str(port)
+
+        if len(ports.kv_event_ports) != len(dynamic_system_ports):
+            raise ValueError(
+                "KV-event port count must match system port count: "
+                f"{len(ports.kv_event_ports)} != {len(dynamic_system_ports)}"
+            )
+        for key in list(merged_env):
+            if key == "DYN_VLLM_KV_EVENT_PORT":
+                merged_env.pop(key)
+                continue
+            if key.startswith("DYN_VLLM_KV_EVENT_PORT"):
+                suffix = key.removeprefix("DYN_VLLM_KV_EVENT_PORT")
+                if suffix.isdigit():
+                    merged_env.pop(key)
+        for idx, port in enumerate(ports.kv_event_ports, start=1):
+            merged_env[f"DYN_VLLM_KV_EVENT_PORT{idx}"] = str(port)
+
+        # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
+        if len(ports.nixl_side_channel_ports) != len(dynamic_system_ports):
+            raise ValueError(
+                "NIXL side-channel port count must match system port count: "
+                f"{len(ports.nixl_side_channel_ports)} != {len(dynamic_system_ports)}"
+            )
+        for key in list(merged_env):
+            if key.startswith("DYN_VLLM_NIXL_SIDE_CHANNEL_PORT"):
+                suffix = key.removeprefix("DYN_VLLM_NIXL_SIDE_CHANNEL_PORT")
+                if suffix.isdigit():
+                    merged_env.pop(key)
+        for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
+            merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)
+
     else:
         # Backward compat: infer from config/extra_env if no explicit ports are passed.
         dynamic_frontend_port = int(config.frontend_port)
@@ -93,76 +267,276 @@ def run_serve_deployment(
             int(merged_env.get("DYN_SYSTEM_PORT2") or DefaultPort.SYSTEM2.value),
         ]
 
-    with EngineProcess.from_script(
-        config, request, extra_env=merged_env
-    ) as server_process:
-        for _payload in config.request_payloads:
-            logger.info("TESTING: Payload: %s", _payload.__class__.__name__)
+    config = _with_endpoint_readiness_checks(config, dynamic_frontend_port)
 
-            # Make a per-iteration copy so tests can safely override ports/fields
-            # without mutating shared config instances across parametrized cases.
-            payload = deepcopy(_payload)
-            # inject model
-            if hasattr(payload, "with_model"):
-                payload = payload.with_model(config.model)
+    if ports is not None:
+        merged_env["DYN_MANAGED_PORTS"] = "1"
 
-            # Default behavior: requests go to the frontend port, except metrics which target
-            # worker system ports (mapped from DefaultPort -> per-test ports).
-            if getattr(payload, "endpoint", "") == "/metrics":
-                if payload.port == DefaultPort.SYSTEM1.value:
-                    if len(dynamic_system_ports) < 1:
-                        raise RuntimeError(
-                            "Payload targets SYSTEM_PORT1 but no system ports were provided "
-                            f"(payload={payload.__class__.__name__})"
-                        )
-                    payload.port = dynamic_system_ports[0]
-                elif payload.port == DefaultPort.SYSTEM2.value:
-                    if len(dynamic_system_ports) < 2:
-                        raise RuntimeError(
-                            "Payload targets SYSTEM_PORT2 but only 1 system port was provided "
-                            f"(payload={payload.__class__.__name__})"
-                        )
-                    payload.port = dynamic_system_ports[1]
-            else:
-                payload.port = dynamic_frontend_port
+    # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
+    disagg_bootstrap_port: int | None = None
+    if config.script_name and "disagg" in config.script_name:
+        disagg_bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
+        merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
 
-            # Optional extra system ports for specialized payloads (e.g. LoRA control-plane APIs).
-            # BasePayload always defines `system_ports` (usually empty); map defaults
-            # (SYSTEM_PORT1/2) to per-test system ports when present.
-            if payload.system_ports:
-                mapped_system_ports: list[int] = []
-                for p in payload.system_ports:
-                    if p == DefaultPort.SYSTEM1.value:
+    return _PreparedDeployment(
+        config=config,
+        merged_env=merged_env,
+        frontend_port=dynamic_frontend_port,
+        system_ports=dynamic_system_ports,
+        disagg_bootstrap_port=disagg_bootstrap_port,
+    )
+
+
+def _cleanup_prepared_deployment(prep: _PreparedDeployment) -> None:
+    if prep.disagg_bootstrap_port is not None:
+        deallocate_port(prep.disagg_bootstrap_port)
+
+
+@contextmanager
+def managed_serve_deployment(
+    config: EngineConfig,
+    request: Any,
+    *,
+    ports: ServicePorts | None = None,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> Iterator[EngineProcess]:
+    """Launch a port-isolated Dynamo deployment and guarantee port cleanup."""
+    prep = _prepare_deployment(config, request, ports=ports, extra_env=extra_env)
+
+    try:
+        with EngineProcess.from_config(
+            prep.config, request, extra_env=prep.merged_env
+        ) as server_process:
+            yield server_process
+    finally:
+        _cleanup_prepared_deployment(prep)
+
+
+# EngineConfig.env key naming a whitespace-separated list of pip packages to
+# install into the runtime container before the server launches. Some runtime
+# images intentionally omit certain media-decoder libraries; the few serve tests
+# that exercise a decode path install the decoder here at test time so coverage
+# is retained without the shipped image carrying it. No-op when the key is unset.
+TEST_ONLY_PIP_ENV_KEY = "DYN_TEST_ONLY_PIP_INSTALL"
+
+# Session-level cache so the same package set is installed at most once even
+# though every parametrized deployment (and each retry) calls the installer.
+_test_only_pip_targets: dict[str, str] = {}
+
+
+def _install_test_only_packages(
+    config: EngineConfig, extra_env: Optional[Dict[str, str]] = None
+) -> dict[str, str]:
+    """Install any test-only pip packages a config requested via its env.
+
+    Install into a process-isolated temporary directory rather than the runtime
+    interpreter's site-packages. CI may run the image as an arbitrary uid, and
+    some framework venvs are intentionally read-only. The returned environment
+    exposes the directory only to subprocesses launched for this deployment.
+    """
+    launch_env = dict(extra_env or {})
+    spec = config.env.get(TEST_ONLY_PIP_ENV_KEY, "").strip()
+    if not spec:
+        return launch_env
+
+    target = _test_only_pip_targets.get(spec)
+    if target is None:
+        packages = spec.split()
+        target = tempfile.mkdtemp(prefix="dynamo-test-pip-")
+        logging.getLogger(__name__).info(
+            "Installing test-only package(s) into %s: %s",
+            target,
+            " ".join(packages),
+        )
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--target",
+                    target,
+                    "--no-deps",
+                    *packages,
+                ],
+                check=True,
+            )
+        except Exception:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+        _test_only_pip_targets[spec] = target
+
+    inherited_pythonpath = launch_env.get(
+        "PYTHONPATH", config.env.get("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+    )
+    launch_env["PYTHONPATH"] = (
+        target
+        if not inherited_pythonpath
+        else os.pathsep.join((target, inherited_pythonpath))
+    )
+    return launch_env
+
+
+def run_serve_deployment(
+    config: EngineConfig,
+    request: Any,
+    *,
+    ports: ServicePorts | None = None,  # pass `dynamo_dynamic_ports` here
+    extra_env: Optional[Dict[str, str]] = None,
+    post_validation: Optional[Callable[[], None]] = None,
+) -> None:
+    """Run a standard serve deployment test for any EngineConfig.
+
+    - Launches the engine via EngineProcess.from_script
+    - Builds a payload (with optional override/mutator)
+    - Iterates configured endpoints and validates responses and logs
+    - Optionally runs a final assertion while the deployment is still alive
+    """
+
+    logger = logging.getLogger(request.node.name)
+    logger.info("Starting %s test_deployment", config.name)
+
+    assert (
+        config.request_payloads is not None and len(config.request_payloads) > 0
+    ), "request_payloads must be provided on EngineConfig"
+
+    logger.info("Using model: %s", config.model)
+    logger.info("Script: %s", config.script_name)
+
+    # Install any decoder a codec-stripped image needs for this test, before the
+    # server launches, so the worker can import it. No-op unless the config opts in.
+    extra_env = _install_test_only_packages(config, extra_env)
+
+    prep = _prepare_deployment(config, request, ports=ports, extra_env=extra_env)
+    config = prep.config
+    merged_env = prep.merged_env
+    dynamic_frontend_port = prep.frontend_port
+    dynamic_system_ports = prep.system_ports
+
+    try:
+        with EngineProcess.from_script(
+            config, request, extra_env=merged_env
+        ) as server_process:
+            for _payload in config.request_payloads:
+                logger.info("TESTING: Payload: %s", _payload.__class__.__name__)
+
+                # Make a per-iteration copy so tests can safely override ports/fields
+                # without mutating shared config instances across parametrized cases.
+                payload = deepcopy(_payload)
+                # inject model
+                if hasattr(payload, "with_model"):
+                    payload = payload.with_model(config.model)
+
+                # Default behavior: requests go to the frontend port. Metrics
+                # may target either the frontend or worker system ports; map
+                # each DefaultPort placeholder to its per-test allocation.
+                if getattr(payload, "endpoint", "") == "/metrics":
+                    if payload.port == DefaultPort.FRONTEND.value:
+                        payload.port = dynamic_frontend_port
+                    elif payload.port == DefaultPort.SYSTEM1.value:
                         if len(dynamic_system_ports) < 1:
                             raise RuntimeError(
-                                "Payload.system_ports includes SYSTEM_PORT1 but no system ports were provided "
+                                "Payload targets SYSTEM_PORT1 but no system ports were provided "
                                 f"(payload={payload.__class__.__name__})"
                             )
-                        mapped_system_ports.append(dynamic_system_ports[0])
-                    elif p == DefaultPort.SYSTEM2.value:
+                        payload.port = dynamic_system_ports[0]
+                    elif payload.port == DefaultPort.SYSTEM2.value:
                         if len(dynamic_system_ports) < 2:
                             raise RuntimeError(
-                                "Payload.system_ports includes SYSTEM_PORT2 but only 1 system port was provided "
+                                "Payload targets SYSTEM_PORT2 but only 1 system port was provided "
                                 f"(payload={payload.__class__.__name__})"
                             )
-                        mapped_system_ports.append(dynamic_system_ports[1])
-                    else:
-                        mapped_system_ports.append(p)
-                payload.system_ports = mapped_system_ports
+                        payload.port = dynamic_system_ports[1]
+                else:
+                    payload.port = dynamic_frontend_port
 
-            for _ in range(payload.repeat_count):
-                response = send_request(
-                    url=payload.url(),
-                    payload=payload.body,
-                    timeout=payload.timeout,
-                    method=payload.method,
-                    stream=payload.http_stream,
-                )
-                server_process.check_response(payload, response)
+                # Optional extra system ports for specialized payloads (e.g. LoRA control-plane APIs).
+                # BasePayload always defines `system_ports` (usually empty); map defaults
+                # (SYSTEM_PORT1/2) to per-test system ports when present.
+                if payload.system_ports:
+                    mapped_system_ports: list[int] = []
+                    for p in payload.system_ports:
+                        if p == DefaultPort.SYSTEM1.value:
+                            if len(dynamic_system_ports) < 1:
+                                raise RuntimeError(
+                                    "Payload.system_ports includes SYSTEM_PORT1 but no system ports were provided "
+                                    f"(payload={payload.__class__.__name__})"
+                                )
+                            mapped_system_ports.append(dynamic_system_ports[0])
+                        elif p == DefaultPort.SYSTEM2.value:
+                            if len(dynamic_system_ports) < 2:
+                                raise RuntimeError(
+                                    "Payload.system_ports includes SYSTEM_PORT2 but only 1 system port was provided "
+                                    f"(payload={payload.__class__.__name__})"
+                                )
+                            mapped_system_ports.append(dynamic_system_ports[1])
+                        else:
+                            mapped_system_ports.append(p)
+                    payload.system_ports = mapped_system_ports
 
-            # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
-            if hasattr(payload, "final_validation"):
-                payload.final_validation()
+                for iteration in range(payload.repeat_count):
+                    # Resolve an iteration-specific body once so validation
+                    # retries resend the same request.
+                    request_body = payload.body_for_iteration(iteration)
+                    # Re-issue the request (server stays up) on validation
+                    # failure when payload.max_attempts > 1. See tests/README.md
+                    # "Flaky Tests" for when this is appropriate. Backoff
+                    # factor 1.5 keeps the worst-case sleep budget bounded
+                    # for max_attempts up to ~6.
+                    last_err: Optional[ResponseValidationError] = None
+                    try:
+                        for attempt in range(payload.max_attempts):
+                            try:
+                                response = send_request(
+                                    url=payload.url(),
+                                    payload=request_body,
+                                    timeout=payload.timeout,
+                                    method=payload.method,
+                                    stream=payload.http_stream,
+                                )
+                                server_process.check_response(payload, response)
+                                last_err = None
+                                break
+                            except ResponseValidationError as e:
+                                last_err = e
+                                if attempt < payload.max_attempts - 1:
+                                    wait = 1.0 * (1.5**attempt)
+                                    logger.warning(
+                                        "%s request failed (attempt %d/%d): %s — retrying in %.1fs",
+                                        type(payload).__name__,
+                                        attempt + 1,
+                                        payload.max_attempts,
+                                        e,
+                                        wait,
+                                    )
+                                    time.sleep(wait)
+                    except Exception as e:
+                        # Transport / connection failures (and payload.url()
+                        # failures) aren't retried by design; the inner loop
+                        # only retries ResponseValidationError. Re-raise with
+                        # the server's last 80 log lines so a CI failure is
+                        # diagnosable in one pass rather than yielding a bare
+                        # ReadTimeout.
+                        raise RuntimeError(
+                            _format_request_failure(
+                                config=config,
+                                payload=payload,
+                                server_process=server_process,
+                                error=e,
+                            )
+                        ) from e
+                    if last_err is not None:
+                        raise last_err
+
+                # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
+                if hasattr(payload, "final_validation"):
+                    payload.final_validation()
+
+            if post_validation is not None:
+                post_validation()
+    finally:
+        _cleanup_prepared_deployment(prep)
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):

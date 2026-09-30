@@ -18,12 +18,19 @@
 package dynamo
 
 import (
+	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -36,18 +43,187 @@ func baseDGD(services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) 
 	}
 }
 
-func TestComputeDGDWorkersSpecHash_Deterministic(t *testing.T) {
+func rawBetaDGD(t testing.TB, src *v1alpha1.DynamoGraphDeployment) *v1beta1.DynamoGraphDeployment {
+	t.Helper()
+	dst := &v1beta1.DynamoGraphDeployment{}
+	if err := src.ConvertTo(dst); err != nil {
+		t.Fatalf("convert test DGD to v1beta1: %v", err)
+	}
+	return dst
+}
+
+func mustComputeBetaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) string {
+	t.Helper()
+	hash, err := ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		t.Fatalf("compute v1beta1 DGD worker hash: %v", err)
+	}
+	return hash
+}
+
+func betaDGDWithRuntimeVersion(t testing.TB, image, override string) *v1beta1.DynamoGraphDeployment {
+	t.Helper()
+
+	// Convert the standard worker fixture to the current API version.
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+
+	// Configure the inputs used to resolve the worker runtime version.
+	dgd.Spec.Components[0].RuntimeVersionOverride = override
+	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  commonconsts.MainContainerName,
+				Image: image,
+			}},
+		},
+	}
+
+	return dgd
+}
+
+func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(2))},
 		"decode":  {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(3))},
 	})
-	h1 := ComputeDGDWorkersSpecHash(dgd)
-	h2 := ComputeDGDWorkersSpecHash(dgd)
+	h1 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
+	h2 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	assert.Equal(t, h1, h2)
 	assert.Len(t, h1, 8)
 }
 
-func TestComputeDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *testing.T) {
+	t.Log("Build a worker with omitted experimental configuration")
+	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	base.Spec.Components[0].Experimental = nil
+	omittedHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), base, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+
+	t.Log("Compare optional outer objects and explicit false with complete omission")
+	cases := []struct {
+		name         string
+		experimental *v1beta1.ExperimentalSpec
+	}{
+		{"empty_experimental", &v1beta1.ExperimentalSpec{}},
+		{"empty_grove", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{}}},
+		{"explicit_false", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Render an equivalent configuration")
+			candidate := base.DeepCopy()
+			candidate.Spec.Components[0].Experimental = tc.experimental
+			original := candidate.DeepCopy()
+			rendered, err := GenerateGrovePodCliqueSet(context.Background(), candidate, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, omittedRendered.Spec, rendered.Spec, "precondition: effective workload must be identical")
+
+			t.Log("Verify the worker hash is unchanged")
+			actual := mustComputeBetaDGDWorkersSpecHash(t, candidate)
+			require.Equal(t, omittedHash, actual)
+
+			t.Log("Verify rendering and hashing do not mutate the input")
+			require.Equal(t, original, candidate)
+		})
+	}
+
+	t.Log("Verify the effective true opt-in still changes the worker generation")
+	explicitTrue := base.DeepCopy()
+	explicitTrue.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
+	}
+	assert.NotEqual(t, omittedHash, mustComputeBetaDGDWorkersSpecHash(t, explicitTrue))
+}
+
+func TestWorkerHashSpec_PreservesOtherExperimentalFeatures(t *testing.T) {
+	t.Log("Cover other experimental features alongside an ineffective Grove option")
+	cases := []struct {
+		name         string
+		experimental v1beta1.ExperimentalSpec
+	}{
+		{"gms", v1beta1.ExperimentalSpec{GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{}}},
+		{"failover", v1beta1.ExperimentalSpec{Failover: &v1beta1.FailoverSpec{}}},
+		{"enabled_checkpoint", v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Add explicit false alongside another experimental feature")
+			dcd := &v1beta1.DynamoComponentDeployment{}
+			dcd.Spec.Experimental = tc.experimental.DeepCopy()
+			dcd.Spec.Experimental.Grove = &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)}
+			original := dcd.DeepCopy()
+
+			t.Log("Hash normalization removes only Grove and leaves the original input intact")
+			normalized := workerHashSpec(dcd)
+			require.Equal(t, &tc.experimental, normalized.Experimental)
+			require.Equal(t, original, dcd)
+		})
+	}
+}
+
+func TestComputeBetaDGDWorkersSpecHash_EquivalentExplicitRolesDoNotRoll(t *testing.T) {
+	t.Log("Build a multinode worker with the established implicit leader and worker layout")
+	implicit := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 4},
+		},
+	}))
+
+	t.Log("Make the same semantic role structure explicit in reverse declaration order")
+	explicit := implicit.DeepCopy()
+	explicit.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleWorker},
+		{Name: v1beta1.ComponentRoleLeader},
+	}
+
+	t.Log("Verify the representation-only migration keeps the worker generation stable")
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, implicit), mustComputeBetaDGDWorkersSpecHash(t, explicit))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing.T) {
+	t.Log("Build explicit multinode roles with a worker provider override")
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 4},
+		},
+	}))
+	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader},
+		{
+			Name: v1beta1.ComponentRoleWorker,
+			ProviderOverride: &v1beta1.ProviderOverride{
+				APIVersion: "grove.io/v1alpha1",
+				Target:     "PodCliqueTemplateSpec",
+				Value: apiextensionsv1.JSON{Raw: []byte(
+					`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`,
+				)},
+			},
+		},
+	}
+
+	t.Log("Reverse the map-list declaration order without changing its semantic content")
+	reordered := dgd.DeepCopy()
+	reordered.Spec.Components[0].Roles[0], reordered.Spec.Components[0].Roles[1] =
+		reordered.Spec.Components[0].Roles[1], reordered.Spec.Components[0].Roles[0]
+
+	t.Log("Verify the order-only update keeps the worker generation stable")
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, reordered))
+
+	t.Log("Make the same cardinality assertions explicit")
+	explicitReplicas := dgd.DeepCopy()
+	explicitReplicas.Spec.Components[0].Roles[0].Replicas = ptr.To(int32(1))
+	explicitReplicas.Spec.Components[0].Roles[1].Replicas = ptr.To(int32(3))
+
+	t.Log("Verify optional role cardinality assertions do not create a worker generation")
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, explicitReplicas))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
 	withFrontend := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker":   {ComponentType: commonconsts.ComponentTypeWorker},
 		"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
@@ -55,98 +231,264 @@ func TestComputeDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
 	withoutFrontend := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 	})
-	assert.Equal(t, ComputeDGDWorkersSpecHash(withFrontend), ComputeDGDWorkersSpecHash(withoutFrontend))
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, withFrontend)), mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, withoutFrontend)))
 }
 
-func TestComputeDGDWorkersSpecHash_NoWorkers(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_IgnoresGeneratedDCDObjectIdentity(t *testing.T) {
+	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType:         commonconsts.ComponentTypeWorker,
+			GlobalDynamoNamespace: true,
+		},
+	})
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
+
+	changed := dgd.DeepCopy()
+	changed.Namespace = "other"
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, changed)))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_NoWorkers(t *testing.T) {
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
 	})
-	h := ComputeDGDWorkersSpecHash(dgd)
+	h := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	assert.Len(t, h, 8)
 }
 
-func TestComputeDGDWorkersSpecHash_ChangesOnPodAffectingFields(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_ChangesOnPodAffectingFields(t *testing.T) {
 	base := func() *v1alpha1.DynamoGraphDeployment {
 		return baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 		})
 	}
-	baseHash := ComputeDGDWorkersSpecHash(base())
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, base()))
 
 	// Image change (via Resources)
 	dgd := base()
 	dgd.Spec.Services["worker"].Resources = &v1alpha1.Resources{
 		Requests: &v1alpha1.ResourceItem{CPU: "2"},
 	}
-	assert.NotEqual(t, baseHash, ComputeDGDWorkersSpecHash(dgd), "resource change should change hash")
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd)), "resource change should change hash")
 
 	// Env change
 	dgd2 := base()
 	dgd2.Spec.Services["worker"].Envs = []corev1.EnvVar{{Name: "FOO", Value: "bar"}}
-	assert.NotEqual(t, baseHash, ComputeDGDWorkersSpecHash(dgd2), "env change should change hash")
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd2)), "env change should change hash")
 
 	// SharedMemory change
 	dgd3 := base()
 	dgd3.Spec.Services["worker"].SharedMemory = &v1alpha1.SharedMemorySpec{
 		Size: resource.MustParse("1Gi"),
 	}
-	assert.NotEqual(t, baseHash, ComputeDGDWorkersSpecHash(dgd3), "shared memory change should change hash")
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd3)), "shared memory change should change hash")
 
 	// GlobalDynamoNamespace change
 	dgd4 := base()
 	dgd4.Spec.Services["worker"].GlobalDynamoNamespace = true
-	assert.NotEqual(t, baseHash, ComputeDGDWorkersSpecHash(dgd4), "global dynamo namespace change should change hash")
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd4)), "global dynamo namespace change should change hash")
+
+	// Converted v1alpha1 ExtraPodMetadata lands in podTemplate metadata.
+	dgd5 := base()
+	dgd5.Spec.Services["worker"].ExtraPodMetadata = &v1alpha1.ExtraPodMetadata{
+		Labels: map[string]string{"rollout": "required"},
+	}
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd5)), "extra pod metadata change should change hash")
+
+	// Native v1beta1 podTemplate metadata is also pod-affecting.
+	dgd6 := betaDGD(t, base())
+	dgd6.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{"rollout": "required"},
+		},
+	}
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, dgd6), "podTemplate metadata change should change hash")
 }
 
-func TestComputeDGDWorkersSpecHash_StableOnExcludedFields(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_TracksPropagatedDGDObjectAnnotations(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	dgd.Annotations = map[string]string{
+		commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+	}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, dgd)
+
+	changed := dgd.DeepCopy()
+	changed.Annotations[commonconsts.KubeAnnotationVLLMDistributedExecutorBackend] = "mp"
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, changed))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_IgnoresOverriddenDGDObjectAnnotations(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	dgd.Annotations = map[string]string{
+		commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+	}
+	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "component",
+			},
+		},
+	}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, dgd)
+
+	changed := dgd.DeepCopy()
+	changed.Annotations[commonconsts.KubeAnnotationVLLMDistributedExecutorBackend] = "mp"
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, changed))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_TracksGeneratedDCDSpecAndMetadata(t *testing.T) {
 	base := func() *v1alpha1.DynamoGraphDeployment {
 		return baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 		})
 	}
-	baseHash := ComputeDGDWorkersSpecHash(base())
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, base()))
+
+	namespace := base()
+	namespace.Namespace = "other"
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, namespace)))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
+	base := func() *v1alpha1.DynamoGraphDeployment {
+		return baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+		})
+	}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, base()))
+
+	replicas := base()
+	replicas.Spec.Services["worker"].Replicas = ptr.To(int32(99))
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, replicas)))
+
+	scaleToZero := betaDGD(t, base())
+	scaleToZero.Spec.Components[0].Replicas = ptr.To(int32(0))
+	scaleToZero.Spec.Components[0].MinAvailable = ptr.To(int32(1))
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scaleToZero))
+
+	scalingAdapter := betaDGD(t, base())
+	scalingAdapter.Spec.Components[0].ScalingAdapter = &v1beta1.ScalingAdapter{}
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scalingAdapter))
+
+	serviceName := base()
+	serviceName.Spec.Services["worker"].ServiceName = "changed"
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, serviceName)))
+
+	ingress := base()
+	ingress.Spec.Services["worker"].Ingress = &v1alpha1.IngressSpec{Enabled: true}
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, ingress)))
+
+	disabledScalingAdapter := base()
+	disabledScalingAdapter.Spec.Services["worker"].ScalingAdapter = &v1alpha1.ScalingAdapter{}
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, disabledScalingAdapter)))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) {
+	t.Log("define resolved-runtime-version hash comparisons")
+	tests := []struct {
+		name          string
+		leftImage     string
+		leftOverride  string
+		rightImage    string
+		rightOverride string
+		wantEqual     bool
+	}{
+		{
+			name:          "omits resolved versions before 1.5",
+			leftImage:     "registry.example/runtime:custom",
+			rightImage:    "registry.example/runtime:custom",
+			rightOverride: "1.4.9",
+			wantEqual:     true,
+		},
+		{
+			name:          "canonicalizes equivalent implicit and explicit versions",
+			leftImage:     "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			rightImage:    "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			rightOverride: "1.5.0",
+			wantEqual:     true,
+		},
+		{
+			name:          "changes at the 1.5 boundary",
+			leftImage:     "registry.example/runtime:custom",
+			leftOverride:  "1.4.9",
+			rightImage:    "registry.example/runtime:custom",
+			rightOverride: "1.5.0",
+		},
+		{
+			name:          "tracks override changes after 1.5",
+			leftImage:     "registry.example/runtime:custom",
+			leftOverride:  "1.5.0",
+			rightImage:    "registry.example/runtime:custom",
+			rightOverride: "1.5.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("compute worker hashes for the compared runtime versions")
+			left := mustComputeBetaDGDWorkersSpecHash(t, betaDGDWithRuntimeVersion(t, tt.leftImage, tt.leftOverride))
+			right := mustComputeBetaDGDWorkersSpecHash(t, betaDGDWithRuntimeVersion(t, tt.rightImage, tt.rightOverride))
+
+			t.Log("assert whether the resolved versions share a worker generation")
+			if tt.wantEqual {
+				assert.Equal(t, left, right)
+			} else {
+				assert.NotEqual(t, left, right)
+			}
+		})
+	}
+}
+
+func TestRuntimeFeatureGatesDoNotPrecedeVersionHashing(t *testing.T) {
+	tests := []struct {
+		name string
+		gate runtimefeatures.Gate
+	}{
+		{name: "canary health checks", gate: runtimefeatures.CanaryHealthChecks},
+		{name: "increased worker failure threshold", gate: runtimefeatures.IncreasedWorkerFailureThreshold},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("ensure runtime-gated rendering cannot change a legacy unhashed worker generation")
+			assert.GreaterOrEqual(t, tt.gate.MinRuntimeVersion.Compare(minimumHashedRuntimeVersion), 0)
+		})
+	}
+}
+
+func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {
+	base := func() *v1alpha1.DynamoGraphDeployment {
+		return baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+		})
+	}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, rawBetaDGD(t, base()))
 
 	tests := []struct {
 		name   string
 		mutate func(*v1alpha1.DynamoGraphDeployment)
 	}{
-		{"replicas", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].Replicas = ptr.To(int32(99))
-		}},
 		{"annotations", func(d *v1alpha1.DynamoGraphDeployment) {
 			d.Spec.Services["worker"].Annotations = map[string]string{"foo": "bar"}
 		}},
 		{"labels", func(d *v1alpha1.DynamoGraphDeployment) {
 			d.Spec.Services["worker"].Labels = map[string]string{"foo": "bar"}
 		}},
-		{"serviceName", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].ServiceName = "changed"
-		}},
-		{"componentType", func(d *v1alpha1.DynamoGraphDeployment) {
-			// Change to another worker type — still included in hash but componentType is stripped
-			d.Spec.Services["worker"].ComponentType = commonconsts.ComponentTypePrefill
-		}},
-		{"dynamoNamespace", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].DynamoNamespace = ptr.To("changed")
-		}},
-		{"ingress", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].Ingress = &v1alpha1.IngressSpec{Enabled: true}
-		}},
-		{"scalingAdapter", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].ScalingAdapter = &v1alpha1.ScalingAdapter{}
-		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dgd := base()
 			tt.mutate(dgd)
-			assert.Equal(t, baseHash, ComputeDGDWorkersSpecHash(dgd), "excluded field %s should not change hash", tt.name)
+			assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, rawBetaDGD(t, dgd)), "preserved alpha resource metadata is rendered onto workloads")
 		})
 	}
 }
 
-func TestComputeDGDWorkersSpecHash_EnvOrderMatters(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_EnvOrderMatters(t *testing.T) {
 	dgd1 := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: commonconsts.ComponentTypeWorker,
@@ -159,10 +501,10 @@ func TestComputeDGDWorkersSpecHash_EnvOrderMatters(t *testing.T) {
 			Envs:          []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}},
 		},
 	})
-	assert.NotEqual(t, ComputeDGDWorkersSpecHash(dgd1), ComputeDGDWorkersSpecHash(dgd2))
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd1)), mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd2)))
 }
 
-func TestComputeDGDWorkersSpecHash_AllWorkerTypes(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_AllWorkerTypes(t *testing.T) {
 	// All three worker types are included
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"w": {ComponentType: commonconsts.ComponentTypeWorker},
@@ -170,54 +512,9 @@ func TestComputeDGDWorkersSpecHash_AllWorkerTypes(t *testing.T) {
 		"d": {ComponentType: commonconsts.ComponentTypeDecode},
 	})
 	// Changing any one of them changes the hash
-	base := ComputeDGDWorkersSpecHash(dgd)
+	base := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	dgd.Spec.Services["p"].Envs = []corev1.EnvVar{{Name: "X", Value: "1"}}
-	assert.NotEqual(t, base, ComputeDGDWorkersSpecHash(dgd))
-}
-
-func TestStripNonPodTemplateFields(t *testing.T) {
-	spec := &v1alpha1.DynamoComponentDeploymentSharedSpec{
-		ServiceName:      "svc",
-		ComponentType:    commonconsts.ComponentTypeWorker,
-		SubComponentType: "sub",
-		DynamoNamespace:  ptr.To("ns"),
-		Replicas:         ptr.To(int32(3)),
-		Autoscaling:      &v1alpha1.Autoscaling{}, //nolint:staticcheck // SA1019: testing backward compatibility with deprecated field
-		ScalingAdapter:   &v1alpha1.ScalingAdapter{},
-		Ingress:          &v1alpha1.IngressSpec{Enabled: true},
-		ModelRef:         &v1alpha1.ModelReference{Name: "m"},
-		EPPConfig:        &v1alpha1.EPPConfig{},
-		Annotations:      map[string]string{"a": "b"},
-		Labels:           map[string]string{"c": "d"},
-		// Pod-affecting fields
-		Envs:                  []corev1.EnvVar{{Name: "Z"}, {Name: "A"}},
-		GlobalDynamoNamespace: true,
-	}
-	stripped := stripNonPodTemplateFields(spec)
-
-	// Excluded fields are zeroed
-	assert.Empty(t, stripped.ServiceName)
-	assert.Empty(t, stripped.ComponentType)
-	assert.Empty(t, stripped.SubComponentType)
-	assert.Nil(t, stripped.DynamoNamespace)
-	assert.Nil(t, stripped.Replicas)
-	assert.Nil(t, stripped.Autoscaling) //nolint:staticcheck // SA1019: testing backward compatibility with deprecated field
-	assert.Nil(t, stripped.ScalingAdapter)
-	assert.Nil(t, stripped.Ingress)
-	assert.Nil(t, stripped.ModelRef)
-	assert.Nil(t, stripped.EPPConfig)
-	assert.Nil(t, stripped.Annotations)
-	assert.Nil(t, stripped.Labels)
-
-	// Included fields are preserved
-	assert.True(t, stripped.GlobalDynamoNamespace)
-	assert.Len(t, stripped.Envs, 2)
-	// Envs are not sorted
-	assert.Equal(t, "Z", stripped.Envs[0].Name)
-	assert.Equal(t, "A", stripped.Envs[1].Name)
-
-	// Original spec is not mutated
-	assert.Equal(t, "svc", spec.ServiceName)
+	assert.NotEqual(t, base, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd)))
 }
 
 func TestSortEnvVars(t *testing.T) {
@@ -228,4 +525,99 @@ func TestSortEnvVars(t *testing.T) {
 	assert.Equal(t, "C", sorted[2].Name)
 	// Original not mutated
 	assert.Equal(t, "C", envs[0].Name)
+}
+
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesDisabledCheckpoint(t *testing.T) {
+	t.Log("Build a worker with omitted checkpoint configuration")
+	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	base.Spec.Components[0].Experimental = nil
+
+	cases := []struct {
+		name       string
+		checkpoint *v1beta1.ComponentCheckpointConfig
+		grove      *v1beta1.GroveSpec
+	}{
+		{name: "disabled", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false}},
+		{name: "disabled_with_options", checkpoint: &v1beta1.ComponentCheckpointConfig{
+			Enabled: false, CheckpointRef: ptr.To("existing-snapshot"),
+			StartupPolicy:  v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+			DeletionPolicy: v1beta1.CheckpointDeletionPolicyRetain,
+		}},
+		{name: "disabled_with_grove", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false},
+			grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Build equivalent omitted and disabled checkpoint configurations")
+			omitted := base.DeepCopy()
+			if tc.grove != nil {
+				omitted.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{Grove: tc.grove}
+			}
+			disabled := omitted.DeepCopy()
+			if disabled.Spec.Components[0].Experimental == nil {
+				disabled.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{}
+			}
+			disabled.Spec.Components[0].Experimental.Checkpoint = tc.checkpoint
+			original := disabled.DeepCopy()
+
+			t.Log("Verify equal rendered workloads and worker hashes")
+			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			disabledRendered, err := GenerateGrovePodCliqueSet(context.Background(), disabled, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, omittedRendered.Spec, disabledRendered.Spec)
+			assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, disabled))
+			assert.Equal(t, original, disabled, "rendering and hashing must preserve the input")
+		})
+	}
+
+	t.Log("Verify enabling checkpointing still changes the worker hash")
+	enabled := base.DeepCopy()
+	enabled.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+	}
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, base), mustComputeBetaDGDWorkersSpecHash(t, enabled))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesCompilationCacheMountPath(t *testing.T) {
+	t.Log("Build equivalent omitted and explicit default cache paths")
+	omitted := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	omitted.Spec.BackendFramework = string(BackendFrameworkVLLM)
+	omitted.Spec.Components[0].CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"}
+	explicit := omitted.DeepCopy()
+	explicit.Spec.Components[0].CompilationCache.MountPath = commonconsts.DefaultVLLMCacheMountPoint
+	originalOmitted, originalExplicit := omitted.DeepCopy(), explicit.DeepCopy()
+
+	t.Log("Verify equal rendered workloads and worker hashes without mutating either input")
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, omittedRendered.Spec, explicitRendered.Spec)
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, explicit))
+	assert.Equal(t, originalOmitted, omitted)
+	assert.Equal(t, originalExplicit, explicit)
+
+	t.Log("Keep custom paths and PVC identity in the worker hash")
+	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	base.Spec.BackendFramework = string(BackendFrameworkVLLM)
+	base.Spec.Components[0].CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+	for _, cache := range []v1beta1.CompilationCacheConfig{
+		{PVCName: "compilation-cache", MountPath: "/custom/cache"},
+		{PVCName: "other-cache"},
+	} {
+		changed := base.DeepCopy()
+		changed.Spec.Components[0].CompilationCache = &cache
+		assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, changed), "cache: %+v", cache)
+	}
+
+	t.Log("Preserve explicit paths for a backend without a default cache path")
+	dcd := &v1beta1.DynamoComponentDeployment{}
+	dcd.Spec.BackendFramework = string(BackendFrameworkSGLang)
+	dcd.Spec.CompilationCache = &v1beta1.CompilationCacheConfig{
+		PVCName: "compilation-cache", MountPath: commonconsts.DefaultVLLMCacheMountPoint,
+	}
+	normalized := workerHashSpec(dcd)
+	assert.Equal(t, commonconsts.DefaultVLLMCacheMountPoint, normalized.CompilationCache.MountPath)
 }

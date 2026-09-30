@@ -14,6 +14,23 @@
 # limitations under the License.
 
 {{- $operatorValues := index .Values "dynamo-operator" }}
+{{- if $operatorValues.namespaceRestriction.enabled }}
+
+================================================================================
+  DEVELOPMENT AND TESTING ONLY
+================================================================================
+  Namespace-restricted mode (namespaceRestriction.enabled=true) is not
+  supported for production.
+
+  The operator is configured for namespace: {{ default .Release.Namespace $operatorValues.namespaceRestriction.targetNamespace }}
+
+  This release must use dynamo-operator.upgradeCRD=false and use CRDs managed
+  by the cluster-wide operator. Use cluster-wide mode for production deployments.
+
+  See: https://docs.nvidia.com/dynamo/latest/kubernetes/installation/install-dynamo
+================================================================================
+
+{{- end }}
 {{- if and $operatorValues.namespaceRestriction.enabled $operatorValues.gpuDiscovery.enabled }}
 GPU Discovery: ENABLED — the operator will automatically detect GPU hardware from cluster nodes.
 {{- else if $operatorValues.namespaceRestriction.enabled }}

@@ -16,39 +16,46 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# Whether to apply CRDs via an init container on the operator Deployment.
-# Uses server-side apply with the bundled /crd-apply binary.
-# Set to false if CRDs are managed externally (e.g., via GitOps or a separate pipeline).
+# Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container.
+# When false, the chart installs no CRDs; apply them separately before starting a cluster-wide
+# operator. Namespace-restricted installations must set this to false and use the CRDs managed by
+# the cluster-wide operator.
 upgradeCRD: true
 
 # Environment variables to pass to operator Deployment.
 env: []
 
-# Namespace restriction configuration for the operator
-# If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
-# If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace
-# If enabled: false, the operator will run with cluster-wide permissions
+# -- DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments.
 namespaceRestriction:
-  # Whether to restrict the operator to a single namespace
+  # -- DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production.
   enabled: false
-  # The target namespace to restrict to. If empty, defaults to the release namespace
+  # -- DEVELOPMENT AND TESTING ONLY: Target namespace. Defaults to the Helm release namespace.
   targetNamespace: ""
-  # Namespace scope marker lease configuration (used to prevent conflicts when running both cluster-wide and namespace-restricted operators)
+  # -- DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease settings.
   lease:
-    # Duration before the namespace scope marker lease expires if not renewed (namespace-restricted mode only). When a namespace-restricted operator is running, it creates a lease in its namespace. The cluster-wide operator detects this lease and excludes that namespace from processing. If the namespace operator stops renewing the lease (e.g., crashes), the lease expires and the cluster-wide operator automatically resumes processing that namespace.
+    # -- DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease duration.
     duration: 30s
-    # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
+    # -- DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease renewal interval.
     renewInterval: 10s
-# -- GPU discovery configuration (only applies when namespaceRestriction.enabled=true)
+# -- DEVELOPMENT AND TESTING ONLY: GPU discovery settings for namespace-restricted operators.
 gpuDiscovery:
-  # -- Whether to provision a ClusterRole for the namespace-scoped operator to read GPU node labels.
-  # When true (default), Helm creates a ClusterRole/ClusterRoleBinding granting node read access.
-  # Set to false if your installer lacks ClusterRole creation permissions; you must then provide
-  # hardware config manually in each DynamoGraphDeploymentRequest.
+  # -- DEVELOPMENT AND TESTING ONLY: Enable GPU discovery in namespace-restricted mode.
   enabled: true
 controllerManager:
   tolerations: []
   affinity: {}
+
+  # -- Extra labels to add to the controller-manager pod template.
+  # Useful for unified service tagging conventions
+  # (e.g. Datadog `tags.datadoghq.com/manager.{service,env,version}`)
+  # and external selectors that target the controller pods directly.
+  podLabels: {}
+
+  # -- Extra annotations to add to the controller-manager pod template.
+  # Useful for autodiscovery integrations that key off pod annotations
+  # (e.g. Datadog `ad.datadoghq.com/manager.checks`, Prometheus
+  # `prometheus.io/scrape`) without forking the chart.
+  podAnnotations: {}
 
   # Leader election configuration
   leaderElection:
@@ -72,6 +79,10 @@ controllerManager:
       repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
       # tag is optional - if not set, will use Chart.AppVersion
       tag: ""
+    # Default DGDR profiler image, put into DGDR spec.image when unset. Empty
+    # derives dynamo-planner:<chart appVersion>, which only exists for GA
+    # releases.
+    dgdrDefaultImage: ""
     resources:
       limits:
         cpu: 1024m
@@ -82,6 +93,13 @@ controllerManager:
   replicas: 1
   serviceAccount:
     annotations: {}
+
+planner:
+  powerAwareness:
+    # -- Deprecated compatibility value. Planner pods/list is now always granted
+    # in the DGD namespace for startup/drain detection. Per-instance power
+    # awareness remains controlled by enable_power_awareness in Planner config.
+    enabled: false
 
 dynamo:
   components:
@@ -108,6 +126,16 @@ dynamo:
       # true=always create (use for helm template / GitOps workflows),
       # false=never create
       enabled: null
+      # -- Path scraped on the frontend HTTP port. Must match the frontend's
+      # DYN_HTTP_SVC_METRICS_PATH, or the scrape 404s and every dynamo_frontend_*
+      # series goes missing. Applies only to the endpoints that scrape a frontend
+      # HTTP service; the system port always serves /metrics.
+      frontendPath: /metrics
+      # -- Extra labels to add to every PodMonitor resource.
+      labels: {}
+      # -- Enable the NIXL telemetry metrics collection on workers.
+      # Requires workers with NIXL_TELEMETRY_ENABLE=y in their environment
+      nixlTelemetry: false
 
   mpiRun:
     secretName: "mpi-run-ssh-secret"
@@ -122,6 +150,12 @@ metricsService:
   # true=always create both (use for helm template / GitOps workflows),
   # false=never create either
   enabled: null
+  # -- Labels for the operator ServiceMonitor. Label-selecting Prometheus installs
+  # only discover monitors carrying their release label; the default matches the
+  # release name used by deploy/observability/setup-monitoring.sh. Override when your
+  # Prometheus release is named differently, e.g. {release: kube-prometheus-stack}.
+  labels:
+    release: prometheus
   ports:
   - name: metrics
     port: 8080
@@ -132,58 +166,35 @@ metricsService:
 natsAddr: ""
 etcdAddr: ""
 
-nats:
-  # Whether the NATS is enabled
-  enabled: true
-
 modelExpressURL: ""
 
-# Checkpoint configuration for fast pod restore
-# NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
-# using the snapshot Helm chart in each namespace where checkpointing is needed.
+# TLS configuration for inter-component encryption.
+# Paths are injected into all DGD pods via InfrastructureConfiguration.
+natsTLSCAPath: ""
+natsTLSClientCertPath: ""
+natsTLSClientKeyPath: ""
+tcpTLSCertPath: ""
+tcpTLSKeyPath: ""
+tcpTLSCAPath: ""
+tcpTLSClientCertPath: ""
+tcpTLSClientKeyPath: ""
+tcpTLSClientCAPath: ""
+tcpTLSServerName: ""
+
+# Checkpoint configuration for fast Pod restore through the standalone
+# Snapshot operator and node agent.
 checkpoint:
-  # Enable checkpoint/restore functionality
+  # -- Enable checkpoint/restore functionality
   enabled: false
-
-  # Path written by worker when model is loaded and ready for checkpointing
-  # Must match the path expected by checkpoint-enabled runtime images
-  readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
-  # Storage configuration
-  # These settings tell the operator where to find checkpoint storage
-  # Must match the configuration in the snapshot chart
-  storage:
-    # Storage backend type: pvc, s3, or oci
-    type: pvc
-
-    # PVC configuration (used when type=pvc)
-    pvc:
-      # Name of the PVC created by the snapshot chart
-      # Must match the PVC name in the snapshot chart
-      pvcName: "snapshot-pvc"
-      # Base path within the PVC for storing checkpoints
-      basePath: "/checkpoints"
-
-    # S3 configuration (used when type=s3)
-    s3:
-      # S3 URI in format: s3://[endpoint/]bucket/prefix
-      # Examples:
-      #   - s3://my-bucket/checkpoints (AWS S3)
-      #   - s3://minio.example.com/my-bucket/checkpoints (MinIO/custom endpoint)
-      uri: ""
-      # Reference to a secret containing AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION
-      # If not provided, uses IRSA/Workload Identity for authentication
-      credentialsSecretRef: ""
-
-    # OCI registry configuration (used when type=oci)
-    oci:
-      # OCI URI in format: oci://registry/repository
-      # Examples:
-      #   - oci://myregistry.io/checkpoints
-      #   - oci://ghcr.io/myorg/checkpoints
-      uri: ""
-      # Reference to a docker config secret for registry authentication
-      credentialsSecretRef: ""
+  # Localhost seccomp profile applied to checkpoint+restore pods to block
+  # io_uring (which CRIU cannot dump). The default profile is applied unless
+  # seccomp.disabled=true is set. Set seccomp.disabled=true on OpenShift
+  # (custom localhost profiles require privileged SCC) or when using a CRIU
+  # build with io_uring support. Override the default path by setting
+  # seccomp.profile.
+  seccomp:
+    disabled: false
+    profile: profiles/block-iouring.json
 
 # Webhook configuration
 webhook:
@@ -206,24 +217,20 @@ webhook:
   caBundle: ""
 
   # Webhook failure policy
-  # Fail: Reject requests if webhook is unavailable (recommended for production)
-  # Ignore: Allow requests if webhook is unavailable
+  # Fail: Reject requests if webhook is unavailable (required for normal operation)
+  # Ignore: Emergency-only bypass. Pause Dynamo resource writes, restore Fail
+  # immediately after recovery, and audit every resource changed during the bypass.
   failurePolicy: Fail
+  # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook.
+  # Defaults to Ignore so a webhook outage falls back to cold-start instead of
+  # blocking workload Pods.
+  podCheckpointRestoreFailurePolicy: Ignore
 
   # Timeout for webhook calls (in seconds)
   timeoutSeconds: 10
 
-  # Namespace selector for webhooks
-  # Use this to exclude certain namespaces from validation
-  #
-  # For CLUSTER-WIDE operators: Exclude namespaces with namespace-restricted operators
-  # namespaceSelector:
-  #   matchExpressions:
-  #   - key: dynamo-operator
-  #     operator: NotIn
-  #     values: ["namespace-restricted"]
-  #
-  # For NAMESPACE-RESTRICTED operators: Leave empty (auto-configured)
+  # -- Unsupported; must remain empty. Helm configures global admission for the
+  # cluster-wide operator and target-namespace admission for restricted operators.
   namespaceSelector: {}
 
   # cert-manager integration (optional, alternative to built-in cert-controller)

@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated prefill/decode on a SINGLE GPU.
-# Per-worker VRAM is estimated from model parameters below. Override individual
-# knobs (MAX_MODEL_LEN, MAX_CONCURRENT_SEQS) via env vars, or set
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE to bypass the calculation entirely.
+# Per-worker VRAM is controlled via build_vllm_gpu_mem_args (see gpu_utils.sh).
+# Override individual knobs (MAX_MODEL_LEN, MAX_CONCURRENT_SEQS) via env vars.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --max-model-len 4096, RTX 6000 Ada 48 GiB):
 #   estimate (from gpu_utils.sh) : ~4.0 GiB per worker (~8.0 GiB total)
@@ -25,66 +24,83 @@ MODEL="Qwen/Qwen3-0.6B"
 # ---- Tunable (override via env vars) ----
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+# Inherit GPU from parent (profiler/test harness sets CUDA_VISIBLE_DEVICES);
+# default to GPU 0 for standalone use.
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# Per-worker KV cache byte cap (deterministic, GPU-size independent).
+# Profiled safe value: 1_023_525_000 bytes (~976 MiB, 2x over min 512 MiB).
+# --gpu-memory-utilization 0.01 prevents vLLM's startup free-memory check from
+# rejecting the launch when a co-resident worker already holds VRAM.
+# The profiler/parallel runner overrides via _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES.
+DEFAULT_KV_CACHE_BYTES="${DEFAULT_KV_CACHE_BYTES:-1023525000}"
 
-# ---- Estimate per-worker VRAM (see examples/common/gpu_utils.md) ----
-# Sets _EW_WEIGHTS_GIB, _EW_KV_GIB, _EW_OVERHEAD_GIB, _EW_TOTAL_GIB
-estimate_worker_vram "$MODEL" "$MAX_MODEL_LEN" "$MAX_CONCURRENT_SEQS" vllm
-
-# DYN_GPU_MEMORY_FRACTION_OVERRIDE takes precedence (profiler binary search).
-# In single-GPU mode, split the override evenly between the two workers.
-if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
-    GPU_MEM_FRACTION=$(awk -v f="$DYN_GPU_MEMORY_FRACTION_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
-else
-    GPU_MEM_FRACTION=$(gpu_worker_fraction vllm)
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+if [[ -z "$GPU_MEM_ARGS" ]]; then
+    GPU_MEM_ARGS="--kv-cache-memory-bytes $DEFAULT_KV_CACHE_BYTES --gpu-memory-utilization 0.01"
 fi
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+WORKER_MODULE="dynamo.vllm"
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTTP_PORT" \
-    "Max seq len: $MAX_MODEL_LEN" \
-    "GPU Mem:     ${GPU_MEM_FRACTION} per worker (~${_EW_TOTAL_GIB} GiB each)" \
-    "  estimate:  weights=${_EW_WEIGHTS_GIB} + kv=${_EW_KV_GIB} + overhead=${_EW_OVERHEAD_GIB} GiB"
+    "Workers:     2 (prefill + decode, fraction is per worker)"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python3 -m dynamo.frontend &
+# Set DYN_CHAT_PROCESSOR=vllm to exercise the Python pre/post processor instead of Rust.
+FRONTEND_ARGS=()
+if [[ -n "${DYN_CHAT_PROCESSOR:-}" ]]; then
+    FRONTEND_ARGS+=(--dyn-chat-processor "$DYN_CHAT_PROCESSOR")
+fi
+if [[ -n "${DYN_ROUTER_MODE:-}" ]]; then
+    FRONTEND_ARGS+=(--router-mode "$DYN_ROUTER_MODE")
+fi
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+    python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
+
+SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 1 "${DYN_SYSTEM_PORT:-8081}")
+SYSTEM_PORT_PREFILL=$(dyn_port DYN_SYSTEM_PORT 2 8082)
+NIXL_PORT_DECODE=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 5600)
+NIXL_PORT_PREFILL=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 20097)
+KV_PORT_PREFILL=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${DYN_VLLM_KV_EVENT_PORT:-20081}")
 
 # run decode worker with metrics on port 8081
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 # For disaggregated deployments we standardize on DYN_SYSTEM_PORT1/2 instead of
 # *_PREFILL/*_DECODE env names so test harnesses can set one simple pair.
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-CUDA_VISIBLE_DEVICES=0 \
-python3 -m dynamo.vllm \
+CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_DECODE \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE \
+python3 -m "$WORKER_MODULE" \
   --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode decode \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --gpu-memory-utilization "${GPU_MEM_FRACTION}" \
+  $GPU_MEM_ARGS \
   --max-model-len "$MAX_MODEL_LEN" &
 
-# Wait for decode worker to initialize before starting prefill worker
-# This prevents both workers from competing for GPU memory simultaneously, which can cause OOM.
-# The decode worker needs time to:
-# 1. Load model weights and allocate its memory fraction
-# 2. Initialize KV cache
-# 3. Register with NATS service discovery so prefill worker can find it
-echo "Waiting for decode worker to initialize..."
-sleep 10
+# Wait for decode worker to initialize before starting prefill worker.
+# Both workers share one GPU; without this wait they compete for GPU memory
+# during model loading and the scheduler OOMs.
+# || true: don't let set -e kill the script on timeout (wait_for_ready returns 1).
+DECODE_SYSTEM_PORT=$SYSTEM_PORT_DECODE
+wait_for_ready "http://localhost:${DECODE_SYSTEM_PORT}/health" 45 || true
 
 # run prefill worker with metrics on port 8082
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=0 \
-python3 -m dynamo.vllm \
+CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_PREFILL \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL \
+DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
+python3 -m "$WORKER_MODULE" \
   --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode prefill \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --gpu-memory-utilization "${GPU_MEM_FRACTION}" \
+  $GPU_MEM_ARGS \
   --max-model-len "$MAX_MODEL_LEN" \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PREFILL}\",\"enable_kv_cache_events\":true}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

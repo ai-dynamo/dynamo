@@ -11,6 +11,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.timeout(30),
 ]
 
 
@@ -22,12 +23,15 @@ class MockServer:
     def __init__(self):
         self.context_is_stopped = False
         self.context_is_killed = False
+        self.context_metadata: dict[str, str] = {}
+        self.context_cancelled = asyncio.Event()
 
     async def generate(self, request, context):
         print("################## generate called ######################")
 
         self.context_is_stopped = False
         self.context_is_killed = False
+        self.context_metadata = {}
 
         method_name = request
         assert hasattr(
@@ -39,31 +43,64 @@ class MockServer:
 
     async def _generate_until_context_cancelled(self, request, context):
         """
-        Generate method that yields numbers 0-999 every 0.1 seconds
+        Generate method that yields numbers 0-999 every 0.1 seconds.
         Checks for context.is_stopped() / context.is_killed() before each yield and raises
-        CancelledError if stopped / killed
+        CancelledError if stopped / killed.
         """
         for i in range(1000):
             print(f"Processing iteration {i}")
 
-            # Check if context is stopped
             if context.is_stopped():
                 print(f"Context stopped at iteration {i}")
                 self.context_is_stopped = True
                 self.context_is_killed = context.is_killed()
+                self.context_metadata = dict(context.metadata.items())
+                self.context_cancelled.set()
                 raise asyncio.CancelledError
 
-            # Check if context is killed
             if context.is_killed():
                 print(f"Context killed at iteration {i}")
                 self.context_is_stopped = context.is_stopped()
                 self.context_is_killed = True
+                self.context_metadata = dict(context.metadata.items())
+                self.context_cancelled.set()
                 raise asyncio.CancelledError
 
             await asyncio.sleep(0.1)
-
             print(f"Sending iteration {i}")
             yield i
+
+        assert (
+            False
+        ), "Test failed: generate_until_cancelled did not raise CancelledError"
+
+    async def _generate_until_context_cancelled_with_metadata(self, request, context):
+        """
+        Variant of _generate_until_context_cancelled that includes context metadata
+        in each yielded payload so the test can assert metadata propagation.
+        """
+        for i in range(1000):
+            print(f"Processing iteration {i}")
+
+            if context.is_stopped():
+                print(f"Context stopped at iteration {i}")
+                self.context_is_stopped = True
+                self.context_is_killed = context.is_killed()
+                self.context_metadata = dict(context.metadata.items())
+                self.context_cancelled.set()
+                raise asyncio.CancelledError
+
+            if context.is_killed():
+                print(f"Context killed at iteration {i}")
+                self.context_is_stopped = context.is_stopped()
+                self.context_is_killed = True
+                self.context_metadata = dict(context.metadata.items())
+                self.context_cancelled.set()
+                raise asyncio.CancelledError
+
+            await asyncio.sleep(0.1)
+            print(f"Sending iteration {i}")
+            yield {"i": i, "metadata": dict(context.metadata.items())}
 
         assert (
             False
@@ -190,14 +227,45 @@ async def test_client_context_cancel(temp_file_store, server, client):
 
         iteration_count += 1
 
-    # Give server a moment to process the cancellation
-    await asyncio.sleep(0.2)
+    await asyncio.wait_for(handler.context_cancelled.wait(), timeout=5)
 
     # Verify server detected the cancellation
     assert handler.context_is_stopped
     assert not handler.context_is_killed
 
     # TODO: Test with _generate_until_asyncio_cancelled server handler
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+async def test_client_context_cancel_preserves_metadata(
+    temp_file_store, server, client
+):
+    _, handler = server
+    context = Context(metadata={"tenant": "alpha", "region": "us-west"})
+    stream = await client.generate(
+        "_generate_until_context_cancelled_with_metadata", context=context
+    )
+
+    iteration_count = 0
+    async for annotated in stream:
+        payload = annotated.data()
+        print(f"Received iteration: {payload}")
+        assert payload["i"] == iteration_count
+        assert payload["metadata"] == {"region": "us-west", "tenant": "alpha"}
+
+        if iteration_count >= 2:
+            context.stop_generating()
+            break
+
+        iteration_count += 1
+
+    await asyncio.wait_for(handler.context_cancelled.wait(), timeout=5)
+
+    assert handler.context_is_stopped
+    assert not handler.context_is_killed
+    assert handler.context_metadata == {"region": "us-west", "tenant": "alpha"}
 
 
 @pytest.mark.forked
@@ -252,7 +320,7 @@ async def test_server_context_cancel(temp_file_store, server, client):
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
         assert str(e).startswith(
-            "Disconnected: Stream ended before generation completed"
+            "Unavailable: Stream ended before generation completed"
         )
 
     # Verify server context cancellation status
@@ -278,14 +346,25 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
     except ValueError as e:
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
-        assert str(e).endswith(
-            "a python exception was caught while processing the async generator: CancelledError: "
-        )
+        assert "CancelledError" in str(e)
+        assert str(e).startswith("Cancelled: CancelledError")
 
     # Verify server context cancellation status
     # TODO: Server to gracefully stop the stream?
     assert not handler.context_is_stopped
     assert not handler.context_is_killed
+
+
+async def _wait_for_cancelled_request(request, handler):
+    stream = await request
+    # Cancellation propagates asynchronously, so responses can arrive before it completes.
+    try:
+        async for _ in stream:
+            pass
+    except ValueError as error:
+        if str(error) != "Cancelled: CancelledError":
+            raise
+    await handler.context_cancelled.wait()
 
 
 @pytest.mark.forked
@@ -296,15 +375,8 @@ async def test_client_context_already_cancelled(temp_file_store, server, client)
     context = Context()
     context.stop_generating()
     # TODO: (DIS-830) The outgoing call should raise if context is cancelled
-    stream = await client.generate("_generate_until_context_cancelled", context=context)
-
-    async for _ in stream:
-        raise AssertionError(
-            "Request should be cancelled before any responses are generated"
-        )
-
-    # Give server a moment to update status
-    await asyncio.sleep(0.2)
+    request = client.generate("_generate_until_context_cancelled", context=context)
+    await asyncio.wait_for(_wait_for_cancelled_request(request, handler), timeout=5)
 
     # Verify server context cancellation status
     assert handler.context_is_stopped
@@ -322,15 +394,7 @@ async def test_client_context_cancel_before_await_request(
     request = client.generate("_generate_until_context_cancelled", context=context)
     context.stop_generating()
     # TODO: (DIS-830) The outgoing call should raise if context is cancelled
-    stream = await request
-
-    async for _ in stream:
-        raise AssertionError(
-            "Request should be cancelled before any responses are generated"
-        )
-
-    # Give server a moment to update status
-    await asyncio.sleep(0.2)
+    await asyncio.wait_for(_wait_for_cancelled_request(request, handler), timeout=5)
 
     # Verify server context cancellation status
     assert handler.context_is_stopped

@@ -6,17 +6,27 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
-pub mod event_sink;
+mod active_set;
+pub(crate) mod cleanup;
+pub mod conditional_disagg;
+mod lookup_update;
+
+pub mod identity;
 pub mod indexer;
+pub mod kv_hints;
+pub mod plugins;
 pub mod protocols;
+pub mod recovery;
 pub mod scheduling;
 pub mod sequences;
+pub mod services;
+pub mod session_prefix_index;
+pub mod tracking_hash;
+pub mod worker_type;
 pub mod zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
-pub use indexer::concurrent_radix_tree;
-#[cfg(feature = "bench")]
-pub use indexer::naive as naive_indexers;
+pub use indexer::concurrent_radix_tree_compressed;
 pub use indexer::positional as nested_map;
 pub use indexer::pruning as approx;
 pub use indexer::radix_tree;
@@ -27,31 +37,57 @@ pub use scheduling::selector;
 pub use sequences::multi_worker as multi_worker_sequence;
 pub use sequences::single as sequence;
 
-#[cfg(feature = "standalone-indexer")]
-pub mod standalone_indexer;
-
 #[cfg(any(test, feature = "bench"))]
 pub mod test_utils;
 
 // Re-export key types for convenience
 pub use self::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
-    SequenceSubscriber,
+    ActiveSequencesMultiWorker, NoopSequencePublisher, ReplicaWorkerPolicy, SequenceError,
+    SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 pub use self::sequence::{ActiveSequences, RequestId};
-pub use concurrent_radix_tree::ConcurrentRadixTree;
-pub use config::{KvRouterConfig, RouterConfigOverride, RouterQueuePolicy};
-pub use event_sink::EventSink;
-pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
-#[cfg(feature = "bench")]
-pub use naive_indexers::{InvertedIndex, NaiveNestedMap};
+pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
+pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
+pub use config::{
+    ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,
+    RouterQueuePolicy, SharedCacheType,
+};
+pub use identity::{DEFAULT_ROUTING_GROUP, DcId, RoutingPartitionId, RoutingPartitionRef};
+#[allow(deprecated)]
+pub use indexer::{
+    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
+    LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
+    ThreadPoolIndexer,
+};
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
-    KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, WorkerConfigLike, WorkerId,
-    compute_block_hash_for_seq,
+    KvCacheEventError, KvTransferEnforcement, LocalBlockHash, OverlapScores, RouterEvent,
+    RouterEventSink, SharedCacheHits, WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
 };
 pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;
+pub use scheduling::LocalScheduler;
+pub use scheduling::LoraWorkerFilter;
+pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
-pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
-pub use selector::{DefaultWorkerSelector, WorkerSelector};
+pub use scheduling::{
+    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, SessionContext,
+    WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
+};
+#[cfg(any(test, feature = "bench"))]
+pub use selector::DefaultWorkerSelector;
+pub use selector::{WorkerSelectionInput, WorkerSelector};
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use plugins::worker_selection::{
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
+    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
+};
+pub use session_prefix_index::{
+    LogicalNode, NodeId, SessionId, SessionPrefixIndexError, SessionPrefixIndexer,
+};
+pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
+pub use worker_type::WorkerType;
+
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use plugins::worker_selection::WorkerSelectionPolicyFactory;

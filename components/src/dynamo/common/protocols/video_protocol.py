@@ -8,7 +8,7 @@ to ensure compatibility with the Dynamo HTTP frontend.
 """
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
 
-from typing import Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -53,6 +53,11 @@ class NvCreateVideoRequest(BaseModel):
     Matches Rust NvCreateVideoRequest in lib/llm/src/protocols/openai/videos.rs.
     """
 
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
+
     # Required fields
     prompt: str
     """The text prompt for video generation."""
@@ -73,8 +78,16 @@ class NvCreateVideoRequest(BaseModel):
     user: Optional[str] = None
     """Optional user identifier."""
 
-    response_format: Optional[str] = None
-    """Response format: 'url' or 'b64_json' (default: 'url')."""
+    response_format: Optional[Literal["url", "b64_json"]] = None
+    """How the generated data should be returned: 'url' or 'b64_json'.
+    If unset, handlers default to 'url'."""
+
+    output_format: Optional[str] = None
+    """Requested container format (e.g. 'mp4', 'mjpeg').
+    This is a hint; check output_format in the response data for the actual format."""
+
+    stream: Optional[bool] = None
+    """Whether to stream the video generation (default: false)."""
 
     nvext: Optional[VideoNvExt] = None
     """NVIDIA extensions."""
@@ -86,11 +99,20 @@ class VideoData(BaseModel):
     Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
     """
 
+    output_format: str
+    """Actual container format of this video."""
+
     url: Optional[str] = None
     """URL of the generated video (if response_format is 'url')."""
 
     b64_json: Optional[str] = None
     """Base64-encoded video (if response_format is 'b64_json')."""
+
+    fps: Optional[int] = None
+    """Actual video frame rate when reported by the model."""
+
+    audio_sample_rate: Optional[int] = None
+    """Muxed audio sample rate when the generated video contains audio."""
 
 
 class NvVideosResponse(BaseModel):

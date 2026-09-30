@@ -7,69 +7,59 @@
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import logging
 import os
-import time
 from typing import Any, Dict, Optional
 
 import pytest
 
-from tests.router.common import (
-    _test_router_basic,
-    _test_router_decisions,
-    _test_router_indexers_sync,
+from tests.router.e2e_harness import (
+    ManagedEngineProcessMixin,
+    run_basic_router_test,
+    run_cache_salt_isolation_test,
+    run_disagg_router_decisions_test,
+    run_indexers_sync_test,
+    run_router_decisions_test,
 )
-from tests.router.helper import generate_random_suffix, get_runtime
-from tests.utils.constants import DefaultPort
-from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_ports, deallocate_ports
-from tests.utils.test_output import resolve_test_output_path
+from tests.router.helper import generate_random_suffix
+from tests.utils.constants import DynamoPortRange
+from tests.utils.gpu_args import build_gpu_mem_args
+from tests.utils.managed_process import ManagedProcess, check_health_ready
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    allocate_port,
+    allocate_ports,
+    deallocate_ports,
+)
 
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 pytestmark = [
-    pytest.mark.e2e,
     pytest.mark.router,
     pytest.mark.sglang,
-    pytest.mark.model(MODEL_NAME),
 ]
-SPEEDUP_RATIO = 10.0
-NUM_REQUESTS = 10
-PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
+# SGLang uses "page_size" instead of "block_size". 64 (not 16) because the
+# TRT-LLM MLA attention backend only supports page sizes 32/64, and
+# dynamo.sglang coerces page_size up to 64 on GPUs where that backend is
+# selected (overrides._mla_backend_page_constraints). A 16-token page here
+# then desyncs the router radix (16) from the worker KV events (64) and every
+# device_blocks assertion sees 0. 64 is honored on every backend, so the
+# router and workers always agree.
+PAGE_SIZE = 64
 
-
-def allocate_frontend_ports(request, count: int) -> list[int]:
-    """Allocate random free frontend ports for xdist-safe execution."""
-    ports = allocate_ports(count, DefaultPort.FRONTEND.value)
-    request.addfinalizer(lambda: deallocate_ports(ports))
-    return ports
-
-
-# Shared test payload for all tests
-TEST_PAYLOAD: Dict[str, Any] = {
-    "model": MODEL_NAME,
-    "messages": [
-        {
-            "role": "user",
-            "content": "In a quiet meadow tucked between rolling hills, a plump gray rabbit nibbled on clover beneath the shade of a gnarled oak tree. Its ears twitched at the faint rustle of leaves, but it remained calm, confident in the safety of its burrow just a few hops away. The late afternoon sun warmed its fur, and tiny dust motes danced in the golden light as bees hummed lazily nearby. Though the rabbit lived a simple life, every day was an adventure of scents, shadows, and snacks—an endless search for the tastiest patch of greens and the softest spot to nap.",
-        }
-    ],
-    "stream": True,
-    "max_tokens": 10,
-}
-
-# Shared SGLang configuration for all tests
-# mem_fraction_static limits actual VRAM allocation (required for multi-worker on same GPU)
+# Shared SGLang configuration for all tests.
+# Memory is budgeted with the token-cap form (--max-total-tokens +
+# --mem-fraction-static 0.9, see tests/README.md "SGLang KV tokens").
 SGLANG_ARGS: Dict[str, Any] = {
     "page_size": PAGE_SIZE,
     "model": MODEL_NAME,
-    "mem_fraction_static": 0.4,  # Limit VRAM allocation per worker (equivalent to vLLM's gpu_memory_utilization)
+    "max_total_tokens": 2048,  # matches the requested_sglang_kv_tokens(2048) markers
     "context_length": 1024,  # Limit context length to reduce KV cache size (equivalent to vLLM's max_model_len)
     "disable_cuda_graph": True,  # Disable CUDA graphs for faster startup & lower memory (equivalent to vLLM's enforce_eager)
 }
 
 
-class SGLangProcess:
+class SGLangProcess(ManagedEngineProcessMixin):
     """Manages SGLang workers using dynamo.sglang (HTTP API + KV events).
 
     This is a drop-in replacement for MockerProcess that uses real SGLang workers.
@@ -88,7 +78,9 @@ class SGLangProcess:
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        durable_kv_events: bool = False,
+        namespace: Optional[str] = None,
+        gpu_start_index: int = 0,
+        disaggregation_mode: Optional[str] = None,
     ):
         """Initialize SGLang workers with dynamo integration.
 
@@ -98,31 +90,53 @@ class SGLangProcess:
                 - page_size: KV cache page size (default: 16)
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - mem_fraction_static: Fraction of GPU memory to allocate (optional)
+                - max_total_tokens: Max KV cache tokens; takes precedence over
+                  mem_fraction_static and is emitted with --mem-fraction-static 0.9
+                  (see tests/README.md "SGLang KV tokens")
                 - context_length: Maximum sequence length (optional)
                 - disable_cuda_graph: Disable CUDA graphs (default: False)
             num_workers: Number of SGLang worker processes
             single_gpu: If True, all workers share GPU 0
-            data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            data_parallel_size: If set, enables this many data-parallel ranks per worker process.
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
-        self.namespace = f"test-namespace-{namespace_suffix}"
-        self.component_name = "backend"
+        self.namespace = namespace or f"test-namespace-{namespace_suffix}"
+        self.component_name = (
+            "prefill" if disaggregation_mode == "prefill" else "backend"
+        )
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
         self.data_parallel_size = data_parallel_size
         self.worker_processes = []
         self.store_backend = store_backend
 
-        # Dynamically allocate unique system and KV event ports (one per worker)
-        # to avoid conflicts in parallel test runs.
-        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        # Dynamically allocate unique system and KV event ports to avoid
+        # conflicts in parallel test runs.
+        self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        kv_event_rank_span = data_parallel_size or 1
+        self._kv_event_ports = allocate_contiguous_ports(
+            num_workers, kv_event_rank_span, DynamoPortRange.ROUTER.value
+        )
+        # Forward-pass metrics: SGLang publishes FPM over a per-worker ipc://
+        # socket (path derived from the worker's connection_id), so unlike vLLM
+        # it never binds this port -- the env var only flips the feature on. One
+        # shared value across workers is therefore sufficient (no collision).
+        self._fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        # Pin the torch.distributed rendezvous port per worker: on the non-DP path
+        # SGLang probes and closes a port, so it can be taken before the real bind.
+        self._nccl_ports = [
+            allocate_port(DynamoPortRange.NCCL.value) for _ in range(num_workers)
+        ]
         request.addfinalizer(
-            lambda: deallocate_ports(self._system_ports + self._kv_event_ports)
+            lambda: deallocate_ports(
+                self._system_ports
+                + self._kv_event_ports
+                + self._nccl_ports
+                + [self._fpm_port]
+            )
         )
 
         if sglang_args is None:
@@ -131,8 +145,15 @@ class SGLangProcess:
         page_size = sglang_args.get("page_size", PAGE_SIZE)
         model = sglang_args.get("model", MODEL_NAME)
         mem_fraction_static = sglang_args.get("mem_fraction_static")
+        max_total_tokens = sglang_args.get("max_total_tokens")
         context_length = sglang_args.get("context_length")
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
+        # Resolved memory budget, for startup logs (mirrors the command flags).
+        mem_budget = (
+            f"max_total_tokens={max_total_tokens}, mem_frac=0.9"
+            if max_total_tokens is not None
+            else f"mem_frac={mem_fraction_static}"
+        )
 
         self.model_name = model
 
@@ -140,10 +161,10 @@ class SGLangProcess:
             # Calculate GPU device for this process
             if single_gpu:
                 # Force all processes to GPU 0 (for single-GPU testing)
-                gpu_device = "0"
+                gpu_device = str(gpu_start_index)
             elif data_parallel_size is not None:
                 # Worker sees dp_rank GPUs (each DP rank gets its own GPU)
-                worker_start_gpu = worker_idx * data_parallel_size
+                worker_start_gpu = gpu_start_index + worker_idx * data_parallel_size
                 gpu_device = ",".join(
                     str(i)
                     for i in range(
@@ -152,7 +173,7 @@ class SGLangProcess:
                 )
             else:
                 # No DP; worker sees one GPU
-                gpu_device = str(worker_idx)
+                gpu_device = str(gpu_start_index + worker_idx)
 
             command = [
                 "python3",
@@ -164,17 +185,37 @@ class SGLangProcess:
                 str(page_size),
             ]
 
-            # Disable CUDA graphs for faster startup & lower memory
+            # Disable CUDA graphs for faster startup & lower memory.
+            # sglang 0.5.10+ has piecewise CUDA graphs (separate flag) that
+            # consume ~7 GB during capture — must also be disabled for
+            # multi-worker same-GPU tests to avoid OOM.
             if disable_cuda_graph:
                 command.append("--disable-cuda-graph")
+                command.append("--disable-piecewise-cuda-graph")
 
-            # Limit VRAM allocation (required for multi-worker on same GPU)
-            if mem_fraction_static is not None:
+            # Limit VRAM allocation (required for multi-worker on same GPU).
+            # Prefer the token-cap form; see the SGLANG_ARGS comment.
+            if max_total_tokens is not None:
+                command.extend(
+                    [
+                        "--max-total-tokens",
+                        str(max_total_tokens),
+                        "--mem-fraction-static",
+                        "0.9",
+                    ]
+                )
+            elif mem_fraction_static is not None:
                 command.extend(["--mem-fraction-static", str(mem_fraction_static)])
 
             # Add optional context_length if specified
             if context_length is not None:
                 command.extend(["--context-length", str(context_length)])
+
+            command.extend(build_gpu_mem_args("build_sglang_gpu_mem_args"))
+
+            if disaggregation_mode is not None:
+                command.extend(["--disaggregation-mode", disaggregation_mode])
+                command.extend(["--disaggregation-transfer-backend", "nixl"])
 
             if data_parallel_size is not None:
                 # Add DP configuration
@@ -188,15 +229,15 @@ class SGLangProcess:
                     ]
                 )
 
-            # Add per-worker KV events config for ZMQ publishing
-            # Ports are dynamically allocated for xdist-safe parallel execution.
-            kv_events_port = self._kv_event_ports[worker_idx]
+            # Add per-worker KV events config for ZMQ publishing. SGLang DP
+            # ranks publish at base_port + dp_rank, so DP tests must reserve a
+            # contiguous port block and pass the block's base port here.
+            kv_events_port = self._kv_event_ports[worker_idx * kv_event_rank_span]
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
 
-            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
-            if durable_kv_events:
-                command.append("--durable-kv-events")
+            nccl_port = self._nccl_ports[worker_idx]
+            command.extend(["--nccl-port", str(nccl_port)])
 
             # Each SGLang worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
             # Ports are dynamically allocated for xdist-safe parallel execution.
@@ -208,6 +249,7 @@ class SGLangProcess:
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
+                "DYN_FORWARDPASS_METRIC_PORT": str(self._fpm_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
 
@@ -224,7 +266,11 @@ class SGLangProcess:
                 timeout=120,  # Allow time for model loading
                 display_output=True,
                 health_check_ports=[],
-                health_check_urls=[],
+                # Gate each worker on its own /health, which reports ready once
+                # dynamo.sglang registers its health-check payload on generate.
+                health_check_urls=[
+                    (f"http://localhost:{system_port}/health", check_health_ready)
+                ],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
             )
@@ -232,113 +278,30 @@ class SGLangProcess:
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}, "
+                    f"nccl_port={nccl_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created SGLang worker {worker_idx} on GPU {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}, "
+                    f"nccl_port={nccl_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
-    def __enter__(self):
-        """Start all SGLang worker processes with sequential initialization.
-
-        Workers are started sequentially with a delay between each to avoid
-        resource contention during initialization. This prevents
-        shared memory handle allocation failures when multiple workers
-        try to initialize simultaneously on the same GPU.
-        """
-        logger.info(
-            f"[SGLangProcess] Starting {len(self.worker_processes)} worker processes sequentially..."
-        )
-
-        # Start each process sequentially, waiting for initialization before next
-        for i, process in enumerate(self.worker_processes):
-            logger.info(f"[SGLangProcess] Starting SGLang worker {i}...")
-            try:
-                # Manually initialize the process without blocking on health checks
-                process._logger = logging.getLogger(process.__class__.__name__)
-                process._command_name = process.command[0]
-                process.log_dir = resolve_test_output_path(process.log_dir)
-                os.makedirs(process.log_dir, exist_ok=True)
-                log_name = f"{process._command_name}.log.txt"
-                process._log_path = os.path.join(process.log_dir, log_name)
-
-                if process.data_dir:
-                    process._remove_directory(process.data_dir)
-
-                process._terminate_all_matching_process_names()
-                logger.info(
-                    f"[SGLangProcess] Launching process {i} (pid will be assigned)..."
-                )
-                process._start_process()  # Start the process but don't wait
-                logger.info(
-                    f"[SGLangProcess] Worker {i} launched with PID: {process.proc.pid if process.proc else 'unknown'}"
-                )
-                time.sleep(process.delayed_start)
-
-                # Wait for initialization before starting next worker
-                # This prevents shared memory contention
-                if i < len(self.worker_processes) - 1:
-                    init_delay = 5  # seconds
-                    logger.info(
-                        f"[SGLangProcess] Waiting {init_delay}s for worker {i} to initialize before starting next worker..."
-                    )
-                    time.sleep(init_delay)
-
-            except Exception:
-                logger.exception(f"[SGLangProcess] Failed to start worker {i}")
-                # Clean up on failure
-                try:
-                    process.__exit__(None, None, None)
-                except Exception as cleanup_err:
-                    logger.warning(
-                        f"[SGLangProcess] Error during cleanup: {cleanup_err}"
-                    )
-                raise
-
-        logger.info(
-            f"[SGLangProcess] All {len(self.worker_processes)} workers launched with sequential initialization."
-        )
-        logger.info("[SGLangProcess] Waiting for health checks to complete...")
-
-        # Now wait for health checks for all processes
-        for i, process in enumerate(self.worker_processes):
-            logger.info(f"[SGLangProcess] Checking health for worker {i}...")
-            try:
-                elapsed = process._check_ports(process.timeout)
-                process._check_urls(process.timeout - elapsed)
-                process._check_funcs(process.timeout - elapsed)
-                logger.info(f"[SGLangProcess] Worker {i} health checks passed")
-            except Exception:
-                logger.error(f"[SGLangProcess] Worker {i} health check failed")
-                # Clean up all processes on failure
-                self.__exit__(None, None, None)
-                raise
-
-        logger.info(
-            "[SGLangProcess] All workers started successfully and passed health checks!"
-        )
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Stop all SGLang worker processes gracefully."""
-        for i, process in enumerate(self.worker_processes):
-            logger.info(f"Stopping SGLang worker {i}")
-            process.__exit__(exc_type, exc_val, exc_tb)
-
-        # Add delay to ensure full cleanup of NATS/ETCD/ZMQ resources
-        # This prevents test isolation issues when running multiple tests
-        logger.info("Waiting for SGLang worker resources to fully clean up...")
-        time.sleep(2)
+    process_name = "SGLang worker"
+    cleanup_name = "SGLang worker resources"
 
 
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
+@pytest.mark.timeout(270)  # 3x ~89s (sglang gpu_1 log)
 def test_sglang_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
@@ -346,45 +309,26 @@ def test_sglang_kv_router_basic(
     set_ucx_tls_no_mm,
     request_plane,
 ):
-    """
-    Quick e2e sanity test for KV router with SGLang engine instances.
-    Tests both NATS and TCP request planes.
-    """
-
-    # runtime_services starts etcd and nats
-    N_SGLANG_WORKERS = 2
-    logger.info(
-        f"Starting SGLang KV router test with {N_SGLANG_WORKERS} workers using request_plane={request_plane}"
+    run_basic_router_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_ARGS,
+        num_workers=2,
+        single_gpu=True,
+        request=request,
+        request_plane=request_plane,
+        block_size=PAGE_SIZE,
+        model_name=MODEL_NAME,
     )
 
-    with SGLangProcess(
-        request,
-        sglang_args=SGLANG_ARGS,
-        num_workers=N_SGLANG_WORKERS,
-        single_gpu=True,  # fit workers into one GPU
-        request_plane=request_plane,
-    ) as sglang_workers:
-        # Start SGLang workers
-        logger.info(f"Starting {N_SGLANG_WORKERS} SGLang workers")
-        logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
 
-        # Run basic router test (starts router internally and waits for workers to be ready)
-        frontend_port = allocate_frontend_ports(request, 1)[0]
-        _test_router_basic(
-            engine_workers=sglang_workers,
-            block_size=PAGE_SIZE,
-            request=request,
-            frontend_port=frontend_port,
-            test_payload=TEST_PAYLOAD,
-            num_requests=NUM_REQUESTS,
-            frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
-            store_backend="etcd",  # Explicit for clarity
-            request_plane=request_plane,
-        )
-
-
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
     request,
@@ -393,39 +337,56 @@ def test_router_decisions_sglang_multiple_workers(
     set_ucx_tls_no_mm,
     request_plane,
 ):
-    # runtime_services starts etcd and nats
-    logger.info("Starting SGLang router prefix reuse test with two workers")
-    N_WORKERS = 2
-
-    with SGLangProcess(
-        request,
-        sglang_args=SGLANG_ARGS,
-        num_workers=N_WORKERS,
-        single_gpu=True,  # Worker uses GPU 0
+    run_router_decisions_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_ARGS,
+        request=request,
         request_plane=request_plane,
-    ) as sglang_workers:
-        # Start 2 worker processes on the same GPU
-        logger.info("Starting 2 SGLang worker processes on single GPU (mem_frac=0.4)")
-        logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
-
-        runtime = get_runtime(request_plane=request_plane)
-        endpoint = runtime.endpoint(f"{sglang_workers.namespace}.backend.generate")
-
-        _test_router_decisions(
-            sglang_workers,
-            endpoint,
-            MODEL_NAME,
-            request,
-            test_dp_rank=False,
-            block_size=PAGE_SIZE,
-        )
+        model_name=MODEL_NAME,
+        block_size=PAGE_SIZE,
+        component_name="backend",
+        num_workers=2,
+        single_gpu=True,
+        test_dp_rank=False,
+    )
 
 
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_router_cache_salt_isolation_sglang(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    run_cache_salt_isolation_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=MODEL_NAME,
+        block_size=PAGE_SIZE,
+        component_name="backend",
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
+@pytest.mark.h100
 @pytest.mark.gpu_2
-@pytest.mark.post_merge
+@pytest.mark.nightly
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
-@pytest.mark.skip(reason="DYN-2265")
 def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,
@@ -440,100 +401,111 @@ def test_router_decisions_sglang_dp(
         * The (worker_id, dp_rank) with events should have exactly 4 events (one per request)
         * All events should be on the forced (worker_id, dp_rank=1) (verifying forced routing and prefix reuse)
     """
-    N_WORKERS = 1
-    DP_SIZE = 2
-
-    with SGLangProcess(
-        request,
-        sglang_args=SGLANG_ARGS,
-        num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
-        single_gpu=False,
-        data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
+    run_router_decisions_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_ARGS,
+        request=request,
         request_plane=request_plane,
-    ) as sglang_workers:
-        logger.info("Starting 2 SGLang DP ranks (dp_size=2) (mem_frac=0.4)")
-        logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
-
-        # Get runtime and create endpoint
-        runtime = get_runtime(request_plane=request_plane)
-        # Use the namespace from the SGLang workers
-        endpoint = runtime.endpoint(f"{sglang_workers.namespace}.backend.generate")
-
-        _test_router_decisions(
-            sglang_workers,
-            endpoint,
-            MODEL_NAME,
-            request,
-            test_dp_rank=True,
-            block_size=PAGE_SIZE,
-        )
+        model_name=MODEL_NAME,
+        block_size=PAGE_SIZE,
+        component_name="backend",
+        num_workers=1,
+        single_gpu=False,
+        test_dp_rank=True,
+        extra_process_kwargs={"data_parallel_size": 2},
+    )
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
+@pytest.mark.gpu_2
+@pytest.mark.nightly
+@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
+@pytest.mark.timeout(600)
+def test_router_decisions_sglang_disagg(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    run_disagg_router_decisions_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=MODEL_NAME,
+        block_size=PAGE_SIZE,
+        num_prefill_workers=2,
+        num_decode_workers=1,
+        prefill_process_kwargs={
+            "single_gpu": True,
+            "gpu_start_index": 0,
+            "disaggregation_mode": "prefill",
+        },
+        decode_process_kwargs={
+            "single_gpu": True,
+            "gpu_start_index": 1,
+            "disaggregation_mode": "decode",
+        },
+    )
+
+
+# DYN-2784: fixture setup hangs instead of failing. Worker #2 dies during
+# SGLangProcess launch and KvRouter then blocks forever on
+# min_initial_workers=2; the timeout below cannot fire because the signal is
+# swallowed at a C-level syscall.
+#
+# Skipped outright, because the containment this previously relied on does not
+# hold. The note here used to read "passes reliably in pre_merge/post_merge, so
+# scope the skip to nightly" -- measured over five days that is 82% of nightly
+# runs but also 63% of post_merge, and the runs that do hang burn a whole job:
+# observed hangs of 3659s, 4235s and 6077s, each holding a 12 GiB reservation
+# with three more workers queued behind it, because the VRAM-aware parallel
+# orchestrator has no hard-kill for a child that outlives its declared timeout.
+# That came to roughly 220 runner-hours in five days.
+#
+# skip_in_nightly is kept but is not what makes this safe: it only drops the
+# test from the nightly marker filter, and the hang is not nightly-specific.
+#
+# Re-enable once the launch race is fixed, or once the orchestrator can kill a
+# hung child -- either one alone turns this from a lost job into a normal
+# failure. The scenario itself is worth keeping; it is the hang that is not
+# affordable.
+@pytest.mark.skip(
+    reason="hangs to the job step cap instead of failing; see the note above"
+)
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
+@pytest.mark.skip_in_nightly
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
-    [
-        ("etcd", False, "tcp"),
-    ],
-    ids=["nats_core"],
-    indirect=["durable_kv_events", "request_plane"],
-)
-@pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
+@pytest.mark.timeout(320)  # 3x ~106s (sglang gpu_1 log)
 def test_sglang_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
-    file_storage_backend,
     set_ucx_tls_no_mm,
-    store_backend,
-    durable_kv_events,
     request_plane,
+    event_plane,
 ):
-    """
-    Test that two KV routers have synchronized indexer states after processing requests
-    with SGLang workers. This test verifies that both routers converge to the same internal state.
-
-    Tests with configuration:
-    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
-                 (includes NATS interruption/recovery testing)
-    """
-    # runtime_services_dynamic_ports handles NATS and etcd startup
-    nats_process, _etcd_process = runtime_services_dynamic_ports
-
-    logger.info(
-        f"Starting SGLang indexers sync test: store_backend={store_backend}, "
-        f"durable_kv_events={durable_kv_events}, request_plane={request_plane}"
-    )
-
-    N_SGLANG_WORKERS = 2
-
-    with SGLangProcess(
-        request,
-        sglang_args=SGLANG_ARGS,
-        num_workers=N_SGLANG_WORKERS,
-        single_gpu=True,  # fit workers into one GPU
+    run_indexers_sync_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_ARGS,
+        request=request,
+        runtime_services_dynamic_ports=runtime_services_dynamic_ports,
+        store_backend="etcd",
         request_plane=request_plane,
-        store_backend=store_backend,
-        durable_kv_events=durable_kv_events,
-    ) as sglang_workers:
-        # Start SGLang workers
-        logger.info(f"Starting {N_SGLANG_WORKERS} SGLang workers")
-        logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
-
-        # Use the common test implementation (creates its own runtimes for each router)
-        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
-        # When using durable_kv_events=True, use JetStream mode for the router
-        _test_router_indexers_sync(
-            engine_workers=sglang_workers,
-            block_size=PAGE_SIZE,
-            model_name=MODEL_NAME,
-            num_workers=N_SGLANG_WORKERS,
-            store_backend=store_backend,
-            request_plane=request_plane,
-            test_nats_interruption=not durable_kv_events,
-            nats_server=nats_process if not durable_kv_events else None,
-            durable_kv_events=durable_kv_events,
-        )
-
-        logger.info("SGLang indexers sync test completed successfully")
+        event_plane=event_plane,
+        block_size=PAGE_SIZE,
+        model_name=MODEL_NAME,
+        num_workers=2,
+    )

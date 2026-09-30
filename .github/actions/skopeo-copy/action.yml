@@ -6,7 +6,7 @@ inputs:
     description: 'Source registry hostname (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com)'
     required: true
   source_image:
-    description: 'Source image name (e.g., ai-dynamo/dynamo)'
+    description: 'Source image name (e.g., organization/repository)'
     required: true
   source_tag:
     description: 'Source image tag'
@@ -25,8 +25,8 @@ inputs:
   source_aws_default_region:
     description: 'AWS Default Region for source ECR'
     required: false
-  source_aws_account_id:
-    description: 'AWS Account ID for source ECR'
+  source_ecr_registry:
+    description: 'Source ECR registry hostname'
     required: false
   source_azure_acr_hostname:
     description: 'Azure ACR hostname for source registry'
@@ -41,8 +41,8 @@ inputs:
   target_aws_default_region:
     description: 'AWS Default Region for target ECR'
     required: false
-  target_aws_account_id:
-    description: 'AWS Account ID for target ECR'
+  target_ecr_registry:
+    description: 'Target ECR registry hostname'
     required: false
   target_azure_acr_hostname:
     description: 'Azure ACR hostname for target registry'
@@ -53,6 +53,10 @@ inputs:
   target_azure_acr_password:
     description: 'Azure ACR password for target registry'
     required: false
+  override_arch:
+    description: 'Copy only the specified architecture (e.g. amd64). If empty, copies all platforms (manifest list).'
+    required: false
+    default: ''
 
 outputs:
   target_image_ref:
@@ -63,19 +67,19 @@ runs:
   using: "composite"
   steps:
     - name: Login to Source Registry
-      uses: ./.github/actions/skopeo-login
+      uses: $/.github/actions/skopeo-login
       with:
         aws_default_region: ${{ inputs.source_aws_default_region }}
-        aws_account_id: ${{ inputs.source_aws_account_id }}
+        ecr_registry: ${{ inputs.source_ecr_registry }}
         azure_acr_hostname: ${{ inputs.source_azure_acr_hostname }}
         azure_acr_user: ${{ inputs.source_azure_acr_user }}
         azure_acr_password: ${{ inputs.source_azure_acr_password }}
 
     - name: Login to Target Registry
-      uses: ./.github/actions/skopeo-login
+      uses: $/.github/actions/skopeo-login
       with:
         aws_default_region: ${{ inputs.target_aws_default_region }}
-        aws_account_id: ${{ inputs.target_aws_account_id }}
+        ecr_registry: ${{ inputs.target_ecr_registry }}
         azure_acr_hostname: ${{ inputs.target_azure_acr_hostname }}
         azure_acr_user: ${{ inputs.target_azure_acr_user }}
         azure_acr_password: ${{ inputs.target_azure_acr_password }}
@@ -109,7 +113,13 @@ runs:
         RETRY_DELAY=10
         for attempt in $(seq 1 $MAX_RETRIES); do
           echo "Attempt ${attempt}/${MAX_RETRIES}..."
-          if skopeo copy --all --retry-times 4 "${SOURCE_REF}" "${TARGET_REF}"; then
+          ARCH_FLAG=""
+          if [ -n "${{ inputs.override_arch }}" ]; then
+            ARCH_FLAG="--override-arch ${{ inputs.override_arch }}"
+          else
+            ARCH_FLAG="--all"
+          fi
+          if skopeo copy ${ARCH_FLAG} --retry-times 4 "${SOURCE_REF}" "${TARGET_REF}"; then
             echo "target_image_ref=${{ inputs.target_registry }}/${TARGET_IMAGE}:${TARGET_TAG}" >> $GITHUB_OUTPUT
             echo "✅ Image copied successfully"
             exit 0

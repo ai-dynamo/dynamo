@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+source: kustomize/base
+nameTemplate: "${variant}"
+matrix:
+  variant:
+    - name: aks-ib
+      components:
+        - ../../../kustomize/components/aks-ib
+    - name: aws-p5.48xlarge
+      components:
+        - ../../../kustomize/components/disagg-workers/aws-efa
+        - ../../../kustomize/components/vllm-disagg/aws-efa
+        - kustomize/components/vllm-efa-runtime
+      templates:
+        - source: ../../../kustomize/templates/aws-efa/p5.48xlarge
+          path: components/efa
+    - name: gke-roce
+      components:
+        - ../../../kustomize/components/disagg-workers/gke-roce
+        - ../../../kustomize/components/vllm-disagg/nixl-default
+        - kustomize/components/gke-image-pull-secret
+    - name: nebius-ib
+      components:
+        - ../../../kustomize/components/disagg-workers/nebius-ib
+        - ../../../kustomize/components/vllm-disagg/nebius-ib
+        - ../../../kustomize/components/vllm-disagg/nixl-default
+    - name: nscale-ib
+      components:
+        - ../../../kustomize/components/disagg-workers/nscale-ib
+        - kustomize/components/nscale-gpu-memory

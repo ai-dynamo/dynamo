@@ -40,7 +40,7 @@ This workload is ideal for KV-aware routing—with 36.64% cache efficiency, requ
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 2. **16x H200 GPUs** across 2 nodes
 3. **HuggingFace token** configured:
    ```bash
@@ -153,4 +153,3 @@ kubectl delete dynamographdeployment disagg-router-6p-2d -n ${NAMESPACE}
 ## References
 
 - [Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving](https://github.com/kvcache-ai/Mooncake) - FAST25 paper and trace data
-

@@ -4,6 +4,7 @@
 """Base handler for vLLM-Omni multi-stage pipelines."""
 
 import asyncio
+import dataclasses
 import logging
 import time
 from typing import Any, AsyncGenerator, Dict
@@ -16,12 +17,17 @@ try:
 except ImportError:
     DiffusionParallelConfig = None  # type: ignore[assignment, misc]
 
+from dynamo._core import Context
+from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
+from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
+from dynamo.vllm.lora_state import LoRAState
+from dynamo.vllm.omni.utils import resolve_stage_configs
 
 logger = logging.getLogger(__name__)
 
 
-class BaseOmniHandler(BaseWorkerHandler):
+class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
     """Base handler for multi-stage pipelines using vLLM-Omni's AsyncOmni orchestrator."""
 
     def __init__(
@@ -49,7 +55,17 @@ class BaseOmniHandler(BaseWorkerHandler):
 
         # Initialize attributes needed from BaseWorkerHandler
         # We don't call super().__init__() because VllmEngineMonitor expects AsyncLLM,
-        # but AsyncOmni manages its own engines internally
+        # but AsyncOmni manages its own engines internally.
+        #
+        # CRITICAL: AsyncOmni must implement the vLLM LoRA interface:
+        # - add_lora(LoRARequest) - dynamically load adapter into engine
+        # - remove_lora(int) - unload adapter by ID
+        # - list_loras() - query currently loaded adapters
+        # BaseWorkerHandler.load_lora() depends on these methods when
+        # _preload_lora_into_engine() is True (default for AGGREGATED mode).
+        # NOTE: OmniHandler._generate_with_lora_admission_lock holds the per-adapter
+        # lock through the first result for all adapter requests (including preloaded),
+        # ensuring remove_lora cannot execute while generation is in-flight.
 
         # TODO: Kv publishers not supported yet
         # TODO: Adopt to baseworker initialization pattern
@@ -58,63 +74,126 @@ class BaseOmniHandler(BaseWorkerHandler):
         self.config = config
         self.model_max_len = config.engine_args.max_model_len
         self.shutdown_event = shutdown_event
-        self.use_vllm_tokenizer = config.use_vllm_tokenizer
+
+        self._lora_state = LoRAState()
+        self._paused = False
+        self._pause_lock = asyncio.Lock()
+        # Properties loaded_loras, _lora_load_locks, _lora_load_locks_guard are now
+        # available through LoRAState. No direct assignment needed since properties
+        # are backed by _lora_state after initialization.
+        self._lora_capacity = self._resolve_lora_capacity(config)
+        self._advertised_gpu_lora_capacity = self._resolve_advertised_gpu_lora_capacity(
+            config
+        )
+        # Shared lock protecting capacity check and insertion into loaded_loras.
+        # Per-adapter locks (via _get_lora_lock) serialize ops on the same adapter,
+        # but concurrent loads of *different* adapters need a shared capacity guard
+        # to prevent both bypassing the check before either inserts (atomicity).
+        self._lora_capacity_guard = asyncio.Lock()
+        # Track adapters already handed to vLLM so load/unload stays idempotent.
+        # This set ensures the same adapter isn't handed to add_lora() twice,
+        # and tracks which adapters are in the engine (vs. just in loaded_loras metadata).
+        self._engine_loaded_loras: set[str] = set()
 
         logger.info(f"{self.__class__.__name__} initialized successfully")
 
+    def _resolve_lora_capacity(self, config) -> int | None:
+        """Return the effective LoRA capacity for this Omni backend."""
+        if not getattr(config.engine_args, "enable_lora", False):
+            return None
+
+        # Resident adapter budget should follow vLLM max_cpu_loras when set.
+        # max_loras controls per-batch active adapter concurrency, not total
+        # registration capacity.
+        resident_capacity = getattr(config.engine_args, "max_cpu_loras", None)
+        if resident_capacity is not None:
+            return resident_capacity
+
+        return getattr(config.engine_args, "max_loras", None)
+
+    def _resolve_advertised_gpu_lora_capacity(self, config) -> int | None:
+        """Return advertised GPU LoRA concurrency for discovery metadata."""
+        if not getattr(config.engine_args, "enable_lora", False):
+            return None
+        return getattr(config.engine_args, "max_loras", None)
+
     def _build_omni_kwargs(self, config) -> Dict[str, Any]:
-        """Build keyword arguments for AsyncOmni constructor.
-
-        Constructs the full kwargs dict including engine-level diffusion
-        parameters and parallel configuration when available.
-
-        Args:
-            config: Parsed Config object.
-
-        Returns:
-            Dictionary of keyword arguments for AsyncOmni.
-        """
+        """Build keyword arguments for AsyncOmni constructor."""
         omni_kwargs: Dict[str, Any] = {
             "model": config.model,
             "trust_remote_code": config.engine_args.trust_remote_code,
         }
+        if config.output_modalities:
+            omni_kwargs["output_modalities"] = config.output_modalities
 
         if config.stage_configs_path:
-            omni_kwargs["stage_configs_path"] = config.stage_configs_path
+            omni_kwargs["deploy_config"] = config.stage_configs_path
 
-        # Add diffusion engine-level params if present on config.
-        # Config fields use the omni_ prefix; map them to AsyncOmni kwarg names.
-        diffusion_params = {
-            # config attr → AsyncOmni kwarg
-            "omni_enable_layerwise_offload": "enable_layerwise_offload",
-            "omni_layerwise_num_gpu_layers": "layerwise_num_gpu_layers",
-            "omni_vae_use_slicing": "vae_use_slicing",
-            "omni_vae_use_tiling": "vae_use_tiling",
-            "omni_boundary_ratio": "boundary_ratio",
-            "omni_flow_shift": "flow_shift",
-            "omni_diffusion_cache_backend": "cache_backend",
-            "omni_diffusion_cache_config": "cache_config",
-            "omni_enable_cache_dit_summary": "enable_cache_dit_summary",
-            "omni_enable_cpu_offload": "enable_cpu_offload",
-            "omni_enforce_eager": "enforce_eager",
-        }
-        for config_attr, kwarg_name in diffusion_params.items():
-            if hasattr(config, config_attr):
-                value = getattr(config, config_attr)
-                if value is not None:
-                    omni_kwargs[kwarg_name] = value
+        _, stage_configs = resolve_stage_configs(
+            config.model,
+            trust_remote_code=config.engine_args.trust_remote_code,
+            deploy_config_path=config.stage_configs_path,
+        )
+        # Older Omni defers single-stage diffusion detection until engine startup.
+        forward_diffusion_options = not stage_configs or any(
+            stage.stage_type == "diffusion" for stage in stage_configs
+        )
+        for field, value in dataclasses.asdict(config.diffusion).items():
+            if value is not None and (
+                forward_diffusion_options or field == "enforce_eager"
+            ):
+                omni_kwargs[field] = value
 
-        # Build DiffusionParallelConfig if parallel params are present
-        if DiffusionParallelConfig is not None and hasattr(
-            config, "omni_ulysses_degree"
-        ):
+        # These three fields are shared vLLM engine settings. Keep their CLI
+        # source in engine_args while forwarding them to Omni's diffusion
+        # topology explicitly.
+        if DiffusionParallelConfig is not None:
+            # Older installed Omni versions can lack newly added parallel
+            # options. Ignore unsupported default values, but reject explicit
+            # non-default values rather than silently changing configuration.
+            parallel_kwargs = dataclasses.asdict(config.parallel)
+            supported_parallel_fields = {
+                field.name for field in dataclasses.fields(DiffusionParallelConfig)
+            }
+            unsupported_parallel_fields = sorted(
+                set(parallel_kwargs) - supported_parallel_fields
+            )
+            if unsupported_parallel_fields:
+                default_parallel_kwargs = dataclasses.asdict(type(config.parallel)())
+                unsupported_non_defaults = [
+                    field
+                    for field in unsupported_parallel_fields
+                    if parallel_kwargs[field] != default_parallel_kwargs[field]
+                ]
+                if unsupported_non_defaults:
+                    options = ", ".join(unsupported_non_defaults)
+                    raise ValueError(
+                        "Installed vLLM-Omni does not support non-default "
+                        f"parallel option(s): {options}. Upgrade vLLM-Omni or "
+                        "remove the unsupported option(s)."
+                    )
+                logger.debug(
+                    "Ignoring parallel options unavailable in the installed "
+                    "vLLM-Omni: %s",
+                    ", ".join(unsupported_parallel_fields),
+                )
+                parallel_kwargs = {
+                    field: value
+                    for field, value in parallel_kwargs.items()
+                    if field in supported_parallel_fields
+                }
             parallel_config = DiffusionParallelConfig(
-                ulysses_degree=getattr(config, "omni_ulysses_degree", 1),
-                ring_degree=getattr(config, "omni_ring_degree", 1),
-                cfg_parallel_size=getattr(config, "omni_cfg_parallel_size", 1),
+                tensor_parallel_size=getattr(
+                    config.engine_args, "tensor_parallel_size", 1
+                ),
+                pipeline_parallel_size=getattr(
+                    config.engine_args, "pipeline_parallel_size", 1
+                ),
+                data_parallel_size=getattr(config.engine_args, "data_parallel_size", 1),
+                **parallel_kwargs,
             )
             omni_kwargs["parallel_config"] = parallel_config
-        elif DiffusionParallelConfig is None:
+        else:
             logger.warning(
                 "DiffusionParallelConfig not available; "
                 "skipping parallel config for AsyncOmni"
@@ -123,8 +202,8 @@ class BaseOmniHandler(BaseWorkerHandler):
         return omni_kwargs
 
     async def generate(
-        self, request: Dict[str, Any], context
-    ) -> AsyncGenerator[Dict, None]:
+        self, request: Dict[str, Any], context: Context
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Generate outputs using AsyncOmni orchestrator with OpenAI-compatible format.
 
         Subclasses should override ``_generate_openai_mode`` for custom output handling.
@@ -132,7 +211,7 @@ class BaseOmniHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Omni Request ID: {request_id}")
 
-        async for chunk in self._generate_openai_mode(request, context, request_id):  # type: ignore
+        async for chunk in self._generate_openai_mode(request, context, request_id):
             yield chunk
 
     async def _generate_openai_mode(
@@ -146,6 +225,8 @@ class BaseOmniHandler(BaseWorkerHandler):
         raise NotImplementedError(
             f"{self.__class__.__name__} must implement _generate_openai_mode"
         )
+        # Make this a proper async generator so the return type is correct.
+        yield  # pragma: no cover
 
     def _extract_text_prompt(self, request: Dict[str, Any]) -> str | None:
         """Extract text prompt from OpenAI messages format.
@@ -172,8 +253,26 @@ class BaseOmniHandler(BaseWorkerHandler):
             request, self.default_sampling_params, self.model_max_len
         )
 
-    def _error_chunk(self, request_id: str, error_message: str) -> Dict[str, Any]:
-        """Create an error chunk in OpenAI format."""
+    def _error_chunk(
+        self,
+        request_id: str,
+        error_message: str,
+        request_type=None,
+    ) -> Dict[str, Any]:
+        """Create an error response matching the expected protocol for the request type.
+
+        For AUDIO_GENERATION returns NvAudioSpeechResponse format.
+        For all other types returns OpenAI chat.completion.chunk format.
+        """
+        if request_type == RequestType.AUDIO_GENERATION:
+            return NvAudioSpeechResponse(
+                id=request_id,
+                model=self.config.served_model_name or self.config.model,
+                status="failed",
+                created=int(time.time()),
+                error=error_message,
+            ).model_dump()
+
         return {
             "id": request_id,
             "created": int(time.time()),

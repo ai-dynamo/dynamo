@@ -48,17 +48,17 @@ const (
 	ConditionTypeDeploymentReady = "DeploymentReady"
 
 	// Event reasons
-	EventReasonInitialized          = "Initialized"
-	EventReasonValidationFailed     = "ValidationFailed"
-	EventReasonProfilingJobCreated  = "ProfilingJobCreated"
-	EventReasonProfilingJobFailed   = "ProfilingJobFailed"
-	EventReasonAIConfiguratorFailed = "AIConfiguratorFailed"
-	EventReasonSpecGenerated        = "SpecGenerated"
-	EventReasonSpecChangeRejected   = "SpecChangeRejected"
-	EventReasonDeploymentCreated    = "DeploymentCreated"
-	EventReasonDeploymentReady      = "DeploymentReady"
-	EventReasonDeploymentDegraded   = "DeploymentDegraded"
-	EventReasonDeploymentDeleted    = "DeploymentDeleted"
+	EventReasonInitialized         = "Initialized"
+	EventReasonValidationFailed    = "ValidationFailed"
+	EventReasonProfilingJobCreated = "ProfilingJobCreated"
+	EventReasonProfilingJobFailed  = "ProfilingJobFailed"
+	EventReasonSpecGenerated       = "SpecGenerated"
+	EventReasonSpecChangeRejected  = "SpecChangeRejected"
+	EventReasonDeploymentCreated   = "DeploymentCreated"
+	EventReasonDeploymentReady     = "DeploymentReady"
+	EventReasonDeploymentDegraded  = "DeploymentDegraded"
+	EventReasonDeploymentDeleted   = "DeploymentDeleted"
+	EventReasonImagePullFailed     = "ImagePullFailed"
 
 	// Label keys
 	LabelApp           = "app"
@@ -69,7 +69,6 @@ const (
 
 	// Label values
 	LabelValueDynamoProfiler = "dynamo-profiler"
-	LabelValueAICProfiler    = "aic-profiler"
 	LabelValueDynamoOperator = "dynamo-operator"
 )
 
@@ -175,16 +174,34 @@ const (
 )
 
 // GPUSKUType is the AIC hardware system identifier for a supported GPU.
-// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
+// +kubebuilder:validation:Enum=gb200_sxm;gb10;b300_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 type GPUSKUType string
 
 const (
+	// --- Blackwell ---
 	GPUSKUTypeGB200SXM GPUSKUType = "gb200_sxm"
+	GPUSKUTypeGB10     GPUSKUType = "gb10"
+	GPUSKUTypeB300SXM  GPUSKUType = "b300_sxm"
+	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
+	// --- Hopper ---
 	GPUSKUTypeH200SXM  GPUSKUType = "h200_sxm"
 	GPUSKUTypeH100SXM  GPUSKUType = "h100_sxm"
-	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
+	GPUSKUTypeH100PCIe GPUSKUType = "h100_pcie"
+	// --- Ampere ---
 	GPUSKUTypeA100SXM  GPUSKUType = "a100_sxm"
-	GPUSKUTypeL40S     GPUSKUType = "l40s"
+	GPUSKUTypeA100PCIe GPUSKUType = "a100_pcie"
+	GPUSKUTypeA30      GPUSKUType = "a30"
+	// --- Ada ---
+	GPUSKUTypeL40S GPUSKUType = "l40s"
+	GPUSKUTypeL40  GPUSKUType = "l40"
+	GPUSKUTypeL4   GPUSKUType = "l4"
+	// --- Older NVIDIA ---
+	GPUSKUTypeV100SXM  GPUSKUType = "v100_sxm"
+	GPUSKUTypeV100PCIe GPUSKUType = "v100_pcie"
+	GPUSKUTypeT4       GPUSKUType = "t4"
+	// --- AMD ---
+	GPUSKUTypeMI200 GPUSKUType = "mi200"
+	GPUSKUTypeMI300 GPUSKUType = "mi300"
 )
 
 // BackendType specifies the inference backend.
@@ -211,15 +228,26 @@ type WorkloadSpec struct {
 	OSL *int32 `json:"osl,omitempty"`
 
 	// Concurrency is the target concurrency level.
-	// Required (or RequestRate) when the planner is disabled.
+	// Mutually exclusive with the requestRate field. When both fields are omitted and the
+	// planner is disabled, the profiler uses its default maximum-throughput selection.
 	// +optional
 	Concurrency *float64 `json:"concurrency,omitempty"`
 
 	// RequestRate is the target request rate (req/s).
-	// Required (or Concurrency) when the planner is disabled.
+	// Mutually exclusive with the concurrency field. When both fields are omitted and the
+	// planner is disabled, the profiler uses its default maximum-throughput selection.
 	// +optional
 	RequestRate *float64 `json:"requestRate,omitempty"`
 }
+
+// OptimizationType defines the optimization target for SLA-based profiling.
+// +kubebuilder:validation:Enum=latency;throughput
+type OptimizationType string
+
+const (
+	OptimizationTypeLatency    OptimizationType = "latency"
+	OptimizationTypeThroughput OptimizationType = "throughput"
+)
 
 // SLASpec defines the service-level agreement targets for profiling optimization.
 type SLASpec struct {
@@ -237,6 +265,11 @@ type SLASpec struct {
 	// Alternative to specifying TTFT + ITL.
 	// +optional
 	E2ELatency *float64 `json:"e2eLatency,omitempty"`
+
+	// OptimizationType is the optimization target for SLA profiling.
+	// Valid values: latency, throughput.
+	// +optional
+	OptimizationType *OptimizationType `json:"optimizationType,omitempty"`
 }
 
 // ModelCacheSpec references a PVC containing pre-downloaded model weights.
@@ -247,7 +280,10 @@ type ModelCacheSpec struct {
 	PVCName string `json:"pvcName,omitempty"`
 
 	// PVCModelPath is the path to the model checkpoint directory within the PVC
-	// (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
+	// (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). It may also be a
+	// container-visible absolute path already under PVCMountPath. Such an absolute
+	// path is interpreted as container-visible; use the relative form without a
+	// leading slash to address the same path prefix within the PVC.
 	// +optional
 	PVCModelPath string `json:"pvcModelPath,omitempty"`
 
@@ -261,22 +297,54 @@ type ModelCacheSpec struct {
 type OverridesSpec struct {
 	// ProfilingJob allows overriding the profiling Job specification.
 	// Fields set here are merged into the controller-generated Job spec.
+	//
+	// Security: creating a DGDR is workload-creation authority in its namespace —
+	// these overrides carry the same blast radius as creating a Job or Pod directly
+	// there, by design. Pod security is enforced centrally by Kubernetes Pod Security
+	// Admission on the resulting Pods once the namespace is labeled (see
+	// pod-security.kubernetes.io/enforce): it applies the full Pod Security Standards —
+	// covering privileged, host namespaces, and hostPath, not only securityContext —
+	// not this API. ServiceAccount identity is a separate layer: these overrides can
+	// set serviceAccountName and automountServiceAccountToken, which are bounded by
+	// RBAC and namespace membership rather than PSA — the same authority any Pod author
+	// in the namespace already holds. Grant create/update on DGDRs only to principals
+	// trusted to create Pods in the namespace. The profiling Job always runs in the
+	// DGDR's own namespace and overrides cannot change that — but namespace containment
+	// is not node or cross-tenant isolation. Dynamo's workloads, including this Job,
+	// satisfy the baseline standard, so enforce baseline (non-exempt) on every resulting
+	// Pod to close the privileged, host-namespace, host-device, and hostPath paths.
 	// +optional
 	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
 
-	// DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment
-	// to use as the base for the generated deployment. Fields from profiling results
-	// are merged on top. Use this to override backend worker images.
+	// TrustRemoteCode explicitly permits generated vLLM and SGLang workers to
+	// execute custom code from the configured model repository. When enabled,
+	// the profiler adds --trust-remote-code to every generated worker component
+	// after the deployment topology has been generated. Enable this setting only
+	// for model repositories you trust.
+	// +optional
+	// +kubebuilder:default=false
+	TrustRemoteCode bool `json:"trustRemoteCode,omitempty"`
+
+	// DGD provides a partial, versioned DynamoGraphDeployment override for the
+	// profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or
+	// nvidia.com/v1beta1 and kind to DynamoGraphDeployment.
 	//
-	// The field is stored as a raw embedded resource rather than a typed
-	// *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already
-	// imports v1beta1 as the conversion hub and Go does not allow import cycles.
+	// The profiler merges the override using the schema for its declared version.
+	// If the generated DGD uses another supported version, the complete DGD is
+	// converted before the merge and converted back afterward. The final DGD
+	// selected or created by a DGDR is nvidia.com/v1beta1.
 	//
-	// The EmbeddedResource marker tells the API server to validate that the value is a
-	// well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it
-	// is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,
-	// kind, and field schema) is performed by the controller during reconciliation.
-	// TODO(future MR): add webhook admission validation for the DGD field type.
+	// The override can update DGD fields, but topology entries are limited to
+	// services or components already present in the generated DGD. Metadata labels
+	// and annotations are merged, metadata.name selects the final DGD name, and
+	// other identity or runtime metadata is ignored.
+	// V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows
+	// structural schema merge behavior, including map-list merging and atomic-list
+	// replacement.
+	//
+	// The raw embedded resource preserves either supported schema. The API server
+	// validates that it has apiVersion and kind; override processing validates the
+	// DGD kind, supported version, and field schema.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:EmbeddedResource
@@ -301,43 +369,107 @@ type KVRouterSpec struct {
 
 // FeaturesSpec controls optional Dynamo platform features in the generated deployment.
 type FeaturesSpec struct {
-	// Planner is the raw SLA planner configuration passed to the planner service.
-	// Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.
-	// Go treats this as opaque bytes; the Planner service validates it at startup.
+	// Planner contains the raw Planner configuration passed to the Planner service.
+	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
+	// See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference.
+	// DGDR passes this object through without field-level validation; the Planner
+	// service validates it at startup.
 	// The presence of this field (non-null) enables the planner in the generated DGD.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
 	Planner *runtime.RawExtension `json:"planner,omitempty"`
 
-	// TODO: KVRouter support is not yet implemented in the operator.
-	// KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
+	// KVRouter configures KV-cache-aware routing for the generated deployment.
+	// When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend.
+	// Settings in spec.overrides.dgd take precedence: an override can replace
+	// DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the
+	// environment variable when both are present.
+	// +optional
+	KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
 
 	// Mocker configures the simulated (mocker) backend for testing without GPUs.
 	// +optional
 	Mocker *MockerSpec `json:"mocker,omitempty"`
 }
 
-// HardwareSpec describes the hardware resources available for profiling and deployment.
-// These fields are typically auto-filled by the operator from cluster discovery.
+// HardwareSpec describes the GPU hardware for profiling and deployment.
+// All fields are auto-detected from cluster GPU nodes when omitted
+// (requires cluster-wide mode with GPU discovery enabled).
+// gpuSku is a selector (restricts which nodes are considered);
+// the other fields are pure overrides passed to the profiler.
+// If all four fields are set, discovery is skipped.
 type HardwareSpec struct {
-	// GPUSKU is the AIC hardware system identifier for the GPU.
-	// When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
+	// GPUSKU selects the GPU type to target.
+	// When omitted, auto-detected by selecting the GPU with the highest
+	// node count, then highest VRAM. In mixed-GPU clusters, set this to
+	// choose which GPU type to use. Discovery and totalGpus are then
+	// restricted to nodes matching this SKU.
 	// +optional
-	// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
+	// +kubebuilder:validation:Enum=gb200_sxm;gb10;b300_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
+	// When omitted, auto-detected from cluster GPU nodes.
 	// +optional
 	VRAMMB *float64 `json:"vramMb,omitempty"`
 
-	// TotalGPUs is the total number of GPUs available in the cluster.
+	// TotalGPUs is the GPU budget for profiling and deployment.
+	// The profiler uses this to determine parallelism and replica count.
+	// When omitted, computed by counting GPUs on discovered nodes
+	// (filtered by gpuSku when set), temporarily capped at 32 to
+	// limit profiler search space. This cap may be removed in a future
+	// release. Set this field explicitly to override.
 	// +optional
 	TotalGPUs *int32 `json:"totalGpus,omitempty"`
 
 	// NumGPUsPerNode is the number of GPUs per node.
+	// When omitted, auto-detected from cluster GPU nodes.
 	// +optional
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
+	// Interconnect describes the primary GPU-to-GPU interconnect *within a node*.
+	//
+	// Semantics / usage:
+	//   - This is capability metadata used for profiling, planning, and deployment decisions.
+	//   - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed.
+	//   - When omitted, the operator may attempt best-effort discovery (currently distinguishes "nvlink"
+	//     vs "pcie" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.
+	//
+	// Impact of wrong / missing values:
+	//   - If set more optimistically than reality (e.g., "nvlink" when only PCIe is present), performance
+	//     models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts,
+	//     resulting in degraded performance compared to expectations.
+	//   - If set more pessimistically than reality (e.g., "pcie" when NVLink is present), the system may
+	//     choose conservative plans and leave performance on the table.
+	//   - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to
+	//     conservative assumptions.
+	//
+	// Example values: "pcie", "nvlink". Other values may be accepted but may not be auto-detected.
+	//
+	// +optional
+	Interconnect string `json:"interconnect,omitempty"`
+
+	// RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.
+	//
+	// Semantics / usage:
+	//   - This is capability metadata used for profiling, planning, and deployment decisions.
+	//   - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,
+	//     GPUDirect settings). It only expresses availability/intent.
+	//   - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating
+	//     RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery
+	//     is unavailable, it may remain unset.
+	//
+	// Impact of wrong / missing values:
+	//   - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or
+	//     deployments to assume RDMA is available; depending on the runtime transport selection and
+	//     fallback behavior, this can lead to connection/setup failures or performance regressions.
+	//   - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and
+	//     fall back to non-RDMA transports, usually remaining functional but potentially slower.
+	//   - If unset and undiscovered, consumers should treat RDMA availability as unknown and use
+	//     conservative defaults / fallback transports.
+	//
+	// +optional
+	RDMA *bool `json:"rdma,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
@@ -355,10 +487,20 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
 	Backend BackendType `json:"backend,omitempty"`
 
-	// Image is the container image reference for the profiling job (frontend image).
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".
+	// Image is the container image reference for the profiling job (planner image).
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0".
+	// For Dynamo < 1.1.0, use dynamo-frontend.
 	// +optional
 	Image string `json:"image,omitempty"`
+
+	// RuntimeVersionOverride supplies the default Dynamo runtime version for
+	// generated DynamoGraphDeployment components that do not set their own
+	// override. Set this when Image uses a non-semantic-version tag or digest, or
+	// when its tag does not identify the Dynamo runtime version. An explicit
+	// component value in overrides.dgd takes precedence.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
 
 	// ModelCache provides optional PVC configuration for pre-downloaded model weights.
 	// When provided, weights are loaded from the PVC instead of downloading from HuggingFace.
@@ -401,8 +543,9 @@ type DynamoGraphDeploymentRequestSpec struct {
 	AutoApply *bool `json:"autoApply,omitempty"`
 }
 
-// ParetoConfig represents a single Pareto-optimal deployment configuration
-// discovered during profiling.
+// ParetoConfig is retained for compatibility with status objects produced by
+// older profiler releases.
+// Deprecated: The profiler no longer generates Pareto configurations.
 type ParetoConfig struct {
 	// Config is the full deployment configuration for this Pareto point.
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -412,8 +555,8 @@ type ParetoConfig struct {
 
 // ProfilingResultsStatus contains the output of the profiling process.
 type ProfilingResultsStatus struct {
-	// Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.
-	// Each entry represents a different cost/performance trade-off.
+	// Pareto is retained for compatibility with existing status objects.
+	// Deprecated: The controller no longer populates this field.
 	// +optional
 	Pareto []ParetoConfig `json:"pareto,omitempty"`
 
@@ -463,8 +606,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
-	// ProfilingResults contains the output of the profiling process including
-	// Pareto-optimal configurations and the selected deployment configuration.
+	// ProfilingResults contains the selected deployment configuration produced by profiling.
+	// Deprecated compatibility fields may remain on objects created by older releases.
 	// +optional
 	ProfilingResults *ProfilingResultsStatus `json:"profilingResults,omitempty"`
 
@@ -499,8 +642,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Profiling",type=string,JSONPath=`.status.profilingPhase`
-// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`,priority=1
-// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`,priority=1
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`
+// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`
 // +kubebuilder:printcolumn:name="DGD",type=string,JSONPath=`.status.dgdName`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 type DynamoGraphDeploymentRequest struct {
@@ -521,10 +664,6 @@ type DynamoGraphDeploymentRequestList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeploymentRequest `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeploymentRequest{}, &DynamoGraphDeploymentRequestList{})
 }
 
 // SetPhase updates the Phase field in the DGDR status.

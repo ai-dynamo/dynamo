@@ -1,0 +1,45 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Overview
+subtitle: How Dynamo turns raw model output into OpenAI-compatible tool_calls and reasoning_content
+---
+
+Some models emit tool calls and chain-of-thought reasoning as markup inside their raw text output. Dynamo parses that markup out and surfaces it as OpenAI-compatible `tool_calls` and `reasoning_content` on the response, so clients get structured fields instead of raw `<tool_call>` or `<think>` text.
+
+Setting this up is two steps: one thing that always runs, then two optional features layered on top of it.
+
+<Steps>
+  <Step title="Pick a chat processor">
+    Every request to `/v1/chat/completions` is handled by a **chat processor**. It renders the chat template, tokenizes the prompt, routes to the worker, and assembles the OpenAI-compatible response. You always have one — it is selected by the `--dyn-chat-processor` frontend flag, which **defaults to `dynamo`**.
+
+    The `dynamo` default is Dynamo's own framework-agnostic (Rust) processor. It works across every backend — vLLM, SGLang, and TRT-LLM — and with disaggregated serving, and it ships built-in parsers for a broad set of model formats. **For most models the default is all you need.** You only change the chat processor when Dynamo does not ship a parser for your model's format and you want to fall back to the engine's own parser (vLLM or SGLang).
+
+    Because the chat processor decides *who* parses, it also decides which parser flags you use and where they go — so it is the first decision. Keep the `dynamo` default unless Dynamo lacks a parser for your model; see [Chat Processors](chat-processors.mdx) for the options and engine-fallback configuration.
+  </Step>
+  <Step title="Choose your parsers">
+    With a chat processor in place, tool-call parsing and reasoning parsing are two **independent, optional** features. Turn on either, both, or neither — they do not depend on each other, and there is no required order between them:
+
+    - **Tool call parsing** extracts `tool_calls` from a model that emits tool-call markup. See [Tool Call Parsing](tool-call-parsing.mdx).
+    - **Reasoning parsing** splits chain-of-thought into `reasoning_content` for a model that emits thinking content. See [Reasoning Parsing](reasoning-parsing.md).
+
+    A model that only calls tools needs just the tool-call parser; a pure chain-of-thought model needs just the reasoning parser; a model that does both needs both.
+
+    <Note>
+    When both are enabled, reasoning parsing runs before tool-call parsing at request time: Dynamo first separates the reasoning text, then parses tool calls from the remaining assistant output. This is execution order inside the frontend, not something you configure — the two flags are still set independently.
+    </Note>
+  </Step>
+</Steps>
+
+## Why Dynamo parses in the frontend
+
+In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call and reasoning parsing happen in each engine's own frontend, with subtle behavioral differences across them. For performance, Dynamo orchestrates routing and tokenization and passes tokens directly to each engine, bypassing the engine's OpenAI server to avoid duplicate work per request. So the `dynamo` chat processor implements parsing in Dynamo's frontend as a framework-agnostic Rust layer — one tested OpenAI-compatible contract across vLLM, SGLang, and TRT-LLM, on a hot path that stays concurrent without a Python GIL bottleneck. The `vllm` / `sglang` chat processors (engine fallback) opt back into the engine's own parser when Dynamo doesn't ship one for your model.
+
+## See Also
+
+- [Chat Processors](chat-processors.mdx) — the `--dyn-chat-processor` flag, the `dynamo` default, and engine fallback
+- [Tool Call Parsing](tool-call-parsing.mdx) — Dynamo-native tool-call parser names and request examples
+- [Reasoning Parsing](reasoning-parsing.md) — Dynamo-native reasoning parser names
+- [Structural Tag (Guided Decoding for Tool Calls)](structural-tag.md) — constrain output to a valid tool-call format with xgrammar
+- [Troubleshooting Tool Calls](troubleshooting-tool-calls.md) — capture `logprobs` so issues can be localized
+- [Frontend Configuration Reference](../../reference/components/frontend-configuration.mdx) — full CLI flag reference

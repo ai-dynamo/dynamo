@@ -3,8 +3,65 @@
 
 use async_trait::async_trait;
 
-use super::{KvRouterError, WorkerTask};
+use std::sync::Arc;
+
+use super::{
+    AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, LowerTierQueryOptions,
+    TieredMatchDetails, WorkerTask,
+};
 use crate::protocols::*;
+
+/// Trait for querying an external shared KV cache pool.
+///
+/// Implementations check which blocks/pages from a request's token sequence
+/// exist in the shared cache. The returned `SharedCacheHits` describes which
+/// block positions are available externally (and thus cheaper to prefill).
+#[async_trait]
+pub trait SharedKvCache: Send + Sync {
+    /// Query which blocks exist in the shared cache for the given token sequence.
+    ///
+    /// `cache_namespace` must be honored by implementations to avoid scoring
+    /// shared-cache hits across isolated cache namespaces.
+    async fn check_blocks(
+        &self,
+        tokens: &[u32],
+        block_size: u32,
+        cache_namespace: Option<&str>,
+    ) -> Result<SharedCacheHits, KvRouterError>;
+}
+
+#[async_trait]
+pub trait TieredMatchProvider: Send + Sync {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError>;
+
+    async fn find_tiered_matches_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        let _ = options;
+        self.find_tiered_matches(sequence).await
+    }
+}
+
+/// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].
+///
+/// `worker_count` and `block_count` are always populated. `node_count` is
+/// reserved for backends that can expose a structural node count.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShardSizeSnapshot {
+    /// Zero-based shard index.
+    pub shard_idx: usize,
+    /// Distinct `(worker_id, dp_rank)` pairs stored in this shard.
+    pub worker_count: usize,
+    /// Total cached blocks across all workers in this shard.
+    pub block_count: usize,
+    /// Radix-tree node count, or zero when the backend does not expose one.
+    pub node_count: usize,
+}
 
 #[async_trait]
 pub trait KvIndexerInterface {
@@ -28,6 +85,7 @@ pub trait KvIndexerInterface {
     ///
     /// * `tokens` - A vector of `u32` tokens.
     /// * `lora_name` - Optional LoRA adapter name to include in block hash computation.
+    /// * `cache_namespace` - Optional cache namespace to include in block hash computation.
     ///
     /// ### Returns
     ///
@@ -36,6 +94,8 @@ pub trait KvIndexerInterface {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError>;
 
     /// Apply a `RouterEvent` to the KV store.
@@ -58,6 +118,21 @@ pub trait KvIndexerInterface {
     /// Indexers that track dp_rank-level granularity should override this.
     async fn remove_worker_dp_rank(&self, worker: WorkerId, _dp_rank: DpRank) {
         self.remove_worker(worker).await;
+    }
+
+    /// Remove one logical worker rank and return only after the reset is visible.
+    ///
+    /// This is a cold-path lifecycle barrier. Implementations must order the
+    /// reset after mutations already accepted for the worker and acknowledge it
+    /// only after those entries can no longer be returned by reads.
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        _worker: WorkerId,
+        _dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        Err(KvRouterError::Unsupported(
+            "acknowledged worker-rank reset is not supported".to_string(),
+        ))
     }
 
     /// Shutdown the KV Indexer.
@@ -90,6 +165,32 @@ pub trait KvIndexerInterface {
     /// Returns the amount of events still in the queue at the time of the flush.
     /// Used primarily for debugging.
     async fn flush(&self) -> usize;
+
+    /// Return a human-readable timing breakdown of `find_matches` overhead.
+    ///
+    /// Implementations that track per-phase timing (e.g. scatter/gather overhead
+    /// vs. actual shard work) override this to return a multi-line report string.
+    /// The default returns an empty string so callers can skip printing it.
+    fn timing_report(&self) -> String {
+        String::new()
+    }
+
+    /// Return a size snapshot for each shard.
+    ///
+    /// Single-shard indexers return one entry (shard 0).  Multi-shard indexers
+    /// return one entry per shard.  Non-sharded indexers (and implementations
+    /// that don't override this) return an empty `Vec`.
+    ///
+    /// See [`ShardSizeSnapshot`] for the fields exposed per shard.
+    async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+        vec![]
+    }
+
+    /// Edge lengths (hashes per node) for every non-root node.
+    /// Returns an empty vec for backends that don't support this.
+    fn node_edge_lengths(&self) -> Vec<usize> {
+        vec![]
+    }
 }
 
 // ============================================================================
@@ -106,16 +207,91 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()>;
+    /// Bind optional shared metrics before the backend is published to worker threads.
+    fn configure_metrics(&mut self, _metrics: Option<&KvIndexerMetrics>) {}
+
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()>;
 
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
 
+    /// Whether this backend can reconstruct its complete state as router events.
+    fn supports_event_dump(&self) -> bool {
+        true
+    }
+
+    /// Whether Boolean event acknowledgements are sufficient for pruning bookkeeping.
+    fn supports_routing_decision_pruning(&self) -> bool {
+        true
+    }
+
+    /// Install a shared structural anchor for branch-sharded suffix routing.
+    ///
+    /// Backends that do not support anchored routing keep the default
+    /// unsupported response. This is only called by the branch-sharded wrapper
+    /// when a routed subtree starts on a different shard than its parent prefix.
+    fn apply_anchor(
+        &self,
+        _worker: WorkerWithDpRank,
+        _anchor: AnchorTask,
+    ) -> Result<(), KvCacheEventError> {
+        Err(KvCacheEventError::InvalidBlockSequence)
+    }
+
+    /// Find matches under a previously installed shared structural anchor.
+    fn find_matches_from_anchor(
+        &self,
+        _anchor: AnchorRef,
+        _suffix: &[LocalBlockHash],
+    ) -> Result<OverlapScores, KvRouterError> {
+        Err(KvRouterError::Unsupported(
+            "backend does not support anchored find_matches".to_string(),
+        ))
+    }
+
+    /// Returns true when a maintenance task should be enqueued.
+    fn try_schedule_cleanup(&self) -> bool {
+        false
+    }
+
+    /// Rolls back a scheduled cleanup when enqueueing the task fails.
+    fn cancel_scheduled_cleanup(&self) {}
+
+    /// Executes a maintenance task on a worker thread.
+    fn run_cleanup_task(&self) {}
+
     /// Dump events directly from the shared structure, bypassing worker channels.
     /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.
-    /// ConcurrentRadixTree). Returns `None` for backends that keep per-thread
+    /// ConcurrentRadixTreeCompressed). Returns `None` for backends that keep per-thread
     /// state and must dump via the worker channel.
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
         None
     }
+
+    /// Return a human-readable backend-specific timing or instrumentation report.
+    fn timing_report(&self) -> String {
+        String::new()
+    }
+
+    /// Number of radix-tree nodes created since construction, when available.
+    fn node_count(&self) -> usize {
+        0
+    }
+
+    /// Edge lengths (hashes per node) for every non-root node in the tree.
+    /// Returns an empty vec for backends that don't support this.
+    fn node_edge_lengths(&self) -> Vec<usize> {
+        vec![]
+    }
 }
+
+/// Marker trait for [`SyncIndexer`] backends that implement structural anchors.
+///
+/// Branch-sharded routing can split a suffix onto a shard whose backend needs a
+/// synthetic parent anchor. Implement this only when `apply_anchor` and
+/// `find_matches_from_anchor` are supported by the backend.
+pub trait AnchorCapableSyncIndexer: SyncIndexer {}

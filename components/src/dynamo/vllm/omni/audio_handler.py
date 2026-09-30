@@ -1,0 +1,501 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Audio/TTS handler utilities for the vLLM-Omni backend.
+
+Extracted from omni_handler.py to keep modality-specific logic separate.
+OmniHandler holds an instance as ``self.audio`` (composition).
+"""
+
+import logging
+from typing import Any, Dict, Union
+
+from transformers import AutoTokenizer
+from vllm_omni.inputs.data import OmniTextPrompt
+
+try:
+    from vllm_omni.model_executor.models.qwen3_tts.prompt_embeds_builder import (
+        Qwen3TTSPromptEmbedsBuilder,
+    )
+except ImportError:
+    Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
+
+from dynamo.common.http.url_validator import UrlValidationError
+from dynamo.common.multimodal.media_source import decode_data_uri
+from dynamo.common.protocols import sanitize_media_passthrough
+from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+from dynamo.common.utils.output_modalities import RequestType
+from dynamo.vllm.omni.audex import AudexRequestAdapter
+from dynamo.vllm.omni.engine_inputs import EngineInputs
+from dynamo.vllm.omni.utils import engine_model_stages, validate_audio_max_new_tokens
+
+logger = logging.getLogger(__name__)
+
+# model_stage names that receive Qwen3-TTS-specific prompt format
+# (prompt_token_ids + additional_information). Other audio models
+# (MiMo-Audio, Qwen3-Omni, Stable Audio, etc.) use a plain text prompt.
+# Mirrors vLLM-Omni's _TTS_MODEL_STAGES in serving_speech.py.
+_TTS_MODEL_STAGES: set = {"qwen3_tts"}
+
+# Fallback language set used when model config is unavailable.
+_TTS_LANGUAGES_FALLBACK = {
+    "Auto",
+    "Chinese",
+    "English",
+    "Japanese",
+    "Korean",
+    "German",
+    "French",
+    "Russian",
+    "Portuguese",
+    "Spanish",
+    "Italian",
+}
+
+
+class AudioGenerationHandler:
+    """Handles audio/TTS request processing for the vLLM-Omni backend.
+
+    Instantiated by OmniHandler during initialization and held as a
+    composition attribute (``self.audio``).  This keeps
+    audio-specific logic (validation, prompt building, encoding) out
+    of the orchestrator.
+
+    Model-specific request preparation lives outside this class: Audex in
+    ``omni.audex.AudexRequestAdapter`` (``self.audex``), Qwen3-TTS in the
+    ``_engine_inputs_tts`` path below. Everything else takes the generic
+    plain-text prompt.
+
+    TODO: give the model-specific paths one common adapter abstraction — a
+    ``supports()``/``prepare()`` protocol the handler dispatches over, with
+    Qwen3-TTS and the generic prompt as implementations alongside Audex.
+    Detection and preparation are currently spread over ``_is_tts_model``,
+    ``self.audex.model_type()``, and the branches in ``build_engine_inputs``,
+    which does not scale to a fourth model family.
+    """
+
+    def __init__(self, config, engine_client, media_output_fs, media_output_http_url):
+        self.config = config
+        self.engine_client = engine_client
+        self.media_output_fs = media_output_fs
+        self.media_output_http_url = media_output_http_url
+        self._tts_tokenizer: Any = None
+        self.audex = AudexRequestAdapter(config, engine_client)
+
+        # Cache TTS capabilities from model config at init.
+        self._tts_supported_speakers: set = self._load_supported_speakers()
+        self._tts_supported_languages: set = self._load_supported_languages()
+        if self._tts_supported_speakers:
+            logger.info(
+                "Loaded %d TTS speakers: %s",
+                len(self._tts_supported_speakers),
+                sorted(self._tts_supported_speakers),
+            )
+        if self._tts_supported_languages:
+            logger.info(
+                "Loaded %d TTS languages: %s",
+                len(self._tts_supported_languages),
+                sorted(self._tts_supported_languages),
+            )
+
+    # -- TTS capability loading from model config -----------------------------
+
+    def _load_supported_speakers(self) -> set:
+        """Load supported speakers from model config (case-insensitive).
+
+        Reads ``hf_config.talker_config.spk_id`` or ``speaker_id``,
+        matching vLLM-Omni's ``_load_supported_speakers()``.
+        """
+        try:
+            hf_config = self.engine_client.model_config.hf_config
+            talker_config = getattr(hf_config, "talker_config", None)
+            if talker_config is None:
+                return set()
+            for attr_name in ("spk_id", "speaker_id"):
+                speakers_dict = getattr(talker_config, attr_name, None)
+                if speakers_dict and isinstance(speakers_dict, dict):
+                    return {s.lower() for s in speakers_dict.keys()}
+        except Exception as e:
+            logger.warning("Could not load speakers from model config: %s", e)
+        return set()
+
+    def _load_supported_languages(self) -> set:
+        """Load supported languages from model config.
+
+        Reads ``hf_config.talker_config.codec_language_id``.
+        """
+        try:
+            hf_config = self.engine_client.model_config.hf_config
+            talker_config = getattr(hf_config, "talker_config", None)
+            if talker_config is None:
+                return set()
+            lang_dict = getattr(talker_config, "codec_language_id", None)
+            if lang_dict and isinstance(lang_dict, dict):
+                return {lang.lower() for lang in lang_dict.keys()}
+        except Exception as e:
+            logger.warning("Could not load languages from model config: %s", e)
+        return set()
+
+    # -- TTS model detection --------------------------------------------------
+
+    def _is_tts_model(self) -> bool:
+        """Check if the loaded model is a Qwen3-TTS-style model.
+
+        Searches for a TTS model_stage in the engine's stage list,
+        stage configs, or model config. Supports multiple vLLM-Omni versions.
+        """
+        stages = engine_model_stages(self.engine_client)
+        if stages & _TTS_MODEL_STAGES:
+            return True
+
+        # Try model_config.hf_config.model_type (universal fallback)
+        try:
+            model_type = self.engine_client.model_config.hf_config.model_type
+            logger.debug("_is_tts_model: hf_config.model_type=%s", model_type)
+            if model_type in _TTS_MODEL_STAGES:
+                return True
+        except (AttributeError, TypeError) as e:
+            logger.debug("_is_tts_model: hf_config fallback failed: %s", e)
+
+        logger.warning(
+            "_is_tts_model: could not detect TTS model. engine model stages=%s",
+            sorted(stages),
+        )
+        return False
+
+    # -- Audio engine input construction --------------------------------------
+
+    async def build_engine_inputs(
+        self, req: NvCreateAudioSpeechRequest, request_id: str | None = None
+    ) -> EngineInputs:
+        """Build engine inputs for an audio/TTS request.
+
+        Three code paths (matching vLLM-Omni serving_speech.py):
+
+        * **TTS path** (Qwen3-TTS): ``prompt_token_ids`` +
+          ``additional_information``.
+        * **Audex path** (delegated to ``self.audex``): literal ChatML prompt
+          priming codec generation, plus the CFG / RVQ-phase contracts on
+          stage-0 sampling params.
+        * **Generic audio path** (MiMo-Audio, etc.): plain text prompt.
+
+        Every path ends in ``_engine_inputs``, which owns the response-delivery
+        fields that are identical for every audio model.
+
+        ``request_id`` is the final Dynamo request id; Audex uses it as the CFG
+        pair id that binds a guided request to its unconditional companion.
+        """
+        if not req.input or not req.input.strip():
+            raise ValueError("Input text cannot be empty")
+
+        audex_model_type = self.audex.model_type()
+        if audex_model_type is not None:
+            # Everything model-specific (validation, ChatML prompt, CFG/RVQ
+            # contracts) belongs to the adapter; ``audex_model_type`` is the
+            # resolution made above, so it does not repeat the stage lookup.
+            #
+            # ``stream_audio`` stays off: per-payload chunk streaming has not
+            # been validated for the Audex pipeline, so its requests take the
+            # aggregate path and the response carries one complete waveform.
+            # Aggregation itself follows the resolved output kind, not the model
+            # (see ``utils.audio_output_is_cumulative``).
+            prepared = self.audex.prepare(req, request_id, audex_model_type)
+            return self._engine_inputs(
+                req,
+                OmniTextPrompt(prompt=prepared.prompt),
+                sampling_params_list=prepared.sampling_params_list,
+            )
+
+        stream_audio = self._chunk_streaming_allowed(req)
+
+        if self._is_tts_model():
+            return await self._engine_inputs_tts(req, stream_audio=stream_audio)
+
+        # Generic audio model – plain text prompt (same as image/video)
+        logger.info(f"Audio request (generic): input='{req.input[:50]}...'")
+        return self._engine_inputs(
+            req, OmniTextPrompt(prompt=req.input), stream_audio=stream_audio
+        )
+
+    def _engine_inputs(
+        self,
+        req: NvCreateAudioSpeechRequest,
+        prompt: Union[OmniTextPrompt, Dict[str, Any]],
+        *,
+        sampling_params_list: list | None = None,
+        stream_audio: bool = False,
+    ) -> EngineInputs:
+        """Attach the response-delivery fields shared by every audio model.
+
+        The per-model paths above own the prompt and the sampling params; the
+        delivery contract (request type, data source, codec, speed, chunking) is
+        the same for all of them and is applied here once.
+        """
+        return EngineInputs(
+            prompt=prompt,
+            sampling_params_list=sampling_params_list,
+            request_type=RequestType.AUDIO_GENERATION,
+            response_format=req.data_source,
+            output_format=req.response_format,
+            speed=req.speed or 1.0,
+            stream_audio=stream_audio,
+        )
+
+    @staticmethod
+    def _chunk_streaming_allowed(req: NvCreateAudioSpeechRequest) -> bool:
+        """Whether the worker may emit audio chunks instead of one waveform.
+
+        URL delivery, whole-file encoders, and speed adjustment require the
+        complete waveform before the worker can emit a response. A missing or
+        false capability identifies a legacy frontend that also needs one
+        aggregated item. TODO(v1.7): Remove this compatibility check after
+        v1.4 leaves the N-2 window.
+        """
+        frontend_accepts_audio_chunks = bool(
+            req.nvext and req.nvext.frontend_accepts_audio_chunks
+        )
+        returns_audio_bytes = req.data_source != "url"
+        supports_chunk_encoding = (req.response_format or "wav").lower() in {
+            "pcm",
+            "wav",
+        }
+        uses_default_speed = req.speed is None or req.speed == 1.0
+        return (
+            frontend_accepts_audio_chunks
+            and returns_audio_bytes
+            and supports_chunk_encoding
+            and uses_default_speed
+        )
+
+    # -- Qwen3-TTS-specific helpers -------------------------------------------
+
+    async def _engine_inputs_tts(
+        self, req: NvCreateAudioSpeechRequest, *, stream_audio: bool
+    ) -> EngineInputs:
+        """Build engine inputs for Qwen3-TTS models."""
+        self._validate_tts_request(req)
+
+        if req.voice is not None:
+            req.voice = req.voice.lower()
+
+        task_type = req.task_type or "CustomVoice"
+
+        tts_params: Dict[str, Any] = {
+            "text": [req.input],
+            "task_type": [task_type],
+            "language": [req.language or "Auto"],
+            "instruct": [req.instructions or ""],
+            "max_new_tokens": [req.max_new_tokens or 2048],
+        }
+
+        if req.voice is not None:
+            tts_params["speaker"] = [req.voice]
+        elif task_type == "CustomVoice":
+            tts_params["speaker"] = ["Vivian"]
+
+        if req.ref_audio is not None:
+            wav_list, sr = await self._resolve_ref_audio(req.ref_audio)
+            tts_params["ref_audio"] = [[wav_list, sr]]
+        if req.ref_text is not None:
+            tts_params["ref_text"] = [req.ref_text]
+
+        if task_type == "VoiceDesign":
+            tts_params["non_streaming_mode"] = [True]
+
+        # Frontend-forwarded passthrough knobs join the engine params;
+        # fields the handler already set win. A knob naming a path or a
+        # policy control is refused here (see sanitize_media_passthrough).
+        for key, value in sanitize_media_passthrough(req.extra_args).items():
+            tts_params.setdefault(key, [value])
+
+        estimated_len = self._estimate_tts_prompt_len(tts_params)
+
+        prompt = {
+            "prompt_token_ids": [1] * estimated_len,
+            "additional_information": tts_params,
+        }
+
+        logger.info(
+            f"Audio TTS request: input='{req.input[:50]}...', "
+            f"voice={tts_params.get('speaker', ['N/A'])[0]}, "
+            f"task_type={task_type}, prompt_len={estimated_len}"
+        )
+
+        return self._engine_inputs(req, prompt, stream_audio=stream_audio)
+
+    def _validate_tts_request(self, req: NvCreateAudioSpeechRequest) -> None:
+        """Validate Qwen3-TTS-specific request parameters."""
+        task_type = req.task_type or "CustomVoice"
+
+        _ALLOWED_TASK_TYPES = {"CustomVoice", "VoiceDesign", "Base"}
+        if task_type not in _ALLOWED_TASK_TYPES:
+            raise ValueError(
+                f"Invalid task_type '{task_type}'. "
+                f"Supported: {', '.join(sorted(_ALLOWED_TASK_TYPES))}"
+            )
+
+        if req.language is not None:
+            supported_langs = self._tts_supported_languages or {
+                lang.lower() for lang in _TTS_LANGUAGES_FALLBACK
+            }
+            if req.language.lower() not in supported_langs and req.language != "Auto":
+                raise ValueError(
+                    f"Invalid language '{req.language}'. "
+                    f"Supported: Auto, {', '.join(sorted(supported_langs))}"
+                )
+
+        if task_type == "CustomVoice" and req.voice is not None:
+            if self._tts_supported_speakers:
+                if req.voice.lower() not in self._tts_supported_speakers:
+                    raise ValueError(
+                        f"Invalid voice '{req.voice}'. "
+                        f"Supported: {', '.join(self._tts_supported_speakers)}"
+                    )
+
+        if task_type == "Base" and req.ref_audio is None:
+            raise ValueError("Base task requires 'ref_audio' for voice cloning")
+
+        if task_type != "Base":
+            if req.ref_text is not None:
+                raise ValueError("'ref_text' is only valid for Base task")
+
+        if task_type == "VoiceDesign" and not req.instructions:
+            raise ValueError(
+                "VoiceDesign task requires 'instructions' to describe the voice"
+            )
+
+        if (
+            req.instructions
+            and len(req.instructions) > self.config.tts_max_instructions_length
+        ):
+            raise ValueError(
+                f"Instructions too long "
+                f"(max {self.config.tts_max_instructions_length} characters)"
+            )
+
+        validate_audio_max_new_tokens(req.max_new_tokens, self.config)
+
+    async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple:
+        """Download or decode reference audio for voice cloning (Base task)."""
+        import io
+
+        import soundfile as sf
+
+        if ref_audio_str.startswith(("http://", "https://")):
+            import ipaddress
+            import socket
+            from urllib.parse import urlparse
+
+            import aiohttp
+
+            parsed = urlparse(ref_audio_str)
+            if not parsed.hostname:
+                raise ValueError("Invalid ref_audio URL")
+            for info in socket.getaddrinfo(
+                parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
+            ):
+                ip_str = str(info[4][0]).split("%", 1)[0]
+                addr = ipaddress.ip_address(ip_str)
+                if addr.is_private or addr.is_loopback:
+                    raise ValueError(
+                        f"ref_audio URL resolves to blocked address: {addr}"
+                    )
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    ref_audio_str,
+                    timeout=aiohttp.ClientTimeout(
+                        total=self.config.tts_ref_audio_timeout
+                    ),
+                ) as resp:
+                    if resp.status != 200:
+                        raise ValueError(
+                            f"Failed to download ref_audio: HTTP {resp.status}"
+                        )
+                    audio_bytes = await resp.read()
+                    if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
+                        raise ValueError(
+                            f"ref_audio too large "
+                            f"({len(audio_bytes)} bytes, "
+                            f"max {self.config.tts_ref_audio_max_bytes})"
+                        )
+        elif ref_audio_str.startswith("data:"):
+            max_bytes = self.config.tts_ref_audio_max_bytes
+            # Bound the *encoded* input separately from the decoded limit. A
+            # data URI carries its payload inline, so without this an unbounded
+            # one is materialized in full before any check can look at it. The
+            # most expensive legal encoding is 4 URI characters per decoded byte
+            # (4/3 base64 characters, each percent-escaped to 3), so this cannot
+            # reject a payload that would have fit -- the exact limit is applied
+            # to the decoded bytes below, where percent escapes and padding have
+            # already been normalized away.
+            if len(ref_audio_str) > max_bytes * 4:
+                raise ValueError(
+                    f"ref_audio data URI too large (max {max_bytes} bytes decoded)"
+                )
+            try:
+                audio_bytes = decode_data_uri(ref_audio_str)
+            except UrlValidationError as exc:
+                raise ValueError(f"Invalid data: ref_audio ({exc})") from exc
+            if len(audio_bytes) > max_bytes:
+                raise ValueError(
+                    f"ref_audio data URI too large "
+                    f"({len(audio_bytes)} bytes, max {max_bytes})"
+                )
+        else:
+            raise ValueError(
+                "ref_audio must be a URL (http/https) or base64 data URI (data:...)"
+            )
+
+        try:
+            wav_data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+        except sf.LibsndfileError as exc:
+            # LibsndfileError is a RuntimeError, so without this a payload that
+            # is valid base64 but not audio still reaches the client as a 500.
+            raise ValueError(
+                f"ref_audio is not readable audio ({len(audio_bytes)} bytes): "
+                "unrecognised format"
+            ) from exc
+        return wav_data, int(sr)
+
+    def _estimate_tts_prompt_len(self, tts_params: Dict[str, Any]) -> int:
+        """Estimate Qwen3-TTS prompt length using its tokenizer.
+
+        Falls back to 2048 if the model-specific estimator is unavailable.
+        """
+        if Qwen3TTSPromptEmbedsBuilder is None:
+            logger.warning(
+                "Qwen3-TTS prompt estimator is unavailable, using fallback 2048"
+            )
+            return 2048
+
+        if not hasattr(self, "_tts_tokenizer") or self._tts_tokenizer is None:
+            self._tts_tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model,
+                trust_remote_code=self.config.engine_args.trust_remote_code,
+                padding_side="left",
+            )
+
+        hf_config = self.engine_client.model_config.hf_config
+        talker_config = getattr(hf_config, "talker_config", None)
+        task_type = (tts_params.get("task_type") or ["CustomVoice"])[0]
+
+        return (
+            Qwen3TTSPromptEmbedsBuilder.estimate_prompt_len_from_additional_information(
+                additional_information=tts_params,
+                task_type=task_type,
+                tokenize_prompt=lambda t: self._tts_tokenizer(t, padding=False)[
+                    "input_ids"
+                ],
+                codec_language_id=(
+                    getattr(talker_config, "codec_language_id", None)
+                    if talker_config
+                    else None
+                ),
+                spk_is_dialect=(
+                    getattr(talker_config, "spk_is_dialect", None)
+                    if talker_config
+                    else None
+                ),
+            )
+        )

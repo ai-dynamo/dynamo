@@ -9,6 +9,7 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
@@ -17,6 +18,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
 )
+from dynamo.trtllm.request_handlers.push_egress import push_egress_capable
 
 configure_dynamo_logging()
 
@@ -66,9 +68,13 @@ class EncodeHandler(HandlerBase):
             self.model_type = self.multimodal_processor.model_type
             self.tokenizer = self.multimodal_processor.tokenizer
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
+        # EncodeHelper bypasses HandlerBase input preparation.
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"New Request ID: {context.id()}")
         if self.multimodal_processor is None:
             logging.error("encode handler: no multimodal_processor configured")
@@ -100,30 +106,37 @@ class PrefillHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
-    async def remote_encode_with_nixl(self, request: dict):
+    async def remote_encode_with_nixl(self, request: dict, context=None):
         """
         Call encode worker for NIXL flow to load embeddings and unpack the response.
 
         Args:
             request: Request dict
+            context: Optional Dynamo context for trace propagation
 
         Returns:
             Encoder's embeddings tensor to be used by the prefill worker
         """
         # Get response with shape info and readable metadata
+        if self.encode_client is None:
+            raise RuntimeError("Encode client is not configured.")
         encode_response = None
-        async for res in await self.encode_client.round_robin(request):
+        async for res in await self.encode_client.round_robin(request, context=context):
             encode_response = res.data()
             break
 
         if not encode_response:
             raise RuntimeError("Did not receive a response from the encode worker.")
 
+        if self.connector is None:
+            raise RuntimeError("Connector is not configured.")
         # Use utility function to handle NIXL reading and reconstruction
         return await EncodeHelper.read_embeddings_from_encode_response(
             encode_response, self.connector
         )
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -131,26 +144,32 @@ class PrefillHandler(HandlerBase):
         Prefill worker: process prompt and return disaggregated_params.
         Frontend routes to decode workers automatically.
         """
+        # Reject before optional remote encoder/cache work. HandlerBase keeps a
+        # second guard as a backstop for paths without these early side effects.
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"Prefill Request ID: {context.id()}")
-        logging.debug(f"PrefillHandler.generate received request: {request}")
+        request_token_ids = request.get("token_ids")
+        logging.debug(
+            "PrefillHandler.generate received request: token_ids=%s keys=%s",
+            len(request_token_ids) if isinstance(request_token_ids, list) else None,
+            len(request),
+        )
         embeddings_tensor = None
         ep_disaggregated_params = None
 
         if self.multimodal_processor:
-            # Extract messages from extra_args (set by Rust preprocessor) or fall back to direct field
-            messages = request.get("extra_args", {}).get(
-                "messages", request.get("messages", [])
-            )
             (
                 _,
                 image_urls,
                 embedding_paths,
-            ) = self.multimodal_processor.extract_prompt_and_media(messages)
+            ) = self.multimodal_processor.extract_prompt_and_media_from_request(request)
             # Handle embedding paths (NIXL transfer of pre-computed embeddings)
             if embedding_paths:
                 if self.encode_client and self.connector:
                     logging.info(f"PrefillHandler: embedding_paths={embedding_paths}")
-                    embeddings_tensor = await self.remote_encode_with_nixl(request)
+                    embeddings_tensor = await self.remote_encode_with_nixl(
+                        request, context=context
+                    )
                 else:
                     # We can still handle embedding_paths without NIXL:
                     # `MultimodalRequestProcessor.process_openai_request` will load the embeddings
@@ -168,6 +187,7 @@ class PrefillHandler(HandlerBase):
                         request,
                         self.encode_client,
                         self._encoder_cache,
+                        trace_context=context,
                     )
                     if isinstance(result, list):
                         # Cache path: got List[torch.Tensor]
@@ -200,6 +220,8 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:

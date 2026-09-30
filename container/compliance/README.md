@@ -1,107 +1,128 @@
 # Container Compliance Tooling
 
-Scripts for generating attribution CSVs from built container images, listing all installed dpkg and Python packages with their SPDX license identifiers where known.
+Inline pipeline that generates per-image license NOTICES at build time, gates the
+build on a license policy, and ships a base-image SBOM corpus that drives both
+baseline subtraction (so NOTICES attributes only what we redistribute on top of the
+upstream base) and a CI drift check that fails fast when a base image moves.
 
-## Output format
+There is no separate extraction job anymore. Every shipped image builds a `licenses`
+stage (see `../templates/compliance.Dockerfile`) that runs the generators against its
+own filesystem; CI extracts `/legal` and `/sboms` from that stage with a warm cache.
 
-Each run produces up to two CSV files:
+## Layout
 
-| Column | Description |
-|--------|-------------|
-| `package_name` | Package name as reported by dpkg or pip |
-| `version` | Installed version |
-| `type` | `dpkg` or `python` |
-| `spdx_license` | SPDX identifier (e.g. `MIT`, `Apache-2.0`) or `UNKNOWN` |
-
-Files are sorted by `(type, package_name)` for stable diffs.
-
-When a base image is provided, a second `_diff.csv` file is written containing only packages that are new or version-changed relative to the base — i.e. what Dynamo's build layers added on top of the upstream image.
-
-## Usage
-
-```bash
-# Full scan, output to stdout
-python container/compliance/generate_attributions.py <image:tag>
-
-# Write to file
-python container/compliance/generate_attributions.py <image:tag> -o attribution.csv
-
-# With base image diff — auto-resolved from context.yaml
-python container/compliance/generate_attributions.py <image:tag> \
-    --framework vllm \
-    --cuda-version 12.9 \
-    -o attribution-vllm-cuda12-amd64.csv
-# Produces: attribution-vllm-cuda12-amd64.csv  (full)
-#           attribution-vllm-cuda12-amd64_diff.csv  (delta from base)
-
-# With explicit base image override
-python container/compliance/generate_attributions.py <image:tag> \
-    --base-image nvcr.io/nvidia/cuda:12.9.1-runtime-ubuntu24.04 \
-    -o attribution.csv
-
-# Frontend image
-python container/compliance/generate_attributions.py <image:tag> \
-    --framework dynamo \
-    --target frontend \
-    -o attribution-frontend-amd64.csv
-
-# dpkg only
-python container/compliance/generate_attributions.py <image:tag> \
-    --types dpkg \
-    -o attribution-dpkg.csv
-```
-
-### All flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `image` | *(required)* | Container image to scan |
-| `--output`, `-o` | stdout | Output CSV path |
-| `--framework` | — | Auto-resolve base image from `context.yaml` (`vllm`, `sglang`, `trtllm`, `dynamo`) |
-| `--target` | `runtime` | Build target for base resolution (`runtime` or `frontend`) |
-| `--cuda-version` | — | CUDA version for base resolution (e.g. `12.9`, `13.0`, `13.1`) |
-| `--base-image` | — | Explicit base image URI (overrides `--framework` auto-resolve) |
-| `--context-yaml` | `container/context.yaml` | Path to context.yaml |
-| `--types` | `dpkg,python` | Comma-separated list of types to extract |
-| `--docker-cmd` | `docker` | Docker binary to use |
-| `--verbose`, `-v` | — | Enable verbose logging to stderr |
-
-## Base image reference
-
-| Framework | CUDA | Base image |
-|-----------|------|------------|
-| `vllm` | 12.9 | `nvcr.io/nvidia/cuda:12.9.1-runtime-ubuntu24.04` |
-| `vllm` | 13.0 | `nvcr.io/nvidia/cuda:13.0.2-runtime-ubuntu24.04` |
-| `sglang` | 12.9 | `lmsysorg/sglang:v0.5.9-runtime` |
-| `sglang` | 13.0 | `lmsysorg/sglang:v0.5.9-cu130-runtime` |
-| `trtllm` | 13.1 | `nvcr.io/nvidia/cuda-dl-base:25.12-cuda13.1-runtime-ubuntu24.04` |
-| `dynamo` frontend | — | `nvcr.io/nvidia/base/ubuntu:noble-20250619` |
-
-These values are sourced from `container/context.yaml` at runtime; the table above reflects the current defaults.
+| Path | Purpose |
+|------|---------|
+| `generators/` | Per-ecosystem NOTICES generators: `rust`, `python`, `dpkg`, `go`, `native`, plus `common.py` (shared `Component` + `render_notices`) and `__main__.py` (orchestrator). |
+| `policy/` | `licenses.toml` (allow/deny SPDX lists + per-package `[[exceptions]]`) and `validate.py` (the build-failing policy gate). |
+| `base_sboms/` | The baseline corpus: `manifest.json`, slim CycloneDX `*.cdx.json`, `capture_baseline_sbom.py`, and `check_drift.py`. |
+| `osrb/` | Release-time OSRB submission packager (`package.py`) and its `distribution.yaml` / `linkage.yaml`. |
+| `overrides.py`, `license_overrides.yaml` | Authoritative `(ecosystem, name) → SPDX` overrides consulted before automatic detection. |
+| `native_packages.yaml` | From-source / binary components attributed via a hand-curated overlay (optional `license_text_path`). |
+| `verify_sbom_diff.py` | Cross-checks generated NOTICES against the base SBOM corpus; fails on drift. |
+| `resolve_diff_base.py` | Picks the baseline commit to diff a build's OSRB CSV against (PR→main / post-merge→main / release branch→prior release tag). |
+| `diff_osrb_csv.py` | Diffs two OSRB CSVs into a change-typed `*.diff.csv` (additions, version bumps, license changes, removals). |
 
 ## How it works
 
-The script runs two lightweight helper scripts **inside the container** via `docker run --rm -v`:
+The vllm/sglang/trtllm runtime images use the inline system below;
+frontend/planner stay on the legacy `shared-compliance.yml` scan until they
+migrate. For each runtime image, `templates/compliance.Dockerfile` adds a
+`licenses` stage that `FROM`s the image's pre-compliance stage (`pre_runtime`)
+and runs:
 
-- **dpkg extractor** — runs `dpkg-query` to list packages, then reads `/usr/share/doc/<pkg>/copyright` files for license info. Only DEP-5 machine-readable copyright files are parsed; ambiguous cases return `UNKNOWN`.
-- **Python extractor** — uses `importlib.metadata.distributions()` to iterate installed packages. License is read from `License-Expression` (PEP 639), then `License` metadata, then trove classifiers. Ambiguous cases return `UNKNOWN`.
+```bash
+python3 -m compliance.generators \
+    --ecosystem python,rust,dpkg[,native] \
+    --venv ${VIRTUAL_ENV} \
+    --output-dir /legal \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}}
+```
 
-Both helpers are self-contained and have no external dependencies — they run with whatever Python is in the container.
+Each generator emits a `NOTICES-<Ecosystem>.txt` (with the full upstream license text per
+package where available) plus a `<ecosystem>-deps.csv` into `/legal`, then the policy gate
+runs `compliance.policy.validate` against `licenses.toml` and the build fails on any
+denied / `UNKNOWN` license not covered by an exception. The `sboms` and `legal` scratch
+stages expose `/sboms` and `/legal` for CI extraction; the final runtime stage does
+`COPY --from=licenses /legal /legal` so NOTICES ship inside the image.
 
-## License detection
+`BASELINE_SBOM_FILE` is rendered from `container/context.yaml`'s per-(framework, device)
+`baseline_sbom` key (see `render.py:_resolve_compliance_inputs`). When set, the generators
+subtract the baseline's components so NOTICES attribute only what Dynamo adds on top of the
+upstream base. When empty, nothing is subtracted and the policy gate fails on any denied
+license the base image carries, so an image is either baselined or skips these stages.
 
-Detection is intentionally conservative: only unambiguous matches are assigned SPDX identifiers. The `UNKNOWN` entries are expected; they can be resolved with additional analysis against the raw copyright files.
+## Base SBOM corpus & drift
+
+`base_sboms/manifest.json` maps each `(from_image, baseline_image)` pair to a slim
+CycloneDX baseline. `capture_baseline_sbom.py` resolves digests, verifies the layer-prefix
+invariant, syft-scans the baseline, and writes the slim SBOM. `check_drift.py` runs on every
+PR and on a daily cron (`.github/workflows/compliance-base-drift.yml`); it fails if a recorded
+digest moved or the layer-prefix invariant no longer holds, which means a vendor silently
+switched a base image and the corpus must be re-captured.
+
+A tag bump is the other way a baseline goes stale, and the upsert key includes `from_tag`, so
+re-capturing on a new tag appends rather than replaces. Pass `--prune-superseded` to drop the
+old tag's rows and the SBOM files nothing references any more; leaving them behind eventually
+fails the drift check, which re-resolves every row against the registry.
+
+For TRT-LLM this is automated: `.github/workflows/auto-dep-upgrade-trigger.yml` re-captures both
+architectures against the new tag and commits the refreshed corpus alongside the version bump, so
+`runtime_image_tag` and `baseline_sbom` never diverge. A capture that fails pushes nothing.
 
 ## CI integration
 
-Attribution CSVs are generated automatically as part of CI after every successful image build. Artifacts are available in the GitHub Actions workflow run under:
-- `compliance-{framework}-cuda{major}-{platform}` — runtime images
-- `compliance-frontend-{arch}` — frontend image
+- **Inline extraction** — `.github/actions/compliance-extract` extracts `/legal` + `/sboms`
+  from the build's warm cache, runs `verify_sbom_diff.py`, and uploads the artifacts.
+- **Drift check** — `.github/workflows/compliance-base-drift.yml` validates the corpus.
+- **OSRB bundle** — `osrb/package.py` stitches per-image artifacts into a release submission.
 
-The scan runs as a separate lightweight job (`prod-default-small-v2`) in parallel with tests, so it does not extend pipeline wall time.
+Artifacts appear in the workflow run as `compliance-<prefix>-<suffix>-legal` /
+`-sboms` / `-sources`.
 
-## Requirements
+### Per-build OSRB diff
 
-- Python 3.11+
-- `docker` (or compatible CLI) with access to the target registry
-- `pyyaml` — only required on the host when using `--framework`/`--cuda-version` base image auto-resolution (`pip install pyyaml`)
+Alongside each `osrb-<image>-<arch>-<sha8>.csv`, the compliance-extract action
+writes `osrb-<image>-<arch>-<sha8>.diff.csv` comparing this build's dependency
+set against a context-dependent baseline. The diff notes four change kinds —
+additions, version bumps, license changes, removals — ordered by change bucket
+(additions → version+license changes → version bumps → license-only changes →
+removals), then by ecosystem (`rust, python, go, dpkg, native`), then name.
+
+The baseline (resolved by `resolve_diff_base.py`) depends on where the build runs:
+
+- **PR targeting `main`** → the PR's true merge-base (fork point), walking backward
+  on first-parent history only when that commit lacks this container's
+  `compliance-<sha>-<container>` artifact. Advancing `main` alone does not move
+  this starting point; it moves when the PR is rebased or updated with `main`.
+- **Post-merge on `main`** → the same walk, starting from the previous commit on `main`.
+- **PR targeting / post-merge on `release/*`** → the release tag `vX.Y.Z` that is
+  the highest one strictly older than the current version (semver order first —
+  `1.3.0` beats `1.2.5` for a `1.3.1` build regardless of publish date). Among
+  tags sharing an `X.Y.Z` base (e.g. `v1.2.3-nemo-3` vs `v1.2.3-minimax`), the
+  one published later wins.
+- **Nightly** → the previous successful scheduled run of the nightly workflow
+  (found via the Actions API); manual runs are excluded and the selected run's
+  commit names the baseline artifact.
+
+The baseline CSV is fetched by downloading the baseline commit's
+`compliance-<baseSHA>-<container>` artifact (needs `actions: read`). Baselines
+live only as Actions artifacts, so an expired/absent one is not fatal: the diff
+then contains a single `baseline_unavailable` row and the build stays green.
+
+Each arch also gets a self-describing `baseline/` folder next to the diff so the
+archive records exactly what was compared against:
+
+```text
+linux_<arch>/
+  osrb-<container>-<arch>-<sha8>.diff.csv
+  baseline/
+    BASELINE.md                              # selection rules + baseline SHA, commit link, generating-run link, label
+    osrb-<container>-<arch>-<baseSHA8>.csv   # a copy of the baseline CSV (absent when the baseline was unavailable)
+```
+
+## License detection
+
+Detection is conservative: only unambiguous matches get an SPDX identifier. `UNKNOWN`
+fails the policy gate, surfacing the package for an explicit override in
+`license_overrides.yaml` or a signed-off `[[exceptions]]` entry in `policy/licenses.toml`.

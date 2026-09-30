@@ -10,11 +10,11 @@ This module defines the default health check payload for sglang backends.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import sglang as sgl
 
-from dynamo.health_check import HealthCheckPayload
+from dynamo.health_check import HEALTH_CHECK_KEY, HealthCheckPayload
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,36 @@ class SglangHealthCheckPayload(HealthCheckPayload):
         else:
             self.default_payload["token_ids"] = [bos_token_id]
 
+        super().__init__()
+
+
+class SglangEmbeddingHealthCheckPayload(HealthCheckPayload):
+    """Send an embedding request through the worker's normal encode path."""
+
+    def __init__(
+        self,
+        model_name: str,
+        engine: Optional[sgl.Engine] = None,
+        use_text_input: bool = False,
+    ) -> None:
+        self.default_payload = {
+            "model": model_name,
+            "input": (
+                "Test" if use_text_input else [_get_bos_token_id_from_engine(engine)]
+            ),
+        }
+        super().__init__()
+
+
+class SglangRerankHealthCheckPayload(HealthCheckPayload):
+    """Probe the cross-encoder path with a single query/document pair."""
+
+    def __init__(self, model: str) -> None:
+        self.default_payload = {
+            "model": model,
+            "query": "health check",
+            "documents": ["health check"],
+        }
         super().__init__()
 
 
@@ -163,6 +193,14 @@ class SglangDisaggHealthCheckPayload(HealthCheckPayload):
         )
 
         super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        # Layer the canary marker on top of whatever the base class returns
+        # (which may be DYN_HEALTH_CHECK_PAYLOAD-overridden), so the canary
+        # contract survives user payload overrides.
+        payload = dict(super().to_dict())
+        payload[HEALTH_CHECK_KEY] = True
+        return payload
 
 
 class SglangPrefillHealthCheckPayload(SglangDisaggHealthCheckPayload):

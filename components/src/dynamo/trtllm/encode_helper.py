@@ -11,7 +11,12 @@ from typing import Any, Dict, Optional, Union
 import torch
 
 import dynamo.nixl_connect as nixl_connect
-from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.http import HttpStatusError
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
+from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
 
@@ -209,8 +214,8 @@ class EncodeHelper:
     # Two supported flows:
     #
     # 1. EMBEDDING-PATH FLOW (Pre-computed embeddings via NIXL)
-    #    - User sends URL ending in .pt/.pth/.bin
-    #    - Encode worker loads tensor, creates NIXL readable op
+    #    - User sends URL ending in .safetensors
+    #    - Encode worker loads tensor (via safetensors), creates NIXL readable op
     #    - Prefill worker reads embeddings via RDMA
     #    - Use case: Customer has pre-computed embeddings from custom encoder
     #
@@ -235,7 +240,7 @@ class EncodeHelper:
         for the prefill worker to read via RDMA.
 
         Args:
-            embedding_paths: List of paths to embedding files (.pt/.pth/.bin)
+            embedding_paths: List of paths to embedding files (.safetensors)
             multimodal_processor: Processor to load embeddings
             connector: NIXL connector for RDMA transfer
 
@@ -243,7 +248,7 @@ class EncodeHelper:
             Response with NIXL metadata, shape, dtype, and auxiliary data
         """
         logging.info(f"EncodeHelper: loading embeddings from {embedding_paths[0]}")
-        loaded_data = multimodal_processor.load_tensor_from_path_or_url(
+        loaded_data = await multimodal_processor.load_tensor_from_path_or_url(
             embedding_paths[0]
         )
 
@@ -289,6 +294,8 @@ class EncodeHelper:
         model_dir: str,
         model_type: str,
         engine,
+        mm_processor_kwargs: Optional[dict] = None,
+        cache_scope: str | None = None,
     ):
         """
         Process image URLs via TRT-LLM's MultimodalEncoder (full EPD flow).
@@ -303,6 +310,8 @@ class EncodeHelper:
             model_dir: Path to model directory (unused; kept for API compatibility)
             model_type: Model type string (unused; kept for API compatibility)
             engine: TensorRTLLMEngine with MultimodalEncoder
+            mm_processor_kwargs: Optional model-specific preprocessing options
+            cache_scope: Optional frontend-derived image-cache isolation scope
 
         Yields:
             Response with ep_disaggregated_params, processed_prompt, and prompt_token_ids
@@ -310,7 +319,9 @@ class EncodeHelper:
         # Load images with shared ImageLoader (async, same as multimodal_processor PD flow).
         image_items = [{"Url": u} for u in image_urls]
         image_loader = EncodeHelper._get_image_loader()
-        pil_images = await image_loader.load_image_batch(image_items)
+        pil_images = await image_loader.load_image_batch(
+            image_items, cache_scope=cache_scope
+        )
         if not pil_images:
             logging.error("ENCODE WORKER: no images loaded from image_urls")
             yield {"ep_disaggregated_params": None}
@@ -321,7 +332,7 @@ class EncodeHelper:
             {
                 "prompt_token_ids": prompt_token_ids_from_request,
                 "multi_modal_data": processed_mm_data,
-                "mm_processor_kwargs": {},
+                "mm_processor_kwargs": mm_processor_kwargs or {},
             }
         ]
 
@@ -406,15 +417,11 @@ class EncodeHelper:
             yield {"error": "No multimodal_processor configured on encode worker"}
             return
 
-        # Extract messages and determine which flow to use
-        messages = request.get("extra_args", {}).get(
-            "messages", request.get("messages", [])
-        )
         (
             _,
             image_urls,
             embedding_paths,
-        ) = multimodal_processor.extract_prompt_and_media(messages)
+        ) = multimodal_processor.extract_prompt_and_media_from_request(request)
 
         # Flow 1: Embedding-path flow (pre-computed embeddings via NIXL)
         if embedding_paths:
@@ -447,6 +454,16 @@ class EncodeHelper:
             # chat template and tokenized; token_ids then include image placeholder tokens
             # if the model's tokenizer_config chat template emits them).
             token_ids = request.get("token_ids")
+            epd_mm_kwargs = resolve_mm_processor_kwargs(request)
+            if epd_mm_kwargs is not None and not isinstance(epd_mm_kwargs, dict):
+                # Raise rather than yield an error payload: a yielded dict reads as a
+                # normal encoder response, so the caller reports missing embeddings as
+                # an internal failure. Matches the aggregated path's 400.
+                raise HttpStatusError(
+                    400,
+                    "Malformed mm_processor_kwargs field: expected an object",
+                    str(epd_mm_kwargs),
+                )
             async for response in EncodeHelper._process_full_epd_flow(
                 token_ids,  # type: ignore
                 image_urls,
@@ -454,11 +471,13 @@ class EncodeHelper:
                 model_dir,
                 model_type,
                 engine,
+                mm_processor_kwargs=epd_mm_kwargs,
+                cache_scope=image_cache_scope_from_request(request),
             ):
                 yield response
 
         # No valid multimodal content found
         else:
             yield {
-                "error": "No embedding_paths or image_urls found in request, or image_urls without text_prompt or token_ids"
+                "error": "No embedding_paths (.safetensors) or image_urls found in request, or image_urls without text_prompt or token_ids"
             }

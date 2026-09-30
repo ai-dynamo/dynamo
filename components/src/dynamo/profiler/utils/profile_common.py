@@ -18,14 +18,21 @@
 import copy
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from stat import S_ISREG
 
 import pandas as pd
 
+from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
-from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    ProfilingPhase,
+    SearchStrategy,
+)
+from dynamo.profiler.utils.model_cache_paths import normalize_model_cache_path
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +42,35 @@ logger = logging.getLogger(__name__)
 
 # Mapping from backend name to the image-name component of the published
 # backend runtime image.
-# e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+# e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
 BACKEND_IMAGE_NAMES: dict[str, str] = {
     "vllm": "vllm-runtime",
     "sglang": "sglang-runtime",
     "trtllm": "tensorrtllm-runtime",
 }
+
+PLANNER_IMAGE_NAME = "dynamo-planner"
+
+
+def _replace_image_name(image_ref: str, new_name: str) -> str:
+    """Replace the image name component in a Docker image reference.
+
+    Preserves the registry path prefix and tag suffix, only replacing the
+    last ``/``-delimited component (before any ``:tag``).
+    """
+    slash_idx = image_ref.rfind("/")
+    prefix = image_ref[: slash_idx + 1] if slash_idx >= 0 else ""
+    suffix = image_ref[slash_idx + 1 :]
+    name_and_tag, has_digest, digest = suffix.partition("@")
+    colon_idx = name_and_tag.rfind(":")
+    tag = name_and_tag[colon_idx:] if colon_idx >= 0 else ""
+    digest_suffix = f"@{digest}" if has_digest else ""
+    return f"{prefix}{new_name}{tag}{digest_suffix}"
+
+
+def derive_planner_image(profiler_image: str) -> str:
+    """Derive the planner service image from the profiler image reference."""
+    return _replace_image_name(profiler_image, PLANNER_IMAGE_NAME)
 
 
 def derive_backend_image(profiler_image: str, backend: str) -> str:
@@ -53,12 +83,12 @@ def derive_backend_image(profiler_image: str, backend: str) -> str:
     Examples::
 
         derive_backend_image(
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0", "vllm"
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1", "vllm"
         )
-        # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
+        # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 
-        derive_backend_image("myregistry.io/sglang-runtime:1.0.0", "sglang")
-        # → "myregistry.io/sglang-runtime:1.0.0"
+        derive_backend_image("myregistry.io/sglang-runtime:1.1.1", "sglang")
+        # → "myregistry.io/sglang-runtime:1.1.1"
 
     Args:
         profiler_image: Any Docker image reference of the form
@@ -79,14 +109,7 @@ def derive_backend_image(profiler_image: str, backend: str) -> str:
             f"Supported backends: {list(BACKEND_IMAGE_NAMES.keys())}"
         )
 
-    # Split off the last path component: "registry/path/name:tag" → "name:tag"
-    slash_idx = profiler_image.rfind("/")
-    prefix = profiler_image[: slash_idx + 1] if slash_idx >= 0 else ""
-    suffix = profiler_image[slash_idx + 1 :]
-    colon_idx = suffix.find(":")
-    tag = suffix[colon_idx:] if colon_idx >= 0 else ""
-
-    return f"{prefix}{backend_image_name}{tag}"
+    return _replace_image_name(profiler_image, backend_image_name)
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +134,7 @@ class ProfilerOperationalConfig:
     prefill_interpolation_granularity: int = DEFAULT_PREFILL_INTERPOLATION_GRANULARITY
     decode_interpolation_granularity: int = DEFAULT_DECODE_INTERPOLATION_GRANULARITY
     dry_run: bool = DEFAULT_DRY_RUN
+    current_phase: ProfilingPhase = field(default=ProfilingPhase.Initializing)
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +161,39 @@ def resolve_model_path(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
         and dgdr.modelCache.pvcMountPath
         and dgdr.modelCache.pvcModelPath
     ):
-        mount = dgdr.modelCache.pvcMountPath.rstrip("/")
-        sub = dgdr.modelCache.pvcModelPath.strip("/")
-        local_path = f"{mount}/{sub}"
-        if os.path.isdir(local_path):
-            return local_path
+        local_path = normalize_model_cache_path(
+            dgdr.modelCache.pvcMountPath,
+            dgdr.modelCache.pvcModelPath,
+        )
+        config_path = os.path.join(local_path, "config.json")
+        try:
+            if S_ISREG(os.stat(config_path).st_mode):
+                return local_path
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError as e:
+            raise RuntimeError(
+                f"Cannot inspect PVC model config {config_path!r}: {e}. "
+                "Check directory permissions and symlink ownership for the "
+                "profiler user, or set modelCache.pvcModelPath to an accessible "
+                "snapshot directory."
+            ) from e
     return dgdr.model
+
+
+def pick_decode_component(client) -> str:
+    """Pick the decode worker component name from a deployment client.
+
+    Returns the first entry in ``client.components`` that is not the frontend
+    (case-insensitive), falling back to the literal ``"decode"`` if every
+    component is frontend or the list is empty. The previous fallback
+    (``client.components[-1]``) could resolve to ``"frontend"`` in degenerate
+    component lists, which routed log-path lookups at the frontend service.
+    """
+    for svc in getattr(client, "components", None) or []:
+        if str(svc).lower() != "frontend":
+            return svc
+    return "decode"
 
 
 def is_planner_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
@@ -163,19 +214,62 @@ def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     )
 
 
-def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
-    """True when the DGDR requires profiling interpolation data.
+def is_kv_router_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR spec explicitly enables KV-cache-aware routing."""
+    return (
+        dgdr.features is not None
+        and dgdr.features.kvRouter is not None
+        and dgdr.features.kvRouter.enabled is True
+    )
 
-    Profile data is consumed by mocker workers (for latency simulation)
-    and by the planner when throughput-based scaling is enabled.
+
+def needs_mocker_ais_perf_model(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when mocker workers should load performance data from AIC.
+
+    Requests with Planner configuration use its pre-deployment sweep mode. For
+    mocker-only requests there is no Planner mode, so the DGDR search strategy
+    determines whether the profiler uses rapid AIC data or thorough NPZ data.
+    """
+    if not is_mocker_enabled(dgdr):
+        return False
+    if dgdr.features is not None and dgdr.features.planner is not None:
+        return (
+            dgdr.features.planner.pre_deployment_sweeping_mode
+            == PlannerPreDeploymentSweepMode.Rapid
+        )
+    return dgdr.searchStrategy == SearchStrategy.Rapid
+
+
+def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR requires profiling interpolation data *at this stage*.
+
+    Profile data (NPZ/JSON on disk) is consumed by:
+
+    * **Mocker workers** for latency simulation — required for thorough mode.
+      Requests with Planner configuration use its sweep mode; mocker-only
+      requests use the DGDR search strategy. In rapid mode the mocker pulls
+      latency data directly from the AIConfigurator SDK via
+      ``--ais-perf-model`` flags injected by the profiler, so no NPZ is
+      emitted.
+    * **Planner** when thorough-mode bootstrap data is requested. In rapid
+      mode the planner receives ``ais_perf_model`` and can also run AIC
+      interpolation in-process at bootstrap; in none mode it starts from
+      native AIC or live FPM regression warmup.
     """
     if is_mocker_enabled(dgdr):
-        return True
-    return (
+        return not needs_mocker_ais_perf_model(dgdr)
+    sweep_mode = (
+        dgdr.features.planner.pre_deployment_sweeping_mode
+        if dgdr.features is not None and dgdr.features.planner is not None
+        else None
+    )
+    if (
         dgdr.features is not None
         and dgdr.features.planner is not None
         and dgdr.features.planner.enable_throughput_scaling
-    )
+    ):
+        return sweep_mode == PlannerPreDeploymentSweepMode.Thorough
+    return False
 
 
 def determine_picking_mode(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
@@ -249,18 +343,21 @@ def get_profiling_job_tolerations(dgdr: DynamoGraphDeploymentRequestSpec) -> lis
 
 
 def inject_tolerations_into_dgd(dgd_config: dict, tolerations: list) -> dict:
-    """Add tolerations to every service's extraPodSpec in a DGD config dict.
+    """Add tolerations to every component pod template in a DGD config.
 
-    Tolerations already present in a service are preserved; only new entries
+    Tolerations already present in a component are preserved; only new entries
     (by identity) are appended.  Returns a deep copy with tolerations applied.
     """
     result = copy.deepcopy(dgd_config)
-    for _svc_name, svc in result.get("spec", {}).get("services", {}).items():
-        if not isinstance(svc, dict):
+    components = result.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        return result
+    for component in components:
+        if not isinstance(component, dict):
             continue
-        eps = svc.setdefault("extraPodSpec", {})
-        existing = eps.get("tolerations", [])
+        pod_spec = component.setdefault("podTemplate", {}).setdefault("spec", {})
+        existing = pod_spec.get("tolerations") or []
         new_entries = [t for t in tolerations if t not in existing]
         if new_entries:
-            eps["tolerations"] = list(existing) + new_entries
+            pod_spec["tolerations"] = list(existing) + new_entries
     return result

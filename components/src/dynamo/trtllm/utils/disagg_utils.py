@@ -15,9 +15,55 @@
 
 import base64
 import dataclasses
+import inspect
 
 from tensorrt_llm.executor.result import Logprob
 from tensorrt_llm.llmapi import DisaggregatedParams
+from tensorrt_llm.llmapi.disagg_utils import (
+    get_global_disagg_request_id as _trtllm_get_global_disagg_request_id,
+)
+
+# This compatibility shim intentionally relies on the public helper retaining
+# its name while TRT-LLM distinguishes the two known APIs by the ``process_id``
+# parameter added in rc22.
+# Dynamo maps its distributed-runtime connection ID into TRT-LLM's historical
+# 10-bit machine-ID space with ``connection_id % 1021``. TRT-LLM rc22 split
+# that field into an 8-bit node ID and a 6-bit process ID. Preserve Dynamo's
+# existing 10-bit worker slot and encode it losslessly into the new pair.
+_TRTLLM_DISAGG_ID_HAS_PROCESS_ID = (
+    "process_id" in inspect.signature(_trtllm_get_global_disagg_request_id).parameters
+)
+_TRTLLM_PROCESS_ID_SPACE = 1 << 6
+_TRTLLM_NODE_ID_SPACE = 1 << 8
+_DYNAMO_DISAGG_MACHINE_ID_SPACE = 1021
+
+
+def get_compatible_global_disagg_request_id(machine_id: int) -> int:
+    """Generate a global TRT-LLM disaggregation request ID across API versions.
+
+    TRT-LLM <= rc21 accepts a 10-bit ``machine_id``. TRT-LLM >= rc22 accepts
+    an 8-bit ``node_id`` plus a 6-bit ``process_id``. Dynamo's existing
+    machine ID is in ``[0, 1021)``; splitting that value with ``divmod(64)``
+    produces a unique, in-range pair without changing Dynamo's collision
+    characteristics.
+    """
+
+    if not 0 <= machine_id < _DYNAMO_DISAGG_MACHINE_ID_SPACE:
+        raise ValueError(
+            "Dynamo disagg machine_id must be in range "
+            f"[0, {_DYNAMO_DISAGG_MACHINE_ID_SPACE}), got {machine_id}"
+        )
+
+    if _TRTLLM_DISAGG_ID_HAS_PROCESS_ID:
+        node_id, process_id = divmod(machine_id, _TRTLLM_PROCESS_ID_SPACE)
+        if node_id >= _TRTLLM_NODE_ID_SPACE:
+            raise ValueError(
+                "Dynamo disagg machine_id maps outside TRT-LLM's 8-bit "
+                f"node_id space: machine_id={machine_id}, node_id={node_id}"
+            )
+        return _trtllm_get_global_disagg_request_id(node_id, process_id)
+
+    return _trtllm_get_global_disagg_request_id(machine_id)
 
 
 class DisaggregatedParamsCodec:

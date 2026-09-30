@@ -119,7 +119,7 @@ impl TokenLogProbs {
 /// Trait for extracting logprob information from various response types
 pub trait LogprobExtractor {
     /// Extract logprobs organized by choice index
-    /// Returns: HashMap<choice_index, Vec<TokenLogProbs>>
+    /// Returns: `HashMap<choice_index, Vec<TokenLogProbs>>`
     fn extract_logprobs_by_choice(&self) -> HashMap<u32, Vec<TokenLogProbs>>;
 }
 
@@ -128,7 +128,7 @@ impl LogprobExtractor for NvCreateChatCompletionStreamResponse {
     fn extract_logprobs_by_choice(&self) -> HashMap<u32, Vec<TokenLogProbs>> {
         let mut result = HashMap::new();
 
-        for choice in &self.choices {
+        for choice in &self.inner.choices {
             let choice_index = choice.index;
 
             let choice_logprobs = choice
@@ -572,7 +572,7 @@ mod tests {
     use crate::protocols::codec::create_message_stream;
     use crate::protocols::convert_sse_stream;
     use approx::assert_abs_diff_eq;
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
         ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
     };
@@ -876,6 +876,7 @@ mod tests {
         let token_logprobs = vec![ChatCompletionTokenLogprob {
             token: "unlikely_selection".to_string(),
             logprob: (0.15_f32).ln(), // Selected but not optimal: 15%
+            token_id: None,
             bytes: None,
             top_logprobs: vec![
                 TopLogprobs {
@@ -932,6 +933,7 @@ mod tests {
         ChatCompletionTokenLogprob {
             token: token.to_string(),
             logprob: prob.ln(),
+            token_id: None,
             bytes: None,
             top_logprobs: top_probs
                 .into_iter()
@@ -947,55 +949,51 @@ mod tests {
     fn create_mock_response_with_logprobs(
         token_logprobs: Vec<ChatCompletionTokenLogprob>,
     ) -> NvCreateChatCompletionStreamResponse {
-        #[expect(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            id: "test_id".to_string(),
-            choices: vec![ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    content: Some(
-                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
                             "test".to_string(),
-                        ),
-                    ),
-                    function_call: None,
-                    tool_calls: None,
-                    role: Some(Role::Assistant),
-                    refusal: None,
-                    reasoning_content: None,
-                },
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
-                logprobs: Some(ChatChoiceLogprobs {
-                    content: Some(token_logprobs),
-                    refusal: None,
-                }),
-            }],
-            created: 1234567890,
-            model: "test-model".to_string(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
+                        )),
+                        function_call: None,
+                        tool_calls: None,
+                        role: Some(Role::Assistant),
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(FinishReason::Stop),
+                    logprobs: Some(ChatChoiceLogprobs {
+                        content: Some(token_logprobs),
+                        refusal: None,
+                    }),
+                }],
+                created: 1234567890,
+                model: "test-model".to_string(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+            },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
     fn create_mock_response_with_multiple_choices(
         choices_logprobs: Vec<Vec<ChatCompletionTokenLogprob>>,
     ) -> NvCreateChatCompletionStreamResponse {
-        #[expect(deprecated)]
         let choices = choices_logprobs
             .into_iter()
             .enumerate()
             .map(|(i, token_logprobs)| ChatChoiceStream {
                 index: i as u32,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some(
-                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                            "test".to_string(),
-                        ),
-                    ),
+                    content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                        "test".to_string(),
+                    )),
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
@@ -1003,7 +1001,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -1012,15 +1009,18 @@ mod tests {
             .collect();
 
         NvCreateChatCompletionStreamResponse {
-            id: "test_id".to_string(),
-            choices,
-            created: 1234567890,
-            model: "test-model".to_string(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                choices,
+                created: 1234567890,
+                model: "test-model".to_string(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+            },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -1339,34 +1339,33 @@ mod tests {
     #[test]
     fn test_logprob_extractor_with_missing_data() {
         // Test with choice that has no logprobs
-        #[expect(deprecated)]
         let response = NvCreateChatCompletionStreamResponse {
-            id: "test_id".to_string(),
-            choices: vec![ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    content: Some(
-                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
                             "test".to_string(),
-                        ),
-                    ),
-                    function_call: None,
-                    tool_calls: None,
-                    role: Some(Role::Assistant),
-                    refusal: None,
-                    reasoning_content: None,
-                },
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
-                logprobs: None, // No logprobs
-            }],
-            created: 1234567890,
-            model: "test-model".to_string(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
+                        )),
+                        function_call: None,
+                        tool_calls: None,
+                        role: Some(Role::Assistant),
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(FinishReason::Stop),
+                    logprobs: None, // No logprobs
+                }],
+                created: 1234567890,
+                model: "test-model".to_string(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+            },
             nvext: None,
+            llm_metrics: None,
         };
 
         let logprobs = response.extract_logprobs_by_choice();
@@ -1573,15 +1572,18 @@ mod tests {
         // In practice, this would have real logprobs data
 
         NvCreateChatCompletionStreamResponse {
-            id: "test_id".to_string(),
-            choices: vec![],
-            created: 1234567890,
-            model: "test-model".to_string(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                choices: vec![],
+                created: 1234567890,
+                model: "test-model".to_string(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+            },
             nvext: None,
+            llm_metrics: None,
         }
     }
 

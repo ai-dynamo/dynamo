@@ -8,22 +8,39 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+profile = []
+# Test/benchmark-only deterministic replay plumbing. Production replay never
+# enables this feature and keeps the existing random selector behavior.
+replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench"]
+test-support = []
+zmq-events = ["dep:tmq"]
 
 [dependencies]
+dynamo-custom-policy-builtin = { workspace = true }
 # repo
+aisimulate-core = { workspace = true }
 dynamo-kv-router = { workspace = true }
-dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
-derive-getters = { workspace = true }
-rand = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
+tmq = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -34,9 +51,14 @@ validator = { workspace = true }
 ndarray = "0.16"
 ndarray-npy = "0.9"
 ndarray-interp = "0.5"
+rustc-hash = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-timerfd = "0.2"
 
 [dev-dependencies]
+dynamo-kv-router = { workspace = true, features = ["metrics"] }
 rstest = "0.18.2"
+tempfile = { workspace = true }
+tmq = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

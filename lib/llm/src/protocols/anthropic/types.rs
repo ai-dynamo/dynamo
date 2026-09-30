@@ -1,780 +1,61 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Anthropic Messages API types and conversion logic.
+//! Anthropic Messages API conversion logic.
 //!
-//! All request/response types for the `/v1/messages` endpoint, plus
-//! bidirectional conversion to/from the internal chat completions format.
+//! Pure protocol types live in `dynamo_protocols::types::anthropic`.
+//! This module provides bidirectional conversion to/from the internal
+//! chat completions format used by the Dynamo engine.
 
-use dynamo_async_openai::types::{
+// Re-export all pure Anthropic protocol types so existing `use crate::protocols::anthropic::*`
+// continues to work throughout dynamo-llm.
+pub use dynamo_protocols::types::anthropic::*;
+
+use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImageArgs,
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, FunctionName,
-    FunctionObject, ImageUrl, ReasoningContent,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
+    ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage, FunctionName,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
 };
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 use crate::protocols::openai::common_ext::CommonExt;
-use crate::protocols::openai::nvext::{CacheControl, NvExt};
-
-// ---------------------------------------------------------------------------
-// Custom deserializers
-// ---------------------------------------------------------------------------
-
-/// Parsed system prompt content, preserving cache_control from block arrays.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemContent {
-    /// The concatenated text from all system blocks (or the plain string).
-    pub text: String,
-    /// Cache control from the last system block that had one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
-}
-
-/// Deserialize `system` from either a plain string or an array of text blocks.
-/// The Anthropic API accepts both `"system": "text"` and
-/// `"system": [{"type": "text", "text": "...", "cache_control": {...}}]`.
-fn deserialize_system_prompt<'de, D>(deserializer: D) -> Result<Option<SystemContent>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum SystemPrompt {
-        Text(String),
-        Blocks(Vec<SystemBlock>),
-    }
-
-    #[derive(Deserialize)]
-    struct SystemBlock {
-        text: String,
-        #[serde(default)]
-        cache_control: Option<CacheControl>,
-    }
-
-    let maybe: Option<SystemPrompt> = Option::deserialize(deserializer)?;
-    Ok(maybe.map(|sp| match sp {
-        SystemPrompt::Text(s) => SystemContent {
-            text: s,
-            cache_control: None,
-        },
-        SystemPrompt::Blocks(blocks) => {
-            let cache_control = blocks.iter().rev().find_map(|b| b.cache_control.clone());
-            let text = blocks
-                .into_iter()
-                .map(|b| b.text)
-                .collect::<Vec<_>>()
-                .join("\n");
-            SystemContent {
-                text,
-                cache_control,
-            }
-        }
-    }))
-}
-
-// ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
-/// Top-level request body for `POST /v1/messages`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicCreateMessageRequest {
-    /// The model to use (e.g. "claude-sonnet-4-20250514").
-    pub model: String,
-
-    /// The maximum number of tokens to generate.
-    pub max_tokens: u32,
-
-    /// The conversation messages.
-    pub messages: Vec<AnthropicMessage>,
-
-    /// Optional system prompt (string or array of `{"type":"text","text":"..."}` blocks).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_system_prompt"
-    )]
-    pub system: Option<SystemContent>,
-
-    /// Sampling temperature (0.0 - 1.0).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-
-    /// Nucleus sampling parameter.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-
-    /// Top-K sampling parameter.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<u32>,
-
-    /// Custom stop sequences.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_sequences: Option<Vec<String>>,
-
-    /// Whether to stream the response.
-    #[serde(default)]
-    pub stream: bool,
-
-    /// Optional metadata (e.g. user_id).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-
-    /// Tools the model may call.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<AnthropicTool>>,
-
-    /// How the model should choose which tool to call.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<AnthropicToolChoice>,
-
-    /// Top-level cache control for automatic prompt prefix caching.
-    /// When present, the system caches all content up to the last cacheable block.
-    /// Matches the Anthropic Messages API automatic caching mode.
-    /// See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching#automatic-caching
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
-
-    /// Extended thinking configuration. When enabled, the model produces
-    /// `thinking` content blocks containing its internal reasoning before
-    /// the final response. The `budget_tokens` field controls how many tokens
-    /// the model may use for thinking (must be ≥ 1024 and < max_tokens).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingConfig>,
-
-    /// Service tier selection: `"auto"` or `"standard_only"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<String>,
-
-    /// Container identifier for stateful sandbox sessions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container: Option<String>,
-
-    /// Output configuration: effort level and optional JSON schema format.
-    /// `effort` can be `"low"`, `"medium"`, `"high"`, or `"max"`.
-    /// `format` specifies structured JSON output constraints.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_config: Option<serde_json::Value>,
-}
-
-/// Extended thinking configuration for the request.
-///
-/// When `type` is `"enabled"`, the model will produce `thinking` content blocks
-/// with its internal reasoning. `budget_tokens` controls the maximum tokens
-/// available for thinking (minimum 1024, must be less than `max_tokens`).
-/// When `type` is `"disabled"`, no thinking blocks are produced.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThinkingConfig {
-    /// Either `"enabled"` or `"disabled"`.
-    #[serde(rename = "type")]
-    pub thinking_type: String,
-    /// Maximum tokens for internal reasoning. Only relevant when type is "enabled".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub budget_tokens: Option<u32>,
-}
-
-/// A single message in the conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicMessage {
-    pub role: AnthropicRole,
-    #[serde(flatten)]
-    pub content: AnthropicMessageContent,
-}
-
-/// The role of a message sender.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum AnthropicRole {
-    User,
-    Assistant,
-}
-
-/// Message content — either a plain string or an array of content blocks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum AnthropicMessageContent {
-    /// Plain text content.
-    Text { content: String },
-    /// Array of structured content blocks.
-    Blocks { content: Vec<AnthropicContentBlock> },
-}
-
-/// A single content block within a message.
-///
-/// Uses a custom deserializer so that unknown block types (e.g. `citations`,
-/// `server_tool_use`, `redacted_thinking`) are captured as `Other(Value)` instead
-/// of causing a hard deserialization failure. This is important because Claude
-/// Code may send block types that we don't yet handle.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-pub enum AnthropicContentBlock {
-    /// Text content block. May optionally include `citations` — references to
-    /// source documents that support the text content. Citations are generated
-    /// by the model when document/PDF content is provided and citation mode is enabled.
-    #[serde(rename = "text")]
-    Text {
-        text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        citations: Option<Vec<serde_json::Value>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
-    },
-    /// Image content block.
-    #[serde(rename = "image")]
-    Image { source: AnthropicImageSource },
-    /// Tool use request from assistant.
-    #[serde(rename = "tool_use")]
-    ToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
-    },
-    /// Tool result from user.
-    #[serde(rename = "tool_result")]
-    ToolResult {
-        tool_use_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        content: Option<ToolResultContent>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        is_error: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
-    },
-    /// Thinking content block from assistant (extended thinking / reasoning).
-    #[serde(rename = "thinking")]
-    Thinking {
-        thinking: String,
-        signature: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
-    },
-    /// Redacted thinking block from assistant. Contains encrypted reasoning data
-    /// that is opaque to the client but must be passed back verbatim in multi-turn
-    /// conversations so the model can maintain its chain of thought.
-    #[serde(rename = "redacted_thinking")]
-    RedactedThinking { data: String },
-    /// Server-initiated tool use block. Represents a tool call that the API
-    /// executes server-side (e.g., web search). The client receives the result
-    /// via a corresponding `web_search_tool_result` or similar block.
-    #[serde(rename = "server_tool_use")]
-    ServerToolUse {
-        id: String,
-        name: String,
-        #[serde(default)]
-        input: serde_json::Value,
-    },
-    /// Result from a server-initiated tool (e.g., web search results).
-    /// Contains structured content returned by the server-side tool execution.
-    #[serde(rename = "web_search_tool_result")]
-    WebSearchToolResult {
-        tool_use_id: String,
-        #[serde(default)]
-        content: serde_json::Value,
-    },
-    /// Catch-all for unrecognized block types. Preserves the full JSON value
-    /// so that new Anthropic features don't break the endpoint and can be
-    /// round-tripped or inspected.
-    #[serde(untagged)]
-    Other(serde_json::Value),
-}
-
-/// Content of a `tool_result` block — either a plain string or an array of
-/// content blocks (the Anthropic API accepts both).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ToolResultContent {
-    Text(String),
-    Blocks(Vec<ToolResultContentBlock>),
-}
-
-impl ToolResultContent {
-    /// Extract the text content, concatenating array blocks if needed.
-    pub fn into_text(self) -> String {
-        match self {
-            ToolResultContent::Text(s) => s,
-            ToolResultContent::Blocks(blocks) => blocks
-                .into_iter()
-                .filter_map(|b| match b {
-                    ToolResultContentBlock::Text { text } => Some(text),
-                    ToolResultContentBlock::Other(_) => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-        }
-    }
-}
-
-/// A content block within a `tool_result.content` array.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ToolResultContentBlock {
-    Text {
-        text: String,
-    },
-    /// Catch-all for non-text blocks (images, etc.) in tool results.
-    Other(serde_json::Value),
-}
-
-/// Custom deserializer for `AnthropicContentBlock` that handles unknown types
-/// gracefully. Since serde's `#[serde(other)]` is not supported on internally
-/// tagged enums, we deserialize as `Value` first and dispatch manually.
-impl<'de> Deserialize<'de> for AnthropicContentBlock {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let block_type = value
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        match block_type.as_str() {
-            "text" => {
-                let text = value
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("text"))?
-                    .to_string();
-                let citations: Option<Vec<serde_json::Value>> = value
-                    .get("citations")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok());
-                let cache_control: Option<CacheControl> = value
-                    .get("cache_control")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok());
-                Ok(AnthropicContentBlock::Text {
-                    text,
-                    citations,
-                    cache_control,
-                })
-            }
-            "image" => {
-                let source: AnthropicImageSource =
-                    serde_json::from_value(value.get("source").cloned().unwrap_or_default())
-                        .map_err(serde::de::Error::custom)?;
-                Ok(AnthropicContentBlock::Image { source })
-            }
-            "tool_use" => {
-                let id = value
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("id"))?
-                    .to_string();
-                let name = value
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("name"))?
-                    .to_string();
-                let input = value.get("input").cloned().unwrap_or(serde_json::json!({}));
-                let cache_control: Option<CacheControl> = value
-                    .get("cache_control")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok());
-                Ok(AnthropicContentBlock::ToolUse {
-                    id,
-                    name,
-                    input,
-                    cache_control,
-                })
-            }
-            "tool_result" => {
-                let tool_use_id = value
-                    .get("tool_use_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("tool_use_id"))?
-                    .to_string();
-                let content: Option<ToolResultContent> = value
-                    .get("content")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok());
-                let is_error = value.get("is_error").and_then(|v| v.as_bool());
-                let cache_control: Option<CacheControl> = value
-                    .get("cache_control")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok());
-                Ok(AnthropicContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                    cache_control,
-                })
-            }
-            "thinking" => {
-                let thinking = value
-                    .get("thinking")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("thinking"))?
-                    .to_string();
-                let signature = value
-                    .get("signature")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("signature"))?
-                    .to_string();
-                let cache_control: Option<CacheControl> = value
-                    .get("cache_control")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok());
-                Ok(AnthropicContentBlock::Thinking {
-                    thinking,
-                    signature,
-                    cache_control,
-                })
-            }
-            "redacted_thinking" => {
-                let data = value
-                    .get("data")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("data"))?
-                    .to_string();
-                Ok(AnthropicContentBlock::RedactedThinking { data })
-            }
-            "server_tool_use" => {
-                let id = value
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("id"))?
-                    .to_string();
-                let name = value
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("name"))?
-                    .to_string();
-                let input = value.get("input").cloned().unwrap_or(serde_json::json!({}));
-                Ok(AnthropicContentBlock::ServerToolUse { id, name, input })
-            }
-            "web_search_tool_result" => {
-                let tool_use_id = value
-                    .get("tool_use_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| serde::de::Error::missing_field("tool_use_id"))?
-                    .to_string();
-                let content = value
-                    .get("content")
-                    .cloned()
-                    .unwrap_or(serde_json::json!([]));
-                Ok(AnthropicContentBlock::WebSearchToolResult {
-                    tool_use_id,
-                    content,
-                })
-            }
-            other => {
-                tracing::debug!(
-                    "Unrecognized Anthropic content block type '{}', preserving as Other",
-                    other
-                );
-                Ok(AnthropicContentBlock::Other(value))
-            }
-        }
-    }
-}
-
-/// Image source for image content blocks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicImageSource {
-    #[serde(rename = "type")]
-    pub source_type: String,
-    pub media_type: String,
-    pub data: String,
-}
-
-/// A tool definition.
-///
-/// Client tools (custom) require `name` + `input_schema`. Server tools
-/// (web_search, bash, text_editor, code_execution, etc.) are discriminated
-/// by their `type` field (e.g. `"web_search_20260209"`) and may not have
-/// `input_schema`. We keep all fields optional beyond `name` so both
-/// kinds deserialize successfully and pass through to the backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicTool {
-    /// Tool name (required for client tools, present on server tools too).
-    pub name: String,
-    /// Tool type discriminator. Client tools use `"custom"` (or omit).
-    /// Server tools use versioned types like `"web_search_20260209"`.
-    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
-    pub tool_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// JSON Schema for the tool input. Required for client tools, absent on
-    /// server tools (which define their own input shape server-side).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_schema: Option<serde_json::Value>,
-    /// Cache control breakpoint on this tool definition.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
-}
-
-/// Tool choice specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum AnthropicToolChoice {
-    /// Named tool: `{type: "tool", name: "..."}`
-    /// Must be listed before Simple so serde tries the stricter shape first.
-    Named(AnthropicToolChoiceNamed),
-    /// Simple mode: "auto", "any", or "none".
-    Simple(AnthropicToolChoiceSimple),
-}
-
-/// Simple tool choice modes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicToolChoiceSimple {
-    #[serde(rename = "type")]
-    pub choice_type: AnthropicToolChoiceMode,
-    /// When true, the model will call tools one at a time instead of
-    /// potentially issuing multiple tool calls in a single response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disable_parallel_tool_use: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum AnthropicToolChoiceMode {
-    Auto,
-    Any,
-    None,
-    Tool,
-}
-
-/// Named tool choice.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicToolChoiceNamed {
-    #[serde(rename = "type")]
-    pub choice_type: AnthropicToolChoiceMode,
-    pub name: String,
-    /// When true, the model will call tools one at a time instead of
-    /// potentially issuing multiple tool calls in a single response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disable_parallel_tool_use: Option<bool>,
-}
-
-// ---------------------------------------------------------------------------
-// Response types
-// ---------------------------------------------------------------------------
-
-/// Response body for `POST /v1/messages` (non-streaming).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicMessageResponse {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub object_type: String,
-    pub role: String,
-    pub content: Vec<AnthropicResponseContentBlock>,
-    pub model: String,
-    pub stop_reason: Option<AnthropicStopReason>,
-    pub stop_sequence: Option<String>,
-    pub usage: AnthropicUsage,
-}
-
-/// A content block in the response.
-///
-/// The Anthropic API returns up to 12 different block types. We model the
-/// common ones explicitly and catch the rest as `Other` so the proxy can
-/// forward them without losing data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum AnthropicResponseContentBlock {
-    #[serde(rename = "thinking")]
-    Thinking { thinking: String, signature: String },
-    #[serde(rename = "text")]
-    Text {
-        text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        citations: Option<Vec<serde_json::Value>>,
-    },
-    #[serde(rename = "tool_use")]
-    ToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Value,
-    },
-    #[serde(rename = "redacted_thinking")]
-    RedactedThinking { data: String },
-    #[serde(rename = "server_tool_use")]
-    ServerToolUse {
-        id: String,
-        name: String,
-        #[serde(default)]
-        input: serde_json::Value,
-    },
-    #[serde(rename = "web_search_tool_result")]
-    WebSearchToolResult {
-        tool_use_id: String,
-        #[serde(default)]
-        content: serde_json::Value,
-    },
-    /// Catch-all for new/uncommon block types (web_fetch_tool_result,
-    /// code_execution_tool_result, container_upload, etc.) so the proxy
-    /// can serialize them back without data loss.
-    #[serde(untagged)]
-    Other(serde_json::Value),
-}
-
-/// Token usage information.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AnthropicUsage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    /// Number of input tokens used to create a new cache entry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_creation_input_tokens: Option<u32>,
-    /// Number of input tokens read from the prompt cache (prefix cache hits).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_read_input_tokens: Option<u32>,
-}
-
-/// Reason the model stopped generating.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AnthropicStopReason {
-    EndTurn,
-    MaxTokens,
-    StopSequence,
-    ToolUse,
-    /// The model paused to yield control in an agentic loop, intending to
-    /// continue in a subsequent turn. Used with extended thinking / tool use.
-    PauseTurn,
-    /// The model refused to generate content (safety refusal).
-    Refusal,
-}
-
-// ---------------------------------------------------------------------------
-// Streaming types
-// ---------------------------------------------------------------------------
-
-/// SSE event types for the Anthropic streaming API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum AnthropicStreamEvent {
-    #[serde(rename = "message_start")]
-    MessageStart { message: AnthropicMessageResponse },
-
-    #[serde(rename = "content_block_start")]
-    ContentBlockStart {
-        index: u32,
-        content_block: AnthropicResponseContentBlock,
-    },
-
-    #[serde(rename = "content_block_delta")]
-    ContentBlockDelta { index: u32, delta: AnthropicDelta },
-
-    #[serde(rename = "content_block_stop")]
-    ContentBlockStop { index: u32 },
-
-    #[serde(rename = "message_delta")]
-    MessageDelta {
-        delta: AnthropicMessageDeltaBody,
-        usage: AnthropicUsage,
-    },
-
-    #[serde(rename = "message_stop")]
-    MessageStop {},
-
-    #[serde(rename = "ping")]
-    Ping {},
-
-    #[serde(rename = "error")]
-    Error { error: AnthropicErrorBody },
-}
-
-/// Delta content in a streaming content_block_delta event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum AnthropicDelta {
-    #[serde(rename = "thinking_delta")]
-    ThinkingDelta { thinking: String },
-    #[serde(rename = "text_delta")]
-    TextDelta { text: String },
-    #[serde(rename = "input_json_delta")]
-    InputJsonDelta { partial_json: String },
-    /// Incremental signature for a thinking block (sent at the end).
-    #[serde(rename = "signature_delta")]
-    SignatureDelta { signature: String },
-    /// Incremental citation attached to a text block.
-    #[serde(rename = "citations_delta")]
-    CitationsDelta { citation: serde_json::Value },
-}
-
-/// The delta body in a message_delta event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicMessageDeltaBody {
-    pub stop_reason: Option<AnthropicStopReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_sequence: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
-/// Anthropic API error response wrapper.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicErrorResponse {
-    #[serde(rename = "type")]
-    pub object_type: String,
-    pub error: AnthropicErrorBody,
-}
-
-/// Error body within an error response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicErrorBody {
-    #[serde(rename = "type")]
-    pub error_type: String,
-    pub message: String,
-}
-
-impl AnthropicErrorResponse {
-    /// Create an `invalid_request_error` response.
-    pub fn invalid_request(message: impl Into<String>) -> Self {
-        Self {
-            object_type: "error".to_string(),
-            error: AnthropicErrorBody {
-                error_type: "invalid_request_error".to_string(),
-                message: message.into(),
-            },
-        }
-    }
-
-    /// Create an `api_error` (internal server error) response.
-    pub fn api_error(message: impl Into<String>) -> Self {
-        Self {
-            object_type: "error".to_string(),
-            error: AnthropicErrorBody {
-                error_type: "api_error".to_string(),
-                message: message.into(),
-            },
-        }
-    }
-
-    /// Create a `not_found_error` response.
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self {
-            object_type: "error".to_string(),
-            error: AnthropicErrorBody {
-                error_type: "not_found_error".to_string(),
-                message: message.into(),
-            },
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Conversion: AnthropicCreateMessageRequest -> NvCreateChatCompletionRequest
 // ---------------------------------------------------------------------------
+fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequestMessage>) {
+    messages.push(ChatCompletionRequestMessage::System(
+        ChatCompletionRequestSystemMessage {
+            content: ChatCompletionRequestSystemMessageContent::Text(content),
+            name: None,
+            tools: None,
+        },
+    ));
+}
 
+fn system_message_content(content: &AnthropicMessageContent) -> String {
+    match content {
+        AnthropicMessageContent::Text { content } => content.clone(),
+        AnthropicMessageContent::Blocks { content } => content
+            .iter()
+            .filter_map(|block| match block {
+                AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -783,19 +64,16 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 
         // Prepend system message if present
         if let Some(system_content) = &req.system {
-            messages.push(ChatCompletionRequestMessage::System(
-                ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(
-                        system_content.text.clone(),
-                    ),
-                    name: None,
-                },
-            ));
+            push_system_message(system_content.text.clone(), &mut messages);
         }
 
         // Convert each Anthropic message
         for msg in &req.messages {
             match (&msg.role, &msg.content) {
+                // System messages may appear in messages[] from agent clients.
+                (AnthropicRole::System, content) => {
+                    push_system_message(system_message_content(content), &mut messages);
+                }
                 // User with plain text
                 (AnthropicRole::User, AnthropicMessageContent::Text { content }) => {
                     messages.push(ChatCompletionRequestMessage::User(
@@ -823,6 +101,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                             audio: None,
                             tool_calls: None,
                             function_call: None,
+                            partial: None,
                         },
                     ));
                 }
@@ -834,18 +113,31 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         }
 
         // Convert tools
-        let tools = req.tools.as_ref().map(|t| convert_anthropic_tools(t));
+        let tools = req
+            .tools
+            .as_deref()
+            .map(convert_anthropic_tools)
+            .transpose()?;
 
         // Convert tool_choice
         let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
+        let parallel_tool_calls = req
+            .tool_choice
+            .as_ref()
+            .and_then(|choice| match choice {
+                AnthropicToolChoice::Simple(simple) => simple.disable_parallel_tool_use,
+                AnthropicToolChoice::Named(named) => named.disable_parallel_tool_use,
+            })
+            .map(|disabled| !disabled);
 
         // Convert stop_sequences -> stop
         let stop = req
             .stop_sequences
-            .map(dynamo_async_openai::types::Stop::StringArray);
+            .filter(|sequences| !sequences.is_empty())
+            .map(dynamo_protocols::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
-            inner: dynamo_async_openai::types::CreateChatCompletionRequest {
+            inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,
                 temperature: req.temperature,
@@ -854,10 +146,17 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 stop,
                 tools,
                 tool_choice,
+                parallel_tool_calls,
                 stream: Some(true), // Always stream internally
-                stream_options: Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                // Request cumulative usage on every chunk (not just the final
+                // one) so the Anthropic stream converter can stamp an
+                // authoritative per-chunk usage triple onto each
+                // `content_block_delta` and still report a token count if the
+                // client aborts mid-stream. Mirrors the running-usage behaviour
+                // of the OpenAI DeltaGenerator.
+                stream_options: Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                     include_usage: true,
-                    continuous_usage_stats: false,
+                    continuous_usage_stats: true,
                 }),
                 ..Default::default()
             },
@@ -865,43 +164,27 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 top_k: req.top_k.map(|k| k as i32),
                 ..Default::default()
             },
-            nvext: {
-                // Collect per-block cache_control: use the last one found
-                let mut last_block_cc: Option<CacheControl> = None;
-                for msg in &req.messages {
-                    if let AnthropicMessageContent::Blocks { content } = &msg.content {
-                        for block in content {
-                            let block_cc = match block {
-                                AnthropicContentBlock::Text { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                AnthropicContentBlock::ToolUse { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                AnthropicContentBlock::ToolResult { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                AnthropicContentBlock::Thinking { cache_control, .. } => {
-                                    cache_control.as_ref()
-                                }
-                                _ => None,
-                            };
-                            if let Some(cc) = block_cc {
-                                last_block_cc = Some(cc.clone());
-                            }
-                        }
-                    }
-                }
-                // Merge: top-level > per-block > system block cache_control
-                let system_cc = req.system.as_ref().and_then(|s| s.cache_control.clone());
-                let effective_cc = req.cache_control.clone().or(last_block_cc).or(system_cc);
-                effective_cc.map(|cc| NvExt {
-                    cache_control: Some(cc),
-                    ..Default::default()
-                })
+            nvext: crate::protocols::common::extensions::parse_nvext(req.nvext)?,
+            // chat_template_args may be augmented by the Anthropic handler
+            // (anthropic.rs) after conversion — e.g., setting enable_thinking=true
+            // when a reasoning parser is configured. The conversion layer only
+            // forwards the client's explicit thinking preference here; the handler
+            // has access to parsing_options and makes the final decision.
+            chat_template_args: if req
+                .thinking
+                .as_ref()
+                .is_some_and(|t| t.thinking_type == "enabled")
+            {
+                let mut args = std::collections::HashMap::new();
+                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+                Some(args)
+            } else {
+                None
             },
-            chat_template_args: None,
+            thinking: None,
+            thinking_token_budget: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         })
     }
@@ -927,24 +210,9 @@ fn convert_user_blocks(
                 ));
             }
             AnthropicContentBlock::Image { source } => {
-                if source.source_type != "base64" {
-                    anyhow::bail!(
-                        "unsupported image source type {:?}; only base64 is supported",
-                        source.source_type
-                    );
-                }
                 has_image = true;
-                let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
-                let url = url::Url::parse(&data_uri)
-                    .map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                    ChatCompletionRequestMessageContentPartImage {
-                        image_url: ImageUrl {
-                            url,
-                            detail: None,
-                            uuid: None,
-                        },
-                    },
+                    convert_image(source)?,
                 ));
             }
             AnthropicContentBlock::ToolResult {
@@ -956,10 +224,14 @@ fn convert_user_blocks(
                 flush_user_content_parts(&mut content_parts, has_image, messages);
                 has_image = false;
 
-                let text = content.clone().map(|c| c.into_text()).unwrap_or_default();
+                let content = content
+                    .as_ref()
+                    .map(convert_tool_result_content)
+                    .transpose()?
+                    .unwrap_or_default();
                 messages.push(ChatCompletionRequestMessage::Tool(
                     ChatCompletionRequestToolMessage {
-                        content: ChatCompletionRequestToolMessageContent::Text(text),
+                        content,
                         tool_call_id: tool_use_id.clone(),
                     },
                 ));
@@ -979,6 +251,73 @@ fn convert_user_blocks(
     flush_user_content_parts(&mut content_parts, has_image, messages);
 
     Ok(())
+}
+
+fn convert_image(
+    source: &AnthropicImageSource,
+) -> Result<dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
+    if source.source_type != "base64" {
+        anyhow::bail!(
+            "unsupported image source type {:?}; only base64 is supported",
+            source.source_type
+        );
+    }
+
+    let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
+    let url =
+        url::Url::parse(&data_uri).map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
+    let image_url = ImageUrl::from(url.to_string());
+    let image = ChatCompletionRequestMessageContentPartImageArgs::default()
+        .image_url(image_url)
+        .build()?;
+    Ok(image)
+}
+
+fn convert_tool_result_content(
+    content: &ToolResultContent,
+) -> Result<ChatCompletionRequestToolMessageContent, anyhow::Error> {
+    let blocks = match content {
+        ToolResultContent::Text(text) => {
+            return Ok(ChatCompletionRequestToolMessageContent::Text(text.clone()));
+        }
+        ToolResultContent::Blocks(blocks) => blocks,
+    };
+
+    if blocks
+        .iter()
+        .any(|block| matches!(block, ToolResultContentBlock::Other(_)))
+    {
+        anyhow::bail!(
+            "unsupported Anthropic tool_result content block; only text and image are supported"
+        );
+    }
+
+    if !blocks
+        .iter()
+        .any(|block| matches!(block, ToolResultContentBlock::Image { .. }))
+    {
+        return Ok(ChatCompletionRequestToolMessageContent::Text(
+            content.clone().into_text(),
+        ));
+    }
+
+    let mut parts = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ToolResultContentBlock::Text { text } => {
+                parts.push(ChatCompletionRequestToolMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                ));
+            }
+            ToolResultContentBlock::Image { source } => {
+                parts.push(ChatCompletionRequestToolMessageContentPart::ImageUrl(
+                    convert_image(source)?,
+                ));
+            }
+            ToolResultContentBlock::Other(_) => unreachable!("validated above"),
+        }
+    }
+    Ok(ChatCompletionRequestToolMessageContent::Array(parts))
 }
 
 /// Flush accumulated user content parts into a user message.
@@ -1077,8 +416,8 @@ fn convert_assistant_blocks(
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: id.clone(),
-                    r#type: ChatCompletionToolType::Function,
-                    function: dynamo_async_openai::types::FunctionCall {
+                    r#type: FunctionType::Function,
+                    function: dynamo_protocols::types::FunctionCall {
                         name: name.clone(),
                         arguments: serde_json::to_string(input).unwrap_or_default(),
                     },
@@ -1138,27 +477,23 @@ fn convert_assistant_blocks(
             tool_calls: tc,
             #[allow(deprecated)]
             function_call: None,
+            partial: None,
         },
     ));
 }
 
 /// Convert Anthropic tools to ChatCompletionTools.
-fn convert_anthropic_tools(tools: &[AnthropicTool]) -> Vec<ChatCompletionTool> {
+fn convert_anthropic_tools(
+    tools: &[AnthropicTool],
+) -> Result<Vec<ChatCompletionTool>, anyhow::Error> {
     tools
         .iter()
-        .filter_map(|tool| {
-            // Server tools (web_search, bash, etc.) don't have input_schema
-            // and can't be meaningfully converted to OpenAI function tools.
-            // They are backend-specific and handled separately.
-            let schema = tool.input_schema.clone().or_else(|| {
-                tracing::debug!(
-                    tool_name = %tool.name,
-                    tool_type = ?tool.tool_type,
-                    "Skipping server tool in OpenAI conversion (no input_schema)"
-                );
-                None
+        .enumerate()
+        .map(|(tool_index, tool)| {
+            let schema = tool.input_schema.clone().ok_or_else(|| {
+                anyhow::anyhow!("tools[{tool_index}].input_schema: field required for client tools")
             })?;
-            Some(ChatCompletionTool {
+            Ok(ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
                     name: tool.name.clone(),
@@ -1200,42 +535,249 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
     }
 }
 
-// ---------------------------------------------------------------------------
-// Conversion: NvCreateChatCompletionResponse -> AnthropicMessageResponse
-// ---------------------------------------------------------------------------
+/// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
+/// input-token accounting.
+///
+/// Dynamo backends report `prompt_tokens` as the complete prompt and
+/// `cached_tokens` as a subset of it. Anthropic reports the cached subset
+/// separately, so `input_tokens` must exclude it.
+pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> AnthropicUsage {
+    let cache_read_input_tokens = usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens)
+        // A backend must not be able to produce an Anthropic usage breakdown
+        // whose cached subset exceeds the complete prompt.
+        .map(|tokens| tokens.min(usage.prompt_tokens))
+        .filter(|&tokens| tokens > 0);
+
+    AnthropicUsage {
+        input_tokens: usage
+            .prompt_tokens
+            .saturating_sub(cache_read_input_tokens.unwrap_or(0)),
+        output_tokens: usage.completion_tokens,
+        // OpenAI-compatible usage has no cache-write count; keep the Anthropic key present.
+        cache_creation_input_tokens: Some(0),
+        cache_read_input_tokens,
+    }
+}
+
+/// Generate an Anthropic-native `tool_use` id.
+pub(super) fn new_tool_use_id() -> String {
+    format!("toolu_{}", Uuid::new_v4().simple())
+}
+
+/// Decide what an Anthropic `tool_use` block shows for a call whose `arguments` do not
+/// parse, which happens when generation was cut off mid-call at the token limit.
+///
+/// Anthropic's `input` is a typed object, so it cannot carry the raw truncated bytes the
+/// way OpenAI's string-valued `arguments` does. The signal that the call is incomplete
+/// lives in `stop_reason: "max_tokens"` — the value Anthropic's own guidance tells
+/// clients to check before acting on a trailing `tool_use` block — so this function only
+/// decides how much of the call survives in the block.
+///
+/// It keeps the members the model finished writing and drops the one it was still
+/// writing. Nothing is invented: a truncated value is discarded rather than closed with a
+/// guessed quote or brace, so the block never reports a value the model did not emit.
+///
+/// This replaces `unwrap_or(json!({}))`, which turned any unparseable arguments
+/// into a well-formed EMPTY object. That produced a `tool_use` block a client would
+/// happily execute with no arguments and no error anywhere in the response.
+pub(super) fn tool_use_input(
+    tool_name: &str,
+    arguments: &str,
+    truncated: bool,
+) -> Option<serde_json::Value> {
+    // No argument bytes at all is the MOST truncated shape when the limit ended
+    // generation: it landed after the name and before the first argument token.
+    // Only a call the model finished may report an empty object.
+    if arguments.is_empty() {
+        return (!truncated).then(|| serde_json::json!({}));
+    }
+
+    let error = match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(value) => return Some(value),
+        Err(error) => error,
+    };
+
+    if !truncated {
+        tracing::warn!(
+            tool_name = %tool_name,
+            argument_bytes = arguments.len(),
+            error = %error,
+            "suppressing tool_use block with invalid arguments because generation was not cut off"
+        );
+        return None;
+    }
+
+    match recover_completed_members(arguments) {
+        Some(map) => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                argument_bytes = arguments.len(),
+                recovered_members = map.len(),
+                error = %error,
+                "tool call arguments were cut off at the token limit; keeping the members \
+                 that completed. `stop_reason` is `max_tokens`"
+            );
+            Some(serde_json::Value::Object(map))
+        }
+        None => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                argument_bytes = arguments.len(),
+                error = %error,
+                "suppressing truncated tool_use block because no complete member survived"
+            );
+            None
+        }
+    }
+}
+
+/// Return the members of a truncated JSON object that finished, or `None` when none did.
+///
+/// One forward scan tracking string and nesting state, recording the offset of every
+/// top-level `,`. Each such comma is a point where the object was syntactically whole, so
+/// the text before it plus a closing brace is valid JSON built only from bytes the model
+/// actually produced. The last such point is the most that can be recovered.
+///
+/// Returns `None` for a non-object payload, and for an object truncated before its first
+/// member closed — there is nothing to recover, and guessing would invent content.
+fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut last_boundary: Option<usize> = None;
+
+    for (index, ch) in trimmed.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            _ if in_string => {}
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth -= 1,
+            // A top-level comma separates two members, so everything before it is a
+            // complete member list. Depth is 1 while inside the object's own braces.
+            ',' if depth == 1 => last_boundary = Some(index),
+            _ => {}
+        }
+    }
+
+    // Truncation can land after a member's value but before the outer `}`, in which
+    // case there is no trailing comma. Close the object only when the final value is
+    // provably complete; otherwise a partial number such as `2` could be fabricated.
+    if ends_on_a_finished_value(trimmed)
+        && let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            &format!("{}}}", trimmed.trim_end()),
+        )
+    {
+        return Some(map);
+    }
+
+    let boundary = last_boundary?;
+    let candidate = format!("{}}}", &trimmed[..boundary]);
+    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&candidate).ok()
+}
+
+/// Whether the raw suffix proves that the final JSON value ended before truncation.
+fn ends_on_a_finished_value(trimmed: &str) -> bool {
+    let tail = trimmed.trim_end();
+    if tail.len() != trimmed.len() {
+        return true;
+    }
+    if let Some(before_quote) = tail.strip_suffix('"') {
+        let backslashes = before_quote
+            .chars()
+            .rev()
+            .take_while(|ch| *ch == '\\')
+            .count();
+        return backslashes % 2 == 0;
+    }
+    tail.ends_with('}')
+        || tail.ends_with(']')
+        || tail.ends_with("true")
+        || tail.ends_with("false")
+        || tail.ends_with("null")
+}
 
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
     model: &str,
+    api_context: Option<&crate::protocols::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
+    let _ = api_context; // Available for future enrichment (service_tier, etc.)
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
 
-    let choice = chat_resp.choices.into_iter().next();
+    let choice = chat_resp.inner.choices.into_iter().next();
     let mut content = Vec::new();
     let mut stop_reason = None;
 
     if let Some(choice) = choice {
+        // Only the token limit means that a call may have been cut off. The loop
+        // below narrows this choice-level fact to the final call, which is the only
+        // call that can have been interrupted by the limit.
+        let truncated = matches!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+
         // Map finish_reason
         stop_reason = choice.finish_reason.map(|fr| match fr {
-            dynamo_async_openai::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-            dynamo_async_openai::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-            dynamo_async_openai::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
-            dynamo_async_openai::types::FinishReason::ContentFilter => AnthropicStopReason::EndTurn,
-            dynamo_async_openai::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
+            dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
+            dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
+            dynamo_protocols::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
+            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::Refusal,
+            dynamo_protocols::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
         });
 
         // Extract tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
-            for tc in tool_calls {
-                let input: serde_json::Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+            let last_call = tool_calls.len().saturating_sub(1);
+            for (call_index, tc) in tool_calls.into_iter().enumerate() {
+                let Some(input) = tool_use_input(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    truncated && call_index == last_call,
+                ) else {
+                    continue;
+                };
+                let emitted_id = new_tool_use_id();
+                tracing::debug!(
+                    backend_id = %tc.id,
+                    emitted_id = %emitted_id,
+                    "minting Anthropic tool_use id"
+                );
                 content.push(AnthropicResponseContentBlock::ToolUse {
-                    id: tc.id,
+                    id: emitted_id,
                     name: tc.function.name,
                     input,
                 });
             }
+        }
+
+        // `stop_reason: tool_use` is an instruction to run a tool. Suppressing every
+        // call above leaves nothing to run, and Anthropic rejects that turn when the
+        // client sends it back, so the conversation cannot continue. Report the turn
+        // as ended instead. `max_tokens` and `refusal` already explain themselves and
+        // stay as they are.
+        if stop_reason == Some(AnthropicStopReason::ToolUse)
+            && !content
+                .iter()
+                .any(|block| matches!(block, AnthropicResponseContentBlock::ToolUse { .. }))
+        {
+            tracing::warn!(
+                "every tool_use block was suppressed; reporting end_turn instead of tool_use"
+            );
+            stop_reason = Some(AnthropicStopReason::EndTurn);
         }
 
         // Extract reasoning content (from --dyn-reasoning-parser, e.g. qwen3).
@@ -1254,8 +796,8 @@ pub fn chat_completion_to_anthropic_response(
 
         // Extract text content
         let text = match choice.message.content {
-            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Text(t)) => Some(t),
-            Some(dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_)) => {
+            Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(t)) => Some(t),
+            Some(dynamo_protocols::types::ChatCompletionMessageContent::Parts(_)) => {
                 tracing::warn!(
                     "Multimodal (Parts) content in chat completion response replaced with placeholder text in Anthropic conversion."
                 );
@@ -1280,22 +822,16 @@ pub fn chat_completion_to_anthropic_response(
         });
     }
 
-    // Map usage
+    // Keep the cache-creation key present when the backend omits usage entirely.
     let usage = chat_resp
+        .inner
         .usage
-        .map(|u| {
-            let cache_read_input_tokens = u
-                .prompt_tokens_details
-                .and_then(|d| d.cached_tokens)
-                .filter(|&n| n > 0);
-            AnthropicUsage {
-                input_tokens: u.prompt_tokens,
-                output_tokens: u.completion_tokens,
-                cache_creation_input_tokens: None, // Not available from OpenAI format
-                cache_read_input_tokens,
-            }
-        })
-        .unwrap_or_default();
+        .as_ref()
+        .map(completion_usage_to_anthropic)
+        .unwrap_or(AnthropicUsage {
+            cache_creation_input_tokens: Some(0),
+            ..Default::default()
+        });
 
     AnthropicMessageResponse {
         id: msg_id,
@@ -1308,110 +844,6 @@ pub fn chat_completion_to_anthropic_response(
         usage,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Count tokens
-// ---------------------------------------------------------------------------
-
-/// Request body for `POST /v1/messages/count_tokens`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AnthropicCountTokensRequest {
-    pub model: String,
-    pub messages: Vec<AnthropicMessage>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_system_prompt"
-    )]
-    pub system: Option<SystemContent>,
-    #[serde(default)]
-    pub tools: Option<Vec<AnthropicTool>>,
-}
-
-/// Response body for `POST /v1/messages/count_tokens`.
-#[derive(Debug, Clone, Serialize)]
-pub struct AnthropicCountTokensResponse {
-    pub input_tokens: u32,
-}
-
-impl AnthropicCountTokensRequest {
-    /// Estimate input token count using a `len/3` heuristic.
-    pub fn estimate_tokens(&self) -> u32 {
-        let mut total_len: usize = 0;
-
-        if let Some(system) = &self.system {
-            total_len += system.text.len();
-        }
-
-        for msg in &self.messages {
-            // Count role
-            total_len += match msg.role {
-                AnthropicRole::User => 4,
-                AnthropicRole::Assistant => 9,
-            };
-            // Count content
-            match &msg.content {
-                AnthropicMessageContent::Text { content } => total_len += content.len(),
-                AnthropicMessageContent::Blocks { content } => {
-                    for block in content {
-                        total_len += estimate_block_len(block);
-                    }
-                }
-            }
-        }
-
-        if let Some(tools) = &self.tools {
-            for tool in tools {
-                total_len += tool.name.len();
-                if let Some(desc) = &tool.description {
-                    total_len += desc.len();
-                }
-                if let Some(schema) = &tool.input_schema {
-                    total_len += schema.to_string().len();
-                }
-            }
-        }
-
-        let tokens = total_len / 3;
-        if tokens == 0 && total_len > 0 {
-            1
-        } else {
-            tokens as u32
-        }
-    }
-}
-
-fn estimate_block_len(block: &AnthropicContentBlock) -> usize {
-    match block {
-        AnthropicContentBlock::Text { text, .. } => text.len(),
-        AnthropicContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
-        AnthropicContentBlock::ToolResult { content, .. } => content
-            .as_ref()
-            .map(|c| match c {
-                ToolResultContent::Text(s) => s.len(),
-                ToolResultContent::Blocks(blocks) => blocks
-                    .iter()
-                    .map(|b| match b {
-                        ToolResultContentBlock::Text { text } => text.len(),
-                        ToolResultContentBlock::Other(v) => v.to_string().len(),
-                    })
-                    .sum(),
-            })
-            .unwrap_or(0),
-        AnthropicContentBlock::Thinking { thinking, .. } => thinking.len(),
-        AnthropicContentBlock::RedactedThinking { data, .. } => data.len(),
-        AnthropicContentBlock::ServerToolUse { name, input, .. } => {
-            name.len() + input.to_string().len()
-        }
-        AnthropicContentBlock::WebSearchToolResult { content, .. } => content.to_string().len(),
-        AnthropicContentBlock::Image { .. } => 256, // rough estimate for image metadata
-        AnthropicContentBlock::Other(v) => v.to_string().len(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1428,6 +860,7 @@ mod tests {
                     content: "Hello!".into(),
                 },
             }],
+            nvext: None,
             system: None,
             temperature: Some(0.7),
             top_p: None,
@@ -1462,6 +895,65 @@ mod tests {
     }
 
     #[test]
+    fn test_nvext_agent_context_is_rejected() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "nvext": {
+                "agent_context": {
+                    "session_id": "run-123:researcher-0",
+                    "parent_session_id": "run-123:root"
+                }
+            }
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let err = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+
+        assert!(err.to_string().contains("invalid nvext"));
+        assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn test_nvext_agent_context_empty_id_is_still_unknown_field() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "nvext": {
+                "agent_context": {
+                    "session_id": ""
+                }
+            }
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let err = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+
+        assert!(err.to_string().contains("invalid nvext"));
+        assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn test_nvext_unknown_field_errors_in_llm_layer() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "nvext": {
+                "unsupported_future_field": true
+            }
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let err = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+
+        assert!(err.to_string().contains("invalid nvext"));
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
     fn test_system_message_prepended() {
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),
@@ -1472,6 +964,7 @@ mod tests {
                     content: "Hi".into(),
                 },
             }],
+            nvext: None,
             system: Some(SystemContent {
                 text: "You are helpful.".into(),
                 cache_control: None,
@@ -1499,6 +992,48 @@ mod tests {
         ));
         assert!(matches!(
             &chat_req.inner.messages[1],
+            ChatCompletionRequestMessage::User(_)
+        ));
+    }
+
+    #[test]
+    fn test_message_level_system_role_conversion() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Keep answers short."},
+                        {"type": "text", "text": "Use the available shell."}
+                    ]
+                },
+                {"role": "user", "content": "List files"}
+            ]
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req.messages[1].role, AnthropicRole::System));
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat_req.inner.messages.len(), 3);
+        assert!(matches!(
+            &chat_req.inner.messages[0],
+            ChatCompletionRequestMessage::User(_)
+        ));
+        match &chat_req.inner.messages[1] {
+            ChatCompletionRequestMessage::System(system) => match &system.content {
+                ChatCompletionRequestSystemMessageContent::Text(text) => {
+                    assert_eq!(text, "Keep answers short.\nUse the available shell.");
+                }
+                other => panic!("expected text content, got {other:?}"),
+            },
+            other => panic!("expected system message, got {other:?}"),
+        }
+        assert!(matches!(
+            &chat_req.inner.messages[2],
             ChatCompletionRequestMessage::User(_)
         ));
     }
@@ -1538,6 +1073,7 @@ mod tests {
                     },
                 },
             ],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1581,6 +1117,7 @@ mod tests {
                     content: "Hi".into(),
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1597,6 +1134,12 @@ mod tests {
             output_config: None,
         };
 
+        let mut empty_req = req.clone();
+        empty_req.stop_sequences = Some(vec![]);
+        let empty_chat_req: NvCreateChatCompletionRequest = empty_req.try_into().unwrap();
+        assert!(empty_chat_req.inner.stop.is_none());
+        crate::engines::ValidateRequest::validate(&empty_chat_req).unwrap();
+
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.stop.is_some());
     }
@@ -1612,6 +1155,7 @@ mod tests {
                     content: "Hi".into(),
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1652,46 +1196,94 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_tool_choice_conversion_preserves_request_level_parser_policy() {
+        for (label, tool_choice, parsing_enabled) in [
+            ("auto", serde_json::json!({"type": "auto"}), true),
+            ("any", serde_json::json!({"type": "any"}), true),
+            (
+                "named",
+                serde_json::json!({"type": "tool", "name": "get_weather"}),
+                true,
+            ),
+            ("none", serde_json::json!({"type": "none"}), false),
+        ] {
+            let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "tools": [{
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": {"type": "object"}
+                }],
+                "tool_choice": tool_choice
+            }))
+            .unwrap();
+
+            let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+            assert_eq!(
+                chat_req.inner.tools.as_ref().map(Vec::len),
+                Some(1),
+                "{label} must preserve tools"
+            );
+            assert_eq!(
+                crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&chat_req),
+                parsing_enabled,
+                "unexpected parser policy for Anthropic {label}"
+            );
+
+            match (label, chat_req.inner.tool_choice.as_ref()) {
+                ("auto", Some(ChatCompletionToolChoiceOption::Auto))
+                | ("any", Some(ChatCompletionToolChoiceOption::Required))
+                | ("none", Some(ChatCompletionToolChoiceOption::None)) => {}
+                ("named", Some(ChatCompletionToolChoiceOption::Named(named))) => {
+                    assert_eq!(named.function.name, "get_weather");
+                }
+                (_, actual) => panic!("unexpected converted tool choice for {label}: {actual:?}"),
+            }
+        }
+    }
+
     #[allow(deprecated)]
     #[test]
     fn test_chat_completion_to_anthropic_response() {
         let chat_resp = NvCreateChatCompletionResponse {
-            id: "chatcmpl-xyz".into(),
-            choices: vec![dynamo_async_openai::types::ChatChoice {
-                index: 0,
-                message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                    content: Some(
-                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-xyz".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
                             "Hello!".to_string(),
-                        ),
-                    ),
-                    refusal: None,
-                    tool_calls: None,
-                    role: dynamo_async_openai::types::Role::Assistant,
-                    function_call: None,
-                    audio: None,
-                    reasoning_content: None,
-                },
-                finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
-                stop_reason: None,
-                logprobs: None,
-            }],
-            created: 1726000000,
-            model: "test-model".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion".to_string(),
-            usage: Some(dynamo_async_openai::types::CompletionUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-                prompt_tokens_details: None,
-                completion_tokens_details: None,
-            }),
+                        )),
+                        refusal: None,
+                        tool_calls: None,
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: Some(dynamo_protocols::types::CompletionUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    prompt_tokens_details: None,
+                    completion_tokens_details: None,
+                }),
+            },
             nvext: None,
         };
 
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model");
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
         assert!(response.id.starts_with("msg_"));
         assert_eq!(response.object_type, "message");
         assert_eq!(response.role, "assistant");
@@ -1706,6 +1298,160 @@ mod tests {
             }
             _ => panic!("expected text block"),
         }
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn test_anthropic_response_input_tokens_excludes_cached() {
+        // OpenAI prompt_tokens is the total (12) and already includes the
+        // cached tokens (11). Anthropic input_tokens must report only the
+        // uncached portion (12 - 11 = 1), with cache_read reported separately.
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-cache".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "Hi!".to_string(),
+                        )),
+                        refusal: None,
+                        tool_calls: None,
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: Some(dynamo_protocols::types::CompletionUsage {
+                    prompt_tokens: 12,
+                    completion_tokens: 5,
+                    total_tokens: 17,
+                    prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                        audio_tokens: None,
+                        cached_tokens: Some(11),
+                    }),
+                    completion_tokens_details: None,
+                }),
+            },
+            nvext: None,
+        };
+
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        assert_eq!(response.usage.input_tokens, 1);
+        assert_eq!(response.usage.cache_read_input_tokens, Some(11));
+        assert_eq!(response.usage.cache_creation_input_tokens, Some(0));
+        assert_eq!(response.usage.output_tokens, 5);
+
+        let serialized = serde_json::to_value(&response.usage).expect("usage serializes");
+        assert_eq!(serialized["input_tokens"], 1);
+        assert_eq!(serialized["cache_read_input_tokens"], 11);
+        assert_eq!(serialized["cache_creation_input_tokens"], 0);
+        assert_eq!(serialized["output_tokens"], 5);
+    }
+
+    #[test]
+    fn test_anthropic_usage_clamps_cached_tokens_to_prompt_tokens() {
+        let usage = CompletionUsage {
+            prompt_tokens: 12,
+            completion_tokens: 5,
+            total_tokens: 17,
+            prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                audio_tokens: None,
+                cached_tokens: Some(20),
+            }),
+            completion_tokens_details: None,
+        };
+
+        let usage = completion_usage_to_anthropic(&usage);
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn test_anthropic_response_emits_zero_cache_creation_when_backend_reports_no_usage() {
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-no-usage".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "Hi!".to_string(),
+                        )),
+                        refusal: None,
+                        tool_calls: None,
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: None,
+            },
+            nvext: None,
+        };
+
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        assert_eq!(response.usage.cache_creation_input_tokens, Some(0));
+
+        let serialized = serde_json::to_value(&response.usage).expect("usage serializes");
+        assert_eq!(serialized["cache_creation_input_tokens"], 0);
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn test_anthropic_response_does_not_emit_nvext() {
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-xyz".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "Hello!".to_string(),
+                        )),
+                        refusal: None,
+                        tool_calls: None,
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: None,
+            },
+            nvext: Some(serde_json::json!({
+                "worker_id": {"decode_worker_id": 1}
+            })),
+        };
+
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        let value = serde_json::to_value(response).unwrap();
+        assert!(value.get("nvext").is_none(), "got: {value}");
     }
 
     #[test]
@@ -1796,6 +1542,7 @@ mod tests {
                     ],
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1880,6 +1627,7 @@ mod tests {
             model: "test".into(),
             max_tokens: 100,
             messages: req.messages,
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1961,6 +1709,74 @@ mod tests {
             },
             _ => panic!("expected blocks"),
         }
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let ChatCompletionRequestMessage::Tool(tool) = &chat_req.inner.messages[0] else {
+            panic!("expected tool message");
+        };
+        assert_eq!(
+            tool.content,
+            ChatCompletionRequestToolMessageContent::Text("line 1line 2".into())
+        );
+    }
+
+    #[test]
+    fn test_tool_result_image_preserved() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": [
+                        {"type": "text", "text": "Screenshot captured"},
+                        {"type": "image", "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "aGVsbG8="
+                        }}
+                    ]
+                }]
+            }]
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let ChatCompletionRequestMessage::Tool(tool) = &chat_req.inner.messages[0] else {
+            panic!("expected tool message");
+        };
+        let ChatCompletionRequestToolMessageContent::Array(parts) = &tool.content else {
+            panic!("expected array content");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            ChatCompletionRequestToolMessageContentPart::Text(text)
+                if text.text == "Screenshot captured"
+        ));
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[1] else {
+            panic!("expected image_url part");
+        };
+        assert_eq!(
+            image.image_url.as_ref().unwrap().url.as_str(),
+            "data:image/png;base64,aGVsbG8="
+        );
+    }
+
+    #[test]
+    fn test_tool_result_other_block_is_rejected() {
+        let content = ToolResultContent::Blocks(vec![ToolResultContentBlock::Other(
+            serde_json::json!({"type": "document"}),
+        )]);
+
+        let error = convert_tool_result_content(&content).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only text and image are supported")
+        );
     }
 
     #[test]
@@ -1996,6 +1812,7 @@ mod tests {
                 role: AnthropicRole::Assistant,
                 content: AnthropicMessageContent::Blocks { content: blocks },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -2253,100 +2070,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_control_passthrough() {
-        use crate::protocols::openai::nvext::{CacheControl, CacheControlType};
-
-        let req = AnthropicCreateMessageRequest {
-            model: "test-model".into(),
-            max_tokens: 100,
-            messages: vec![AnthropicMessage {
-                role: AnthropicRole::User,
-                content: AnthropicMessageContent::Text {
-                    content: "Hello".into(),
-                },
-            }],
-            system: None,
-            temperature: None,
-            top_p: None,
-            top_k: None,
-            stop_sequences: None,
-            stream: false,
-            metadata: None,
-            tools: None,
-            tool_choice: None,
-            cache_control: Some(CacheControl {
-                control_type: CacheControlType::Ephemeral,
-                ttl: None,
-            }),
-            thinking: None,
-            service_tier: None,
-            container: None,
-            output_config: None,
-        };
-
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext
-            .cache_control
-            .expect("nvext.cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl_seconds(), 300);
-    }
-
-    #[test]
-    fn test_cache_control_1h_ttl_passthrough() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
-        let json = r#"{
-            "model": "test",
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "Hello"}],
-            "cache_control": {"type": "ephemeral", "ttl": "1h"}
-        }"#;
-        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        assert!(req.cache_control.is_some());
-
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext
-            .cache_control
-            .expect("nvext.cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl_seconds(), 3600);
-    }
-
-    #[test]
-    fn test_no_cache_control_passthrough() {
-        let req = AnthropicCreateMessageRequest {
-            model: "test-model".into(),
-            max_tokens: 100,
-            messages: vec![AnthropicMessage {
-                role: AnthropicRole::User,
-                content: AnthropicMessageContent::Text {
-                    content: "Hello".into(),
-                },
-            }],
-            system: None,
-            temperature: None,
-            top_p: None,
-            top_k: None,
-            stop_sequences: None,
-            stream: false,
-            metadata: None,
-            tools: None,
-            tool_choice: None,
-            cache_control: None,
-            thinking: None,
-            service_tier: None,
-            container: None,
-            output_config: None,
-        };
-
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(chat_req.nvext.is_none());
-    }
-
-    #[test]
     fn test_per_block_cache_control_deserialization() {
         let json = r#"{
             "model": "test",
@@ -2377,81 +2100,6 @@ mod tests {
             }
             _ => panic!("expected blocks"),
         }
-    }
-
-    #[test]
-    fn test_per_block_cache_control_last_wins() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
-        let json = r#"{
-            "model": "test",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "system context", "cache_control": {"type": "ephemeral"}},
-                        {"type": "text", "text": "recent context", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
-                    ]
-                }
-            ]
-        }"#;
-        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext.cache_control.expect("cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl_seconds(), 3600); // Last block's 1h TTL wins
-    }
-
-    #[test]
-    fn test_top_level_cache_control_overrides_per_block() {
-        let json = r#"{
-            "model": "test",
-            "max_tokens": 100,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "context", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
-                    ]
-                }
-            ],
-            "cache_control": {"type": "ephemeral"}
-        }"#;
-        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req.nvext.expect("nvext should be set");
-        let cc = nvext.cache_control.expect("cache_control should be set");
-        // Top-level (no TTL = 300s default) takes precedence over per-block (1h)
-        assert_eq!(cc.ttl_seconds(), 300);
-    }
-
-    #[test]
-    fn test_system_block_array_with_cache_control() {
-        use crate::protocols::openai::nvext::CacheControlType;
-
-        let json = r#"{
-            "model": "test",
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "Hello"}],
-            "system": [
-                {"type": "text", "text": "You are a helpful assistant.", "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": "Be concise."}
-            ]
-        }"#;
-        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
-        let system = req.system.as_ref().unwrap();
-        assert_eq!(system.text, "You are a helpful assistant.\nBe concise.");
-        // The LAST block with cache_control wins (first block here)
-        assert!(system.cache_control.is_some());
-
-        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let nvext = chat_req
-            .nvext
-            .expect("nvext should be set from system cache_control");
-        let cc = nvext.cache_control.expect("cache_control should be set");
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
     }
 
     #[test]
@@ -2661,6 +2309,7 @@ mod tests {
                     ],
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -2694,7 +2343,12 @@ mod tests {
                     // Second part: image with data URI
                     match &parts[1] {
                         ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
-                            let url_str = img.image_url.url.to_string();
+                            let url_str = img
+                                .image_url
+                                .as_ref()
+                                .expect("converted image must contain a URL")
+                                .url
+                                .to_string();
                             assert!(
                                 url_str.starts_with("data:image/png;base64,"),
                                 "expected data URI, got: {url_str}"
@@ -2733,6 +2387,7 @@ mod tests {
                     ],
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -2806,6 +2461,7 @@ mod tests {
                     },
                 },
             ],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -2846,5 +2502,257 @@ mod tests {
             &chat_req.inner.messages[3],
             ChatCompletionRequestMessage::Tool(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod anthropic_types_tests {
+    use super::*;
+
+    #[allow(deprecated)]
+    fn converted_tool_use_response_for(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> AnthropicMessageResponse {
+        let tool_calls = arguments
+            .iter()
+            .enumerate()
+            .map(
+                |(index, arguments)| dynamo_protocols::types::ChatCompletionMessageToolCall {
+                    id: format!("call_{}", index + 1),
+                    r#type: dynamo_protocols::types::FunctionType::Function,
+                    function: dynamo_protocols::types::FunctionCall {
+                        name: "record_literal".into(),
+                        arguments: (*arguments).into(),
+                    },
+                },
+            )
+            .collect();
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-wiring".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: None,
+                        refusal: None,
+                        tool_calls: Some(tool_calls),
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(finish_reason),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".into(),
+                usage: None,
+            },
+            nvext: None,
+        };
+        chat_completion_to_anthropic_response(chat_resp, "test-model", None)
+    }
+
+    fn converted_tool_use_inputs(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> Vec<serde_json::Value> {
+        converted_tool_use_response_for(finish_reason, arguments)
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The measured payload: `record_literal` cut off inside the second
+    /// argument's string value. `label` finished, `literal_text` did not.
+    const TRUNCATED: &str =
+        r#"{"label": "customer-eof", "literal_text": "customer-eof-xxxxxxxxxxxxxxxxxxxx"#;
+
+    const MALFORMED_BUT_COMPLETE: &str = r#"{"label": "a", "extra": }"#;
+
+    #[test]
+    fn conversion_recovers_members_only_for_the_final_length_call() {
+        let inputs = converted_tool_use_inputs(
+            dynamo_protocols::types::FinishReason::Length,
+            &[MALFORMED_BUT_COMPLETE, TRUNCATED],
+        );
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0], serde_json::json!({"label": "customer-eof"}));
+    }
+
+    /// A call cut off before its first argument token has no argument bytes. Reporting
+    /// it as an empty object hands the client a runnable zero-argument call.
+    #[test]
+    fn conversion_drops_a_length_call_with_no_argument_bytes() {
+        let inputs =
+            converted_tool_use_inputs(dynamo_protocols::types::FinishReason::Length, &[""]);
+        assert!(inputs.is_empty(), "unexpected tool block: {inputs:?}");
+        assert_eq!(tool_use_input("get_weather", "", true), None);
+        // A call the model finished still reports the empty object.
+        assert_eq!(
+            tool_use_input("get_weather", "", false),
+            Some(serde_json::json!({}))
+        );
+    }
+
+    /// `tool_use` tells the client to run a tool. With every call suppressed there is
+    /// nothing to run, and Anthropic rejects the turn when the client sends it back.
+    #[test]
+    fn conversion_reports_end_turn_when_every_tool_block_is_suppressed() {
+        let response = converted_tool_use_response_for(
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            &[r#"{"label": "cut""#],
+        );
+        assert!(
+            !response
+                .content
+                .iter()
+                .any(|block| matches!(block, AnthropicResponseContentBlock::ToolUse { .. })),
+            "the malformed call must not be emitted"
+        );
+        assert_eq!(response.stop_reason, Some(AnthropicStopReason::EndTurn));
+    }
+
+    #[test]
+    fn conversion_does_not_recover_malformed_non_length_arguments() {
+        for reason in [
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            dynamo_protocols::types::FinishReason::Stop,
+            dynamo_protocols::types::FinishReason::ContentFilter,
+            dynamo_protocols::types::FinishReason::FunctionCall,
+        ] {
+            let inputs = converted_tool_use_inputs(reason, &[TRUNCATED]);
+            assert!(inputs.is_empty(), "unexpected tool block for {reason:?}");
+        }
+    }
+
+    #[test]
+    fn truncated_arguments_keep_the_members_that_completed() {
+        let input = tool_use_input("record_literal", TRUNCATED, true)
+            .expect("completed members should be recovered");
+        let obj = input.as_object().expect("input must stay an object");
+
+        // The finished member survives verbatim.
+        assert_eq!(
+            obj.get("label").and_then(|v| v.as_str()),
+            Some("customer-eof")
+        );
+        // The member still being written is dropped rather than closed with a guess.
+        assert!(
+            !obj.contains_key("literal_text"),
+            "a truncated value must not be reported, got: {input}"
+        );
+        assert_eq!(obj.len(), 1);
+    }
+
+    /// The defect this replaced: every unparseable payload became `{}`, so a client
+    /// received a well-formed tool_use block and executed it with no arguments.
+    #[test]
+    fn truncated_arguments_are_not_silently_emptied() {
+        assert_eq!(
+            tool_use_input("record_literal", TRUNCATED, true),
+            Some(serde_json::json!({"label": "customer-eof"}))
+        );
+    }
+
+    #[test]
+    fn valid_arguments_are_passed_through_unchanged() {
+        let input = tool_use_input("get_weather", r#"{"location": "SF", "unit": "c"}"#, true);
+        assert_eq!(
+            input,
+            Some(serde_json::json!({"location": "SF", "unit": "c"}))
+        );
+    }
+
+    #[test]
+    fn conversion_maps_content_filter_to_refusal() {
+        let response = converted_tool_use_response_for(
+            dynamo_protocols::types::FinishReason::ContentFilter,
+            &[r#"{"label":"blocked"}"#],
+        );
+        assert_eq!(response.stop_reason, Some(AnthropicStopReason::Refusal));
+    }
+
+    #[test]
+    fn final_member_without_closing_brace_is_recovered_when_provably_complete() {
+        assert_eq!(
+            tool_use_input("record_literal", r#"{"label":"done""#, true),
+            Some(serde_json::json!({"label": "done"}))
+        );
+        assert_eq!(
+            recover_completed_members(r#"{"count": 2 "#).unwrap()["count"],
+            2
+        );
+        assert_eq!(
+            recover_completed_members(r#"{"ok": true "#).unwrap()["ok"],
+            true
+        );
+        assert_eq!(
+            recover_completed_members(r#"{"ok": false "#).unwrap()["ok"],
+            false
+        );
+        assert_eq!(
+            recover_completed_members(r#"{"value": null "#).unwrap()["value"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn undelimited_scalar_prefix_is_not_recovered() {
+        assert_eq!(recover_completed_members(r#"{"count": 2"#), None);
+        assert_eq!(recover_completed_members(r#"{"ok": tru"#), None);
+        assert_eq!(recover_completed_members(r#"{"value": nul"#), None);
+    }
+
+    #[test]
+    fn nothing_is_recovered_before_the_first_member_closes() {
+        // Truncated inside the FIRST value: no member ever completed, so there is
+        // nothing to show and inventing one would fabricate an argument.
+        assert_eq!(recover_completed_members(r#"{"label": "customer-eo"#), None);
+        assert_eq!(recover_completed_members("{"), None);
+        assert_eq!(recover_completed_members(""), None);
+        // Not an object at all.
+        assert_eq!(recover_completed_members(r#"["a", "b""#), None);
+    }
+
+    #[test]
+    fn commas_inside_strings_and_nested_values_are_not_member_boundaries() {
+        // A comma inside a string value must not be mistaken for a member boundary.
+        let raw = r#"{"a": "x, y", "b": "unterminated"#;
+        let recovered = recover_completed_members(raw).expect("`a` completed");
+        assert_eq!(recovered.get("a").and_then(|v| v.as_str()), Some("x, y"));
+        assert_eq!(recovered.len(), 1);
+
+        // A comma inside a nested object or array belongs to that value, not the
+        // top-level member list.
+        let raw = r#"{"a": {"p": 1, "q": 2}, "b": [1, 2], "c": "cut"#;
+        let recovered = recover_completed_members(raw).expect("`a` and `b` completed");
+        assert_eq!(
+            recovered.get("a"),
+            Some(&serde_json::json!({"p": 1, "q": 2}))
+        );
+        assert_eq!(recovered.get("b"), Some(&serde_json::json!([1, 2])));
+        assert!(!recovered.contains_key("c"));
+    }
+
+    #[test]
+    fn escaped_quotes_do_not_end_the_string() {
+        // The `\"` must not be read as closing the value, which would make the
+        // following comma look like a top-level boundary.
+        let raw = r#"{"a": "he said \"hi\", ok", "b": "cut"#;
+        let recovered = recover_completed_members(raw).expect("`a` completed");
+        assert_eq!(
+            recovered.get("a").and_then(|v| v.as_str()),
+            Some(r#"he said "hi", ok"#)
+        );
+        assert_eq!(recovered.len(), 1);
     }
 }

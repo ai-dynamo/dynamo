@@ -14,7 +14,7 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 # Defaults
 WAN_SIZE="1b"
 FS_URL="file:///tmp/dynamo_media"
-HTTP_PORT="${HTTP_PORT:-8000}"
+HTTP_PORT="${DYN_HTTP_PORT:-${HTTP_PORT:-8000}}"
 NUM_FRAMES=17
 HEIGHT=480
 WIDTH=832
@@ -128,6 +128,7 @@ python3 -m dynamo.sglang \
     --model-path "$MODEL_PATH" \
     --served-model-name "$MODEL_PATH" \
     --tp "$TP_SIZE" \
+    --nccl-port "${DYN_SYSTEM_PORT2:-30005}" \
     --video-generation-worker \
     --media-output-fs-url "$FS_URL" \
     --trust-remote-code \

@@ -37,12 +37,12 @@ from typing import List, Optional, Tuple
 # Planner-specific types are the canonical hand-written source of truth.
 _IMPORT_OVERRIDES: dict[str, tuple[str, str, bool]] = {
     "PlannerPreDeploymentSweepMode": (
-        "dynamo.planner.utils.planner_config",
+        "dynamo.planner.config.planner_config",
         "PlannerPreDeploymentSweepMode",
         True,
     ),
     "PlannerConfig": (
-        "dynamo.planner.utils.planner_config",
+        "dynamo.planner.config.planner_config",
         "PlannerConfig",
         True,
     ),

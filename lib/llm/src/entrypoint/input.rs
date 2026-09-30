@@ -10,13 +10,12 @@
 use std::{
     fmt,
     io::{IsTerminal as _, Read as _},
-    path::PathBuf,
     str::FromStr,
 };
 
-pub mod batch;
 mod common;
-pub use common::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub(crate) use common::build_preprocessed_routing_with_session_affinity_mode;
+pub use common::{PreprocessedRouting, build_preprocessed_routing};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;
@@ -24,7 +23,7 @@ pub mod text;
 
 use dynamo_runtime::protocols::ENDPOINT_SCHEME;
 
-const BATCH_PREFIX: &str = "batch:";
+use crate::http::service::FrontendRouteExtension;
 
 /// The various ways of connecting prompts to an engine
 #[derive(PartialEq)]
@@ -40,9 +39,6 @@ pub enum Input {
 
     /// Pull requests from a namespace/component/endpoint path.
     Endpoint(String),
-
-    /// Batch mode. Run all the prompts, write the outputs, exit.
-    Batch(PathBuf),
 
     // Run an KServe compatible gRPC server
     Grpc,
@@ -68,10 +64,6 @@ impl TryFrom<&str> for Input {
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
                 Ok(Input::Endpoint(endpoint_path.to_string()))
             }
-            batch_patch if batch_patch.starts_with(BATCH_PREFIX) => {
-                let path = batch_patch.strip_prefix(BATCH_PREFIX).unwrap();
-                Ok(Input::Batch(PathBuf::from(path)))
-            }
             e => Err(anyhow::anyhow!("Invalid in= option '{e}'")),
         }
     }
@@ -85,7 +77,6 @@ impl fmt::Display for Input {
             Input::Text => "text",
             Input::Stdin => "stdin",
             Input::Endpoint(path) => path,
-            Input::Batch(path) => &path.display().to_string(),
         };
         write!(f, "{s}")
     }
@@ -110,38 +101,68 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
-    // Initialize audit bus + sink workers (off hot path; fan-out supported)
-    if crate::audit::config::policy().enabled {
-        let cap: usize = std::env::var("DYN_AUDIT_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1024);
-        crate::audit::bus::init(cap);
-        crate::audit::sink::spawn_workers_from_env().await?;
-        tracing::info!(cap, "Audit initialized");
+    run_input_with_frontend_route_extensions(drt, in_opt, engine_config, Vec::new()).await
+}
+
+/// Run the given engine (EngineConfig) connected to an input, with optional
+/// frontend route extensions for the HTTP frontend.
+pub async fn run_input_with_frontend_route_extensions(
+    drt: dynamo_runtime::DistributedRuntime,
+    in_opt: Input,
+    engine_config: super::EngineConfig,
+    frontend_route_extensions: Vec<FrontendRouteExtension>,
+) -> anyhow::Result<()> {
+    // Frontend route extensions only apply to the HTTP frontend; reject them
+    // once here rather than repeating the guard in every non-HTTP arm.
+    if !matches!(&in_opt, Input::Http) && !frontend_route_extensions.is_empty() {
+        anyhow::bail!("frontend route extensions are only supported by HTTP input");
+    }
+    // Registered before initialization, not after: `spawn_workers` reads the
+    // registration count to decide whether the process-wide sinks follow the
+    // caller's token, and this input owns their teardown.
+    let active_input = crate::request_trace::ActiveInput::register();
+
+    if !matches!(&in_opt, Input::Http) {
+        initialize_input(&drt, &engine_config).await;
     }
 
-    match in_opt {
+    let result = match in_opt {
         Input::Http => {
-            http::run(drt, engine_config).await?;
+            http::run_with_frontend_route_extensions(drt, engine_config, frontend_route_extensions)
+                .await
         }
-        Input::Grpc => {
-            grpc::run(drt, engine_config).await?;
-        }
-        Input::Text => {
-            text::run(drt, None, engine_config).await?;
-        }
+        Input::Grpc => grpc::run(drt, engine_config).await,
+        Input::Text => text::run(drt, None, engine_config).await,
         Input::Stdin => {
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
-            text::run(drt, Some(prompt), engine_config).await?;
+            text::run(drt, Some(prompt), engine_config).await
         }
-        Input::Batch(path) => {
-            batch::run(drt, path, engine_config).await?;
-        }
-        Input::Endpoint(path) => {
-            endpoint::run(drt, path, engine_config).await?;
-        }
+        Input::Endpoint(path) => endpoint::run(drt, path, engine_config).await,
+    };
+
+    // Nothing above this frame waits for the sinks; the caller's next step is
+    // process exit. The result is carried across so a failing input still
+    // drains, and the drain itself only happens once the last input has
+    // finished, because several can share one process.
+    active_input.release_and_drain().await;
+
+    result
+}
+
+pub(crate) async fn initialize_input(
+    drt: &dynamo_runtime::DistributedRuntime,
+    engine_config: &super::EngineConfig,
+) {
+    if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
     }
-    Ok(())
+    if let Err(e) = crate::request_trace::start_tool_event_ingest_from_policy(
+        drt.clone(),
+        engine_config.local_model(),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "Request trace tool event ingest initialization failed; continuing without request trace tool events");
+    }
 }

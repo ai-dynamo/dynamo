@@ -22,6 +22,7 @@ from common import (
     prepare_trace_dataset,
     resolve_tokenizer,
     setup_logger,
+    tag_requests_with_priority,
 )
 
 logger = setup_logger(__name__)
@@ -32,6 +33,11 @@ TIERS = ["low", "medium", "high"]
 def parse_float_list(s):
     """Parse a comma-separated string into a list of floats."""
     return [float(x.strip()) for x in s.split(",")]
+
+
+def parse_int_list(s):
+    """Parse a comma-separated string into a list of ints."""
+    return [int(x.strip()) for x in s.split(",")]
 
 
 def split_trace(requests, distribution, seed):
@@ -81,16 +87,19 @@ def run_concurrent_streams(
     """Launch concurrent aiperf subprocesses for each tier.
 
     Args:
-        tag_priority: If True, inject nvext.agent_hints.latency_sensitivity per tier.
+        tag_priority: If True, inject extra.nvext.agent_hints.priority per tier.
     """
     processes = []
     log_files = []
-    for tier, pj in zip(TIERS, priority_values):
+    for tier, priority in zip(TIERS, priority_values):
         tier_dir = os.path.join(run_dir, f"{tier}_priority")
         os.makedirs(tier_dir, exist_ok=True)
 
         trace_path = os.path.join(tier_dir, "trace.jsonl")
-        write_trace_file(tier_requests[tier], trace_path)
+        requests = tier_requests[tier]
+        if tag_priority:
+            requests = tag_requests_with_priority(requests, priority)
+        write_trace_file(requests, trace_path)
 
         artifact_dir = os.path.join(tier_dir, "aiperf_artifacts")
         os.makedirs(artifact_dir, exist_ok=True)
@@ -105,20 +114,13 @@ def run_concurrent_streams(
             args.url,
         )
         cmd.extend(["--log-level", "WARNING", "--ui-type", "none"])
-        if tag_priority:
-            cmd.extend(
-                [
-                    "--extra-inputs",
-                    json.dumps({"nvext": {"agent_hints": {"latency_sensitivity": pj}}}),
-                ]
-            )
 
         log_path = os.path.join(tier_dir, "aiperf.log")
         log_file = open(log_path, "w")
         log_files.append(log_file)
 
         label = "priority" if tag_priority else "baseline"
-        logger.info(f"Launching {tier} tier ({label}, latency_sensitivity={pj})")
+        logger.info(f"Launching {tier} tier ({label}, priority={priority})")
         logger.info(f"  Command: {' '.join(cmd)}")
 
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
@@ -192,12 +194,13 @@ def plot_ttft_comparison(baseline_dir, priority_dir, output_path, priority_value
         priority_medians,
         width,
         yerr=[priority_lo, priority_hi],
-        label="With latency_sensitivity",
+        label="With priority",
         capsize=4,
     )
 
     tier_labels = [
-        f"{tier.capitalize()}\n(ls={pj})" for tier, pj in zip(TIERS, priority_values)
+        f"{tier.capitalize()}\n(p={priority})"
+        for tier, priority in zip(TIERS, priority_values)
     ]
     ax.set_xticks(x)
     ax.set_xticklabels(tier_labels)
@@ -230,14 +233,14 @@ def main():
         "--priority-values",
         type=str,
         default="0,1,2",
-        help="Comma-separated latency_sensitivity values for low/medium/high tiers (default: 0,1,2)",
+        help="Comma-separated priority values for low/medium/high tiers (default: 0,1,2)",
     )
 
     args = parser.parse_args()
     resolve_tokenizer(args)
 
     distribution = parse_float_list(args.priority_distribution)
-    priority_values = parse_float_list(args.priority_values)
+    priority_values = parse_int_list(args.priority_values)
 
     if len(distribution) != len(TIERS):
         parser.error(

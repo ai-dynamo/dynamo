@@ -6,16 +6,26 @@
 import argparse
 from typing import Optional
 
-from tensorrt_llm.llmapi import BuildConfig
+# trtllm >= 1.3.0rc21 removed BuildConfig; its fields moved to BaseLlmArgs
+# Remove this try-except once we bump trtllm version to >= 1.3.0rc21
+try:
+    from tensorrt_llm.llmapi import BuildConfig
+except ImportError:
+    from tensorrt_llm.llmapi.llm_args import BaseLlmArgs as BuildConfig
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.frontend_decoding_args import (
+    add_frontend_decoding_arg,
+)
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
 from .constants import DisaggregationMode, Modality
 
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+CANONICAL_AGGREGATED_MODE = "agg"
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 
 
 class DynamoTrtllmArgGroup(ArgGroup):
@@ -74,6 +84,26 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_ENABLE_ATTENTION_DP",
             default=False,
             help="Enable attention data parallelism. When enabled, attention_dp_size equals tensor_parallel_size.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--conversation-affinity",
+            env_var="DYN_ENGINE_CONV_AFFINITY",
+            default=False,
+            help="Force TensorRT-LLM conversation-affinity ADP routing regardless of engine "
+            "config detection. Initial DP-rank placement is controlled by "
+            "--conversation-affinity-dp-rank-source.",
+        )
+        add_argument(
+            g,
+            flag_name="--conversation-affinity-dp-rank-source",
+            env_var="DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE",
+            default="engine",
+            choices=["engine", "dynamo"],
+            help="Select initial attention-DP placement while conversation affinity is enabled. "
+            "'engine' lets TensorRT-LLM load-balance the first request; 'dynamo' forwards the "
+            "Dynamo router's selected rank and requires a TensorRT-LLM build containing "
+            "NVIDIA/TensorRT-LLM#16815 or equivalent.",
         )
         add_argument(
             g,
@@ -148,25 +178,74 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--publish-events-and-metrics",
-            env_var="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS",
+            flag_name="--publish-kv-events",
+            env_var="DYN_TRTLLM_PUBLISH_KV_EVENTS",
             default=False,
-            help="If set, publish events and metrics to Dynamo components.",
+            help=(
+                "Publish KV cache events to the KV router. This does not enable "
+                "TensorRT-LLM iteration statistics: use --publish-metrics for "
+                "Prometheus metrics, and --fpm-trace or DYN_FORWARDPASS_METRIC_PORT "
+                "for the Planner's forward-pass metrics."
+            ),
+            dest="publish_kv_events",
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--disable-request-abort",
-            env_var="DYN_TRTLLM_DISABLE_REQUEST_ABORT",
-            default=True,
-            help="Disable calling abort() on the TRT-LLM engine when a request is cancelled.",
+            flag_name="--publish-metrics",
+            env_var="DYN_TRTLLM_PUBLISH_METRICS",
+            default=False,
+            help=(
+                "Expose TensorRT-LLM iteration and request metrics on this "
+                "worker's Prometheus endpoint, and publish the Planner's "
+                "forward-pass metrics, which read the same iteration "
+                "statistics. This does not publish KV cache events; use "
+                "--publish-kv-events for that."
+            ),
+            dest="publish_metrics",
+        )
+        add_argument(
+            g,
+            flag_name="--load-format",
+            env_var="DYN_TRTLLM_LOAD_FORMAT",
+            default="auto",
+            help="Model weight loading format passed to TensorRT-LLM (e.g. 'auto', 'gms').",
+        )
+        add_argument(
+            g,
+            flag_name="--model-loader-extra-config",
+            env_var="DYN_TRTLLM_MODEL_LOADER_EXTRA_CONFIG",
+            default="",
+            help=(
+                "JSON object passed as extra config to the model loader "
+                "(e.g. '{\"gms_read_only\": true}')."
+            ),
         )
         add_argument(
             g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
-            default=DisaggregationMode.AGGREGATED.value,
-            choices=[mode.value for mode in DisaggregationMode],
-            help="Mode to use for disaggregation.",
+            default=CANONICAL_AGGREGATED_MODE,
+            choices=[
+                CANONICAL_AGGREGATED_MODE,
+                PREFILL_DECODE_DISAGGREGATION_MODE,
+                *[
+                    mode.value
+                    for mode in DisaggregationMode
+                    if mode != DisaggregationMode.AGGREGATED
+                ],
+            ],
+            help=(
+                "Worker disaggregation mode. Use 'agg' for aggregated serving, "
+                "'pd' for a combined prefill+decode worker, 'prefill', "
+                "'decode', or 'encode'."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-multimodal",
+            env_var="DYN_TRTLLM_ENABLE_MULTIMODAL",
+            default=False,
+            help="Enable multimodal LLM request processing.",
         )
         add_argument(
             g,
@@ -174,7 +253,10 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_MODALITY",
             default=Modality.TEXT.value,
             choices=[m.value for m in Modality],
-            help="Modality to use for the model.",
+            help=(
+                "Modality to use for the model. For multimodal LLM serving, "
+                "prefer --enable-multimodal; diffusion modalities remain here."
+            ),
         )
         add_argument(
             g,
@@ -198,6 +280,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="Maximum size of downloadable embedding files/Image URLs.",
         )
+        add_frontend_decoding_arg(g, env_prefix="TRTLLM")
 
         # --- Guided Decoding ---
         add_argument(
@@ -210,95 +293,14 @@ class DynamoTrtllmArgGroup(ArgGroup):
             "Options: xgrammar, llguidance.",
         )
 
+        # --- Diffusion Options ---
+        self._add_diffusion_arguments(parser)
+        self._add_diffusion_request_arguments(parser)
+
+    def _add_diffusion_arguments(self, parser: argparse.ArgumentParser) -> None:
         diffusion_group = parser.add_argument_group(
             "Diffusion Options [Experimental]",
-            "Options for video_diffusion modality",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-height",
-            env_var="DYN_TRTLLM_DEFAULT_HEIGHT",
-            default=480,
-            arg_type=int,
-            help="Default video/image height in pixels.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-width",
-            env_var="DYN_TRTLLM_DEFAULT_WIDTH",
-            default=832,
-            arg_type=int,
-            help="Default video/image width in pixels.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-num-frames",
-            env_var="DYN_TRTLLM_DEFAULT_NUM_FRAMES",
-            default=81,
-            arg_type=int,
-            help="Default number of frames for video generation.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-num-inference-steps",
-            env_var="DYN_TRTLLM_DEFAULT_NUM_INFERENCE_STEPS",
-            default=50,
-            arg_type=int,
-            help="Default number of inference steps.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--default-guidance-scale",
-            env_var="DYN_TRTLLM_DEFAULT_GUIDANCE_SCALE",
-            default=5.0,
-            arg_type=float,
-            help="Default CFG guidance scale.",
-        )
-
-        add_argument(
-            diffusion_group,
-            flag_name="--torch-dtype",
-            env_var="DYN_TRTLLM_TORCH_DTYPE",
-            default="bfloat16",
-            choices=["bfloat16", "float16", "float32"],
-            help="Torch dtype for model loading. bfloat16 recommended for Ampere+ GPUs.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--revision",
-            env_var="DYN_TRTLLM_REVISION",
-            default=None,
-            help="HuggingFace Hub revision (branch, tag, or commit SHA) for model download.",
-        )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--enable-teacache",
-            env_var="DYN_TRTLLM_ENABLE_TEACACHE",
-            default=False,
-            help="Enable TeaCache optimization for faster generation.",
-        )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--teacache-use-ret-steps",
-            env_var="DYN_TRTLLM_TEACACHE_USE_RET_STEPS",
-            default=True,
-            help="Use retention steps for TeaCache.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--teacache-thresh",
-            env_var="DYN_TRTLLM_TEACACHE_THRESH",
-            default=0.2,
-            arg_type=float,
-            help="TeaCache threshold.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--attn-backend",
-            env_var="DYN_TRTLLM_ATTN_BACKEND",
-            default="VANILLA",
-            choices=["VANILLA", "TRTLLM"],
-            help="Attention backend for diffusion models. VANILLA = PyTorch SDPA, TRTLLM = TensorRT-LLM kernels.",
+            "Generic options for diffusion pipeline",
         )
         add_argument(
             diffusion_group,
@@ -324,18 +326,47 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             diffusion_group,
+            flag_name="--enable-teacache",
+            env_var="DYN_TRTLLM_ENABLE_TEACACHE",
+            default=False,
+            help="Enable TeaCache optimization for faster generation.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--teacache-use-ret-steps",
+            env_var="DYN_TRTLLM_TEACACHE_USE_RET_STEPS",
+            default=True,
+            help="Use retention steps for TeaCache.",
+        )
+        add_argument(
+            diffusion_group,
+            flag_name="--teacache-thresh",
+            env_var="DYN_TRTLLM_TEACACHE_THRESH",
+            default=0.2,
+            arg_type=float,
+            help="TeaCache threshold.",
+        )
+        add_argument(
+            diffusion_group,
+            flag_name="--torch-dtype",
+            env_var="DYN_TRTLLM_TORCH_DTYPE",
+            default="bfloat16",
+            choices=["bfloat16", "float16", "float32"],
+            help="Torch dtype for model loading. bfloat16 recommended for Ampere+ GPUs.",
+        )
+        add_argument(
+            diffusion_group,
+            flag_name="--revision",
+            env_var="DYN_TRTLLM_REVISION",
+            default=None,
+            help="HuggingFace Hub revision (branch, tag, or commit SHA) for model download.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
             flag_name="--disable-torch-compile",
             env_var="DYN_TRTLLM_DISABLE_TORCH_COMPILE",
             default=False,
             help="Disable torch.compile optimization.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--torch-compile-mode",
-            env_var="DYN_TRTLLM_TORCH_COMPILE_MODE",
-            default="default",
-            choices=["default", "reduce-overhead", "max-autotune"],
-            help="torch.compile mode.",
         )
         add_negatable_bool_argument(
             diffusion_group,
@@ -346,48 +377,18 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             diffusion_group,
-            flag_name="--fuse-qkv",
-            env_var="DYN_TRTLLM_FUSE_QKV",
-            default=True,
-            help="Enable QKV fusion for transformer attention layers.",
-        )
-        add_negatable_bool_argument(
-            diffusion_group,
             flag_name="--enable-cuda-graph",
             env_var="DYN_TRTLLM_ENABLE_CUDA_GRAPH",
             default=False,
             help="Enable CUDA graph capture for transformer forward passes. Mutually exclusive with torch.compile.",
         )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--enable-layerwise-nvtx-marker",
-            env_var="DYN_TRTLLM_ENABLE_LAYERWISE_NVTX_MARKER",
-            default=False,
-            help="Enable per-layer NVTX markers for profiling with Nsight Systems.",
-        )
         add_argument(
             diffusion_group,
-            flag_name="--warmup-steps",
-            env_var="DYN_TRTLLM_WARMUP_STEPS",
-            default=1,
-            arg_type=int,
-            help="Number of denoising steps to run during warmup (0 to disable).",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--dit-dp-size",
-            env_var="DYN_TRTLLM_DIT_DP_SIZE",
-            default=1,
-            arg_type=int,
-            help="Data parallel size for DiT.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--dit-tp-size",
-            env_var="DYN_TRTLLM_DIT_TP_SIZE",
-            default=1,
-            arg_type=int,
-            help="Tensor parallel size for DiT.",
+            flag_name="--attn-backend",
+            env_var="DYN_TRTLLM_ATTN_BACKEND",
+            default="VANILLA",
+            choices=["VANILLA", "TRTLLM"],
+            help="Attention backend for diffusion models. VANILLA = PyTorch SDPA, TRTLLM = TensorRT-LLM kernels.",
         )
         add_argument(
             diffusion_group,
@@ -413,31 +414,78 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="CFG parallel size for DiT.",
         )
-        add_argument(
+        add_negatable_bool_argument(
             diffusion_group,
-            flag_name="--dit-fsdp-size",
-            env_var="DYN_TRTLLM_DIT_FSDP_SIZE",
-            default=1,
-            arg_type=int,
-            help="FSDP size for DiT.",
+            flag_name="--enable-layerwise-nvtx-marker",
+            env_var="DYN_TRTLLM_ENABLE_LAYERWISE_NVTX_MARKER",
+            default=False,
+            help="Enable per-layer NVTX markers for profiling with Nsight Systems.",
         )
         add_negatable_bool_argument(
             diffusion_group,
-            flag_name="--enable-async-cpu-offload",
-            env_var="DYN_TRTLLM_ENABLE_ASYNC_CPU_OFFLOAD",
+            flag_name="--skip-warmup",
+            env_var="DYN_TRTLLM_SKIP_WARMUP",
             default=False,
-            help="Enable async CPU offload for memory efficiency.",
+            help="Skip warmup inference during initialization.",
+        )
+
+    def _add_diffusion_request_arguments(self, parser: argparse.ArgumentParser) -> None:
+        # Check TRT-LLM's public VisualGenParams for the list of fields. Note that
+        # we only add the fields that can be set in request, otherwise we use
+        # TRT-LLM's default values by not setting them at all.
+        diffusion_request_group = parser.add_argument_group(
+            "Diffusion Request Options [Experimental]",
+            "Options to set default values for video/image generation requests",
         )
         add_argument(
-            diffusion_group,
-            flag_name="--skip-components",
-            env_var="DYN_TRTLLM_SKIP_COMPONENTS",
-            default="",
-            help=(
-                "Comma-separated list of pipeline components to skip loading. "
-                "Valid values: transformer, vae, text_encoder, tokenizer, scheduler, "
-                "image_encoder, image_processor."
-            ),
+            diffusion_request_group,
+            flag_name="--default-height",
+            env_var="DYN_TRTLLM_DEFAULT_HEIGHT",
+            default=480,
+            arg_type=int,
+            help="Default video/image height in pixels.",
+        )
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-width",
+            env_var="DYN_TRTLLM_DEFAULT_WIDTH",
+            default=832,
+            arg_type=int,
+            help="Default video/image width in pixels.",
+        )
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-num-inference-steps",
+            env_var="DYN_TRTLLM_DEFAULT_NUM_INFERENCE_STEPS",
+            default=50,
+            arg_type=int,
+            help="Default number of inference steps.",
+        )
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-guidance-scale",
+            env_var="DYN_TRTLLM_DEFAULT_GUIDANCE_SCALE",
+            default=5.0,
+            arg_type=float,
+            help="Default CFG guidance scale.",
+        )
+        # Video specific args
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-num-frames",
+            env_var="DYN_TRTLLM_DEFAULT_NUM_FRAMES",
+            default=81,
+            arg_type=int,
+            help="Default number of frames for video generation.",
+        )
+        # Image specific args
+        add_argument(
+            diffusion_request_group,
+            flag_name="--default-num-images-per-prompt",
+            env_var="DYN_TRTLLM_DEFAULT_NUM_IMAGES_PER_PROMPT",
+            default=1,
+            arg_type=int,
+            help="Default number of images per prompt for image generation.",
         )
 
 
@@ -451,6 +499,8 @@ class DynamoTrtllmConfig(ConfigBase):
     pipeline_parallel_size: int
     expert_parallel_size: Optional[int]
     enable_attention_dp: bool
+    conversation_affinity: bool
+    conversation_affinity_dp_rank_source: str
     kv_block_size: int
     gpus_per_node: Optional[int] = None
     max_batch_size: int
@@ -460,19 +510,24 @@ class DynamoTrtllmConfig(ConfigBase):
     free_gpu_memory_fraction: float
     extra_engine_args: str
     override_engine_args: str
-    publish_events_and_metrics: bool
-    disable_request_abort: bool
+    publish_kv_events: bool
+    publish_metrics: bool
+    load_format: str
+    model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
+    enable_multimodal: bool
     modality: Modality
     encode_endpoint: str
     allowed_local_media_path: str
     max_file_size_mb: int
+    frontend_decoding: bool
 
     default_height: int
     default_width: int
     default_num_frames: int
+    default_num_images_per_prompt: int
     default_num_inference_steps: int
     default_guidance_scale: float
     torch_dtype: str
@@ -484,25 +539,40 @@ class DynamoTrtllmConfig(ConfigBase):
     quant_algo: Optional[str]
     quant_dynamic: bool
     disable_torch_compile: bool
-    torch_compile_mode: str
     enable_fullgraph: bool
-    fuse_qkv: bool
     enable_cuda_graph: bool
     enable_layerwise_nvtx_marker: bool
-    warmup_steps: int
-    dit_dp_size: int
-    dit_tp_size: int
+    skip_warmup: bool
     dit_ulysses_size: int
     dit_ring_size: int
     dit_cfg_size: int
-    dit_fsdp_size: int
-    enable_async_cpu_offload: bool
-    skip_components: str
 
     def validate(self) -> None:
         if isinstance(self.disaggregation_mode, str):
-            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+            if self.disaggregation_mode == DisaggregationMode.AGGREGATED.value:
+                raise ValueError(
+                    "--disaggregation-mode=prefill_and_decode is no longer supported; "
+                    "use --disaggregation-mode=agg for aggregated serving or "
+                    "--disaggregation-mode=pd for a combined prefill+decode worker."
+                )
+            if self.disaggregation_mode in {
+                CANONICAL_AGGREGATED_MODE,
+                PREFILL_DECODE_DISAGGREGATION_MODE,
+            }:
+                self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            else:
+                self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
             self.modality = Modality(self.modality)
+        if self.enable_multimodal:
+            if Modality.is_diffusion(self.modality):
+                raise ValueError(
+                    "--enable-multimodal cannot be combined with "
+                    f"--modality {self.modality.value}. Use --modality only for "
+                    "diffusion models."
+                )
+            self.modality = Modality.MULTIMODAL
+        elif self.modality == Modality.MULTIMODAL:
+            self.enable_multimodal = True
         if not self.served_model_name:
             self.served_model_name = None

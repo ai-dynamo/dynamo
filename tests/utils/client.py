@@ -39,8 +39,10 @@ def _sanitize_payload_for_logging(payload: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "image_url":
-                        image_url = part.get("image_url", {})
-                        if "url" in image_url:
+                        image_url = part.get("image_url")
+                        if isinstance(image_url, dict) and isinstance(
+                            image_url.get("url"), str
+                        ):
                             image_url["url"] = _truncate_base64_url(image_url["url"])
 
     return sanitized
@@ -159,6 +161,7 @@ def wait_for_model_availability(
     logger: logging.Logger,
     max_attempts: int = 15,
     attempt_timeouts: list[float] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> bool:
     """
     Wait for model to be available by sending test requests.
@@ -197,7 +200,9 @@ def wait_for_model_availability(
             logger.debug(
                 f"Testing model availability at {test_url} (attempt {attempt+1}/{max_attempts}, timeout={timeout_val}s)"
             )
-            response = requests.post(test_url, json=test_payload, timeout=timeout_val)
+            response = requests.post(
+                test_url, json=test_payload, timeout=timeout_val, headers=headers
+            )
 
             if response.status_code == 200:
                 logger.info(f"Model '{model}' is available and responding")

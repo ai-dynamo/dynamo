@@ -3,8 +3,8 @@
 
 use super::*;
 
+use super::zmq::*;
 use utils::*;
-use zmq::*;
 
 use derive_builder::Builder;
 use std::sync::Arc;

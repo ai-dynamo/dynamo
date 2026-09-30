@@ -6,17 +6,20 @@
 //! This is a simplified subscriber that deserializes raw vLLM/TensorRT-LLM events.
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use rmp_serde::Deserializer;
 use serde::Deserialize;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use zeromq::{Socket, SocketRecv, SubSocket};
 
-use dynamo_kv_router::zmq_wire::RawKvEvent;
+use dynamo_kv_router::protocols::StorageTier as RouterStorageTier;
+use dynamo_kv_router::zmq_wire::{KvEventOwnership, Locality, RawKvEvent};
 
-use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
+use super::SharedCacheStatusTracker;
+use super::tracker::{
+    CacheStatusTracker, EventSource, RemoveEventInput, StorageTier, StoreEventInput,
+};
+use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 /// Event batch received from vLLM/TensorRT-LLM (array format)
 /// Format: [timestamp, [events], data_parallel_rank]
@@ -47,7 +50,7 @@ impl VllmEventBatch {
 /// Start ZMQ listener and process events into tracker
 pub async fn start_simple_zmq_listener(
     endpoint: String,
-    tracker: Arc<RwLock<CacheStatusTracker>>,
+    tracker: SharedCacheStatusTracker,
     cancellation_token: CancellationToken,
     engine_source: EventSource,
 ) -> Result<JoinHandle<()>> {
@@ -64,7 +67,7 @@ pub async fn start_simple_zmq_listener(
 
 async fn run_listener_loop(
     endpoint: String,
-    tracker: Arc<RwLock<CacheStatusTracker>>,
+    tracker: SharedCacheStatusTracker,
     cancellation_token: CancellationToken,
     engine_source: EventSource,
 ) -> Result<()> {
@@ -73,15 +76,10 @@ async fn run_listener_loop(
         endpoint
     );
 
-    let mut socket = SubSocket::new();
-    socket
-        .connect(&endpoint)
+    let socket = connect_sub_socket(&endpoint, None)
         .await
-        .context("Failed to connect to ZMQ endpoint")?;
-    socket
-        .subscribe("")
-        .await
-        .context("Failed to subscribe to ZMQ topics")?;
+        .with_context(|| format!("Failed to connect to ZMQ endpoint {endpoint}"))?;
+    let mut socket = socket;
 
     tracing::info!(
         "KV event consolidator ZMQ listener successfully connected to {}",
@@ -97,18 +95,19 @@ async fn run_listener_loop(
                 break;
             }
 
-            msg_result = socket.recv() => {
-                let Ok(msg) = msg_result else {
-                    tracing::warn!("Error receiving ZMQ message: {:?}", msg_result.unwrap_err());
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    continue;
+            msg_result = socket.next() => {
+                let frames = match msg_result {
+                    Some(Ok(frames)) => multipart_message(frames),
+                    Some(Err(error)) => {
+                        tracing::error!("Error receiving ZMQ message: {error}");
+                        break;
+                    }
+                    None => break,
                 };
 
                 // Parse multipart message: supports both formats
                 // - 2 frames: [topic, payload]
                 // - 3 frames: [topic, sequence, payload]
-                let frames: Vec<Vec<u8>> = msg.into_vec().into_iter().map(|f| f.to_vec()).collect();
-
                 let payload = match frames.len() {
                     2 => &frames[1],  // [topic, payload]
                     3 => &frames[2],  // [topic, sequence, payload]
@@ -139,7 +138,7 @@ async fn run_listener_loop(
                 // Process events
                 let mut tracker_guard = tracker.write().await;
                 for event in batch.events() {
-                    process_event(&mut tracker_guard, event.clone(), dp_rank, engine_source);
+                    process_event(&mut **tracker_guard, event.clone(), dp_rank, engine_source);
                 }
             }
         }
@@ -149,11 +148,31 @@ async fn run_listener_loop(
 }
 
 fn process_event(
-    tracker: &mut CacheStatusTracker,
+    tracker: &mut dyn CacheStatusTracker,
     event: RawKvEvent,
     data_parallel_rank: Option<i32>,
     engine_source: EventSource,
 ) {
+    // Compatibility with v1.2 framework-only producers during v1.4 rolling upgrades.
+    // TODO(v1.5): Remove with the legacy consolidator subscription after v1.2
+    // leaves N-2 and residency-v2 producers use only the versioned source.
+    if event.ownership() != Ok(KvEventOwnership::Framework) {
+        tracing::warn!("Ignoring non-framework event on the legacy consolidator stream");
+        return;
+    }
+    // G1-only ingress: this source is the engine's local device (G1) cache.
+    // Non-local events (REMOTE / unknown locality), native lower-tier media
+    // (CPU offload, vLLM STORAGE), and unrecognized media (fail-closed) belong
+    // to other systems — KVBM offload arrives via its own source — so they must
+    // not be tracked as G1 here.
+    if matches!(event.locality(), Some(Locality::Remote | Locality::Unknown))
+        || event.medium().is_some_and(|m| {
+            RouterStorageTier::from_kv_medium(m) != Some(RouterStorageTier::Device)
+        })
+    {
+        return;
+    }
+
     match event {
         RawKvEvent::BlockStored {
             block_hashes,
@@ -207,23 +226,27 @@ fn process_event(
                 let block_tokens = token_chunks[i].clone();
                 let block_hash_u64 = block_hash.into_u64();
 
-                tracker.handle_store(
-                    block_hash_u64.to_string(),
-                    engine_source,
-                    block_tokens,
-                    current_parent.clone(),
+                tracker.handle_store(StoreEventInput {
+                    block_hash: block_hash_u64.to_string(),
+                    source: engine_source,
+                    token_ids: block_tokens,
+                    parent_hash: current_parent.clone(),
                     block_size,
-                    lora_name.clone(),
-                    Some(storage_tier),
+                    lora_name: lora_name.clone(),
+                    tier: Some(storage_tier),
                     data_parallel_rank,
-                );
+                });
 
                 // Next block's parent is this block (only if hash was valid)
                 current_parent = Some(block_hash_u64.to_string());
             }
         }
 
-        RawKvEvent::BlockRemoved { block_hashes, medium } => {
+        RawKvEvent::BlockRemoved {
+            block_hashes,
+            medium,
+            ..
+        } => {
             let storage_tier = medium
                 .as_ref()
                 .and_then(|m| StorageTier::from_vllm_medium(m))
@@ -236,13 +259,100 @@ fn process_event(
             );
 
             for block_hash in block_hashes {
-                tracker.handle_remove(&block_hash.into_u64().to_string(), engine_source);
+                tracker.handle_remove(RemoveEventInput {
+                    block_hash: block_hash.into_u64().to_string(),
+                    source: engine_source,
+                    tier: Some(storage_tier),
+                });
             }
         }
 
-        RawKvEvent::AllBlocksCleared => {
+        RawKvEvent::AllBlocksCleared { .. } => {
             tracing::debug!("Processing AllBlocksCleared");
             tracker.handle_clear_all();
         }
+
+        RawKvEvent::Ignored => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tracker::{ConsolidatedEvent, PassthroughCacheStatusTracker, StorageTier};
+    use super::*;
+    use dynamo_kv_router::zmq_wire::BlockHashValue;
+
+    fn stored_event(medium: Option<&str>, locality: Option<Locality>) -> RawKvEvent {
+        RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(1)],
+            parent_block_hash: None,
+            token_ids: vec![10, 11],
+            block_size: 2,
+            medium: medium.map(str::to_owned),
+            lora_name: None,
+            cache_namespace: None,
+            block_mm_infos: None,
+            is_eagle: Some(false),
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+            locality,
+            ownership: None,
+            session_id: None,
+        }
+    }
+
+    /// G1-only ingress contract: only local device (G1) events reach the
+    /// tracker. Native lower-tier media (vLLM STORAGE, CPU offload), unrecognized
+    /// media (FS), and non-local (REMOTE / unknown locality) events are dropped.
+    #[test]
+    fn process_event_tracks_only_g1_device_events() {
+        let mut tracker = PassthroughCacheStatusTracker::new();
+
+        process_event(
+            &mut tracker,
+            stored_event(Some("STORAGE"), None),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("CPU"), None),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("FS"), None),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("GPU"), Some(Locality::Remote)),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(None, Some(Locality::Unknown)),
+            None,
+            EventSource::Vllm,
+        );
+        assert!(tracker.drain_events().is_empty());
+
+        process_event(
+            &mut tracker,
+            stored_event(None, None),
+            None,
+            EventSource::Vllm,
+        );
+        assert!(matches!(
+            tracker.drain_events().as_slice(),
+            [ConsolidatedEvent::Store {
+                tier: Some(StorageTier::Device),
+                ..
+            }]
+        ));
     }
 }

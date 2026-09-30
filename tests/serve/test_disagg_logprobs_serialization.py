@@ -32,10 +32,10 @@ import pytest
 
 try:
     from tensorrt_llm.executor.result import Logprob
-
-    from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 except ImportError as e:
     pytest.skip(f"tensorrt_llm import failed: {e}", allow_module_level=True)
+
+from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
 
 def _to_asdict_format(logprob_dicts):
@@ -49,6 +49,7 @@ def _to_asdict_format(logprob_dicts):
 
 @pytest.mark.pre_merge
 @pytest.mark.trtllm
+@pytest.mark.core
 @pytest.mark.gpu_0
 @pytest.mark.unit
 class TestDisaggLogprobsSerializationRoundtrip:

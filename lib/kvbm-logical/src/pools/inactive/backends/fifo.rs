@@ -19,7 +19,7 @@ pub type PriorityKey = u64;
 
 /// FIFO reuse policy
 #[derive(Debug)]
-pub struct FifoReusePolicy {
+pub(crate) struct FifoReusePolicy {
     keys: HashMap<BlockId, PriorityKey>,
     blocks: BTreeMap<PriorityKey, InactiveBlock>,
     next_seq: u64,
@@ -92,25 +92,13 @@ impl ReusePolicy for FifoReusePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{TestMeta, create_staged_block};
+    use crate::testing::hash_for_tokens;
 
-    // Use TestMeta instead of local TestData
-    type TestData = TestMeta;
-
-    // Wrapper for backward compatibility
-    fn create_completed_block<T: crate::blocks::BlockMetadata + std::fmt::Debug>(
-        tokens: &[u32],
-        block_id: BlockId,
-    ) -> crate::blocks::Block<T, crate::blocks::state::Staged> {
-        create_staged_block::<T>(block_id, tokens)
-    }
-
-    /// Helper function to create InactiveBlock instances for testing
-    fn create_inactive_block(block_id: BlockId, seq_hash: u64) -> InactiveBlock {
-        let complete_block = create_completed_block::<TestData>(&[seq_hash as u32], block_id);
+    /// Helper function to create InactiveBlock instances for testing.
+    fn create_inactive_block(block_id: BlockId, seed: u64) -> InactiveBlock {
         InactiveBlock {
             block_id,
-            seq_hash: complete_block.sequence_hash(),
+            seq_hash: hash_for_tokens(&[seed as u32]),
         }
     }
 

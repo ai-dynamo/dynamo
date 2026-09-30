@@ -1,0 +1,2956 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::path::Path;
+
+use anyhow::{Result, bail};
+use dynamo_kv_router::config::KvRouterConfig;
+
+use super::online;
+use super::validate::{
+    validate_offline_concurrency_args, validate_offline_disagg_concurrency_args,
+    validate_offline_disagg_replay_args, validate_offline_replay_args,
+    validate_online_concurrency_args, validate_online_replay_args,
+};
+use super::{
+    OfflineDisaggReplayConfig, ReplayCaptureOptions, ReplayPrefillLoadEstimator, ReplayRouterMode,
+    ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
+};
+use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat, load_weka_agentic_graph};
+use crate::scheduler::RouterEventVisibility;
+
+/// Replay artifact KV-event timestamp visibility override.
+///
+/// This is intended for parity tests that need to normalize event visibility
+/// across mock engines while leaving each engine's production default intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayKvEventVisibility {
+    PassStart,
+    PassEnd,
+}
+
+impl From<ReplayKvEventVisibility> for RouterEventVisibility {
+    fn from(visibility: ReplayKvEventVisibility) -> Self {
+        match visibility {
+            ReplayKvEventVisibility::PassStart => Self::PassStart,
+            ReplayKvEventVisibility::PassEnd => Self::PassEnd,
+        }
+    }
+}
+
+fn load_trace_from_file(
+    trace_path: &Path,
+    trace_block_size: usize,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+) -> Result<Trace> {
+    match trace_format {
+        TraceFileFormat::Mooncake | TraceFileFormat::MooncakeDelta => {
+            Trace::from_mooncake(trace_path, trace_block_size)
+        }
+        TraceFileFormat::AgenticMooncake | TraceFileFormat::Weka => bail!(
+            "{} trace format must be loaded as an agentic workload",
+            trace_format.as_str()
+        ),
+        TraceFileFormat::AppliedComputeAgentic => Trace::from_applied_compute_agentic(
+            trace_path,
+            trace_block_size,
+            trace_shared_prefix_ratio,
+            trace_num_prefix_groups,
+        ),
+        TraceFileFormat::Dynamo => {
+            bail!("Dynamo request traces must be loaded through the multi-file replay path")
+        }
+        other => bail!(
+            "trace format '{}' is not supported by Dynamo replay",
+            other.as_str()
+        ),
+    }
+}
+
+fn load_agentic_trace_from_file(
+    trace_path: &Path,
+    trace_block_size: usize,
+    trace_format: TraceFileFormat,
+    arrival_speedup_ratio: f64,
+) -> Result<AgenticTrace> {
+    let trace = match trace_format {
+        TraceFileFormat::AgenticMooncake => AgenticTrace::from_agentic_mooncake(trace_path)?,
+        TraceFileFormat::Weka => load_weka_agentic_graph(
+            trace_path,
+            (trace_block_size != 0).then_some(trace_block_size),
+        )?,
+        _ => bail!("{} is not an agentic trace format", trace_format.as_str()),
+    };
+    trace
+        .normalize_starts()
+        .speed_up_timing(arrival_speedup_ratio)
+}
+
+fn is_agentic_trace_format(trace_format: TraceFileFormat) -> bool {
+    matches!(
+        trace_format,
+        TraceFileFormat::AgenticMooncake | TraceFileFormat::Weka
+    )
+}
+
+fn trace_accumulates_session_deltas(trace_format: TraceFileFormat) -> bool {
+    trace_format == TraceFileFormat::MooncakeDelta
+}
+
+fn online_replay_options(
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> online::OnlineReplayOptions {
+    online::OnlineReplayOptions {
+        record_per_request,
+        sla,
+    }
+}
+
+fn online_replay_config(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    options: online::OnlineReplayOptions,
+) -> online::OnlineReplayConfig {
+    online::OnlineReplayConfig::new(
+        args,
+        router_config,
+        prefill_load_estimator,
+        num_workers,
+        router_mode,
+        options,
+    )
+}
+
+fn single_turn_trace_requests(
+    trace_format: TraceFileFormat,
+    trace: &Trace,
+) -> Result<Option<Vec<DirectRequest>>> {
+    // Dynamo request traces retain compact prompt hashes in WorkloadDriver and
+    // materialize only ready requests. The legacy Mooncake path predates that
+    // representation and is intentionally unchanged here.
+    if matches!(
+        trace_format,
+        TraceFileFormat::Mooncake | TraceFileFormat::MooncakeDelta
+    ) && trace.is_single_turn()
+    {
+        // The timestamped request path expects every request to carry an
+        // arrival timestamp; without this guard a trace missing
+        // `first_arrival_timestamp_ms` would panic in
+        // `normalize_trace_requests` instead of returning a clear error.
+        trace.validate_for_trace_mode()?;
+        Ok(Some(trace.to_single_turn_requests()?))
+    } else {
+        Ok(None)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_loaded_trace_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_loaded_trace_with_router_mode_and_options_and_runtime_observers(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_loaded_trace_with_router_mode_and_options_and_runtime_observers(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let args = args.normalized()?;
+    validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
+    let trace = trace
+        .normalize_session_starts()?
+        .speed_up_timing(arrival_speedup_ratio)?;
+    trace.validate_for_trace_mode()?;
+    if trace.is_single_turn() {
+        crate::replay::offline::simulate_trace_workload_with_scaling_policy(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+            false,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            scaling_policy,
+            telemetry,
+        )
+    } else {
+        crate::replay::offline::simulate_trace_workload_with_scaling_policy(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+            true,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            scaling_policy,
+            telemetry,
+        )
+    }
+}
+
+/// Run an offline loaded trace with execution-local capture and determinism.
+///
+/// This is the explicit, thread-safe seam used by canonical replay tooling;
+/// ordinary callers should use [`simulate_loaded_trace_with_router_mode_and_options`].
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_loaded_trace_with_router_mode_and_capture_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    capture_options: ReplayCaptureOptions,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_offline_replay_args(&args, num_workers, router_mode, false)?;
+    let trace = trace
+        .normalize_session_starts()?
+        .speed_up_timing(arrival_speedup_ratio)?;
+    trace.validate_for_trace_mode()?;
+    let emit_session_metadata = !trace.is_single_turn();
+    crate::replay::offline::simulate_trace_workload_with_capture_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        emit_session_metadata,
+        capture_options,
+        max_sim_time_ms,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_loaded_trace_disagg_with_router_mode_and_options(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_loaded_trace_disagg_with_router_mode_and_options_and_runtime_observers(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        arrival_speedup_ratio,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_loaded_trace_disagg_with_router_mode_and_options_and_runtime_observers(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    let trace = trace
+        .normalize_session_starts()?
+        .speed_up_timing(arrival_speedup_ratio)?;
+    trace.validate_for_trace_mode()?;
+    if trace.is_single_turn() {
+        crate::replay::offline::simulate_trace_workload_disagg_with_scaling_policy(
+            config,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            router_mode,
+            false,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            scaling_policy,
+            telemetry,
+        )
+    } else {
+        crate::replay::offline::simulate_trace_workload_disagg_with_scaling_policy(
+            config,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            router_mode,
+            true,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            scaling_policy,
+            telemetry,
+        )
+    }
+}
+
+/// Disaggregated counterpart to
+/// [`simulate_loaded_trace_with_router_mode_and_capture_options`].
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_loaded_trace_disagg_with_router_mode_and_capture_options(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    capture_options: ReplayCaptureOptions,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    let trace = trace
+        .normalize_session_starts()?
+        .speed_up_timing(arrival_speedup_ratio)?;
+    trace.validate_for_trace_mode()?;
+    let emit_session_metadata = !trace.is_single_turn();
+    crate::replay::offline::simulate_trace_workload_disagg_with_capture_options(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        emit_session_metadata,
+        capture_options,
+        max_sim_time_ms,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_loaded_trace_live_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_loaded_trace_live_with_router_mode_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        false,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_loaded_trace_live_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_online_replay_args(&args, num_workers)?;
+    let trace = trace
+        .normalize_session_starts()?
+        .speed_up_timing(arrival_speedup_ratio)?;
+    trace.validate_for_trace_mode()?;
+    let emit_session_metadata = !trace.is_single_turn();
+    online::simulate_trace_workload(
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
+        trace,
+        emit_session_metadata,
+    )
+}
+
+pub fn generate_trace_worker_artifacts_offline(
+    args: MockEngineArgs,
+    trace: Trace,
+) -> Result<ReplayWorkerArtifacts> {
+    let args = args.normalized()?;
+    crate::replay::offline::generate_trace_worker_artifacts(args, trace)
+}
+
+/// Generate offline replay artifacts with a test visibility override for KV events.
+pub fn generate_trace_worker_artifacts_offline_with_kv_event_visibility(
+    args: MockEngineArgs,
+    trace: Trace,
+    visibility: ReplayKvEventVisibility,
+) -> Result<ReplayWorkerArtifacts> {
+    let args = args.normalized()?;
+    crate::replay::offline::generate_trace_worker_artifacts_with_visibility(
+        args,
+        trace,
+        Some(visibility.into()),
+    )
+}
+
+pub fn simulate_trace_file(
+    args: MockEngineArgs,
+    trace_path: &Path,
+    trace_block_size: usize,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_file_with_router_mode(
+        args,
+        None,
+        None,
+        trace_path,
+        trace_block_size,
+        num_workers,
+        arrival_speedup_ratio,
+        ReplayRouterMode::RoundRobin,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_file_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_file_with_router_mode_and_format(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        TraceFileFormat::Mooncake,
+        0.0,
+        0,
+        false,
+        None,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_file_with_router_mode_and_format(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+        record_per_request,
+        max_sim_time_ms,
+        None,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let args = args.normalized()?;
+    validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
+    if is_agentic_trace_format(trace_format) {
+        anyhow::ensure!(
+            scaling_policy.is_none(),
+            "scaling_policy replay only supports standard Mooncake traces"
+        );
+        let trace = load_agentic_trace_from_file(
+            trace_path,
+            trace_block_size,
+            trace_format,
+            arrival_speedup_ratio,
+        )?;
+        return crate::replay::offline::simulate_agentic_trace_workload(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            agentic_lanes,
+            sla,
+            telemetry,
+        );
+    }
+    if trace_format == TraceFileFormat::AppliedComputeAgentic {
+        bail!(
+            "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
+        );
+    }
+    if trace_accumulates_session_deltas(trace_format) && scaling_policy.is_some() {
+        bail!("scaling_policy replay does not support mooncake-delta traces");
+    }
+    let trace = load_trace_from_file(
+        trace_path,
+        trace_block_size,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+    )?
+    .normalize_session_starts()?
+    .speed_up_timing(arrival_speedup_ratio)?;
+    let report = if let Some(requests) = single_turn_trace_requests(trace_format, &trace)? {
+        crate::replay::offline::simulate_trace_with_scaling_policy(
+            args,
+            router_config,
+            prefill_load_estimator,
+            requests,
+            num_workers,
+            1.0,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            scaling_policy,
+            telemetry,
+        )?
+    } else if trace_accumulates_session_deltas(trace_format) {
+        crate::replay::offline::simulate_trace_workload_accumulating_deltas(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            telemetry,
+        )?
+    } else {
+        crate::replay::offline::simulate_trace_workload_with_scaling_policy(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+            true,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            scaling_policy,
+            telemetry,
+        )?
+    };
+    Ok(report)
+}
+
+pub fn simulate_trace_file_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_file_disagg_with_router_mode_and_format(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        arrival_speedup_ratio,
+        router_mode,
+        TraceFileFormat::Mooncake,
+        0.0,
+        0,
+        false,
+        None,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_file_disagg_with_router_mode_and_format(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observers(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        arrival_speedup_ratio,
+        router_mode,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+        record_per_request,
+        max_sim_time_ms,
+        None,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observers(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    if is_agentic_trace_format(trace_format) {
+        anyhow::ensure!(
+            scaling_policy.is_none(),
+            "scaling_policy replay does not support agentic traces"
+        );
+        let trace = load_agentic_trace_from_file(
+            trace_path,
+            trace_block_size,
+            trace_format,
+            arrival_speedup_ratio,
+        )?;
+        return crate::replay::offline::simulate_agentic_trace_workload_disagg(
+            config,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            agentic_lanes,
+            sla,
+            telemetry,
+        );
+    }
+    if trace_format == TraceFileFormat::AppliedComputeAgentic {
+        bail!(
+            "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
+        );
+    }
+    if trace_accumulates_session_deltas(trace_format) {
+        bail!("mooncake-delta trace format is not supported for disaggregated replay");
+    }
+    let trace = load_trace_from_file(
+        trace_path,
+        trace_block_size,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+    )?
+    .normalize_session_starts()?
+    .speed_up_timing(arrival_speedup_ratio)?;
+    let report = if let Some(requests) = single_turn_trace_requests(trace_format, &trace)? {
+        crate::replay::offline::simulate_trace_disagg_with_scaling_policy(
+            config,
+            router_config,
+            prefill_load_estimator,
+            requests,
+            1.0,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            scaling_policy,
+            telemetry,
+        )?
+    } else {
+        crate::replay::offline::simulate_trace_workload_disagg_with_scaling_policy(
+            config,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            router_mode,
+            true,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            scaling_policy,
+            telemetry,
+        )?
+    };
+    Ok(report)
+}
+
+pub fn simulate_trace_live_file(
+    args: MockEngineArgs,
+    trace_path: &Path,
+    trace_block_size: usize,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_live_file_with_router_mode(
+        args,
+        None,
+        None,
+        trace_path,
+        trace_block_size,
+        num_workers,
+        arrival_speedup_ratio,
+        ReplayRouterMode::RoundRobin,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_live_file_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_live_file_with_router_mode_and_format(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        TraceFileFormat::Mooncake,
+        0.0,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_live_file_with_router_mode_and_format(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_live_file_with_router_mode_and_format_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+        false,
+        None,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_live_file_with_router_mode_and_format_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_online_replay_args(&args, num_workers)?;
+    if is_agentic_trace_format(trace_format) {
+        let trace = load_agentic_trace_from_file(
+            trace_path,
+            trace_block_size,
+            trace_format,
+            arrival_speedup_ratio,
+        )?;
+        return online::simulate_agentic_trace_workload(
+            online_replay_config(
+                args,
+                router_config,
+                prefill_load_estimator,
+                num_workers,
+                router_mode,
+                online_replay_options(record_per_request, sla),
+            ),
+            trace,
+            agentic_lanes,
+        );
+    }
+    if trace_format == TraceFileFormat::AppliedComputeAgentic {
+        bail!(
+            "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
+        );
+    }
+    if trace_accumulates_session_deltas(trace_format) {
+        bail!("mooncake-delta trace format is not supported for online replay");
+    }
+    let trace = load_trace_from_file(
+        trace_path,
+        trace_block_size,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+    )?
+    .normalize_session_starts()?
+    .speed_up_timing(arrival_speedup_ratio)?;
+    let config = online_replay_config(
+        args,
+        router_config,
+        prefill_load_estimator,
+        num_workers,
+        router_mode,
+        online_replay_options(record_per_request, sla),
+    );
+    if let Some(requests) = single_turn_trace_requests(trace_format, &trace)? {
+        online::simulate_trace_requests(config, requests, 1.0)
+    } else {
+        online::simulate_trace_workload(config, trace, true)
+    }
+}
+
+pub fn simulate_trace_requests(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_requests_with_router_mode(
+        args,
+        None,
+        None,
+        requests,
+        num_workers,
+        arrival_speedup_ratio,
+        ReplayRouterMode::RoundRobin,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_requests_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_requests_with_router_mode_and_runtime_observers(
+        args,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        false,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_requests_with_router_mode_and_runtime_observers(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let args = args.normalized()?;
+    validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
+    if requests.is_empty() {
+        bail!("trace replay requires at least one request");
+    }
+
+    let report = crate::replay::offline::simulate_trace_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        record_per_request,
+        None,
+        sla,
+        scaling_policy,
+        telemetry,
+    )?;
+    Ok(report)
+}
+
+pub fn simulate_trace_requests_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
+        config,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        arrival_speedup_ratio,
+        router_mode,
+        false,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    if requests.is_empty() {
+        bail!("trace replay requires at least one request");
+    }
+
+    let report = crate::replay::offline::simulate_trace_disagg_with_scaling_policy(
+        config,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        arrival_speedup_ratio,
+        router_mode,
+        record_per_request,
+        None,
+        sla,
+        scaling_policy,
+        telemetry,
+    )?;
+    Ok(report)
+}
+
+pub fn simulate_trace_live_requests(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_live_requests_with_router_mode(
+        args,
+        None,
+        None,
+        requests,
+        num_workers,
+        arrival_speedup_ratio,
+        ReplayRouterMode::RoundRobin,
+    )
+}
+
+pub fn simulate_trace_live_requests_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_live_requests_with_router_mode_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        false,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_live_requests_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_online_replay_args(&args, num_workers)?;
+    if requests.is_empty() {
+        bail!("trace replay requires at least one request");
+    }
+
+    online::simulate_trace_requests(
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
+        requests,
+        arrival_speedup_ratio,
+    )
+}
+
+pub fn simulate_concurrency_file(
+    args: MockEngineArgs,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_file_with_router_mode(
+        args,
+        None,
+        None,
+        trace_path,
+        trace_block_size,
+        max_in_flight,
+        num_workers,
+        ReplayRouterMode::RoundRobin,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_file_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_file_with_router_mode_and_format(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        TraceFileFormat::Mooncake,
+        0.0,
+        0,
+        false,
+        None,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_file_with_router_mode_and_format(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_file_with_router_mode_and_format_and_runtime_observers(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_file_with_router_mode_and_format_and_runtime_observers(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let args = args.normalized()?;
+    validate_offline_concurrency_args(
+        &args,
+        num_workers,
+        max_in_flight,
+        router_mode,
+        scaling_policy.is_some(),
+    )?;
+    if is_agentic_trace_format(trace_format) {
+        bail!(
+            "{} trace format is not supported with replay_concurrency",
+            trace_format.as_str()
+        );
+    }
+    if trace_accumulates_session_deltas(trace_format) && scaling_policy.is_some() {
+        bail!("scaling_policy replay does not support mooncake-delta traces");
+    }
+    let trace = load_trace_from_file(
+        trace_path,
+        trace_block_size,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+    )?;
+    let report = if trace_accumulates_session_deltas(trace_format) {
+        crate::replay::offline::simulate_concurrency_workload_accumulating_deltas(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            max_in_flight,
+            num_workers,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            telemetry,
+        )?
+    } else {
+        crate::replay::offline::simulate_concurrency_workload_with_scaling_policy(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            max_in_flight,
+            num_workers,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+            scaling_policy,
+            telemetry,
+        )?
+    };
+    Ok(report)
+}
+
+pub fn simulate_concurrency_file_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_file_disagg_with_router_mode_and_format(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        max_in_flight,
+        router_mode,
+        TraceFileFormat::Mooncake,
+        0.0,
+        0,
+        false,
+        None,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_file_disagg_with_router_mode_and_format_and_runtime_observers(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        max_in_flight,
+        router_mode,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_file_disagg_with_router_mode_and_format_and_runtime_observers(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let config = config.normalized()?;
+    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    if is_agentic_trace_format(trace_format) {
+        bail!(
+            "{} trace format is not supported with replay_concurrency",
+            trace_format.as_str()
+        );
+    }
+    if trace_accumulates_session_deltas(trace_format) {
+        bail!("mooncake-delta trace format is not supported for disaggregated replay");
+    }
+    let trace = load_trace_from_file(
+        trace_path,
+        trace_block_size,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+    )?;
+    let report = crate::replay::offline::simulate_concurrency_workload_disagg_with_scaling_policy(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+        telemetry,
+    )?;
+    Ok(report)
+}
+
+pub fn simulate_concurrency_live_file(
+    args: MockEngineArgs,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_live_file_with_router_mode(
+        args,
+        None,
+        None,
+        trace_path,
+        trace_block_size,
+        max_in_flight,
+        num_workers,
+        ReplayRouterMode::RoundRobin,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_live_file_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_live_file_with_router_mode_and_format(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        TraceFileFormat::Mooncake,
+        0.0,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_live_file_with_router_mode_and_format(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_live_file_with_router_mode_and_format_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace_path,
+        trace_block_size,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+        false,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_live_file_with_router_mode_and_format_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace_path: &Path,
+    trace_block_size: usize,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    trace_format: TraceFileFormat,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
+    if is_agentic_trace_format(trace_format) {
+        bail!(
+            "{} trace format requires online trace mode and is not supported with replay_concurrency",
+            trace_format.as_str()
+        );
+    }
+    if trace_accumulates_session_deltas(trace_format) {
+        bail!("mooncake-delta trace format is not supported for online replay");
+    }
+    let trace = load_trace_from_file(
+        trace_path,
+        trace_block_size,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+    )?;
+    online::simulate_concurrency_workload(
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
+        trace,
+        max_in_flight,
+    )
+}
+
+pub fn simulate_concurrency_live_requests(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_live_requests_with_router_mode(
+        args,
+        None,
+        None,
+        requests,
+        max_in_flight,
+        num_workers,
+        ReplayRouterMode::RoundRobin,
+    )
+}
+
+pub fn simulate_concurrency_live_requests_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_live_requests_with_router_mode_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        false,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_live_requests_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
+    if requests.is_empty() {
+        bail!("concurrency replay requires at least one request");
+    }
+
+    online::simulate_concurrency_requests(
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
+        requests,
+        max_in_flight,
+    )
+}
+
+pub fn simulate_concurrency_requests(
+    args: MockEngineArgs,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_requests_with_router_mode(
+        args,
+        None,
+        None,
+        requests,
+        max_in_flight,
+        num_workers,
+        ReplayRouterMode::RoundRobin,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_requests_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_requests_with_router_mode_and_runtime_observers(
+        args,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        false,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_requests_with_router_mode_and_runtime_observers(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let args = args.normalized()?;
+    validate_offline_concurrency_args(
+        &args,
+        num_workers,
+        max_in_flight,
+        router_mode,
+        scaling_policy.is_some(),
+    )?;
+    if requests.is_empty() {
+        bail!("concurrency replay requires at least one request");
+    }
+
+    crate::replay::offline::simulate_concurrency_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        record_per_request,
+        None,
+        sla,
+        scaling_policy,
+        telemetry,
+    )
+}
+
+pub fn simulate_concurrency_requests_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_requests_disagg_with_router_mode_and_runtime_observers(
+        config,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        max_in_flight,
+        router_mode,
+        false,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_requests_disagg_with_router_mode_and_runtime_observers(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let config = config.normalized()?;
+    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    if requests.is_empty() {
+        bail!("concurrency replay requires at least one request");
+    }
+
+    crate::replay::offline::simulate_concurrency_disagg_with_scaling_policy(
+        config,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        max_in_flight,
+        router_mode,
+        record_per_request,
+        None,
+        sla,
+        scaling_policy,
+        telemetry,
+    )
+}
+
+pub fn simulate_trace_workload(
+    args: MockEngineArgs,
+    trace: Trace,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_with_router_mode(
+        args,
+        None,
+        None,
+        trace,
+        num_workers,
+        ReplayRouterMode::RoundRobin,
+        SlaThresholds::default(),
+    )
+}
+
+pub fn simulate_trace_workload_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_with_router_mode_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        false,
+        None,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_trace_workload_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_with_router_mode_and_options_and_runtime_observers(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_workload_with_router_mode_and_options_and_runtime_observers(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let args = args.normalized()?;
+    validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
+    let report = crate::replay::offline::simulate_trace_workload_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        true,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+        telemetry,
+    )?;
+    Ok(report)
+}
+
+pub fn simulate_trace_workload_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_disagg_with_router_mode_and_options(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        false,
+        None,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_trace_workload_disagg_with_router_mode_and_options(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_observers(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_observers(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    let report = crate::replay::offline::simulate_trace_workload_disagg_with_scaling_policy(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        true,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+        telemetry,
+    )?;
+    Ok(report)
+}
+
+pub fn simulate_trace_live_workload(
+    args: MockEngineArgs,
+    trace: Trace,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_live_workload_with_router_mode(
+        args,
+        None,
+        None,
+        trace,
+        num_workers,
+        ReplayRouterMode::RoundRobin,
+    )
+}
+
+pub fn simulate_trace_live_workload_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_live_workload_with_router_mode_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        false,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_live_workload_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_online_replay_args(&args, num_workers)?;
+    online::simulate_trace_workload(
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
+        trace,
+        true,
+    )
+}
+
+pub fn simulate_concurrency_workload(
+    args: MockEngineArgs,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_workload_with_router_mode(
+        args,
+        None,
+        None,
+        trace,
+        max_in_flight,
+        num_workers,
+        ReplayRouterMode::RoundRobin,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_workload_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_workload_with_router_mode_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        false,
+        None,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_workload_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_workload_with_router_mode_and_options_and_runtime_observers(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_workload_with_router_mode_and_options_and_runtime_observers(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let args = args.normalized()?;
+    validate_offline_concurrency_args(
+        &args,
+        num_workers,
+        max_in_flight,
+        router_mode,
+        scaling_policy.is_some(),
+    )?;
+    crate::replay::offline::simulate_concurrency_workload_with_scaling_policy(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+        telemetry,
+    )
+}
+
+pub fn simulate_concurrency_workload_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_workload_disagg_with_router_mode_and_options(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        router_mode,
+        false,
+        None,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_workload_disagg_with_router_mode_and_options_and_runtime_observers(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        super::ReplayRuntimeObservers::default(),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options_and_runtime_observers(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+) -> Result<TraceSimulationReport> {
+    let super::ReplayRuntimeObservers {
+        scaling_policy,
+        telemetry,
+    } = observers;
+    let config = config.normalized()?;
+    validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    crate::replay::offline::simulate_concurrency_workload_disagg_with_scaling_policy(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+        scaling_policy,
+        telemetry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_workload_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_agentic_trace_workload_with_router_mode_and_telemetry(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
+        sla,
+        None,
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_workload_with_router_mode_and_telemetry(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+    telemetry: Option<super::ReplayTelemetryOptions>,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_offline_replay_args(&args, num_workers, router_mode, false)?;
+    crate::replay::offline::simulate_agentic_trace_workload(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
+        sla,
+        telemetry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_workload_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_agentic_trace_workload_disagg_with_router_mode_and_telemetry(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
+        sla,
+        None,
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_workload_disagg_with_router_mode_and_telemetry(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+    telemetry: Option<super::ReplayTelemetryOptions>,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    crate::replay::offline::simulate_agentic_trace_workload_disagg(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
+        sla,
+        telemetry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_live_workload_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_online_replay_args(&args, num_workers)?;
+    online::simulate_agentic_trace_workload(
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
+        trace,
+        agentic_lanes,
+    )
+}
+
+pub fn simulate_concurrency_live_workload(
+    args: MockEngineArgs,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_live_workload_with_router_mode(
+        args,
+        None,
+        None,
+        trace,
+        max_in_flight,
+        num_workers,
+        ReplayRouterMode::RoundRobin,
+    )
+}
+
+pub fn simulate_concurrency_live_workload_with_router_mode(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<TraceSimulationReport> {
+    simulate_concurrency_live_workload_with_router_mode_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        num_workers,
+        router_mode,
+        false,
+        SlaThresholds::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_concurrency_live_workload_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    max_in_flight: usize,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
+    online::simulate_concurrency_workload(
+        online_replay_config(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            router_mode,
+            online_replay_options(record_per_request, sla),
+        ),
+        trace,
+        max_in_flight,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::protocols::{EngineType, SglangArgs, WorkerType};
+    use crate::loadgen::{SessionTrace, TurnTrace};
+    use rstest::rstest;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+    use uuid::Uuid;
+
+    fn replay_test_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(128)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(8))
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap()
+    }
+
+    fn disagg_test_config() -> OfflineDisaggReplayConfig {
+        OfflineDisaggReplayConfig {
+            prefill_args: MockEngineArgs {
+                worker_type: WorkerType::Prefill,
+                block_size: 4,
+                ..MockEngineArgs::default()
+            },
+            decode_args: MockEngineArgs {
+                worker_type: WorkerType::Decode,
+                block_size: 4,
+                ..MockEngineArgs::default()
+            },
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        }
+    }
+
+    fn single_turn_dynamo_trace(first_arrival_timestamp_ms: Option<f64>) -> Trace {
+        Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "request_1".to_string(),
+                first_arrival_timestamp_ms,
+                turns: vec![TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![1],
+                    delay_after_previous_ms: 0.0,
+                    ..Default::default()
+                }],
+            }],
+        }
+    }
+
+    fn multi_turn_dynamo_trace() -> Trace {
+        Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "session_1".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    },
+                    TurnTrace {
+                        input_length: 8,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1, 2],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn loaded_dynamo_trace_preserves_request_metadata_contract() {
+        let report = simulate_loaded_trace_with_router_mode_and_options(
+            replay_test_args(),
+            None,
+            None,
+            single_turn_dynamo_trace(Some(0.0)),
+            2,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.per_request.len(), 1);
+        assert_eq!(report.per_request[0].session_id, None);
+        assert_eq!(report.per_request[0].turn_index, None);
+    }
+
+    #[test]
+    fn loaded_dynamo_online_trace_preserves_request_metadata_contract() {
+        let report = simulate_loaded_trace_live_with_router_mode_and_options(
+            replay_test_args(),
+            None,
+            None,
+            single_turn_dynamo_trace(Some(0.0)),
+            2,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.per_request.len(), 1);
+        assert_eq!(report.per_request[0].session_id, None);
+        assert_eq!(report.per_request[0].turn_index, None);
+        assert!(report.per_request[0].decode_worker_idx.is_some());
+    }
+
+    #[test]
+    fn loaded_multi_turn_dynamo_online_trace_preserves_session_metadata() {
+        let report = simulate_loaded_trace_live_with_router_mode_and_options(
+            replay_test_args(),
+            None,
+            None,
+            multi_turn_dynamo_trace(),
+            2,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.per_request.len(), 2);
+        assert_eq!(
+            report.per_request[0].session_id.as_deref(),
+            Some("session_1")
+        );
+        assert_eq!(report.per_request[0].turn_index, Some(0));
+        assert_eq!(
+            report.per_request[1].session_id.as_deref(),
+            Some("session_1")
+        );
+        assert_eq!(report.per_request[1].turn_index, Some(1));
+    }
+
+    #[test]
+    fn loaded_dynamo_disagg_trace_validates_timestamps() {
+        let error = simulate_loaded_trace_disagg_with_router_mode_and_options(
+            disagg_test_config(),
+            None,
+            None,
+            single_turn_dynamo_trace(None),
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            false,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("first_arrival_timestamp_ms"));
+    }
+
+    #[rstest]
+    #[case::vllm(EngineType::Vllm)]
+    #[case::trtllm(EngineType::Trtllm)]
+    fn native_g1_runs_through_offline_replay_entrypoint(#[case] engine_type: EngineType) {
+        let args = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let requests = [11_u128, 22]
+            .into_iter()
+            .enumerate()
+            .map(|(index, uuid)| DirectRequest {
+                tokens: (0..8).collect(),
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![100, 101]),
+                uuid: Some(Uuid::from_u128(uuid)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(index as f64 * 100.0),
+                ..Default::default()
+            })
+            .collect();
+
+        // This public API normalizes/validates args and then executes the
+        // deterministic aggregated replay runtime used by offline replay.
+        let report = simulate_trace_requests(args, requests, 1, 1.0).unwrap();
+
+        assert_eq!(report.request_counts.num_requests, 2);
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(report.request_counts.total_output_tokens, 4);
+        assert!(
+            report.first_admission_prefix_cache_reused_ratio > 0.0,
+            "second identical prompt should reuse native G1 prefix blocks"
+        );
+    }
+
+    #[test]
+    fn one_worker_sglang_impossible_request_returns_dead_end_error() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(1)
+            .speedup_ratio(1000.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(8),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let request = DirectRequest {
+            tokens: vec![1; 8],
+            max_output_tokens: 2,
+            output_token_ids: None,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        };
+
+        let err = simulate_trace_requests_with_router_mode(
+            args,
+            None,
+            None,
+            vec![request],
+            1,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            SlaThresholds::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "replay invariant violated: offline replay detected an effect-free zero-duration pass with 1 in-flight requests remaining"
+        );
+    }
+
+    #[test]
+    fn agentic_mooncake_trace_file_loads_and_scales_timing() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "schema": "dynamo.agentic_mooncake",
+                "version": 2,
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "source": {"format": "test", "digest": "scaled-timing"}
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "request_id": "r1",
+                "play_id": "play",
+                "session_id": "root",
+                "model": "model",
+                "not_before_ms": 100.0,
+                "input_length": 4,
+                "output_length": 1,
+                "hash_ids": [1],
+                "dependencies": []
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "request_id": "r2",
+                "play_id": "play",
+                "session_id": "dependent",
+                "model": "model",
+                "not_before_ms": 130.0,
+                "input_length": 4,
+                "output_length": 1,
+                "hash_ids": [1],
+                "dependencies": [{
+                    "request_id": "r1",
+                    "trigger": "completion",
+                    "delay_ms": 16.0,
+                    "relation": "sequence"
+                }]
+            })
+        )
+        .unwrap();
+
+        let trace =
+            load_agentic_trace_from_file(file.path(), 4, TraceFileFormat::AgenticMooncake, 2.0)
+                .unwrap();
+
+        assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
+        assert_eq!(trace.nodes()[1].not_before_ms(), 15.0);
+        assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 8.0);
+
+        for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+            let mut args = replay_test_args();
+            args.engine_type = engine_type;
+            if engine_type == EngineType::Sglang {
+                args.sglang = Some(SglangArgs {
+                    page_size: Some(4),
+                    chunked_prefill_size: Some(64),
+                    ..Default::default()
+                });
+            }
+            let report = simulate_agentic_trace_workload_with_router_mode(
+                args,
+                None,
+                None,
+                trace.clone(),
+                1,
+                ReplayRouterMode::RoundRobin,
+                true,
+                None,
+                Some(1),
+                SlaThresholds::default(),
+            )
+            .unwrap();
+            assert_eq!(report.request_counts.completed_requests, 2);
+            let trajectories = report.trajectories.unwrap();
+            assert_eq!(trajectories.total, 1);
+            assert_eq!(trajectories.completed, 1);
+            assert_eq!(trajectories.incomplete, 0);
+            assert!(trajectories.e2e.max_ms > 0.0);
+        }
+
+        let report = simulate_trace_live_file_with_router_mode_and_format_and_options(
+            replay_test_args(),
+            None,
+            None,
+            file.path(),
+            4,
+            2,
+            2.0,
+            ReplayRouterMode::KvRouter,
+            TraceFileFormat::AgenticMooncake,
+            0.0,
+            0,
+            true,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(report.per_request.len(), 2);
+    }
+
+    #[test]
+    fn single_turn_legacy_trace_formats_use_request_path() {
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "request_1".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    }],
+                },
+                SessionTrace {
+                    session_id: "request_2".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![2],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    }],
+                },
+            ],
+        };
+
+        for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::MooncakeDelta] {
+            let requests = single_turn_trace_requests(trace_format, &trace)
+                .unwrap()
+                .expect("single-turn traces should become request traces");
+
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].arrival_timestamp_ms, Some(0.0));
+            assert_eq!(requests[1].arrival_timestamp_ms, Some(0.0));
+        }
+
+        assert!(
+            single_turn_trace_requests(TraceFileFormat::Dynamo, &trace)
+                .unwrap()
+                .is_none(),
+            "Dynamo traces must retain compact prompts in the workload path"
+        );
+    }
+
+    #[test]
+    fn single_turn_request_trace_formats_without_timestamps_are_rejected() {
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "request_1".to_string(),
+                first_arrival_timestamp_ms: None,
+                turns: vec![TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![1],
+                    delay_after_previous_ms: 0.0,
+                    ..Default::default()
+                }],
+            }],
+        };
+
+        for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::MooncakeDelta] {
+            let err = single_turn_trace_requests(trace_format, &trace)
+                .expect_err("missing first_arrival_timestamp_ms must error before reaching the timestamped request path");
+            assert!(
+                err.to_string().contains("first_arrival_timestamp_ms"),
+                "expected validation error to mention first_arrival_timestamp_ms, got {err}",
+            );
+        }
+    }
+
+    #[test]
+    fn weka_trace_uses_aisimulate_ingestion_and_preserves_source_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        std::fs::write(
+            &source,
+            serde_json::to_vec(&serde_json::json!({
+                "id": "play",
+                "models": ["model", "other-model"],
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "requests": [
+                    {"t": 1.0, "type": "s", "model": "model", "in": 4, "out": 1, "hash_ids": [1], "api_time": 0.2},
+                    {"t": 1.4, "type": "s", "model": "other-model", "in": 8, "out": 0, "hash_ids": [1, 2]}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let trace = load_agentic_trace_from_file(&source, 0, TraceFileFormat::Weka, 2.0).unwrap();
+
+        assert_eq!(trace.source().format, "weka");
+        assert_eq!(trace.block_size(), 4);
+        assert_eq!(trace.node_count(), 2);
+        assert_eq!(trace.nodes()[0].source_play_ordinal(), Some(0));
+        assert_eq!(trace.nodes()[0].recorded_api_time_ms(), Some(200.0));
+        assert_eq!(trace.nodes()[1].recorded_api_time_ms(), None);
+        assert_eq!(trace.nodes()[1].max_output_tokens(), 0);
+        assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
+        assert_eq!(trace.nodes()[1].not_before_ms(), 200.0);
+        assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 100.0);
+        assert_eq!(
+            trace.identity().source_models,
+            ["model".to_string(), "other-model".to_string()]
+        );
+
+        let error =
+            load_agentic_trace_from_file(&source, 512, TraceFileFormat::Weka, 1.0).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Weka source block size 4 does not match configured block size 512")
+        );
+    }
+}

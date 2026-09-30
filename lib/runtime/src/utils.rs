@@ -11,5 +11,6 @@ pub mod task;
 pub mod tasks;
 pub mod typed_prefix_watcher;
 
-pub use graceful_shutdown::GracefulShutdownTracker;
-pub use ip_resolver::{get_http_rpc_host_from_env, get_tcp_rpc_host_from_env};
+pub use graceful_shutdown::{GracefulShutdownTracker, GracefulTaskGuard};
+#[allow(deprecated)]
+pub use ip_resolver::{local_ip_for_advertise, tcp_rpc_host_from_env};

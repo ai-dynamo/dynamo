@@ -12,19 +12,24 @@ import pytest
 
 from .common import check_module_available
 
-HAS_VLLM = check_module_available("vllm")
+HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
+HAS_QWEN3_REASONING = check_module_available(
+    "vllm.reasoning.qwen3_engine_reasoning_parser"
+) or check_module_available("vllm.reasoning.qwen3_reasoning_parser")
+HAS_QWEN3_TOOL_PARSER = check_module_available(
+    "vllm.tool_parsers.qwen3_engine_tool_parser"
+) or check_module_available("vllm.tool_parsers.qwen3coder_tool_parser")
 if HAS_VLLM:
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
         ChatCompletionToolsParam,
     )
-    from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.outputs import CompletionOutput
-    from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
     from vllm.sampling_params import SamplingParams
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
-    from dynamo.frontend.prepost import StreamingPostProcessor
+    from dynamo.frontend.prepost import StreamingPostProcessor, _prepare_request
+    from dynamo.frontend.vllm_protocol import FunctionDefinition
 else:
     # Fake some types so that `pre-commit` passes
     class CompletionOutput:
@@ -34,11 +39,43 @@ else:
 
 pytestmark = [
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,  # "Hardware"
     pytest.mark.pre_merge,  # "Lifecyle"
     pytest.mark.unit,  # "Test Type"
-    pytest.mark.skipif(not HAS_VLLM, reason="requires vllm"),
+    pytest.mark.skipif(
+        not (HAS_VLLM and HAS_QWEN3_REASONING and HAS_QWEN3_TOOL_PARSER),
+        reason="requires vllm qwen3 reasoning+tool parser",
+    ),
 ]
+
+
+def _resolve_qwen3_reasoning_parser_class():
+    try:
+        from vllm.reasoning.qwen3_engine_reasoning_parser import (
+            Qwen3ParserReasoningAdapter,
+        )
+
+        return Qwen3ParserReasoningAdapter
+    except ImportError:
+        from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
+
+        return Qwen3ReasoningParser
+
+
+def _resolve_qwen3_tool_parser_class():
+    try:
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+        return Qwen3EngineToolParser
+    except ImportError:
+        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+
+        return Qwen3CoderToolParser
+
+
+def _make_qwen3_tool_parser(tokenizer, tools):
+    return _resolve_qwen3_tool_parser_class()(tokenizer, tools)
 
 
 # ---------------------------------------------------------------------------
@@ -108,561 +145,394 @@ OUTPUTS_INTERVAL_1 = [
         index=0,
         text="<think>",
         token_ids=[151667],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="\n",
         token_ids=[198],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="Okay",
         token_ids=[32313],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=",",
         token_ids=[11],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" the",
         token_ids=[279],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" user",
         token_ids=[1196],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" is",
         token_ids=[374],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" asking",
         token_ids=[10161],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" for",
         token_ids=[369],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" the",
         token_ids=[279],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" titles",
         token_ids=[15311],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" of",
         token_ids=[315],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" some",
         token_ids=[1045],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" James",
         token_ids=[7801],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" Joyce",
         token_ids=[53626],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" books",
         token_ids=[6467],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" and",
         token_ids=[323],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" wants",
         token_ids=[6801],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" me",
         token_ids=[752],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" to",
         token_ids=[311],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" use",
         token_ids=[990],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" the",
         token_ids=[279],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" provided",
         token_ids=[3897],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" tool",
         token_ids=[5392],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=".\n",
         token_ids=[624],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="</think>",
         token_ids=[151668],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="\n\n",
         token_ids=[271],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="<tool_call>",
         token_ids=[151657],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="\n",
         token_ids=[198],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='{"',
         token_ids=[4913],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="name",
         token_ids=[606],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='":',
         token_ids=[788],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' "',
         token_ids=[330],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="search",
         token_ids=[1836],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_g",
         token_ids=[1889],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="utenberg",
         token_ids=[44433],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_books",
         token_ids=[73084],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='",',
         token_ids=[497],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' "',
         token_ids=[330],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="arguments",
         token_ids=[16370],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='":',
         token_ids=[788],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' {"',
         token_ids=[5212],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="search",
         token_ids=[1836],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_terms",
         token_ids=[37498],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='":',
         token_ids=[788],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' ["',
         token_ids=[4383],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="James",
         token_ids=[28084],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" Joyce",
         token_ids=[53626],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='",',
         token_ids=[497],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' "',
         token_ids=[330],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="Project",
         token_ids=[7849],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" Gutenberg",
         token_ids=[51586],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='"]',
         token_ids=[1341],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="}}\n",
         token_ids=[11248],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="</tool_call>",
         token_ids=[151658],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="",
         token_ids=[151645],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -676,11 +546,8 @@ OUTPUTS_INTERVAL_20 = [
         index=0,
         text="<think>",
         token_ids=[151667],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -707,11 +574,8 @@ OUTPUTS_INTERVAL_20 = [
             311,
             990,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -738,11 +602,8 @@ OUTPUTS_INTERVAL_20 = [
             729,
             429,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -769,11 +630,8 @@ OUTPUTS_INTERVAL_20 = [
             311,
             990,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -800,11 +658,8 @@ OUTPUTS_INTERVAL_20 = [
             752,
             1744,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -831,11 +686,8 @@ OUTPUTS_INTERVAL_20 = [
             3278,
             5944,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -862,11 +714,8 @@ OUTPUTS_INTERVAL_20 = [
             1265,
             3421,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -893,11 +742,8 @@ OUTPUTS_INTERVAL_20 = [
             330,
             16370,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -920,11 +766,9 @@ OUTPUTS_INTERVAL_20 = [
             151658,
             151645,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -939,11 +783,8 @@ OUTPUTS_NO_TOOL_CALL = [
         index=0,
         text="<think>",
         token_ids=[151667],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -970,11 +811,8 @@ OUTPUTS_NO_TOOL_CALL = [
             88646,
             1128,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1001,11 +839,8 @@ OUTPUTS_NO_TOOL_CALL = [
             53142,
             304,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1032,11 +867,8 @@ OUTPUTS_NO_TOOL_CALL = [
             2598,
             472,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1063,11 +895,8 @@ OUTPUTS_NO_TOOL_CALL = [
             911,
             29000,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1094,11 +923,8 @@ OUTPUTS_NO_TOOL_CALL = [
             10362,
             11285,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1125,11 +951,8 @@ OUTPUTS_NO_TOOL_CALL = [
             1265,
             1779,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1156,11 +979,8 @@ OUTPUTS_NO_TOOL_CALL = [
             518,
             279,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1187,11 +1007,8 @@ OUTPUTS_NO_TOOL_CALL = [
             429,
             13,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1218,11 +1035,8 @@ OUTPUTS_NO_TOOL_CALL = [
             576,
             1196,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1249,11 +1063,8 @@ OUTPUTS_NO_TOOL_CALL = [
             432,
             624,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -1274,11 +1085,9 @@ OUTPUTS_NO_TOOL_CALL = [
             13,
             151645,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -1532,6 +1341,45 @@ def request_for_sampling():
 
 
 @pytest.fixture
+def qwen3_coder_request_for_sampling():
+    return ChatCompletionRequest.model_construct(
+        messages=[{"content": "What is the weather in NYC?", "role": "user"}],
+        model="Qwen/Qwen3-Coder",
+        tools=[
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="get_weather",
+                    description="Get weather for a location",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "City name",
+                            }
+                        },
+                        "required": ["location"],
+                    },
+                ),
+            )
+        ],
+        tool_choice="auto",
+        include_reasoning=True,
+        stream=False,
+        n=1,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        temperature=None,
+        top_p=None,
+        skip_special_tokens=False,
+        chat_template_kwargs=None,
+        reasoning_effort=None,
+        parallel_tool_calls=True,
+    )
+
+
+@pytest.fixture
 def sampling_params():
     return SamplingParams(
         n=1,
@@ -1565,7 +1413,7 @@ def processor(tokenizer, request_for_sampling, sampling_params):
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1633,6 +1481,235 @@ def _collect_tool_calls(results):
 # Test
 # ---------------------------------------------------------------------------
 @pytest.mark.vllm
+def test_qwen3_coder_non_streaming_uses_batch_tool_parse(
+    tokenizer, qwen3_coder_request_for_sampling, sampling_params
+):
+    """Dynamo internally streams, but non-streaming clients should match vLLM batch parsing."""
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text=(
+                "<function=get_weather>\n"
+                "<parameter=location>\n"
+                "NYC\n"
+                "</parameter>\n"
+            ),
+            token_ids=[1001],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text="</function>\n</function>\n</function>",
+            token_ids=[1002],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="length",
+        ),
+    ]
+
+    streaming_proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=None,
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=True,
+    )
+    streaming_results = _collect_results(streaming_proc, outputs)
+    streaming_content = "".join(
+        r.get("delta", {}).get("content", "") for r in streaming_results
+    )
+    assert "<function=get_weather>" not in streaming_content
+    streaming_tool_calls = _collect_tool_calls(streaming_results)
+    assert len(streaming_tool_calls) == 1
+    assert streaming_tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(streaming_tool_calls[0]["function"]["arguments"]) == {
+        "location": "NYC"
+    }
+
+    non_streaming_proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=None,
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=False,
+    )
+    non_streaming_results = _collect_results(non_streaming_proc, outputs)
+    assert len(non_streaming_results) == 1
+
+    all_content = "".join(
+        r.get("delta", {}).get("content", "") for r in non_streaming_results
+    )
+    assert "<function=get_weather>" not in all_content
+    assert "</function>" not in all_content
+
+    tool_calls = _collect_tool_calls(non_streaming_results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"location": "NYC"}
+    assert non_streaming_results[0]["finish_reason"] == "length"
+
+
+@pytest.mark.vllm
+def test_qwen3_coder_non_streaming_preserves_content_before_tool_call(
+    tokenizer, qwen3_coder_request_for_sampling, sampling_params
+):
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text=(
+                "I can check that.\n"
+                "<function=get_weather>\n"
+                "<parameter=location>\n"
+                "NYC\n"
+                "</parameter>\n"
+                "</function>"
+            ),
+            token_ids=[1001],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        )
+    ]
+
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=None,
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=False,
+    )
+
+    results = _collect_results(proc, outputs)
+    assert len(results) == 1
+    assert results[0]["delta"]["content"] == "I can check that."
+
+    tool_calls = _collect_tool_calls(results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"location": "NYC"}
+    assert results[0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.vllm
+def test_qwen3_coder_non_streaming_batches_reasoning_before_tool_parse(
+    tokenizer, qwen3_coder_request_for_sampling, sampling_params
+):
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text=(
+                "<think>Need the weather.</think>\n"
+                "<function=get_weather>\n"
+                "<parameter=location>\n"
+                "NYC\n"
+                "</parameter>\n"
+                "</function>"
+            ),
+            token_ids=[1001],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        )
+    ]
+
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=False,
+    )
+
+    results = _collect_results(proc, outputs)
+    assert len(results) == 1
+    assert results[0]["delta"]["reasoning_content"] == "Need the weather."
+
+    all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
+    assert "<function=get_weather>" not in all_content
+    assert "</function>" not in all_content
+
+    tool_calls = _collect_tool_calls(results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"location": "NYC"}
+    assert results[0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.vllm
+def test_qwen3_streaming_buffers_function_marker_after_reasoning_end(
+    tokenizer, qwen3_coder_request_for_sampling, sampling_params
+):
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text=(
+                "<think>Need the weather.</think>\n"
+                "<function=get_weather>\n"
+                "<parameter=location>\n"
+                "NYC\n"
+                "</parameter>\n"
+            ),
+            token_ids=[151667, 151668],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text="</function>",
+            token_ids=[1002],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        ),
+    ]
+
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=True,
+    )
+
+    results = _collect_results(proc, outputs)
+    assert _collect_reasoning(results) == "Need the weather."
+    all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
+    assert "<function=get_weather>" not in all_content
+    assert "</function>" not in all_content
+
+    tool_calls = _collect_tool_calls(results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"location": "NYC"}
+
+
+@pytest.mark.vllm
 def test_stream_interval_1(processor):
     """stream_interval=1: one token per chunk. Baseline that works."""
     results = _collect_results(processor, OUTPUTS_INTERVAL_1)
@@ -1654,8 +1731,11 @@ def test_stream_interval_1(processor):
     assert tc["id"] is not None and tc["id"].startswith("chatcmpl-tool-")
     assert tc["type"] == "function"
 
+    # finish_reason remapped "stop" → "tool_calls" per openai-openapi
+    # ChatCompletion finish_reason enum.
+    # See https://github.com/ai-dynamo/dynamo/issues/8636
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
     seen_content = False
     for r in results:
@@ -1689,7 +1769,7 @@ def test_stream_interval_20(tokenizer, request_for_sampling, sampling_params):
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1721,9 +1801,9 @@ def test_stream_interval_20(tokenizer, request_for_sampling, sampling_params):
     ), f"Raw <tool_call> markup leaked into content: {all_content!r}"
     assert "</tool_call>" not in all_content
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: remaps "stop" → "tool_calls" per openai-openapi
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
 
 @pytest.mark.vllm
@@ -1742,7 +1822,7 @@ def test_stream_interval_20_reasoning_and_tool_finish_same_chunk(
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1752,11 +1832,9 @@ def test_stream_interval_20_reasoning_and_tool_finish_same_chunk(
         index=0,
         text=(penultimate.text or "") + (final.text or ""),
         token_ids=list(penultimate.token_ids) + list(final.token_ids),
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     )
     outputs = [*OUTPUTS_INTERVAL_20[:-2], merged_final]
 
@@ -1776,8 +1854,10 @@ def test_stream_interval_20_reasoning_and_tool_finish_same_chunk(
     assert "<tool_call>" not in all_content
     assert "</tool_call>" not in all_content
 
+    # finish_reason remapped "stop" → "tool_calls" per OpenAI spec.
+    # See https://github.com/ai-dynamo/dynamo/issues/8636
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
 
 @pytest.mark.vllm
@@ -1795,7 +1875,7 @@ def test_stream_terminal_single_chunk(tokenizer, request_for_sampling, sampling_
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1807,11 +1887,9 @@ def test_stream_terminal_single_chunk(tokenizer, request_for_sampling, sampling_
         index=0,
         text=all_text,
         token_ids=all_token_ids,
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     )
 
     results = _collect_results(proc, [single_chunk])
@@ -1840,9 +1918,9 @@ def test_stream_terminal_single_chunk(tokenizer, request_for_sampling, sampling_
     ), f"Raw <tool_call> markup leaked into content: {all_content!r}"
     assert "</tool_call>" not in all_content
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: remaps "stop" → "tool_calls" per openai-openapi
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
 
 @pytest.mark.vllm
@@ -1862,7 +1940,7 @@ def test_no_tool_call(tokenizer, request_for_sampling, sampling_params):
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1883,6 +1961,352 @@ def test_no_tool_call(tokenizer, request_for_sampling, sampling_params):
     tool_calls = _collect_tool_calls(results)
     assert len(tool_calls) == 0, f"Expected 0 tool calls but got {len(tool_calls)}"
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: no tool calls ⇒ "stop" is passed through unchanged.
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["stop"]
+
+
+# ---------------------------------------------------------------------------
+# vllm chat processor + hermes tool parser + Qwen3 reasoning drops the second
+# tool call in streaming mode on parallel-tool prompts. Observed symptom: 0
+# tool_calls reach the client, tool-call markup is routed into
+# reasoning_content, finish_reason="stop".
+# See https://github.com/ai-dynamo/dynamo/issues/8636
+#
+# Token IDs for the tool-call JSON bodies are arbitrary non-special ints
+# — the hermes parser operates on the text attribute, not decoded tokens.
+# ---------------------------------------------------------------------------
+_FAKE_TC_BODY_1 = tuple(range(1000, 1020))
+_FAKE_TC_BODY_2 = tuple(range(2000, 2020))
+_FAKE_TC_BODY_3 = tuple(range(3000, 3020))
+
+OUTPUTS_PARALLEL_NO_THINK = [
+    CompletionOutput(
+        index=0,
+        text=(
+            '<tool_call>\n{"name": "search_gutenberg_books", "arguments":'
+            ' {"search_terms": ["James Joyce"]}}\n</tool_call>\n'
+            '<tool_call>\n{"name": "search_gutenberg_books", "arguments"'
+        ),
+        token_ids=[
+            151657,
+            198,
+            *_FAKE_TC_BODY_1,
+            198,
+            151658,
+            198,
+            151657,
+            198,
+            *_FAKE_TC_BODY_2,
+        ],
+        cumulative_logprob=None,
+        logprobs=None,
+    ),
+    CompletionOutput(
+        index=0,
+        text=': {"search_terms": ["Charles Dickens"]}}\n</tool_call>',
+        token_ids=[
+            *_FAKE_TC_BODY_3,
+            198,
+            151658,
+            151645,
+        ],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="stop",
+    ),
+]
+
+
+@pytest.mark.vllm
+def test_streaming_parallel_tool_calls_no_think(
+    tokenizer, request_for_sampling, sampling_params
+):
+    """Regression: parallel tools with thinking disabled.
+
+    See https://github.com/ai-dynamo/dynamo/issues/8636
+
+    Shape: `enable_thinking=False` ⇒ <think>…</think> lives in the
+    prompt, the generated output has neither. In streaming mode the
+    reasoning parser stays engaged for every chunk (is_reasoning_end_streaming
+    never fires because </think> never arrives), so the tool-call markup is
+    mis-classified as reasoning_content and 0 tool_calls reach the client.
+
+    Pre-fix: this test FAILS — 0 tool_calls extracted, all tool-call markup
+    routed into reasoning_content, finish_reason="stop".
+    """
+    tool_parser = Hermes2ProToolParser(tokenizer)
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=tool_parser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    results = _collect_results(proc, OUTPUTS_PARALLEL_NO_THINK)
+    tool_calls = _collect_tool_calls(results)
+
+    # -- both tool calls reach the client -----------------------------------
+    assert len(tool_calls) == 2, (
+        f"Expected 2 tool calls (parallel-tool regression, see #8636); got "
+        f"{len(tool_calls)}. Results: {results!r}"
+    )
+    args = [json.loads(tc["function"]["arguments"]) for tc in tool_calls]
+    assert args[0] == {"search_terms": ["James Joyce"]}
+    assert args[1] == {"search_terms": ["Charles Dickens"]}
+    assert tool_calls[0]["id"] != tool_calls[1]["id"]
+
+    # -- no tool-call markup leaks into content or reasoning_content --------
+    all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
+    assert "<tool_call>" not in all_content
+    assert "</tool_call>" not in all_content
+    all_reasoning = _collect_reasoning(results)
+    assert (
+        "search_gutenberg_books" not in all_reasoning
+    ), f"Tool-call content leaked into reasoning_content: {all_reasoning!r}"
+
+    # -- finish_reason must be remapped to "tool_calls" (acc #1 of #8636).
+    # openai-openapi ChatCompletion finish_reason enum is {stop, length,
+    # tool_calls, content_filter, function_call}; vLLM emits "stop" at
+    # <|im_end|>, so the frontend remaps when tool calls were produced.
+    finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
+    assert finish_reasons == [
+        "tool_calls"
+    ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
+
+
+_LONG_ARGUMENT_FRAGMENTS = (
+    "James",
+    " Joyce",
+    " Dubliners",
+    " Ulysses",
+    " Finnegans",
+    " Wake",
+    " Portrait",
+    " of",
+    " the",
+    " Artist",
+)
+
+_LONG_ARGUMENT_CHUNK_TEXTS = (
+    '<tool_call>\n{"name": "search_gutenberg_books", '
+    '"arguments": {"search_terms": ["',
+    *_LONG_ARGUMENT_FRAGMENTS,
+    '"]}}\n</tool_call>',
+)
+
+
+def _long_string_argument_outputs():
+    return [
+        CompletionOutput(
+            index=0,
+            text=text,
+            token_ids=list(range(1000 + i * 4, 1000 + i * 4 + 4)),
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason=(
+                "stop" if i == len(_LONG_ARGUMENT_CHUNK_TEXTS) - 1 else None
+            ),
+        )
+        for i, text in enumerate(_LONG_ARGUMENT_CHUNK_TEXTS)
+    ]
+
+
+def test_streaming_tool_call_arguments_are_not_withheld(
+    tokenizer, request_for_sampling, sampling_params
+):
+    """Stream every tool-call argument delta in its own frame."""
+    tool_parser = Hermes2ProToolParser(tokenizer)
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=tool_parser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    outputs = _long_string_argument_outputs()
+    results = [proc.process_output(output) for output in outputs]
+
+    def _tool_calls_of(result):
+        if result is None:
+            return None
+        return result.get("delta", {}).get("tool_calls")
+
+    withheld = [
+        i
+        for i, (output, result) in enumerate(zip(outputs, results))
+        if output.finish_reason is None and not _tool_calls_of(result)
+    ]
+    assert not withheld, (
+        f"process_output withheld a tool_call delta on chunk(s) {withheld} of "
+        f"{len(outputs)}. The parser produced an argument delta for each, so "
+        "each must be published immediately rather than held until the parser "
+        "falls silent or finish_reason arrives."
+    )
+
+    frames = [r for r in results if _tool_calls_of(r)]
+    assert len(frames) > 1, (
+        "The whole argument arrived in a single frame; argument deltas must "
+        "stream the way plain content does."
+    )
+    assert len(frames) == len(outputs), (
+        f"Expected one tool_call frame per parser delta ({len(outputs)}); got "
+        f"{len(frames)}."
+    )
+
+    tool_calls = _collect_tool_calls([r for r in results if r is not None])
+    assert len(tool_calls) == 1
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {
+        "search_terms": ["".join(_LONG_ARGUMENT_FRAGMENTS)]
+    }
+
+    id_frames = [
+        i for i, r in enumerate(frames) if r["delta"]["tool_calls"][0].get("id")
+    ]
+    type_frames = [
+        i for i, r in enumerate(frames) if r["delta"]["tool_calls"][0].get("type")
+    ]
+    name_frames = [
+        i
+        for i, r in enumerate(frames)
+        if r["delta"]["tool_calls"][0].get("function", {}).get("name")
+    ]
+    assert id_frames == [0], f"'id' must appear on exactly one frame; got {id_frames}"
+    assert type_frames == [
+        0
+    ], f"'type' must appear on exactly one frame; got {type_frames}"
+    assert name_frames == [
+        0
+    ], f"'function.name' must appear on exactly one frame; got {name_frames}"
+
+    finish_reasons = [
+        r["finish_reason"] for r in results if r and r.get("finish_reason")
+    ]
+    assert finish_reasons == [
+        "tool_calls"
+    ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-parser adjust_request wiring
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def recording_reasoning_parser():
+    """A reasoning-parser class plus the per-test list of instances it created.
+
+    Returns ``(cls, instances)``. The list is owned by the fixture rather than
+    living on the class, so each test starts clean without depending on a shared
+    registry being cleared (see .ai/pytest-guidelines.md, "Hermetic Testing").
+    """
+    instances = []
+
+    class _RecordingReasoningParser:
+        """Stands in for a parser whose adjust_request mutates the request.
+
+        Real example: a parser that splits thinking from the answer on text markers
+        needs skip_special_tokens=False so those markers survive detokenisation.
+        """
+
+        def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+            self.tokenizer = tokenizer
+            self.chat_template_kwargs = chat_template_kwargs
+            self.called = False
+            instances.append(self)
+
+        def adjust_request(self, request):
+            self.called = True
+            request.skip_special_tokens = False
+            return request
+
+    return _RecordingReasoningParser, instances
+
+
+def _prep(tokenizer, *, reasoning_parser_class=None, chat_template_kwargs=None):
+    request = ChatCompletionRequest.model_construct(
+        messages=[{"role": "user", "content": "hi"}],
+        model="test",
+        tools=None,
+        tool_choice=None,
+        chat_template=None,
+        chat_template_kwargs=chat_template_kwargs,
+        add_generation_prompt=True,
+        continue_final_message=False,
+        documents=None,
+        reasoning_effort=None,
+        skip_special_tokens=True,
+    )
+    return _prepare_request(
+        request,
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+        reasoning_parser_class=reasoning_parser_class,
+    )
+
+
+class TestReasoningParserAdjustRequest:
+    """The reasoning parser's adjust_request must run during request preparation.
+
+    Without it the reasoning channel only works when the *client* sends
+    skip_special_tokens=false, which ordinary OpenAI-compatible clients do not.
+    """
+
+    def test_adjust_request_is_called(self, tokenizer, recording_reasoning_parser):
+        parser_cls, instances = recording_reasoning_parser
+        req, _, _, _, _ = _prep(tokenizer, reasoning_parser_class=parser_cls)
+        assert len(instances) == 1
+        assert instances[0].called
+        assert req.skip_special_tokens is False
+
+    def test_not_called_when_thinking_disabled(
+        self, tokenizer, recording_reasoning_parser
+    ):
+        """Gating must match StreamingPostProcessor: no parser => no adjustment.
+
+        If the sampling params were adjusted for a parser that then does not exist,
+        the model's control markers reach the client as visible text.
+        """
+        parser_cls, instances = recording_reasoning_parser
+        req, _, _, _, _ = _prep(
+            tokenizer,
+            reasoning_parser_class=parser_cls,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        assert instances == []
+        assert req.skip_special_tokens is True
+
+    def test_enable_thinking_true_still_calls(
+        self, tokenizer, recording_reasoning_parser
+    ):
+        parser_cls, instances = recording_reasoning_parser
+        req, _, _, _, _ = _prep(
+            tokenizer,
+            reasoning_parser_class=parser_cls,
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        assert instances[0].called
+        assert req.skip_special_tokens is False
+
+    def test_no_parser_class_leaves_request_untouched(self, tokenizer):
+        req, _, _, _, _ = _prep(tokenizer, reasoning_parser_class=None)
+        assert req.skip_special_tokens is True
+
+    def test_default_adjust_request_is_a_no_op(
+        self, tokenizer, recording_reasoning_parser
+    ):
+        """ReasoningParser.adjust_request returns the request unchanged by default,
+        so parsers that do not need the override are unaffected."""
+        parser_cls, _ = recording_reasoning_parser
+
+        class _PassThrough(parser_cls):
+            def adjust_request(self, request):
+                self.called = True
+                return request
+
+        req, _, _, _, _ = _prep(tokenizer, reasoning_parser_class=_PassThrough)
+        assert req.skip_special_tokens is True

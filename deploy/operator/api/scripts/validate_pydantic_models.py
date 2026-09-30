@@ -68,7 +68,7 @@ sys.path.insert(0, str(_components_src))
 # dynamo itself must be a namespace-like package (has __path__) so that
 # Python's import machinery can traverse down to dynamo.profiler from the
 # filesystem.  dynamo.planner is pre-registered as a stub to skip its heavy
-# __init__.py, while still allowing dynamo.planner.utils.* to load normally.
+# __init__.py, while still allowing dynamo.planner.config.* to load normally.
 # ---------------------------------------------------------------------------
 _dynamo_path = str(_components_src / "dynamo")
 _planner_path = str(_components_src / "dynamo" / "planner")
@@ -101,6 +101,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
     DynamoGraphDeploymentRequestSpec,
     DynamoGraphDeploymentRequestStatus,
     FeaturesSpec,
+    KVRouterSpec,
     MockerSpec,
     ModelCacheSpec,
     PlannerConfig,
@@ -148,6 +149,7 @@ def test_full_dgdr():
         ),
         features=FeaturesSpec(
             planner=PlannerConfig(enable_load_scaling=False),
+            kvRouter=KVRouterSpec(enabled=True),
             mocker=MockerSpec(enabled=False),
         ),
         searchStrategy=SearchStrategy.Rapid,
@@ -163,6 +165,7 @@ def test_full_dgdr():
     assert spec.modelCache.pvcName == "model-cache"
     assert spec.modelCache.pvcModelPath == "llama-3.1-405b"
     assert isinstance(spec.features.planner, PlannerConfig)
+    assert spec.features.kvRouter.enabled is True
     assert spec.features.mocker.enabled is False
     print("✓ Full DGDR spec validation passed")
 

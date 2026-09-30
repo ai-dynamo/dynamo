@@ -3,10 +3,19 @@
 
 use super::*;
 
+use crate::admission_gate;
+use crate::engine::AsyncEngineContext;
+use crate::error::DynamoError;
 use crate::metrics::prometheus_names::work_handler;
-use crate::protocols::maybe_error::MaybeError;
+use crate::metrics::work_handler_perf::{
+    WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
+};
+use crate::pipeline::network::StreamPrologueError;
+use crate::pipeline::{ManyIn, RequestStream};
+use crate::telemetry::{LifecycleStage, LifecycleTrace};
+use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
@@ -21,6 +30,7 @@ pub struct WorkHandlerMetrics {
     pub request_bytes: IntCounter,
     pub response_bytes: IntCounter,
     pub error_counter: IntCounterVec,
+    pub cancellation_total: IntCounter,
 }
 
 impl WorkHandlerMetrics {
@@ -31,6 +41,7 @@ impl WorkHandlerMetrics {
         request_bytes: IntCounter,
         response_bytes: IntCounter,
         error_counter: IntCounterVec,
+        cancellation_total: IntCounter,
     ) -> Self {
         Self {
             request_counter,
@@ -39,6 +50,7 @@ impl WorkHandlerMetrics {
             request_bytes,
             response_bytes,
             error_counter,
+            cancellation_total,
         }
     }
 
@@ -55,11 +67,18 @@ impl WorkHandlerMetrics {
             metrics_labels,
         )?;
 
+        // Custom buckets for inference workloads: retain sub-second resolution for
+        // fast operations, extend well beyond the default 10s ceiling to capture
+        // long-running generation requests that can last minutes.
+        let request_duration_buckets = vec![
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0,
+            300.0, 600.0,
+        ];
         let request_duration = metrics.create_histogram(
             work_handler::REQUEST_DURATION_SECONDS,
             "Time spent processing requests by work handler",
             metrics_labels,
-            None,
+            Some(request_duration_buckets),
         )?;
 
         let inflight_requests = metrics.create_intgauge(
@@ -87,6 +106,16 @@ impl WorkHandlerMetrics {
             metrics_labels,
         )?;
 
+        let cancellation_total = metrics.create_intcounter(
+            work_handler::CANCELLATION_TOTAL,
+            "Total number of requests cancelled by work handler",
+            metrics_labels,
+        )?;
+
+        // The gate admits on this endpoint's behalf, so expose its family here
+        // too. Idempotent: the gate is process-global and every endpoint asks.
+        admission_gate::register_metrics(endpoint.get_metrics_registry());
+
         Ok(Self::new(
             request_counter,
             request_duration,
@@ -94,188 +123,170 @@ impl WorkHandlerMetrics {
             request_bytes,
             response_bytes,
             error_counter,
+            cancellation_total,
         ))
     }
 }
 
-// RAII guard to ensure inflight gauge is decremented and request duration is observed on all code paths.
+// RAII guard to ensure inflight gauge is decremented, request duration is observed,
+// and lifecycle logs are emitted on all code paths.
 struct RequestMetricsGuard {
     inflight_requests: prometheus::IntGauge,
     request_duration: prometheus::Histogram,
     start_time: Instant,
+    request_id: Option<String>,
 }
+
 impl Drop for RequestMetricsGuard {
     fn drop(&mut self) {
         self.inflight_requests.dec();
         self.request_duration
             .observe(self.start_time.elapsed().as_secs_f64());
+        if let Some(request_id) = &self.request_id {
+            tracing::info!(request_id = %request_id, "request completed");
+        }
     }
 }
 
-#[async_trait]
-impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
-where
-    T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
-    U: Data + Serialize + MaybeError + std::fmt::Debug,
-{
-    fn add_metrics(
-        &self,
-        endpoint: &crate::component::Endpoint,
-        metrics_labels: Option<&[(&str, &str)]>,
-    ) -> Result<()> {
-        // Call the Ingress-specific add_metrics implementation
-        use crate::pipeline::network::Ingress;
-        Ingress::add_metrics(self, endpoint, metrics_labels)
+trait ResponsePublisher {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()>;
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()>;
+
+    /// Send a failure prologue keeping the worker's [`crate::error::ErrorType`]
+    /// where the transport can carry it.
+    ///
+    /// The default drops the type and sends the text alone. That is what the
+    /// QUIC response plane does: its error frame is a raw byte payload with no
+    /// field to put a typed error in, so a typed refusal over QUIC classifies
+    /// exactly as it did before this method existed.
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        self.send_prologue(error.map(|error| error.message)).await
+    }
+    async fn finish(&mut self) -> anyhow::Result<()>;
+    async fn abort(&mut self) -> anyhow::Result<()>;
+
+    fn reset_on_stop(&self) -> bool {
+        false
     }
 
-    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
-        use crate::pipeline::network::Ingress;
-        self.endpoint_health_check_notifier
-            .set(notifier)
-            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+    fn strict_prologue(&self) -> bool {
+        false
+    }
+}
+
+impl ResponsePublisher for quic_response::QuicResponseSender {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send(self, payload).await
+    }
+
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send_prologue(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::finish(self).await
+    }
+
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::abort(self).await
+    }
+
+    fn reset_on_stop(&self) -> bool {
+        true
+    }
+
+    fn strict_prologue(&self) -> bool {
+        true
+    }
+}
+
+impl ResponsePublisher for StreamSender {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+        StreamSender::send(self, payload).await
+    }
+
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+        StreamSender::send_prologue(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        StreamSender::send_prologue_typed(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn finish(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
-        let start_time = std::time::Instant::now();
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
-        // Increment inflight and ensure it's decremented on all exits via RAII guard
-        let _inflight_guard = self.metrics().map(|m| {
-            m.request_counter.inc();
-            m.inflight_requests.inc();
-            m.request_bytes.inc_by(payload.len() as u64);
-            RequestMetricsGuard {
-                inflight_requests: m.inflight_requests.clone(),
-                request_duration: m.request_duration.clone(),
-                start_time,
-            }
-        });
-
-        // decode the control message and the request
-        let msg = TwoPartCodec::default()
-            .decode_message(payload)?
-            .into_message_type();
-
-        // we must have a header and a body
-        // it will be held by this closure as a Some(permit)
-        let (control_msg, request) = match msg {
-            TwoPartMessageType::HeaderAndData(header, data) => {
-                tracing::trace!(
-                    "received two part message with ctrl: {} bytes, data: {} bytes",
-                    header.len(),
-                    data.len()
-                );
-                let control_msg: RequestControlMessage = match serde_json::from_slice(&header) {
-                    Ok(cm) => cm,
-                    Err(err) => {
-                        let json_str = String::from_utf8_lossy(&header);
-                        if let Some(m) = self.metrics() {
-                            m.error_counter
-                                .with_label_values(&[work_handler::error_types::DESERIALIZATION])
-                                .inc();
-                        }
-                        return Err(PipelineError::DeserializationError(format!(
-                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
-                        )));
-                    }
-                };
-                let request: T = serde_json::from_slice(&data)?;
-                (control_msg, request)
-            }
-            _ => {
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
-                        .inc();
-                }
-                return Err(PipelineError::Generic(String::from(
-                    "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
-                )));
-            }
-        };
-
-        // extend request with context
-        tracing::trace!("received control message: {:?}", control_msg);
-        tracing::trace!("received request: {:?}", request);
-        let request: context::Context<T> = Context::with_id(request, control_msg.id);
-
-        // todo - eventually have a handler class which will returned an abstracted object, but for now,
-        // we only support tcp here, so we can just unwrap the connection info
-        tracing::trace!("creating tcp response stream");
-        let mut publisher = tcp::client::TcpClient::create_response_stream(
-            request.context(),
-            control_msg.connection_info,
-        )
-        .await
-        .map_err(|e| {
-            if let Some(m) = self.metrics() {
-                m.error_counter
-                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
-                    .inc();
-            }
-            PipelineError::Generic(format!("Failed to create response stream: {:?}", e,))
-        })?;
-
-        tracing::trace!("calling generate");
-        let stream = self
-            .segment
-            .get()
-            .expect("segment not set")
-            .generate(request)
-            .await
-            .map_err(|e| {
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::GENERATE])
-                        .inc();
-                }
-                PipelineError::GenerateError(e)
-            });
-
-        // the prolouge is sent to the client to indicate that the stream is ready to receive data
-        // or if the generate call failed, the error is sent to the client
-        let mut stream = match stream {
-            Ok(stream) => {
-                tracing::trace!("Successfully generated response stream; sending prologue");
-                let _result = publisher.send_prologue(None).await;
-                stream
-            }
-            Err(e) => {
-                let error_string = e.to_string();
-
-                #[cfg(debug_assertions)]
-                {
-                    tracing::debug!(
-                        "Failed to generate response stream (with debug backtrace): {:?}",
-                        e
-                    );
-                }
-                #[cfg(not(debug_assertions))]
-                {
-                    tracing::error!("Failed to generate response stream: {error_string}");
-                }
-
-                let _result = publisher.send_prologue(Some(error_string)).await;
-                Err(e)?
-            }
-        };
-
+impl<Req, Resp, Adapter> Ingress<Req, Resp, Adapter>
+where
+    Req: PipelineIO + Sync,
+    Resp: PipelineIO,
+    Adapter: Send + Sync + 'static,
+{
+    /// Pump every chunk from the engine's response stream out to the
+    /// upstream response transport, plus the terminal complete-final
+    /// frame. Captures the per-frame metrics, the publish-failure error
+    /// classification (client-side disconnect vs. real failure), and the
+    /// health-check notifier policy (notify only on non-error chunks and
+    /// at clean stream end).
+    async fn pump_response_stream<U>(
+        &self,
+        mut stream: ManyOut<U>,
+        publisher: &impl ResponsePublisher,
+        payload_codec: RequestPlanePayloadCodec,
+    ) where
+        U: Data + std::fmt::Debug,
+        Adapter: IngressResponseEncoder<U>,
+    {
         let context = stream.context();
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
+        let mut saw_error_response = false;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
-            let resp_wrapper = NetworkStreamWrapper {
-                data: Some(resp),
-                complete_final: false,
+            let encoded = match self
+                .payload_adapter
+                .encode_response(payload_codec, Some(resp), false)
+                .await
+            {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    tracing::error!(%err, "failed to encode request-plane response");
+                    saw_error_response = true;
+                    send_complete_final = false;
+                    if let Some(m) = self.metrics() {
+                        m.error_counter
+                            .with_label_values(&[work_handler::error_types::SERIALIZATION])
+                            .inc();
+                    }
+                    break;
+                }
             };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
-                .expect("fatal error: invalid response object - this should never happen");
+            let is_error = encoded.is_error;
+            saw_error_response |= is_error;
+            let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
+            if (publisher.send(resp_bytes).await).is_err() {
                 send_complete_final = false;
                 if context.is_stopped() {
                     // Say there are 2 threads accessing `context`, the sequence can be either:
@@ -300,39 +311,1239 @@ where
                         .inc();
                 }
                 break;
+            } else if !is_error {
+                // Only notify on non-error chunks — error responses don't prove
+                // the engine is healthy and should not reset the canary timer.
+                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                    notifier.notify_one();
+                }
+            }
+            if encoded.stop_stream {
+                // Dropping the engine stream after the terminal frame is sent
+                // propagates cancellation to a producer that is still running.
+                // Stopping the context here can close the response transport
+                // before the queued error and clean terminal frames are read.
+                break;
             }
         }
+        // The TCP response writer exits without its clean sentinel when the
+        // worker context is stopped. Preserve that behavior on QUIC: the
+        // caller sends a logical reset instead of a clean terminal frame.
+        if publisher.reset_on_stop() && context.is_stopped() && !context.is_killed() {
+            send_complete_final = false;
+        }
         if send_complete_final {
-            let resp_wrapper = NetworkStreamWrapper::<U> {
-                data: None,
-                complete_final: true,
+            let encoded = match self
+                .payload_adapter
+                .encode_response(payload_codec, None, true)
+                .await
+            {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    tracing::error!(%err, "failed to encode request-plane final response");
+                    if let Some(m) = self.metrics() {
+                        m.error_counter
+                            .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                            .inc();
+                    }
+                    return;
+                }
             };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
-                .expect("fatal error: invalid response object - this should never happen");
+            let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
-                tracing::error!(
-                    "Failed to publish complete final for stream {}",
-                    context.id()
-                );
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
-                        .inc();
+            if (publisher.send(resp_bytes).await).is_err() {
+                // `is_stopped()` is `state != Live`, so it is also true after
+                // `kill()` — which the response-stream reader does on a TCP read
+                // error. Excluding killed narrows this to `state == Stopped` so
+                // real connection failures stay counted. `&&` reads `is_killed()`
+                // last, so a Stopped -> Killed upgrade between the two reads
+                // falls to the error path.
+                //
+                // Reachable only with a peer-sent `Stop`: the local
+                // `stop_generating()` above clears `send_complete_final` and
+                // breaks first. That invariant is load-bearing.
+                if context.is_stopped() && !context.is_killed() {
+                    // The peer asked us to stop, so a failed marker write is
+                    // attributable to that teardown, not to a fault here. Unlike
+                    // the per-frame branch, this also skips the counter.
+                    tracing::debug!(
+                        "Failed to publish complete final for stream {}; client already torn down",
+                        context.id()
+                    );
+                } else {
+                    // Still attached, or killed (hard cancel, protocol violation,
+                    // connection error): the client sees a stream with no
+                    // end-of-stream marker, so this stays a counted error.
+                    tracing::error!(
+                        "Failed to publish complete final for stream {}",
+                        context.id()
+                    );
+                    if let Some(m) = self.metrics() {
+                        m.error_counter
+                            .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                            .inc();
+                    }
                 }
             }
-            // Notify the health check manager that the stream has finished.
-            // This resets the timer, delaying the next canary health check.
-            if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+            // Only notify on stream completion if no error responses were seen
+            if let (false, Some(notifier)) = (
+                saw_error_response,
+                self.endpoint_health_check_notifier.get(),
+            ) {
                 notifier.notify_one();
+            }
+        }
+    }
+
+    /// Decode the wire envelope into its [`RequestControlMessage`] and the
+    /// optional data payload, shared by every [`IngressDispatch`] shape:
+    ///   - `HeaderAndData` → `(control, Some(data))` — the unary wire shape,
+    ///     where the request body travels in the data half.
+    ///   - `HeaderOnly` → `(control, None)` — the bidirectional wire shape,
+    ///     where request frames flow on the request-stream socket instead.
+    ///
+    /// The caller decides whether its path expects the data payload. The
+    /// deserialization and invalid-message error counters are incremented
+    /// here so every shape reports them consistently.
+    fn decode_control_message(
+        &self,
+        payload: Bytes,
+    ) -> Result<(RequestControlMessage, Option<Bytes>), PipelineError> {
+        let msg = TwoPartCodec::default()
+            .decode_message(payload)?
+            .into_message_type();
+
+        let (header, data) = match msg {
+            TwoPartMessageType::HeaderAndData(header, data) => (header, Some(data)),
+            TwoPartMessageType::HeaderOnly(header) => (header, None),
+            _ => {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                        .inc();
+                }
+                return Err(PipelineError::Generic(String::from(
+                    "Unexpected message from work queue; expected a header-only or header-and-data TwoPartMessage",
+                )));
+            }
+        };
+
+        let control_msg: RequestControlMessage =
+            serde_json::from_slice(&header).map_err(|err| {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::DESERIALIZATION])
+                        .inc();
+                }
+                let json_str = String::from_utf8_lossy(&header);
+                PipelineError::DeserializationError(format!(
+                    "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}, header_len={}",
+                    header.len(),
+                ))
+            })?;
+
+        Ok((control_msg, data))
+    }
+}
+/// The output of [`IngressDispatch::parse_and_build_request`]: the typed
+/// request the engine consumes, plus the bits of the on-wire control
+/// message the shared handler needs after parsing (the response-stream
+/// connection info and the frontend send timestamp).
+struct ParsedRequest<Req> {
+    request: Req,
+    response_connection_info: ConnectionInfo,
+    frontend_send_ts_ns: Option<u64>,
+    payload_codec: RequestPlanePayloadCodec,
+}
+
+#[derive(Clone, Copy)]
+struct ResponsePlaneModes {
+    configured: ResponsePlaneMode,
+    advertised: ResponsePlaneMode,
+}
+
+/// Per-shape strategy for turning a raw payload into a typed engine
+/// request. Captures the wire-shape divergence between the unary
+/// (`HeaderAndData`) and bidirectional (`HeaderOnly` + dial-in for the
+/// request stream) paths; everything else — metrics-guard, response stream
+/// open, `segment.generate`, prologue, pump — lives in
+/// [`Ingress::handle_payload_shared`] below.
+#[async_trait]
+trait IngressDispatch: Send + Sync {
+    type Request: PipelineIO;
+
+    async fn parse_and_build_request(
+        &self,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
+    ) -> Result<ParsedRequest<Self::Request>, PipelineError>;
+}
+
+#[async_trait]
+impl<T, U, Adapter> IngressDispatch for Ingress<SingleIn<T>, ManyOut<U>, Adapter>
+where
+    T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
+    U: Data + std::fmt::Debug,
+    Adapter: IngressRequestDecoder<T> + Send + Sync + 'static,
+{
+    type Request = SingleIn<T>;
+
+    async fn parse_and_build_request(
+        &self,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
+    ) -> Result<ParsedRequest<SingleIn<T>>, PipelineError> {
+        // The unary path carries the request body in the data half; a
+        // header-only envelope means the sender used the bidirectional shape.
+        let data = data.ok_or_else(|| {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                    .inc();
+            }
+            PipelineError::Generic(String::from(
+                "unary engine received a header-only envelope; expected a request payload",
+            ))
+        })?;
+        let payload_codec = control_msg.payload_codec;
+        let request_t: T = self
+            .payload_adapter
+            .decode_request(payload_codec, data)
+            .await
+            .inspect_err(|_| {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::DESERIALIZATION])
+                        .inc();
+                }
+            })?;
+
+        tracing::trace!(
+            request_id = %control_msg.id,
+            metadata_entries = control_msg.metadata.len(),
+            "received control message"
+        );
+        tracing::trace!("received request: {:?}", request_t);
+
+        let request: context::Context<T> =
+            Context::with_id_and_metadata(request_t, control_msg.id, control_msg.metadata);
+
+        Ok(ParsedRequest {
+            request,
+            response_connection_info: control_msg.connection_info,
+            frontend_send_ts_ns: control_msg.frontend_send_ts_ns,
+            payload_codec,
+        })
+    }
+}
+
+#[async_trait]
+impl<T, U, Adapter> IngressDispatch for Ingress<ManyIn<T>, ManyOut<U>, Adapter>
+where
+    T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
+    U: Data + std::fmt::Debug,
+    Adapter: IngressRequestDecoder<T> + Send + Sync + 'static,
+{
+    type Request = ManyIn<T>;
+
+    async fn parse_and_build_request(
+        &self,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
+    ) -> Result<ParsedRequest<ManyIn<T>>, PipelineError> {
+        // Bidirectional envelopes are header-only — all request frames
+        // (including the first) flow on the request-stream socket once it's
+        // dialed in. A data payload means the sender used the unary wire
+        // shape; reject it.
+        if data.is_some() {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                    .inc();
+            }
+            return Err(PipelineError::Generic(String::from(
+                "bidirectional engine received a non-header-only envelope",
+            )));
+        }
+
+        if !matches!(control_msg.request_type, RequestType::ManyIn) {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                    .inc();
+            }
+            return Err(PipelineError::Generic(String::from(
+                "bidirectional engine received a non-ManyIn request envelope",
+            )));
+        }
+
+        let req_stream_conn_info = control_msg
+            .request_stream_connection_info
+            .clone()
+            .ok_or_else(|| {
+                PipelineError::Generic(String::from(
+                    "bidirectional control message missing request_stream_connection_info",
+                ))
+            })?;
+
+        let request_context: context::Context<()> = context::Context::with_id_and_metadata(
+            (),
+            control_msg.id.clone(),
+            control_msg.metadata.clone(),
+        );
+        let payload_codec = control_msg.payload_codec;
+        let context_arc: Arc<dyn AsyncEngineContext> = request_context.context();
+
+        // Open the request stream (upstream → worker) up front. The shared
+        // handler opens the response stream uniformly after we return. If
+        // response-stream open subsequently fails, the forwarder task
+        // spawned below exits cleanly when `frame_tx.send` observes the
+        // dropped `frame_rx`.
+        let request_stream_recv = tcp::client::TcpClient::create_request_stream(
+            context_arc.clone(),
+            req_stream_conn_info,
+            None,
+        )
+        .await
+        .map_err(|e| {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                    .inc();
+            }
+            PipelineError::Generic(format!("Failed to create request stream: {e}"))
+        })?;
+
+        // Forwarder: deserialize raw bytes off the request socket into `T`
+        // and feed the engine's `ManyIn<T>` input. Every request frame
+        // (including the first) flows over this socket — the envelope is
+        // header-only.
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<T>(8);
+        let forwarder_ctx = context_arc.clone();
+        let payload_adapter = self.payload_adapter.clone();
+        tokio::spawn(async move {
+            let mut rx = request_stream_recv.rx;
+            while let Some(bytes) = rx.recv().await {
+                // Stop forwarding on either kill or soft-stop, matching the
+                // send-side `spawn_request_stream_forwarder`. Without the
+                // `stopped()` check, a `stop_generating()` would leave this
+                // task pumping frames into a channel the engine has abandoned.
+                if forwarder_ctx.is_killed() || forwarder_ctx.is_stopped() {
+                    break;
+                }
+                match payload_adapter.decode_request(payload_codec, bytes).await {
+                    Ok(item) => {
+                        if frame_tx.send(item).await.is_err() {
+                            tracing::debug!(
+                                "engine consumer dropped; bidirectional input forwarder exiting"
+                            );
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            codec = payload_codec.name(),
+                            "failed to deserialize bidirectional request frame; killing context"
+                        );
+                        forwarder_ctx.kill();
+                        break;
+                    }
+                }
+            }
+        });
+
+        let input_stream: crate::engine::DataStream<T> =
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(frame_rx));
+        let request: ManyIn<T> = request_context.map(|_| RequestStream::new(input_stream));
+
+        Ok(ParsedRequest {
+            request,
+            response_connection_info: control_msg.connection_info,
+            frontend_send_ts_ns: control_msg.frontend_send_ts_ns,
+            payload_codec,
+        })
+    }
+}
+
+impl<Req, U, Adapter> Ingress<Req, ManyOut<U>, Adapter>
+where
+    Req: PipelineIO + Sync,
+    U: Data + std::fmt::Debug,
+    Adapter: IngressResponseEncoder<U> + Send + Sync + 'static,
+{
+    async fn generate_and_publish<P>(
+        &self,
+        request: Req,
+        payload_codec: RequestPlanePayloadCodec,
+        start_time: Instant,
+        response_modes: ResponsePlaneModes,
+        lifecycle: &LifecycleTrace,
+        mut publisher: P,
+    ) -> Result<(), PipelineError>
+    where
+        Self: IngressDispatch<Request = Req>,
+        P: ResponsePublisher,
+    {
+        let ResponsePlaneModes {
+            configured: configured_mode,
+            advertised: advertised_mode,
+        } = response_modes;
+
+        if configured_mode != advertised_mode {
+            let message = format!(
+                "response plane mismatch: frontend requested {}, worker configured {}",
+                advertised_mode.name(),
+                configured_mode.name()
+            );
+            let _ = publisher.send_prologue(Some(message.clone())).await;
+            let _ = publisher.finish().await;
+            return Err(PipelineError::Generic(message));
+        }
+
+        let request_context = request.context();
+        tracing::trace!("calling generate");
+        let worker_operation = lifecycle.start_worker_operation();
+        // Route backend generation through the transport-independent admission
+        // boundary. Admission errors follow the existing generate error path.
+        let stream = async {
+            admission_gate::global()
+                .admit(
+                    Some(request_context.as_ref()),
+                    self.segment
+                        .get()
+                        .expect("segment not set")
+                        .generate(request)
+                        .instrument(lifecycle.start(LifecycleStage::RequestDispatch)),
+                )
+                .await
+        }
+        .instrument(worker_operation.clone())
+        .await
+        .map_err(|error| {
+            if let Some(metrics) = self.metrics() {
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::GENERATE])
+                    .inc();
+            }
+            PipelineError::GenerateError(error)
+        });
+
+        let stream = match stream {
+            Ok(stream) => {
+                tracing::trace!("Successfully generated response stream; sending prologue");
+                let result = publisher.send_prologue(None).await;
+                if publisher.strict_prologue() {
+                    result.map_err(|error| {
+                        if let Some(metrics) = self.metrics() {
+                            metrics
+                                .error_counter
+                                .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                                .inc();
+                        }
+                        PipelineError::Generic(format!(
+                            "Failed to open {} response stream: {error}",
+                            configured_mode.name()
+                        ))
+                    })?;
+                }
+                WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
+                    .observe(start_time.elapsed().as_secs_f64());
+                stream
+            }
+            Err(error) => {
+                let error_string = error.to_string();
+
+                #[cfg(debug_assertions)]
+                tracing::debug!(
+                    "Failed to generate response stream (with debug backtrace): {:?}",
+                    error
+                );
+                #[cfg(not(debug_assertions))]
+                tracing::error!("Failed to generate response stream: {error_string}");
+
+                if publisher.reset_on_stop()
+                    && request_context.is_stopped()
+                    && !request_context.is_killed()
+                {
+                    let _ = publisher.abort().await;
+                } else {
+                    // Send the worker's error type with the display text, so a
+                    // frontend can tell a request the backend cannot serve from
+                    // a transport failure.
+                    let prologue_error = StreamPrologueError::new(
+                        error_string,
+                        typed_error_from_pipeline_error(&error),
+                    );
+                    let _ = publisher.send_prologue_typed(Some(prologue_error)).await;
+                }
+                return Err(error);
+            }
+        };
+
+        async {
+            self.pump_response_stream(stream, &publisher, payload_codec)
+                .instrument(lifecycle.start_worker_response_streaming())
+                .await
+        }
+        .instrument(worker_operation)
+        .await;
+        let finish = if publisher.reset_on_stop()
+            && request_context.is_stopped()
+            && !request_context.is_killed()
+        {
+            publisher.abort().await
+        } else {
+            publisher.finish().await
+        };
+        finish.map_err(|error| {
+            PipelineError::Generic(format!(
+                "Failed to finish {} response stream: {error}",
+                configured_mode.name()
+            ))
+        })
+    }
+
+    /// Shared body of `PushWorkHandler::handle_payload` for every
+    /// `Ingress<Req, ManyOut<U>>` shape that has an [`IngressDispatch`]
+    /// impl. Sets up the inflight metrics guard, calls
+    /// `parse_and_build_request` for the wire-shape-specific request
+    /// building, opens the response stream uniformly, dispatches via
+    /// the engine, sends the prologue, and pumps the response through
+    /// [`Self::pump_response_stream`].
+    async fn handle_payload_shared(
+        &self,
+        payload: Bytes,
+        request_id: Option<String>,
+    ) -> Result<(), PipelineError>
+    where
+        Self: IngressDispatch<Request = Req>,
+    {
+        let t2_wallclock_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let start_time = std::time::Instant::now();
+        // Increment inflight and ensure it's decremented on all exits via RAII guard
+        let _inflight_guard = self.metrics().map(|m| {
+            m.request_counter.inc();
+            m.inflight_requests.inc();
+            m.request_bytes.inc_by(payload.len() as u64);
+            if let Some(rid) = &request_id {
+                tracing::info!(request_id = %rid, "request received");
+            }
+            RequestMetricsGuard {
+                inflight_requests: m.inflight_requests.clone(),
+                request_duration: m.request_duration.clone(),
+                start_time,
+                request_id: request_id.clone(),
+            }
+        });
+
+        let (control_msg, data) = self.decode_control_message(payload)?;
+        let lifecycle = match self.registered_lifecycle_role() {
+            Some(role)
+                if control_msg
+                    .metadata
+                    .get(crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY)
+                    .is_some_and(|version| version == "v1") =>
+            {
+                LifecycleTrace::from_request_id_with_role(control_msg.id.clone(), role)
+            }
+            _ => LifecycleTrace::new(false),
+        };
+
+        // Admission begins after the envelope selects capture, before payload
+        // decoding and response setup. Hold without entering it: response
+        // readers capture the current span and live until the request ends.
+        // They must inherit handle_payload, not prolong worker.admission.
+        let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
+        let ParsedRequest {
+            request,
+            response_connection_info,
+            frontend_send_ts_ns,
+            payload_codec,
+        } = self.parse_and_build_request(control_msg, data).await?;
+
+        // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
+        if let Some(t1_ns) = frontend_send_ts_ns {
+            let transit_ns = t2_wallclock_ns.saturating_sub(t1_ns);
+            WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
+        }
+
+        let advertised_mode =
+            ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
+                .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let configured_mode = ResponsePlaneMode::configured()
+            .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let response_modes = ResponsePlaneModes {
+            configured: configured_mode,
+            advertised: advertised_mode,
+        };
+        let cancellation_counter = self
+            .metrics()
+            .map(|metrics| metrics.cancellation_total.clone());
+
+        match advertised_mode {
+            ResponsePlaneMode::Tcp => {
+                tracing::trace!("creating tcp response stream");
+                let publisher = tcp::client::TcpClient::create_response_stream(
+                    request.context(),
+                    response_connection_info,
+                    cancellation_counter,
+                )
+                .await
+                .map_err(|error| {
+                    if let Some(metrics) = self.metrics() {
+                        metrics
+                            .error_counter
+                            .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                            .inc();
+                    }
+                    PipelineError::Generic(format!("Failed to create response stream: {error}"))
+                })?;
+                drop(worker_admission);
+                self.generate_and_publish(
+                    request,
+                    payload_codec,
+                    start_time,
+                    response_modes,
+                    &lifecycle,
+                    publisher,
+                )
+                .await?;
+            }
+            ResponsePlaneMode::Quic => {
+                tracing::trace!("creating QUIC response sender");
+                let response_pool = self.quic_response_client_pool()?;
+                let publisher = response_pool
+                    .sender_with_cancellation_metric(
+                        request.context(),
+                        response_connection_info,
+                        cancellation_counter,
+                    )
+                    .await
+                    .map_err(|error| {
+                        if let Some(metrics) = self.metrics() {
+                            metrics
+                                .error_counter
+                                .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                                .inc();
+                        }
+                        PipelineError::Generic(format!(
+                            "Failed to create QUIC response stream: {error}"
+                        ))
+                    })?;
+                drop(worker_admission);
+                self.generate_and_publish(
+                    request,
+                    payload_codec,
+                    start_time,
+                    response_modes,
+                    &lifecycle,
+                    publisher,
+                )
+                .await?;
             }
         }
 
         // Ensure the metrics guard is not dropped until the end of the function.
+        // Drop fires "request completed" log via RAII.
         drop(_inflight_guard);
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl<T, U, Adapter> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>, Adapter>
+where
+    T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
+    U: Data + std::fmt::Debug,
+    Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
+{
+    fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        self.bind_lifecycle_endpoint(endpoint);
+    }
+
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        // Call the inherent `Ingress::add_metrics`, not this trait method.
+        Ingress::add_metrics(self, endpoint, metrics_labels)
+    }
+
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+        self.endpoint_health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+        Ok(())
+    }
+
+    async fn handle_payload(
+        &self,
+        payload: Bytes,
+        request_id: Option<String>,
+    ) -> Result<(), PipelineError> {
+        self.handle_payload_shared(payload, request_id).await
+    }
+}
+
+#[async_trait]
+impl<T, U, Adapter> PushWorkHandler for Ingress<ManyIn<T>, ManyOut<U>, Adapter>
+where
+    T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
+    U: Data + std::fmt::Debug,
+    Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
+{
+    fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        self.bind_lifecycle_endpoint(endpoint);
+    }
+
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        // Call the inherent `Ingress::add_metrics`, not this trait method.
+        Ingress::add_metrics(self, endpoint, metrics_labels)
+    }
+
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+        self.endpoint_health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+        Ok(())
+    }
+
+    async fn handle_payload(
+        &self,
+        payload: Bytes,
+        request_id: Option<String>,
+    ) -> Result<(), PipelineError> {
+        self.handle_payload_shared(payload, request_id).await
+    }
+}
+
+/// Recover the worker's typed error from a pipeline failure, for the prologue.
+///
+/// `GenerateError` must unwrap its `anyhow::Error` payload first. `anyhow::Error`
+/// does not implement `std::error::Error`, so that variant exposes no `source()`
+/// and converting the enclosing `PipelineError` yields a bare
+/// `ErrorType::Unknown`, losing the worker error type. Any other variant carries
+/// no worker error and converts to `ErrorType::Unknown`.
+pub(crate) fn typed_error_from_pipeline_error(e: &PipelineError) -> DynamoError {
+    let source: &(dyn std::error::Error + 'static) = match e {
+        PipelineError::GenerateError(inner) => inner.as_ref(),
+        other => other,
+    };
+    DynamoError::from(source)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
+    use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
+    use crate::protocols::annotated::Annotated;
+    use futures::stream;
+    use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::error::{BackendError, ErrorType};
+
+    type TestRequest = serde_json::Value;
+    type TestResponse = Annotated<serde_json::Value>;
+    type TestIngress = Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>;
+
+    /// The positive half of the recovery hop: a worker's typed refusal, boxed
+    /// into the `anyhow::Error` payload of `PipelineError::GenerateError`,
+    /// comes back out with its type intact.
+    #[test]
+    fn generate_error_payload_keeps_the_workers_error_type() {
+        let e = PipelineError::GenerateError(anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        ));
+
+        assert_eq!(
+            typed_error_from_pipeline_error(&e).error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "the worker's type must survive the anyhow payload"
+        );
+    }
+
+    /// The negative half: a failure that is not a worker's `generate()` error
+    /// has no worker classification and uses the canonical internal fallback.
+    #[test]
+    fn non_generate_pipeline_error_is_internal_unclassified() {
+        let e = PipelineError::DeserializationError("bad request payload".to_string());
+        let error = typed_error_from_pipeline_error(&e);
+
+        assert_eq!(error.class(), ErrorType::Internal);
+        assert_eq!(error.reason().as_str(), "runtime.unclassified");
+    }
+
+    #[derive(Clone, Default)]
+    struct AdmissionCapture {
+        started: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for AdmissionCapture
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if attrs.metadata().name() == "worker.admission" {
+                self.started.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if ctx.span(&id).unwrap().metadata().name() == "worker.admission" {
+                self.closed.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct AdmissionProbe(AdmissionCapture, bool);
+
+    #[async_trait]
+    impl crate::engine::AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for AdmissionProbe
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            assert_eq!(self.0.started.load(Ordering::SeqCst), self.1);
+            assert_eq!(
+                self.0.closed.load(Ordering::SeqCst),
+                self.1,
+                "admission must close before generation, while the TCP reader is still alive"
+            );
+            anyhow::bail!("admission probe finished")
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_admission_closes_before_generation_and_skips_control_calls() {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        // Configuration is process-scoped. Isolate this enabled-mode test from
+        // other tests which may have initialized the disabled default already.
+        const CHILD: &str = "DYNAMO_LIFECYCLE_ADMISSION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "pipeline::network::ingress::push_handler::tests::lifecycle_admission_closes_before_generation_and_skips_control_calls",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("DYN_LIFECYCLE_TRACE_ENABLED", "true")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated admission regression failed");
+            return;
+        }
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_LIFECYCLE_TRACE_ENABLED", Some("true")),
+                ("DYN_RESPONSE_PLANE", Some("tcp")),
+            ],
+            async {
+                for (inference, rooted) in
+                    [(true, true), (true, false), (false, true), (false, false)]
+                {
+                    let capture = AdmissionCapture::default();
+                    let subscriber = tracing_subscriber::registry().with(capture.clone());
+                    async {
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap().to_string();
+                        let peer = tokio::spawn(async move {
+                            let (mut socket, _) = listener.accept().await.unwrap();
+                            let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+                        });
+                        let engine = Arc::new(AdmissionProbe(capture, inference && rooted));
+                        let ingress = if inference {
+                            TestIngress::for_engine_with_lifecycle_role(
+                                engine,
+                                crate::telemetry::LifecycleOperationRole::Worker,
+                            )
+                        } else {
+                            TestIngress::for_engine(engine)
+                        }
+                        .unwrap();
+                        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+                            address,
+                            subject: "admission-probe".to_string(),
+                            context: "admission-probe".to_string(),
+                            stream_type: crate::pipeline::network::StreamType::Response,
+                        }
+                        .into();
+                        let metadata = if rooted {
+                            std::collections::BTreeMap::from([(
+                                crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY,
+                                "v1",
+                            )])
+                        } else {
+                            std::collections::BTreeMap::new()
+                        };
+                        let header = serde_json::to_vec(&serde_json::json!({
+                            "id": "admission-probe",
+                            "request_type": "single_in",
+                            "response_type": "many_out",
+                            "connection_info": connection,
+                            "metadata": metadata,
+                        }))
+                        .unwrap();
+                        let payload = TwoPartCodec::default()
+                            .encode_message(TwoPartMessage::from_parts(
+                                header.into(),
+                                Bytes::from_static(b"{}"),
+                            ))
+                            .unwrap();
+                        let error = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            ingress
+                                .handle_payload_shared(payload, Some("admission-probe".to_string()))
+                                .instrument(tracing::info_span!("handle_payload")),
+                        )
+                        .await
+                        .expect("local admission probe timed out")
+                        .unwrap_err();
+                        assert!(error.to_string().contains("admission probe finished"));
+                        peer.abort();
+                        let _ = peer.await;
+                    }
+                    .with_subscriber(subscriber)
+                    .await;
+                }
+            },
+        )
+        .await;
+    }
+
+    #[derive(Default)]
+    struct MismatchPublisher {
+        prologue: Arc<std::sync::Mutex<Option<Option<String>>>>,
+        finished: Arc<AtomicBool>,
+    }
+
+    impl ResponsePublisher for MismatchPublisher {
+        async fn send(&self, _payload: Bytes) -> anyhow::Result<()> {
+            panic!("mismatch must not send response data")
+        }
+
+        async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+            *self.prologue.lock().unwrap() = Some(error);
+            Ok(())
+        }
+
+        async fn finish(&mut self) -> anyhow::Result<()> {
+            self.finished.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn abort(&mut self) -> anyhow::Result<()> {
+            panic!("mismatch must finish with a frontend-visible error")
+        }
+    }
+
+    #[tokio::test]
+    async fn response_plane_mismatch_reports_error_before_generate() {
+        for (configured, advertised) in [
+            (ResponsePlaneMode::Tcp, ResponsePlaneMode::Quic),
+            (ResponsePlaneMode::Quic, ResponsePlaneMode::Tcp),
+        ] {
+            let ingress = TestIngress::new();
+            let publisher = MismatchPublisher::default();
+            let prologue = publisher.prologue.clone();
+            let finished = publisher.finished.clone();
+            let lifecycle = LifecycleTrace::new(false);
+
+            let error = ingress
+                .generate_and_publish(
+                    Context::new(serde_json::json!({})),
+                    RequestPlanePayloadCodec::Json,
+                    Instant::now(),
+                    ResponsePlaneModes {
+                        configured,
+                        advertised,
+                    },
+                    &lifecycle,
+                    publisher,
+                )
+                .await
+                .expect_err("mismatched response planes must fail");
+
+            let expected = format!(
+                "response plane mismatch: frontend requested {}, worker configured {}",
+                advertised.name(),
+                configured.name()
+            );
+            assert!(error.to_string().contains(&expected));
+            assert_eq!(*prologue.lock().unwrap(), Some(Some(expected)));
+            assert!(finished.load(Ordering::Acquire));
+        }
+    }
+
+    /// Standalone metrics, not bound to an `Endpoint`, so the test needs no DRT.
+    fn test_metrics() -> WorkHandlerMetrics {
+        WorkHandlerMetrics::new(
+            IntCounter::with_opts(Opts::new("requests_total", "t")).unwrap(),
+            Histogram::with_opts(HistogramOpts::new("request_duration_seconds", "t")).unwrap(),
+            IntGauge::with_opts(Opts::new("inflight_requests", "t")).unwrap(),
+            IntCounter::with_opts(Opts::new("request_bytes_total", "t")).unwrap(),
+            IntCounter::with_opts(Opts::new("response_bytes_total", "t")).unwrap(),
+            IntCounterVec::new(
+                Opts::new(work_handler::ERRORS_TOTAL, "t"),
+                &[work_handler::ERROR_TYPE_LABEL],
+            )
+            .unwrap(),
+            IntCounter::with_opts(Opts::new("cancellation_total", "t")).unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_quic_client_pool_initializes_without_add_metrics() {
+        let ingress = TestIngress::new();
+        assert!(ingress.metrics().is_none());
+
+        let first = ingress.quic_response_client_pool().unwrap();
+        let second = ingress.quic_response_client_pool().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// Which half of the teardown race a given run exercises.
+    #[derive(Clone, Copy, Debug)]
+    enum Teardown {
+        /// Frontend sent `ControlMessage::Stop`; the control reader called
+        /// `context.stop()` (see `tcp/client.rs`).
+        Stop,
+        /// Frontend sent `ControlMessage::Kill`; the control reader called
+        /// `context.kill()`.
+        Kill,
+        /// The response-stream reader hit a TCP read error and called
+        /// `context.kill()` (`tcp/client.rs`, "tcp stream read error").
+        /// Indistinguishable from `Kill` at the context level, which is
+        /// exactly why `is_stopped()` alone is too coarse a guard.
+        ConnectionReadError,
+        /// The transport died with the client still attached and the context
+        /// live — a genuine failure that must stay classified as an error.
+        TransportOnly,
+    }
+
+    /// Drive `pump_response_stream` through the client-teardown ordering:
+    /// the engine emits `content_frames` chunks, then the upstream reader goes
+    /// away (mirroring `handle_writer` exiting on `context.stopped()`) while the
+    /// trailing `complete_final` frame is still unsent.
+    ///
+    /// Returns (publish_final count, publish_response count).
+    async fn run_teardown_race(content_frames: usize, teardown: Teardown) -> (u64, u64) {
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress
+            .metrics
+            .set(metrics.clone())
+            .expect("metrics already set");
+
+        // Capacity covers every content frame, so a send only fails once the
+        // receiver is gone — never merely because the channel is full.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(content_frames + 8);
+        let publisher = StreamSender { tx, prologue: None };
+
+        let ctx = Context::new(serde_json::json!({}));
+        let engine_ctx = ctx.context();
+
+        // The stream yields its content, then parks until the test has torn the
+        // receiver down. Ending after the gate (rather than on a timer) is what
+        // makes the race deterministic.
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let content: Vec<TestResponse> = (0..content_frames)
+            .map(|i| Annotated::from_data(serde_json::json!({ "token": i })))
+            .collect();
+        let tail = stream::unfold(Some(gate_rx), |state| async move {
+            // Awaiting then yielding `None` ends the stream, so
+            // `send_complete_final` stays true and the final frame is attempted.
+            let gate = state?;
+            let _ = gate.await;
+            None
+        });
+        let response_stream: ManyOut<TestResponse> = ResponseStream::new(
+            Box::pin(stream::iter(content).chain(tail)),
+            engine_ctx.clone(),
+        );
+
+        let pump = tokio::spawn({
+            let ingress = ingress.clone();
+            async move {
+                ingress
+                    .pump_response_stream(
+                        response_stream,
+                        &publisher,
+                        RequestPlanePayloadCodec::Json,
+                    )
+                    .await;
+            }
+        });
+
+        // Drain the content frames so the pump is past the per-frame branch.
+        for _ in 0..content_frames {
+            rx.recv().await.expect("content frame");
+        }
+
+        // Now reproduce the teardown: the frontend has everything it needs and
+        // drops the request, which kills the worker's writer task.
+        match teardown {
+            Teardown::Stop => engine_ctx.stop(),
+            Teardown::Kill | Teardown::ConnectionReadError => engine_ctx.kill(),
+            Teardown::TransportOnly => {}
+        }
+        drop(rx);
+        let _ = gate_tx.send(());
+
+        pump.await.expect("pump task panicked");
+
+        let errors = &metrics.error_counter;
+        (
+            errors
+                .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                .get(),
+            errors
+                .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
+                .get(),
+        )
+    }
+
+    /// Losing the `complete_final` send to a client that has already
+    /// torn down is not a worker error. The per-frame branch already makes this
+    /// distinction; the final-marker branch must make it too.
+    #[tokio::test]
+    async fn test_publish_final_race_with_stopped_context_is_not_an_error() {
+        let (publish_final, publish_response) = run_teardown_race(3, Teardown::Stop).await;
+        assert_eq!(
+            publish_final, 0,
+            "complete_final lost to a stopped context must not count as an error"
+        );
+        assert_eq!(
+            publish_response, 0,
+            "content frames were all delivered before teardown"
+        );
+    }
+
+    /// A killed context must stay a counted error. `is_stopped()` is
+    /// `state != Live`, so it is true after `kill()` as well — but the
+    /// response-stream reader kills the context on a TCP read error, so
+    /// suppressing on `is_stopped()` alone would hide real connection
+    /// failures from the very counter meant to surface them.
+    #[tokio::test]
+    async fn test_publish_final_with_killed_context_is_still_an_error() {
+        let (publish_final, _) = run_teardown_race(3, Teardown::Kill).await;
+        assert_eq!(
+            publish_final, 1,
+            "a killed context is not a graceful teardown and must still be counted"
+        );
+    }
+
+    /// The concrete regression: `tcp/client.rs` calls `context.kill()` on a TCP
+    /// read error ("tcp stream read error, closing connection"). That path must
+    /// remain visible in `dynamo_component_errors_total`.
+    #[tokio::test]
+    async fn test_publish_final_after_connection_read_error_is_still_an_error() {
+        let (publish_final, _) = run_teardown_race(3, Teardown::ConnectionReadError).await;
+        assert_eq!(
+            publish_final, 1,
+            "a dropped connection must not be silently reclassified as a benign teardown"
+        );
+    }
+
+    /// Guards against suppressing too much: with the context still live, a failed
+    /// `complete_final` is a real transport failure and must still be counted.
+    #[tokio::test]
+    async fn test_publish_final_failure_without_stop_is_still_an_error() {
+        let (publish_final, _) = run_teardown_race(3, Teardown::TransportOnly).await;
+        assert_eq!(
+            publish_final, 1,
+            "a genuine complete_final failure must still be counted"
+        );
+    }
+
+    /// The marker itself is the transport-level end-of-stream signal that
+    /// non-chat consumers (KV-router worker index queries, disaggregated
+    /// prefill→decode) rely on to tell a clean end from a truncated one. The
+    /// classification change must not disturb the clean path: every content
+    /// frame plus a `complete_final: true` frame still goes out, and nothing is
+    /// counted as an error.
+    #[tokio::test]
+    async fn test_complete_final_marker_still_sent_on_clean_stream() {
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+
+        let content_frames = 3;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(content_frames + 8);
+        let publisher = StreamSender { tx, prologue: None };
+
+        let ctx = Context::new(serde_json::json!({}));
+        let content: Vec<TestResponse> = (0..content_frames)
+            .map(|i| Annotated::from_data(serde_json::json!({ "token": i })))
+            .collect();
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(stream::iter(content)), ctx.context());
+
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+        drop(publisher);
+
+        let mut frames = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            let (_header, data) = msg.into_parts();
+            frames.push(serde_json::from_slice::<serde_json::Value>(&data).unwrap());
+        }
+
+        assert_eq!(
+            frames.len(),
+            content_frames + 1,
+            "expected every content frame plus the trailing marker"
+        );
+        for (i, frame) in frames.iter().take(content_frames).enumerate() {
+            assert_eq!(frame["complete_final"], false, "content frame {i}");
+        }
+        assert_eq!(
+            frames[content_frames]["complete_final"], true,
+            "trailing frame must carry the end-of-stream marker"
+        );
+
+        let errors = &metrics.error_counter;
+        assert_eq!(
+            errors
+                .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                .get(),
+            0
+        );
+        assert_eq!(
+            errors
+                .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
+                .get(),
+            0
+        );
     }
 }

@@ -3,11 +3,18 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
-from dynamo.vllm.handlers import BaseWorkerHandler
+pytest.importorskip("torch")
+pytest.importorskip("vllm.config")
+pytest.importorskip("vllm.v1.engine.exceptions")
+
+from dynamo.vllm.handlers import (  # noqa: E402
+    BaseWorkerHandler,
+    VllmEnginePauseController,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -34,8 +41,8 @@ def _make_handler() -> _TestWorkerHandler:
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._sleep_wake_lock = asyncio.Lock()
-    handler._engine_is_sleeping = False
+    handler._pause_controller = VllmEnginePauseController(handler.engine_client)
+    handler._pause_lock = asyncio.Lock()
     return handler
 
 
@@ -75,6 +82,143 @@ async def test_sleep_and_wake_are_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_pause_without_level_uses_vllm_default_sleep():
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=AsyncMock(),
+        resume_generation=AsyncMock(),
+    )
+    controller = VllmEnginePauseController(engine_client)
+
+    changed = await controller.pause(None)
+
+    assert changed is True
+    engine_client.pause_generation.assert_awaited_once()
+    engine_client.sleep.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_wraps_sleep_wake_with_communicator_checkpoint_calls():
+    engine_client = AsyncMock()
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+
+    assert await controller.pause(None) is True
+    assert await controller.resume() is True
+
+    assert engine_client.mock_calls == [
+        call.pause_generation(),
+        call.sleep(),
+        call.checkpoint_prepare(),
+        call.checkpoint_restore(),
+        call.wake_up(),
+        call.resume_generation(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_restore_failure_is_fail_closed():
+    """A failed communicator restore must not be replayed.
+
+    The restored process keeps the engine paused and lets the exception
+    propagate, so it dies rather than resuming on half-rebuilt communicators.
+    """
+    engine_client = AsyncMock()
+    engine_client.checkpoint_restore.side_effect = RuntimeError("restore failed")
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+    assert await controller.pause(None) is True
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        await controller.resume()
+
+    engine_client.checkpoint_restore.assert_awaited_once()
+    # Never reaches wake_up, so memory is not remapped and scheduling stays
+    # stopped; the controller is still paused because only mark_resumed()
+    # clears that, and the caller never gets there.
+    engine_client.wake_up.assert_not_awaited()
+    engine_client.resume_generation.assert_not_awaited()
+    assert controller.is_paused is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_prepare_failure_leaves_controller_unpaused():
+    """A failed prepare must not record a pause it did not complete, or the
+    next resume would issue a checkpoint_restore with no matching prepare."""
+    engine_client = AsyncMock()
+    engine_client.checkpoint_prepare.side_effect = RuntimeError("prepare failed")
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+
+    with pytest.raises(RuntimeError, match="prepare failed"):
+        await controller.pause(None)
+
+    assert controller.is_paused is False
+
+
+@pytest.mark.asyncio
+async def test_wake_up_passes_explicit_tags_from_request():
+    handler = _make_handler()
+    await handler._pause_controller.pause(1)
+
+    result = await handler.wake_up({"tags": ["weights"]})
+
+    assert result["status"] == "ok"
+    handler.engine_client.wake_up.assert_awaited_once_with(["weights"])
+    handler.engine_client.resume_generation.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
+    handler = _make_handler()
+    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+    failed_resume = AsyncMock(side_effect=RuntimeError("resume failed"))
+    handler.engine_client.resume_generation = failed_resume
+
+    sleep_result = await handler.sleep({"level": 1})
+
+    assert sleep_result["status"] == "error"
+    assert handler._pause_controller.is_paused is False
+    assert handler._pause_controller.needs_resume_recovery is True
+    failed_resume.assert_awaited_once()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+
+    handler.engine_client.resume_generation = AsyncMock()
+    wake_result = await handler.wake_up({})
+
+    assert wake_result["status"] == "ok"
+    handler.engine_client.wake_up.assert_not_awaited()
+    handler.engine_client.resume_generation.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    assert handler._pause_controller.needs_resume_recovery is False
+
+
+@pytest.mark.asyncio
+async def test_sleep_reregisters_after_clean_pause_rollback():
+    handler = _make_handler()
+    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+
+    result = await handler.sleep({"level": 1})
+
+    # Rollback resumed generation cleanly, so the engine is serving-safe again.
+    assert result["status"] == "error"
+    assert handler._pause_controller.is_paused is False
+    assert handler._pause_controller.needs_resume_recovery is False
+    handler.engine_client.resume_generation.assert_awaited_once()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    # The endpoint must rejoin the routing pool since wake_up will early-return.
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sleep_returns_error_for_unregister_failure():
     handler = _make_handler()
     handler.generate_endpoint.unregister_endpoint_instance = AsyncMock(
@@ -91,7 +235,7 @@ async def test_sleep_returns_error_for_unregister_failure():
 @pytest.mark.asyncio
 async def test_wake_up_returns_error_for_register_failure():
     handler = _make_handler()
-    handler._engine_is_sleeping = True
+    await handler._pause_controller.pause(1)
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery write timeout")
     )
@@ -101,3 +245,4 @@ async def test_wake_up_returns_error_for_register_failure():
     assert result["status"] == "error"
     handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
+    assert handler._pause_controller.is_paused is True

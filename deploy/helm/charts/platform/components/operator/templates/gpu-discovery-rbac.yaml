@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if and .Values.namespaceRestriction.enabled .Values.gpuDiscovery.enabled }}
+{{- if .Values.gpuDiscovery.enabled }}
 ---
-# Grants the namespace-scoped operator read-only node access for GPU hardware discovery.
-# Namespace-scoped operators do not have this ability by default; cluster-wide operators do.
+# Grants the operator read-only node access for GPU hardware discovery.
+# Nodes are cluster-scoped resources that cannot be granted via a namespace-scoped Role,
+# so they are always provided as a dedicated ClusterRole when GPU discovery is enabled.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -27,6 +28,9 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

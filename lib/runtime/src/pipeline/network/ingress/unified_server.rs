@@ -4,11 +4,11 @@
 //! Unified Request Plane Server Interface
 //!
 //! This module defines a transport-agnostic interface for request plane servers.
-//! All transport implementations (HTTP, TCP, NATS) implement this trait to provide
+//! All transport implementations (TCP, NATS) implement this trait to provide
 //! a consistent interface for endpoint registration and management.
 
 use super::*;
-use crate::SystemHealth;
+use crate::{SystemHealth, protocols::EndpointId};
 use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 /// Unified interface for request plane servers
 ///
-/// This trait abstracts over different transport mechanisms (HTTP/2, TCP, NATS)
+/// This trait abstracts over different transport mechanisms (TCP, NATS)
 /// providing a consistent interface for registering endpoints and managing server lifecycle.
 ///
 /// # Design Principles
@@ -72,22 +72,30 @@ pub trait RequestPlaneServer: Send + Sync {
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()>;
 
-    /// Unregister an endpoint from the server
+    /// Unregister an endpoint by name and instance ID.
     ///
-    /// # Arguments
+    /// Built-in servers return an error without removing a handler if multiple namespaces
+    /// or components match. Use [`Self::unregister_endpoint_instance`] to disambiguate.
+    /// An endpoint that is not registered is a no-op.
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()>;
+
+    /// Unregister the handler with the namespace, component, name, and instance ID
+    /// used at registration. An endpoint that is not registered is a no-op.
     ///
-    /// * `endpoint_name` - Name of the endpoint to unregister
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` if unregistration succeeds or endpoint doesn't exist.
-    /// Errors are only returned for transport-specific failures.
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()>;
+    /// The default delegates to the name-based method for existing implementations.
+    /// Servers supporting same-named endpoints across components should override it.
+    async fn unregister_endpoint_instance(
+        &self,
+        endpoint_id: &EndpointId,
+        instance_id: u64,
+    ) -> Result<()> {
+        self.unregister_endpoint(&endpoint_id.name, instance_id)
+            .await
+    }
 
     /// Get server bind address or identifier
     ///
     /// Returns a transport-specific address string:
-    /// - HTTP: `"http://0.0.0.0:8888"`
     /// - TCP: `"tcp://0.0.0.0:9999"`
     /// - NATS: `"nats://localhost:4222"`
     ///
@@ -101,7 +109,6 @@ pub trait RequestPlaneServer: Send + Sync {
     ///
     /// # Examples
     ///
-    /// - `"http"` - HTTP/2 transport
     /// - `"tcp"` - Raw TCP transport
     /// - `"nats"` - NATS messaging
     fn transport_name(&self) -> &'static str;
@@ -116,4 +123,62 @@ pub trait RequestPlaneServer: Send + Sync {
     /// - Underlying transport is disconnected
     /// - Server encountered a fatal error
     fn is_healthy(&self) -> bool;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct LegacyServer {
+        removed: Mutex<Option<(String, u64)>>,
+    }
+
+    #[async_trait]
+    impl RequestPlaneServer for LegacyServer {
+        async fn register_endpoint(
+            &self,
+            _: String,
+            _: Arc<dyn PushWorkHandler>,
+            _: u64,
+            _: String,
+            _: String,
+            _: Arc<Mutex<SystemHealth>>,
+        ) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+            *self.removed.lock() = Some((endpoint_name.to_string(), instance_id));
+            Ok(())
+        }
+
+        fn address(&self) -> String {
+            unreachable!()
+        }
+
+        fn transport_name(&self) -> &'static str {
+            unreachable!()
+        }
+
+        fn is_healthy(&self) -> bool {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn full_identity_cleanup_delegates_for_legacy_implementations() {
+        let server = LegacyServer::default();
+        let endpoint_id = EndpointId {
+            namespace: "test_namespace".into(),
+            component: "test_component".into(),
+            name: "generate".into(),
+        };
+        let plane: &dyn RequestPlaneServer = &server;
+        plane
+            .unregister_endpoint_instance(&endpoint_id, 0xa)
+            .await
+            .unwrap();
+        assert_eq!(*server.removed.lock(), Some(("generate".into(), 0xa)));
+    }
 }

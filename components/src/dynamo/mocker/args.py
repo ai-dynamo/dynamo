@@ -2,27 +2,34 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import json
 import logging
 import os
 import tempfile
 from pathlib import Path
 
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    add_worker_router_arguments,
+)
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
-from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
-from .utils.planner_profiler_perf_data_converter import (
-    convert_profile_results_to_npz,
-    is_mocker_format_npz,
-    is_profile_results_dir,
-)
 
 DYN_NAMESPACE = get_worker_namespace()
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be positive, got {parsed}")
+    return parsed
 
 
 class ProfileDataResult:
@@ -65,6 +72,12 @@ def resolve_planner_profile_data(
     if planner_profile_data is None:
         return ProfileDataResult(npz_path=None, tmpdir=None)
 
+    from .utils.planner_profiler_perf_data_converter import (
+        convert_profile_results_to_npz,
+        is_mocker_format_npz,
+        is_profile_results_dir,
+    )
+
     # Case 1: Already a mocker-format NPZ file
     if is_mocker_format_npz(planner_profile_data):
         logger.info(f"Using mocker-format NPZ file: {planner_profile_data}")
@@ -88,62 +101,6 @@ def resolve_planner_profile_data(
         f"  - A directory containing selected_prefill_interpolation/raw_data.npz and selected_decode_interpolation/raw_data.npz\n"
         f"  - A directory containing prefill_raw_data.json and decode_raw_data.json"
     )
-
-
-def create_temp_engine_args_file(args: argparse.Namespace) -> Path:
-    """
-    Create a temporary JSON file with MockEngineArgs from CLI arguments.
-    Returns the path to the temporary file.
-    """
-    engine_args = {}
-
-    # Only include non-None values that differ from defaults
-    # Note: argparse converts hyphens to underscores in attribute names
-    # Extract all potential engine arguments, using None as default for missing attributes
-    engine_args = {
-        "num_gpu_blocks": getattr(args, "num_gpu_blocks", None),
-        "block_size": getattr(args, "block_size", None),
-        "max_num_seqs": getattr(args, "max_num_seqs", None),
-        "max_num_batched_tokens": getattr(args, "max_num_batched_tokens", None),
-        "enable_prefix_caching": getattr(args, "enable_prefix_caching", None),
-        "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
-        "preemption_mode": getattr(args, "preemption_mode", None),
-        "speedup_ratio": getattr(args, "speedup_ratio", None),
-        "dp_size": getattr(args, "dp_size", None),
-        "startup_time": getattr(args, "startup_time", None),
-        "planner_profile_data": (
-            str(getattr(args, "planner_profile_data", None))
-            if getattr(args, "planner_profile_data", None)
-            else None
-        ),
-        "is_prefill": getattr(args, "is_prefill_worker", None),
-        "is_decode": getattr(args, "is_decode_worker", None),
-        "enable_local_indexer": not getattr(args, "durable_kv_events", False),
-        # Note: bootstrap_port and zmq_kv_events_port are NOT included here
-        # - they are per-worker and set in launch_workers()
-        # Note: kv_bytes_per_token and kv_cache_dtype are NOT included here
-        # - kv_bytes_per_token is auto-computed in main.py after model prefetch,
-        # - kv_cache_dtype is only used Python-side for the auto-computation.
-        "kv_transfer_bandwidth": getattr(args, "kv_transfer_bandwidth", None),
-    }
-
-    # Parse --reasoning JSON string into a nested object
-    reasoning_str = getattr(args, "reasoning", None)
-    if reasoning_str:
-        engine_args["reasoning"] = json.loads(reasoning_str)
-
-    # Remove None values to only include explicitly set arguments
-    engine_args = {k: v for k, v in engine_args.items() if v is not None}
-
-    # Create temporary file
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(engine_args, f, indent=2)
-        temp_path = Path(f.name)
-
-    logger.debug(f"Created temporary MockEngineArgs file at {temp_path}")
-    logger.debug(f"MockEngineArgs: {engine_args}")
-
-    return temp_path
 
 
 def validate_worker_type_args(args: argparse.Namespace) -> None:
@@ -199,7 +156,7 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
     return [int(p.strip()) for p in ports_str.split(",")]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the Dynamo mocker engine.
 
     Returns:
@@ -238,31 +195,41 @@ def parse_args() -> argparse.Namespace:
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
         default=None,
-        help="Number of GPU blocks for KV cache (default: 16384)",
+        help="Explicit usable GPU-block capacity per data-parallel rank for the mock "
+        "KV cache. When unset, AIS-backed mocker estimates the value; non-AIS "
+        "mocker uses 16384.",
     )
     parser.add_argument(
         "--block-size",
         type=int,
         default=None,
-        help="Token block size for KV cache blocks (default: 64)",
+        help="Token block size for KV cache blocks. When unset, the default "
+        "depends on engine: vLLM 64, SGLang 1, TRTLLM 32.",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=positive_int,
+        default=None,
+        help="Maximum vLLM sequence length, including prompt and generated tokens. "
+        "When omitted, no model-length limit is enforced.",
     )
     parser.add_argument(
         "--max-num-seqs",
         type=int,
-        default=None,
+        default=256,
         help="Maximum number of sequences per iteration (default: 256)",
     )
     parser.add_argument(
         "--max-num-batched-tokens",
         type=int,
-        default=None,
+        default=8192,
         help="Maximum number of batched tokens per iteration (default: 8192)",
     )
     parser.add_argument(
         "--enable-prefix-caching",
         action="store_true",
         dest="enable_prefix_caching",
-        default=None,
+        default=True,
         help="Enable automatic prefix caching (default: True)",
     )
     parser.add_argument(
@@ -276,7 +243,7 @@ def parse_args() -> argparse.Namespace:
         "--enable-chunked-prefill",
         action="store_true",
         dest="enable_chunked_prefill",
-        default=None,
+        default=True,
         help="Enable chunked prefill (default: True)",
     )
     parser.add_argument(
@@ -289,7 +256,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preemption-mode",
         type=str,
-        default=None,
+        default="lifo",
         choices=["lifo", "fifo"],
         help="Preemption mode for decode eviction under memory pressure. "
         "'lifo' (default) evicts the newest request (matches vLLM v1), "
@@ -298,14 +265,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speedup-ratio",
         type=float,
-        default=None,
+        default=1.0,
         help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
+    )
+    parser.add_argument(
+        "--decode-speedup-ratio",
+        type=float,
+        default=1.0,
+        help="Additional speedup multiplier applied only to decode steps (default: 1.0). "
+        "Models speculative decoding (e.g. Eagle) where decode throughput improves "
+        "without affecting prefill latency. Effective decode speedup is speedup_ratio * decode_speedup_ratio.",
     )
     parser.add_argument(
         "--data-parallel-size",
         type=int,
         dest="dp_size",
-        default=None,
+        default=1,
         help="Number of data parallel replicas (default: 1)",
     )
     parser.add_argument(
@@ -322,11 +297,143 @@ def parse_args() -> argparse.Namespace:
         "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
+        "--ais-perf-model",
+        "--aic-perf-model",
+        dest="ais_perf_model",
+        action="store_true",
+        default=False,
+        help="Use AISimulate's perf model directly for latency prediction. "
+        "Requires aisimulate installed.",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="GPU memory fraction for AIS KV capacity estimation with vLLM "
+        "(default: 0.9).",
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help="Static memory fraction for AIS KV capacity estimation with SGLang "
+        "(default: 0.88).",
+    )
+    parser.add_argument(
+        "--free-gpu-memory-fraction",
+        type=float,
+        default=None,
+        help="Fraction of free GPU memory (after model load) for the KV cache, "
+        "for AIS KV capacity estimation with TRT-LLM (default: 0.9).",
+    )
+    parser.add_argument(
+        "--ais-system",
+        "--aic-system",
+        dest="ais_system",
+        type=str,
+        default=None,
+        help="AIS system name (e.g., 'h200_sxm'). Used with --ais-perf-model.",
+    )
+    parser.add_argument(
+        "--ais-backend",
+        "--aic-backend",
+        dest="ais_backend",
+        type=str,
+        default=None,
+        choices=["vllm", "sglang", "trtllm"],
+        help="AIS backend name used for perf database lookups. When unset, "
+        "falls back to --engine-type. Set this to decouple the AIS perf model "
+        "from the simulated engine type (e.g. simulate with vllm while using "
+        "trtllm AIS data).",
+    )
+    parser.add_argument(
+        "--ais-backend-version",
+        "--aic-backend-version",
+        dest="ais_backend_version",
+        type=str,
+        default=None,
+        help="AIS performance-database version: 'current', 'previous', or 'next' "
+        "when available, or a version assigned to one of those slots. "
+        "Defaults to the release database's 'current' slot.",
+    )
+    parser.add_argument(
+        "--ais-tp-size",
+        "--aic-tp-size",
+        dest="ais_tp_size",
+        type=int,
+        default=None,
+        help="Tensor parallel size for AIS latency prediction (default: 1). "
+        "Only affects AIS performance model lookups, not mocker scheduling.",
+    )
+    parser.add_argument(
+        "--ais-moe-tp-size",
+        "--aic-moe-tp-size",
+        dest="ais_moe_tp_size",
+        type=int,
+        default=None,
+        help="MoE tensor-parallel size for AIS latency prediction. "
+        "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+    )
+    parser.add_argument(
+        "--ais-moe-ep-size",
+        "--aic-moe-ep-size",
+        dest="ais_moe_ep_size",
+        type=int,
+        default=None,
+        help="MoE expert-parallel size for AIS latency prediction. "
+        "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+    )
+    parser.add_argument(
+        "--ais-attention-dp-size",
+        "--aic-attention-dp-size",
+        dest="ais_attention_dp_size",
+        type=int,
+        default=None,
+        help="Attention data-parallel size for AIS latency prediction (default: 1). "
+        "Corresponds to the 'dp' dimension in AIS CLI output.",
+    )
+    parser.add_argument(
+        "--ais-nextn",
+        "--aic-nextn",
+        dest="ais_nextn",
+        type=int,
+        default=None,
+        help="[EXPERIMENTAL] Number of MTP draft tokens to sample (1-5).",
+    )
+    parser.add_argument(
+        "--ais-nextn-accept-rates",
+        "--aic-nextn-accept-rates",
+        dest="ais_nextn_accept_rates",
+        type=str,
+        default=None,
+        help=(
+            "[EXPERIMENTAL] Comma-separated conditional MTP acceptance rates. "
+            "Entry i is P(draft i accepted | all earlier drafts were accepted)."
+        ),
+    )
+    parser.add_argument(
+        "--ais-mtp-seed",
+        "--aic-mtp-seed",
+        dest="ais_mtp_seed",
+        type=int,
+        default=42,
+        help="[EXPERIMENTAL] Base RNG seed for mocker MTP burst sampling.",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=1,
         help="Number of mocker workers to launch in the same process (default: 1). "
         "All workers share the same tokio runtime and thread pool.",
+    )
+
+    from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
+
+    parser.add_argument(
+        "--ais-perf-config",
+        type=parse_ais_perf_config,
+        default=None,
+        help="Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML file.",
     )
 
     # Reasoning token output
@@ -337,6 +444,79 @@ def parse_args() -> argparse.Namespace:
         help="Enable reasoning token output. JSON object with fields: "
         "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
         'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
+    )
+    parser.add_argument(
+        "--response-replay-trace-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional Mooncake JSONL trace containing output_token_ids for "
+            "output_replay_id annotation lookup."
+        ),
+    )
+
+    # Engine type selection
+    parser.add_argument(
+        "--engine-type",
+        type=str,
+        default="vllm",
+        choices=["vllm", "sglang", "trtllm"],
+        help="Engine simulation type: 'vllm' (default), 'sglang', or 'trtllm'.",
+    )
+
+    # SGLang-specific configuration
+    parser.add_argument(
+        "--sglang-schedule-policy",
+        type=str,
+        default=None,
+        choices=["fifo", "fcfs", "lpm"],
+        help="SGLang scheduling policy: 'fifo'/'fcfs' (default) or 'lpm' (longest prefix match).",
+    )
+    parser.add_argument(
+        "--sglang-page-size",
+        type=int,
+        default=None,
+        help="SGLang radix cache page size in tokens (default: 1).",
+    )
+    parser.add_argument(
+        "--sglang-max-prefill-tokens",
+        type=int,
+        default=None,
+        help="SGLang maximum prefill tokens budget per batch (default: 16384).",
+    )
+    parser.add_argument(
+        "--sglang-chunked-prefill-size",
+        type=int,
+        default=None,
+        help="SGLang chunked prefill size — max tokens per chunk (default: 8192).",
+    )
+    parser.add_argument(
+        "--sglang-clip-max-new-tokens",
+        type=int,
+        default=None,
+        help="SGLang clip max new tokens for admission budget (default: 4096).",
+    )
+    parser.add_argument(
+        "--sglang-schedule-conservativeness",
+        type=float,
+        default=None,
+        help="SGLang schedule conservativeness factor 0.0-1.0 (default: 1.0).",
+    )
+    parser.add_argument(
+        "--sglang-generate",
+        action="store_true",
+        default=False,
+        help="Serve native streaming SGLang /generate requests (default: disabled).",
+    )
+
+    # TensorRT-LLM-specific configuration
+    parser.add_argument(
+        "--trtllm-capacity-scheduler-policy",
+        type=str,
+        default=None,
+        choices=["guaranteed_no_evict"],
+        help="TRT-LLM capacity scheduler policy. v1 supports only "
+        "'guaranteed_no_evict' (default).",
     )
 
     # Legacy support - allow direct JSON file specification
@@ -371,12 +551,6 @@ def parse_args() -> argparse.Namespace:
         "Mark this as a decode worker which does not publish KV events (default: False)",
     )
     parser.add_argument(
-        "--durable-kv-events",
-        action="store_true",
-        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
-        help="[Deprecated] Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
-    )
-    parser.add_argument(
         "--zmq-kv-events-ports",
         type=str,
         default=None,
@@ -408,10 +582,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv-transfer-bandwidth",
         type=float,
-        default=DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS,
+        default=_default_kv_transfer_bandwidth_gbps(),
         help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
         "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
         "For intra-node NVLink, typical value is ~450.",
+    )
+    parser.add_argument(
+        "--kv-transfer-timing-mode",
+        choices=("full_prompt", "destination_missing"),
+        default="full_prompt",
+        help="Physical KV footprint used for coordinated disaggregated transfer timing.",
     )
     parser.add_argument(
         "--kv-cache-dtype",
@@ -436,16 +616,14 @@ def parse_args() -> argparse.Namespace:
         help="KV cache bytes per token. If not specified, auto-computed from model config "
         "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
     )
-
     parser.add_argument(
         "--stagger-delay",
         type=float,
-        default=-1.0,
+        default=0.0,
         help=(
-            "Delay in seconds between launching each worker to avoid overwhelming "
-            "etcd/NATS/frontend with many workers. Set to 0 to disable staggering. "
-            "Use -1 for auto mode (0.1s for 32-128 workers, 0.2s for >128 workers, 0 otherwise). "
-            "Default: -1 (auto)"
+            "Delay in seconds between launching each worker. "
+            "Set to 0 to disable staggering (default). "
+            "Use -1 for auto mode (0.1s for 33-128 workers, 0.2s for >128 workers, 0 otherwise)."
         ),
     )
     parser.add_argument(
@@ -458,12 +636,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--request-plane",
         type=str,
-        choices=["nats", "http", "tcp"],
+        choices=["nats", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
-        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp]",
+    )
+    parser.add_argument(
+        "--response-plane",
+        type=str,
+        choices=["tcp", "quic"],
+        default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
+        help="Select the response transport. Frontend and workers must match.",
+    )
+    parser.add_argument(
+        "--event-plane",
+        type=str,
+        choices=["nats", "zmq"],
+        default=os.environ.get("DYN_EVENT_PLANE"),
+        help="Determines how events are published [nats|zmq]. If unset, "
+        "auto-detected from --discovery-backend (zmq for file/mem, nats "
+        "for etcd/kubernetes).",
     )
 
-    args = parser.parse_args()
+    # Same flags the frontend and engine backends expose, so a mocker can stand
+    # in for a real worker set when exercising per-role routing.
+    add_worker_router_arguments(parser)
+
+    import sys
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    spellings: dict[str, str] = {}
+    for token in argv:
+        flag = token.split("=", 1)[0]
+        if flag.startswith(("--ais-", "--aic-")):
+            canonical = flag.replace("--aic-", "--ais-", 1)
+            if canonical in spellings and spellings[canonical] != flag:
+                parser.error(
+                    f"{canonical} and its legacy --aic spelling cannot be combined"
+                )
+            spellings[canonical] = flag
+    args = parser.parse_args(argv)
+    # Collect them into their own config object, matching the backends.
+    args.router_advertisement = WorkerRouterConfig.from_cli_args(args)
+
     validate_worker_type_args(args)
 
     # Validate num_workers
@@ -507,5 +721,10 @@ def parse_args() -> argparse.Namespace:
         else:
             args.endpoint = DEFAULT_ENDPOINT
             logger.debug(f"Using default endpoint: {args.endpoint}")
-
     return args
+
+
+def _default_kv_transfer_bandwidth_gbps() -> float:
+    from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
+
+    return DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS

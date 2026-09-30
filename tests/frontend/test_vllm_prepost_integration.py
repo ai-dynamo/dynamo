@@ -43,8 +43,12 @@ SEARCH_TOOL = {
 
 pytestmark = [
     pytest.mark.vllm,
-    # vllm frontend doesn't need or use the GPU, but in CI pytorch seems to look for the Device
+    pytest.mark.core,
+    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
+    # runners with "Failed to infer device type" even for mock tests.
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
+    pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.parallel,
@@ -212,7 +216,7 @@ def start_services(
             yield frontend_port, capture_path
 
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)  # 0-GiB unit test, floor 180s (3x observed 43s)
 def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     start_services: tuple[int, Path],
 ) -> None:
@@ -243,6 +247,14 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
 
     assert captured["model"] == TEST_MODEL
     assert isinstance(captured["token_ids"], list) and captured["token_ids"]
+
+    guided_decoding = captured["sampling_options"].get("guided_decoding")
+    assert isinstance(guided_decoding, dict)
+    structural_tag = guided_decoding.get("structural_tag")
+    assert isinstance(structural_tag, dict)
+    serialized_tag = json.dumps(structural_tag)
+    assert "search_gutenberg_books" in serialized_tag
+    assert "search_terms" in serialized_tag
 
     decoded_prompt = captured["decoded_prompt"]
     assert "What are the titles of some James Joyce books?" in decoded_prompt
@@ -275,3 +287,164 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     ]
     assert finish_reasons, "Expected at least one finish_reason"
     assert set(finish_reasons) <= {"stop", "tool_calls"}
+
+
+@pytest.mark.timeout(180)  # 0-GiB unit test, floor 180s (3x observed 43s)
+def test_vllm_chat_processor_forwards_max_thinking_tokens(
+    start_services: tuple[int, Path],
+) -> None:
+    """nvext.max_thinking_tokens reaches the worker as
+    stop_conditions.max_thinking_tokens after the Python frontend processes it."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "Solve: 1+1."}],
+        "max_tokens": 32,
+        "nvext": {"max_thinking_tokens": 16},
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["stop_conditions"]["max_thinking_tokens"] == 16
+
+
+@pytest.mark.timeout(180)
+def test_vllm_chat_processor_forwards_thinking_token_budget(
+    start_services: tuple[int, Path],
+) -> None:
+    """Root-level `thinking_token_budget` reaches the worker as
+    stop_conditions.max_thinking_tokens after the Python frontend processes it."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "Solve: 1+1."}],
+        "max_tokens": 32,
+        "thinking_token_budget": 32,
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["stop_conditions"]["max_thinking_tokens"] == 32
+
+
+@pytest.mark.timeout(180)
+def test_vllm_chat_processor_thinking_token_budget_overrides_nvext(
+    start_services: tuple[int, Path],
+) -> None:
+    """Root-level `thinking_token_budget` takes precedence over the legacy
+    nvext.max_thinking_tokens field."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "Solve: 1+1."}],
+        "max_tokens": 32,
+        "thinking_token_budget": 32,
+        "nvext": {"max_thinking_tokens": 16},
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["stop_conditions"]["max_thinking_tokens"] == 32
+
+
+@pytest.mark.timeout(180)
+def test_vllm_responses_processor_forwards_thinking_token_budget(
+    start_services: tuple[int, Path],
+) -> None:
+    """Root-level `thinking_token_budget` on a request reaches the
+    worker as stop_conditions.max_thinking_tokens after JSON deserialization."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "input": "Solve: 1+1.",
+        "max_output_tokens": 32,
+        "stream": False,
+        "thinking_token_budget": 32,
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/responses",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["stop_conditions"]["max_thinking_tokens"] == 32
+
+
+@pytest.mark.timeout(180)
+def test_vllm_responses_processor_thinking_token_budget_overrides_nvext(
+    start_services: tuple[int, Path],
+) -> None:
+    """Root-level `thinking_token_budget` takes precedence over the legacy
+    nvext.max_thinking_tokens field."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "input": "Solve: 1+1.",
+        "max_output_tokens": 32,
+        "stream": False,
+        "thinking_token_budget": 32,
+        "nvext": {"max_thinking_tokens": 16},
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/responses",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["stop_conditions"]["max_thinking_tokens"] == 32
+
+
+@pytest.mark.timeout(180)
+def test_vllm_responses_processor_forwards_max_thinking_tokens(
+    start_services: tuple[int, Path],
+) -> None:
+    """Legacy nvext.max_thinking_tokens alone on request still
+    reaches the worker as stop_conditions.max_thinking_tokens."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "input": "Solve: 1+1.",
+        "max_output_tokens": 32,
+        "stream": False,
+        "nvext": {"max_thinking_tokens": 16},
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/responses",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["stop_conditions"]["max_thinking_tokens"] == 16

@@ -40,6 +40,48 @@ fi
 EXAMPLE_PROMPT="Who is the tennis GOAT: Federer, Djokovic, or Nadal?"
 EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit city"
 
+# Resolve an indexed managed port, retaining a standalone fallback.
+# Usage: dyn_port DYN_SYSTEM_PORT 1 8081
+dyn_port() {
+    local prefix="$1"
+    local index="$2"
+    local fallback="$3"
+    local variable="${prefix}${index}"
+    local value="${!variable:-}"
+    local minimum_port=1
+    local maximum_port=65535
+
+    if [[ "${prefix}" == "DYN_SYSTEM_PORT" ]]; then
+        minimum_port=0
+        maximum_port=32767
+    fi
+
+    local selected="${value:-${fallback}}"
+
+    if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+        if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+            echo "Missing or invalid managed port ${variable}: ${value:-<unset>}" >&2
+            return 1
+        fi
+        if (( 10#${value} < minimum_port || 10#${value} > maximum_port )); then
+            echo "Managed port ${variable} is out of range: ${value}" >&2
+            return 1
+        fi
+        printf '%s\n' "${value}"
+        return 0
+    fi
+
+    if [[ -n "${value}" && ! "${value}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid port ${variable}: ${value}" >&2
+        return 1
+    fi
+    if [[ ! "${selected}" =~ ^[0-9]+$ ]] || (( 10#${selected} < minimum_port || 10#${selected} > maximum_port )); then
+        echo "Port ${variable} is out of range: ${selected}" >&2
+        return 1
+    fi
+    printf '%s\n' "${selected}"
+}
+
 # wait_any_exit
 #
 # Waits for ANY backgrounded process to exit and propagates its exit code.
@@ -55,30 +97,54 @@ EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit
 #   failures are detected immediately regardless of which process it was.
 #
 # Signal handling:
-#   SIGTERM/SIGINT are trapped to exit 0 (clean shutdown).  Without this,
-#   external cleanup (e.g. a test harness sending SIGTERM to the process
-#   group) interrupts wait -n, which returns 143 (128+15).  Combined with
-#   set -e, that non-zero code looks like a test failure.  Trapping TERM/INT
-#   makes external teardown exit cleanly while still propagating real errors
-#   (OOM, Python exceptions, etc.) from child processes.
-#
-# The EXIT trap (set at the top of each script) still fires when this function
-# calls exit, tearing down the remaining processes via kill 0.
+#   SIGTERM/SIGINT exit 0 (clean shutdown).  External cleanup (e.g. a test
+#   harness signalling the process group) otherwise interrupts wait -n and
+#   returns 143, which under set -e looks like a test failure.  Real errors
+#   from child processes (OOM, Python exceptions, etc.) still propagate.
 #
 # Usage:
 #   python -m dynamo.frontend &
 #   python -m dynamo.vllm --model "$MODEL" &
 #   wait_any_exit
+
+# Signals the pgid, reaps tracked jobs, then exits with the given code.
+# Without explicit reaping, children reparent as zombies under a non-reaping
+# subreaper (pytest in CI), and the harness's pgid liveness check
+# (_terminate_process_group in managed_process.py) burns 8s on them.
+dynamo_reap_and_exit() {
+    local _rc=${1:-0}
+    # Shield bash from its own pgid TERM/INT; otherwise the kill below
+    # boomerangs and re-enters this trap.
+    trap '' TERM INT
+    # Always signal the pgid, not just when `jobs -p` is non-empty. A
+    # direct child reaped by `wait -n` upstream leaves jobs -p empty,
+    # but its subprocesses may still be alive in our pgid.
+    kill -TERM 0 2>/dev/null || true
+    wait 2>/dev/null || true
+    exit "$_rc"
+}
+
+# EXIT-trap helper; captures $? before echo clobbers it.
+dynamo_exit_trap() {
+    local _rc=$?
+    echo "Cleaning up..."
+    dynamo_reap_and_exit "$_rc"
+}
+
 wait_any_exit() {
-    trap 'exit 0' TERM INT
+    trap 'dynamo_reap_and_exit 0' TERM INT
     if ! jobs -p | grep -q .; then
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
     fi
-    wait -n
-    local _rc=$?
+    # `|| _rc=$?` keeps set -e from swallowing the child's exit code.
+    local _rc=0
+    wait -n || _rc=$?
     echo "A background process exited with code $_rc"
-    exit "$_rc"
+    # Backstop signal trap; double quotes bake _rc in before it goes out of scope.
+    # shellcheck disable=SC2064  # intentional expand-at-set-time
+    trap "dynamo_reap_and_exit $_rc" TERM INT
+    dynamo_reap_and_exit "$_rc"
 }
 
 # print_launch_banner [flags] <title> <model> <port> [extra_info_lines...]
@@ -135,6 +201,12 @@ print_launch_banner() {
     echo "=========================================="
     echo "Model:       $_model"
     echo "Frontend:    http://localhost:$_port"
+
+    local _seq_len="${MAX_MODEL_LEN:-${CONTEXT_LENGTH:-${MAX_SEQ_LEN:-}}}"
+    local _mem_args="${GPU_MEM_ARGS:-}"
+    [[ -n "$_seq_len" ]] && echo "Max seq len: $_seq_len"
+    [[ -n "$_mem_args" ]] && echo "GPU mem:     $_mem_args"
+
     for _line in "$@"; do
         echo "$_line"
     done
@@ -175,6 +247,64 @@ CURL_EOF
 
     echo ""
     echo "=========================================="
+}
+
+# wait_for_ready <url> [timeout_seconds]
+#
+# Polls an HTTP endpoint until it returns 200 or timeout is reached.
+# Useful for waiting for a worker to finish loading before starting the
+# next one (e.g. disaggregated same-GPU deployments where concurrent
+# model loading causes OOM).
+#
+# Args:
+#   url              HTTP URL to poll (e.g. http://localhost:8081/health)
+#   timeout_seconds  Max seconds to wait (default: 30)
+#
+# Returns 0 on success, 1 on timeout.
+wait_for_ready() {
+    local _url="$1"
+    local _timeout="${2:-30}"
+    local _start=$SECONDS
+    echo "Polling $_url (timeout: ${_timeout}s)..."
+    while (( SECONDS - _start < _timeout )); do
+        if curl -sf --max-time 2 "$_url" > /dev/null 2>&1; then
+            echo "Ready after $(( SECONDS - _start ))s"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "WARNING: $_url not ready after ${_timeout}s" >&2
+    return 1
+}
+
+allocate_free_port() {
+    python3 - <<'PY'
+import random
+import socket
+
+PORT_MIN = 1024
+PORT_MAX = 49151
+MAX_ATTEMPTS = 256
+
+for _ in range(MAX_ATTEMPTS):
+    port = random.randint(PORT_MIN, PORT_MAX)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.close()
+        continue
+
+    try:
+        print(port)
+        break
+    finally:
+        sock.close()
+else:
+    raise RuntimeError(
+        f"could not find a free port in the registered range {PORT_MIN}-{PORT_MAX}"
+    )
+PY
 }
 
 # print_curl_footer

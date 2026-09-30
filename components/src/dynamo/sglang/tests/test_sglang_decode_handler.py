@@ -1,0 +1,2377 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
+from contextlib import asynccontextmanager
+from copy import deepcopy
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+from sglang.srt.managers.io_struct import GenerateReqInput
+
+from dynamo.common.constants import DisaggregationMode
+from dynamo.common.metadata_upload import MetadataUploader
+from dynamo.llm import HttpError
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.sglang.engine_generate import (
+    build_native_generate_request,
+    native_generate_stream,
+)
+from dynamo.sglang.protocol import (
+    PreprocessedRequest,
+    SamplingOptions,
+    SglangMultimodalRequest,
+    StopConditions,
+)
+from dynamo.sglang.request_handlers.llm.decode_handler import (
+    DecodeWorkerHandler,
+    _extract_sglang_stop_reason,
+    _native_payload_is_batched,
+    _nvext_extra_field_requested,
+    _openai_stop_sampling_params,
+    _ordered_cancellation_request_id,
+    _public_native_response_id,
+    _user_stop_token_ids,
+)
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    build_disagg_mm_kwargs,
+    extract_media_urls,
+    raise_if_unextracted_multimodal,
+)
+from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
+from dynamo.sglang.request_handlers.multimodal.worker_handler import SglangUtils
+from dynamo.sglang.request_utils import request_cache_salt
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.core,
+    pytest.mark.gpu_0,
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.pre_merge,
+]
+
+
+def _read_zstd_payload(path):
+    import zstandard as zstd
+
+    raw = zstd.ZstdDecompressor().decompress(path.read_bytes())
+    import msgspec
+
+    return msgspec.msgpack.decode(raw)
+
+
+def test_extract_media_urls_supports_string_and_wire_items():
+    mm_data = {
+        "video_url": [
+            "file:///tmp/test.mp4",
+            {"Url": "https://example.com/test.mp4"},
+        ]
+    }
+
+    assert extract_media_urls(mm_data, "video_url") == [
+        "file:///tmp/test.mp4",
+        "https://example.com/test.mp4",
+    ]
+
+
+def test_build_disagg_mm_kwargs_includes_audio_urls():
+    request = {
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "audio_url": [{"Url": "https://example.com/audio.wav"}],
+            "video_url": [{"Url": "https://example.com/video.mp4"}],
+        }
+    }
+
+    assert build_disagg_mm_kwargs(request) == {
+        "image_data": ["https://example.com/image.png"],
+        "audio_data": ["https://example.com/audio.wav"],
+        "video_data": ["https://example.com/video.mp4"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    build_media_kwargs_called = False
+
+    def record_build_media_kwargs(_request):
+        nonlocal build_media_kwargs_called
+        build_media_kwargs_called = True
+        return {}
+
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.build_disagg_mm_kwargs",
+        record_build_media_kwargs,
+    )
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.bootstrap_host = "127.0.0.1"
+    handler.bootstrap_port = 1234
+    handler._generate_bootstrap_room = lambda: "room"
+    handler._get_input_param = lambda request: {}
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image_url": [{"UuidOnly": "cached-image"}]},
+        "multi_modal_uuids": {"image_url": ["cached-image"]},
+    }
+
+    with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+        async for _ in handler.generate(request, context):
+            pass
+
+    assert not build_media_kwargs_called
+
+
+def test_extract_media_urls_returns_none_for_missing_modality():
+    assert extract_media_urls({}, "image_url") is None
+    assert extract_media_urls(None, "image_url") is None
+    assert extract_media_urls({"image_url": []}, "image_url") is None
+
+
+def test_extract_media_urls_rejects_malformed_payloads():
+    # A bare string (not a list) would otherwise split into per-character items.
+    with pytest.raises(ValueError, match="must be a list"):
+        extract_media_urls({"image_url": "https://example.com/a.png"}, "image_url")
+
+    # Frontend-decoded media is URL-passthrough only in the disaggregated path.
+    with pytest.raises(ValueError, match="Frontend-decoded"):
+        extract_media_urls({"image_url": [{"Decoded": "..."}]}, "image_url")
+
+    # Unsupported dict variant fails clearly instead of degrading to text.
+    with pytest.raises(ValueError, match="Unsupported"):
+        extract_media_urls({"image_url": [{"ignored": "value"}]}, "image_url")
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "expected"),
+    [
+        ({"type": "stop", "matched": "END"}, "END"),
+        ({"type": "stop", "matched": 128001}, 128001),
+        ({"type": "stop", "matched": [128001, 128009]}, [128001, 128009]),
+        ({"type": "stop", "matched": True}, None),
+        ({"type": "stop", "matched": ["END"]}, None),
+        ({"type": "length"}, None),
+        (None, None),
+    ],
+)
+def test_extract_sglang_stop_reason(finish_reason, expected):
+    assert _extract_sglang_stop_reason(finish_reason) == expected
+
+
+def test_extract_sglang_stop_reason_filters_hidden_token_ids():
+    finish_reason = {"type": "stop", "matched": 128001}
+
+    assert _extract_sglang_stop_reason(finish_reason, {576}) is None
+    assert _extract_sglang_stop_reason(finish_reason, {128001}) == 128001
+
+
+def test_extract_sglang_stop_reason_filters_hidden_token_id_arrays():
+    finish_reason = {"type": "stop", "matched": [128001, 128009]}
+
+    assert _extract_sglang_stop_reason(finish_reason, {128001}) is None
+    assert _extract_sglang_stop_reason(finish_reason, {128001, 128009}) == [
+        128001,
+        128009,
+    ]
+
+
+def test_user_stop_token_ids_ignores_hidden_ids():
+    assert _user_stop_token_ids(
+        {
+            "stop_conditions": {
+                "stop_token_ids": [576],
+                "stop_token_ids_hidden": [128001],
+            }
+        }
+    ) == {576}
+
+
+def test_user_stop_token_ids_handles_null_fields():
+    assert _user_stop_token_ids({"stop_conditions": {"stop_token_ids": None}}) == set()
+    assert _user_stop_token_ids({"stop_token_ids": None}) == set()
+
+
+def test_user_stop_token_ids_accepts_stop_token_id_array():
+    assert _user_stop_token_ids({"stop": [32, 34]}) == {32, 34}
+
+
+def test_user_stop_token_ids_treats_token_id_display_as_string_stop():
+    assert _user_stop_token_ids({"stop": ["token_id:576"]}) == set()
+
+
+def test_openai_stop_sampling_params_preserves_string_stops():
+    assert _openai_stop_sampling_params({"stop": "END"}) == {"stop": "END"}
+    assert _openai_stop_sampling_params({"stop": ["END"]}) == {"stop": ["END"]}
+    assert _openai_stop_sampling_params({"stop": ["token_id:576"]}) == {
+        "stop": ["token_id:576"]
+    }
+
+
+def test_openai_stop_sampling_params_maps_token_id_stop_array():
+    assert _openai_stop_sampling_params({"stop": [32, 34]}) == {
+        "stop_token_ids": [32, 34]
+    }
+    assert _openai_stop_sampling_params({"stop_token_ids": [32, 34]}) == {
+        "stop_token_ids": [32, 34]
+    }
+
+
+def _new_decode_handler(
+    *,
+    use_sglang_tokenizer: bool = False,
+    skip_tokenizer_init: bool = False,
+    enable_rl: bool = False,
+):
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.shutdown_event = None
+    handler.use_sglang_tokenizer = use_sglang_tokenizer
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(
+            served_model_name="test-model",
+            skip_tokenizer_init=skip_tokenizer_init,
+        ),
+        dynamo_args=SimpleNamespace(enable_rl=enable_rl),
+    )
+    handler._first_token_source = None
+
+    @asynccontextmanager
+    async def no_cancellation_monitor(*args, **kwargs):
+        async def wait_forever():
+            await asyncio.Future()
+
+        task = asyncio.create_task(wait_forever())
+        try:
+            yield task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    handler._cancellation_monitor = no_cancellation_monitor
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    "finish_reason",
+    [
+        pytest.param({"type": "abort"}, id="cancellation"),
+        pytest.param(
+            {
+                "type": "abort",
+                "message": "Failed to compile json grammar",
+                "status_code": 400,
+                "err_type": "BadRequestError",
+            },
+            id="validation-error",
+        ),
+    ],
+)
+async def test_shutdown_abort_chunk_raises_engine_shutdown(
+    processor_name, finish_reason
+):
+    """Shutdown remains retryable even when its abort carries validation details."""
+    handler = _new_decode_handler()
+    handler.shutdown_event = asyncio.Event()
+    handler.shutdown_event.set()
+    context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: False)
+
+    async def stream():
+        """Yield the terminal abort from the shutting-down backend."""
+        yield {
+            "text": "",
+            "output_ids": [],
+            "meta_info": {
+                "id": "sglang-request-id",
+                "finish_reason": finish_reason,
+            },
+        }
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async for _ in getattr(handler, processor_name)(stream(), context):
+            pass
+
+
+@pytest.fixture
+def abort_context():
+    """Track first-token notification without cancelling the test request."""
+    return SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: False,
+        notify_first_token=Mock(),
+    )
+
+
+def _abort_chunk(finish_reason):
+    """Model the placeholder token and text SGLang can emit after grammar failure."""
+    return {
+        "output_ids": [101],
+        "text": "_color",
+        "meta_info": {
+            "id": "sglang-request-id",
+            "finish_reason": finish_reason,
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    ("status_code", "message", "err_type"),
+    [
+        pytest.param(
+            400,
+            "Failed to compile json grammar: [04:33:48] "
+            '/project/cpp/json_schema_converter.cc:2999: Unsupported type "invalid_type"\n',
+            "BadRequestError",
+            id="invalid-schema-type",
+        ),
+        pytest.param(
+            422,
+            "Request validation failed",
+            "UnprocessableEntityError",
+            id="other-client-error",
+        ),
+        pytest.param(
+            500,
+            "Grammar compiler failed internally",
+            "InternalServerError",
+            id="backend-server-error",
+        ),
+    ],
+)
+async def test_error_abort_preserves_http_error_before_output(
+    processor_name, status_code, message, err_type, abort_context
+):
+    """Raise the backend error before exposing placeholder output or token timing."""
+    handler = _new_decode_handler()
+    finish_reason = {
+        "type": "abort",
+        "message": message,
+        "status_code": status_code,
+        "err_type": err_type,
+    }
+    stream = getattr(handler, processor_name)(
+        _stream([_abort_chunk(finish_reason)]), abort_context
+    )
+
+    expected_error = InvalidArgument if status_code == 400 else HttpError
+    with pytest.raises(expected_error) as error:
+        await anext(stream)
+
+    if status_code == 400:
+        assert str(error.value) == message
+    else:
+        assert error.value.code == status_code
+        assert error.value.message == message
+    abort_context.notify_first_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_error_abort_after_output_preserves_error_and_stops(
+    processor_name, abort_context
+):
+    """Preserve an earlier delta, then terminate with the original validation error."""
+    handler = _new_decode_handler()
+    normal_chunk = _abort_chunk(None)
+    normal_chunk["output_ids"] = [42]
+    normal_chunk["text"] = "hello"
+    message = "Failed to compile json grammar: unsupported schema type"
+    error_chunk = _abort_chunk(
+        {
+            "type": "abort",
+            "message": message,
+            "status_code": 400,
+            "err_type": "BadRequestError",
+        }
+    )
+    stream = getattr(handler, processor_name)(
+        _stream([normal_chunk, error_chunk]), abort_context
+    )
+
+    first = await anext(stream)
+    if processor_name == "_process_token_stream":
+        assert first["token_ids"] == [42]
+        assert first.get("finish_reason") is None
+    else:
+        assert first["choices"][0]["delta"]["content"] == "hello"
+        assert first["choices"][0]["finish_reason"] is None
+
+    with pytest.raises(InvalidArgument) as error:
+        await anext(stream)
+    assert str(error.value) == message
+
+    # Neither the abort's placeholder nor a successful terminal chunk can follow.
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    abort_context.notify_first_token.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    "status_fields",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"status_code": None}, id="null"),
+        pytest.param({"status_code": "400"}, id="string"),
+        pytest.param({"status_code": True}, id="boolean"),
+        pytest.param({"status_code": 400.0}, id="float"),
+        pytest.param({"status_code": 200}, id="success-status"),
+        pytest.param({"status_code": 302}, id="redirect-status"),
+        pytest.param({"status_code": 600}, id="out-of-range"),
+    ],
+)
+async def test_error_abort_with_missing_or_invalid_status_uses_server_error(
+    processor_name, status_fields, abort_context
+):
+    """Malformed error metadata fails as a server error instead of a completion."""
+    handler = _new_decode_handler()
+    message = "Failed to compile json grammar"
+    finish_reason = {
+        "type": "abort",
+        "message": message,
+        "err_type": "BadRequestError",
+        **status_fields,
+    }
+    stream = getattr(handler, processor_name)(
+        _stream([_abort_chunk(finish_reason)]), abort_context
+    )
+
+    with pytest.raises(HttpError) as error:
+        await anext(stream)
+
+    assert error.value.code == 500
+    assert error.value.message == message
+    abort_context.notify_first_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    "finish_fields",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"message": None}, id="null"),
+        pytest.param({"message": ""}, id="empty"),
+        pytest.param(
+            {"message": "Aborted", "status_code": None, "err_type": None},
+            id="sglang-cancellation",
+        ),
+    ],
+)
+async def test_abort_without_error_details_remains_cancelled(
+    processor_name, finish_fields, abort_context
+):
+    """An ordinary SGLang cancellation keeps its existing finish mapping."""
+    handler = _new_decode_handler()
+    chunk = _abort_chunk({"type": "abort", **finish_fields})
+    chunk["output_ids"] = []
+    chunk["text"] = ""
+
+    chunks = await _collect(
+        getattr(handler, processor_name)(_stream([chunk]), abort_context)
+    )
+
+    assert len(chunks) == 1
+    if processor_name == "_process_token_stream":
+        assert chunks[0]["finish_reason"] == "cancelled"
+        assert chunks[0]["token_ids"] == []
+    else:
+        assert chunks[0]["choices"][0]["finish_reason"] == "cancelled"
+        assert chunks[0]["choices"][0]["delta"]["content"] == ""
+    abort_context.notify_first_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_shutdown_during_abort_metadata_upload_raises_engine_shutdown(
+    processor_name,
+):
+    handler = _new_decode_handler()
+    handler.shutdown_event = asyncio.Event()
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+
+    class ShutdownUploader:
+        async def upload_choice(self, *_args):
+            handler.shutdown_event.set()
+
+    async def stream():
+        yield {
+            "text": "",
+            "output_ids": [],
+            "meta_info": {
+                "id": "sglang-request-id",
+                "finish_reason": {"type": "abort"},
+            },
+        }
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async for _ in getattr(handler, processor_name)(
+            stream(), context, metadata_uploader=ShutdownUploader()
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_ordered_cancellation_skips_stopped_chunk_processing(processor_name):
+    handler = _new_decode_handler()
+    notified = False
+
+    def notify_first_token():
+        nonlocal notified
+        notified = True
+
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: True,
+        notify_first_token=notify_first_token,
+    )
+
+    class UnexpectedUploader:
+        async def upload_choice(self, *_args):
+            raise AssertionError("stopped chunks must not upload metadata")
+
+    async def stream():
+        yield {
+            "text": "ignored",
+            "output_ids": [1],
+            "meta_info": {
+                "id": "internal-request-id",
+                "finish_reason": {"type": "stop"},
+            },
+        }
+
+    outputs = await _collect(
+        getattr(handler, processor_name)(
+            stream(),
+            context,
+            metadata_uploader=UnexpectedUploader(),
+            submitted_request_id="internal-request-id",
+        )
+    )
+
+    assert outputs == []
+    assert not notified
+
+
+@pytest.mark.parametrize(
+    "body_salt,routing_salt,expected_salt",
+    [
+        (None, None, None),
+        ("", None, None),
+        ("body-salt", None, "body-salt"),
+        ("body-salt", "", None),
+        ("body-salt", "tenant-a", "tenant-a"),
+    ],
+)
+def test_engine_generate_preserves_native_fields_and_overrides_worker_state(
+    body_salt, routing_salt, expected_salt
+):
+    request = {
+        "cache_salt": body_salt,
+        "rid": "resolved-request",
+        "sampling_params": {
+            "max_new_tokens": 32,
+            "n": 1,
+            "sampling_seed": 17,
+            "custom_params": {"future_engine_control": True},
+        },
+        "return_logprob": True,
+        "return_text_in_logprobs": True,
+        "token_ids_logprob": [11],
+        "return_routed_experts": True,
+        "routed_experts_start_len": 4,
+        "session_id": "session-1",
+        "bootstrap_host": "client.example",
+        "routed_dp_rank": 7,
+    }
+
+    native = build_native_generate_request(
+        request,
+        input_ids=[7, 8],
+        request_id="internal-request-id",
+        priority=9,
+        sampling_overrides={"n": 1, "max_new_tokens": 1},
+        bootstrap_host="prefill.internal",
+        routed_dp_rank=3,
+        cache_salt=routing_salt,
+    )
+
+    assert native.rid == "internal-request-id"
+    assert native.input_ids == [7, 8]
+    assert native.stream is True
+    assert native.priority == 9
+    assert native.cache_salt == expected_salt
+    assert native.session_id == "session-1"
+    assert native.return_logprob is True
+    assert native.return_text_in_logprobs is True
+    assert native.token_ids_logprob == [11]
+    assert native.return_routed_experts is True
+    assert native.routed_experts_start_len == 4
+    assert native.bootstrap_host == "prefill.internal"
+    assert native.routed_dp_rank == 3
+    assert native.sampling_params == {
+        "max_new_tokens": 1,
+        "n": 1,
+        "sampling_seed": 17,
+        "custom_params": {"future_engine_control": True},
+    }
+
+
+def test_native_generate_rejects_salt_without_engine_support(monkeypatch):
+    monkeypatch.delitem(GenerateReqInput.__dataclass_fields__, "cache_salt")
+    kwargs = {"input_ids": [1], "request_id": "request", "priority": None}
+
+    with pytest.raises(ValueError, match="cache_salt is not supported"):
+        build_native_generate_request({"cache_salt": "tenant-a"}, **kwargs)
+
+    native = build_native_generate_request({"cache_salt": ""}, **kwargs)
+    assert native.cache_salt is None
+
+
+def test_request_cache_salt_precedence():
+    request = {
+        "routing": {"cache_salt": "routing"},
+        "extra_args": {"nvext": {"cache_salt": "extra"}},
+        "nvext": {"cache_salt": "nvext"},
+        "cache_salt": "body",
+    }
+    for source in [
+        request["routing"],
+        request["extra_args"]["nvext"],
+        request["nvext"],
+        request,
+    ]:
+        assert request_cache_salt(request) == source["cache_salt"]
+        source["cache_salt"] = ""
+    assert request_cache_salt(request) is None
+    assert request_cache_salt({}) is None
+    assert request_cache_salt({"extra_args": [1], "cache_salt": "body"}) == "body"
+
+
+def test_engine_generate_requires_object_sampling_params_for_prefill_override():
+    request = {"sampling_params": [1, 2]}
+
+    with pytest.raises(ValueError, match="sampling_params must be an object"):
+        build_native_generate_request(
+            request,
+            input_ids=[1],
+            request_id="prefill-request",
+            priority=None,
+            sampling_overrides={"max_new_tokens": 1},
+        )
+
+
+def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+
+    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
+        build_native_generate_request(
+            {"return_logprob": True, "top_logprobs_num": 1},
+            input_ids=[1],
+            request_id="request",
+            priority=None,
+        )
+
+
+def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+
+    native = build_native_generate_request(
+        {"return_logprob": True, "top_logprobs_num": 2},
+        input_ids=[1],
+        request_id="request",
+        priority=None,
+    )
+
+    assert native.top_logprobs_num == 2
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_forwards_only_opaque_response():
+    native_response = {
+        "output_ids": [101],
+        "meta_info": {
+            "id": "request-1",
+            "output_token_logprobs": [(-0.1, 101, "a")],
+        },
+    }
+
+    class TokenizerManager:
+        async def generate_request(self, request, request_context):
+            assert request == "native-request"
+            assert request_context is None
+            yield native_response
+
+    engine = SimpleNamespace(tokenizer_manager=TokenizerManager())
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            native_generate_stream(engine, "native-request"),
+            _Context(),
+        )
+    )
+
+    assert chunks == [
+        {"token_ids": [], "engine_data": {"sglang_response": native_response}}
+    ]
+    assert chunks[0]["engine_data"]["sglang_response"] is native_response
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_maps_internal_id_without_mutation():
+    native_response = {
+        "output_ids": [101],
+        "meta_info": {"id": "internal-request-id"},
+    }
+
+    async def stream():
+        yield {
+            "token_ids": [],
+            "engine_data": {"sglang_response": native_response},
+        }
+
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            stream(),
+            _Context(),
+            submitted_request_id="internal-request-id",
+            internal_request_id="internal-request-id",
+            response_request_id="caller-visible-id",
+        )
+    )
+
+    mapped_response = chunks[0]["engine_data"]["sglang_response"]
+    assert mapped_response["meta_info"]["id"] == "caller-visible-id"
+    assert native_response["meta_info"]["id"] == "internal-request-id"
+    assert mapped_response is not native_response
+    assert mapped_response["meta_info"] is not native_response["meta_info"]
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_maps_batched_ids_without_collapsing():
+    native_responses = [
+        {
+            "output_ids": [101 + index],
+            "index": index,
+            "meta_info": {"id": f"internal-request-id_{index}"},
+        }
+        for index in range(2)
+    ]
+
+    async def stream():
+        for native_response in native_responses:
+            yield {
+                "token_ids": [],
+                "engine_data": {"sglang_response": native_response},
+            }
+
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            stream(),
+            _Context(),
+            submitted_request_id=None,
+            internal_request_id="internal-request-id",
+            response_request_id=["caller-request-0", "caller-request-1"],
+        )
+    )
+
+    assert [
+        chunk["engine_data"]["sglang_response"]["meta_info"]["id"] for chunk in chunks
+    ] == ["caller-request-0", "caller-request-1"]
+    assert [response["meta_info"]["id"] for response in native_responses] == [
+        "internal-request-id_0",
+        "internal-request-id_1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("engine_id", "index", "public_id", "expected"),
+    [
+        ("internal_0", 0, "caller", "caller_0"),
+        ("actual-child-a", 0, "caller", "actual-child-a"),
+        ("internal_2", 2, ["caller-0", "caller-1"], "internal_2"),
+        ("internal_0", True, "caller", "internal_0"),
+        ("internal_0", 0, [123], "internal_0"),
+    ],
+)
+def test_public_native_response_id_maps_only_derived_string_ids(
+    engine_id, index, public_id, expected
+):
+    assert (
+        _public_native_response_id(engine_id, index, "internal", public_id) == expected
+    )
+
+
+def _new_token_input_handler(maximum_input_token_id: int = 151935):
+    handler = _new_decode_handler()
+    handler._max_input_token_id = maximum_input_token_id
+    handler.input_param_manager = SimpleNamespace(
+        get_input_param=lambda request, use_tokenizer: request.get("token_ids")
+    )
+    return handler
+
+
+def test_resolve_max_input_token_id_uses_model_vocabulary():
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"base": 0, "added": 151668})
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=tokenizer,
+            model_config=SimpleNamespace(
+                vocab_size=151936,
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_rejects_tokenizer_only_vocabulary():
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"base": 0, "added": 151940})
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=tokenizer,
+            model_config=SimpleNamespace(
+                vocab_size=151936,
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_hf_text_config_fallback():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=SimpleNamespace(),
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(vocab_size=151936)
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_missing_tokenizer():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=None,
+            model_config=SimpleNamespace(
+                vocab_size=151936,
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_missing_tokenizer_metadata():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=SimpleNamespace(),
+            model_config=SimpleNamespace(
+                vocab_size=151936,
+            ),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) == 151935
+
+
+def test_resolve_max_input_token_id_supports_missing_model_metadata():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            tokenizer=SimpleNamespace(),
+        )
+    )
+
+    assert DecodeWorkerHandler._resolve_max_input_token_id(engine) is None
+
+
+def test_nvext_token_data_accepts_maximum_valid_token_id():
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": [1, 151935],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1, 151935]}
+
+
+def test_nvext_token_data_allows_only_llava_image_token_with_image():
+    handler = _new_token_input_handler(maximum_input_token_id=31999)
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            mm_processor=SimpleNamespace(),
+            model_config=SimpleNamespace(image_token_id=32000),
+        )
+    )
+    request = {
+        "token_ids": [1, 32000],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1, 32000]}
+
+    request["token_ids"].append(2**32 - 1)
+    with pytest.raises(HttpError, match="4294967295"):
+        handler._get_input_param(request)
+
+
+def test_nvext_token_data_handles_missing_multimodal_metadata():
+    handler = _new_token_input_handler()
+    handler.engine = SimpleNamespace(tokenizer_manager=SimpleNamespace())
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [1]}
+
+
+@pytest.mark.parametrize("invalid_token_id", [151936, 2**32 - 1])
+def test_nvext_token_data_rejects_out_of_vocabulary_token_id(invalid_token_id):
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": [1, invalid_token_id],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(
+        HttpError,
+        match=rf"Token id {invalid_token_id} is out of vocabulary",
+    ) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+def test_nvext_token_data_accepts_empty_token_list():
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": [],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": []}
+
+
+def test_nvext_token_data_rejects_marked_string_payload():
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": "not-token-ids",
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(
+        HttpError,
+        match=r"nvext\.token_data must resolve to a token ID list",
+    ) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+def test_nvext_token_data_skips_validation_when_model_bound_is_unavailable():
+    handler = _new_token_input_handler()
+    handler._max_input_token_id = None
+    request = {
+        "token_ids": [2**32 - 1],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
+
+
+def test_nvext_token_data_without_model_bound_rejects_locally_invalid_token_id():
+    handler = _new_token_input_handler()
+    handler._max_input_token_id = None
+    request = {
+        "token_ids": [True],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(HttpError) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+@pytest.mark.parametrize("invalid_token_id", [True, 1.5, "1"])
+def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
+    handler = _new_token_input_handler()
+    request = {
+        "token_ids": [invalid_token_id],
+        "extra_args": {"nvext": {"token_in": True}},
+    }
+
+    with pytest.raises(HttpError) as error:
+        handler._get_input_param(request)
+
+    assert error.value.code == 400
+
+
+def test_nvext_token_data_validation_skips_ordinary_token_input():
+    handler = _new_token_input_handler()
+    request = {"token_ids": [2**32 - 1]}
+
+    assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
+
+
+async def _stream(items):
+    for item in items:
+        yield item
+
+
+class _Context:
+    def id(self):
+        return "public-request-id"
+
+    def is_stopped(self):
+        return False
+
+    def notify_first_token(self):
+        pass
+
+
+def test_build_sampling_params_passes_n_for_token_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {"temperature": 0.2, "top_p": 0.9, "n": 3},
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["n"] == 3
+    assert sampling_params["temperature"] == 0.2
+    assert sampling_params["max_new_tokens"] == 8
+
+
+@pytest.mark.parametrize(
+    ("sampling_params", "supported", "expected"),
+    [
+        ({}, True, "request-id"),
+        ({"n": 1}, True, "request-id"),
+        ([{"n": 1}], True, "request-id"),
+        ({"n": 3}, True, None),
+        ([{"n": 3}], True, None),
+        ({"n": 3, "beam_width": 2}, True, "request-id"),
+        ({"n": 1}, False, None),
+    ],
+)
+def test_ordered_cancellation_requires_stable_sglang_request_id(
+    sampling_params, supported, expected
+):
+    assert (
+        _ordered_cancellation_request_id(
+            "request-id", sampling_params, supported=supported
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("native_payload", "expected"),
+    [
+        ({}, False),
+        ({"prompt": "hello"}, False),
+        ({"prompt": ["hello", "world"]}, True),
+        ({"text": ["hello", "world"]}, True),
+        ({"input_ids": [1, 2]}, False),
+        ({"input_ids": [[1], [2]]}, True),
+        ({"input_embeds": [[0.1], [0.2]]}, False),
+        ({"input_embeds": [[[0.1]], [[0.2]]]}, True),
+    ],
+)
+def test_native_payload_batch_detection(native_payload, expected):
+    assert _native_payload_is_batched(native_payload) is expected
+
+
+def test_ordered_cancellation_rejects_native_batch():
+    assert (
+        _ordered_cancellation_request_id(
+            "request-id", {"n": 1}, supported=True, batched=True
+        )
+        is None
+    )
+
+
+def test_build_sampling_params_forwards_repetition_controls_for_token_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "repetition_penalty": 1.05,
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "top_k": 40,
+                "min_p": 0.01,
+                "seed": 1234,
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["presence_penalty"] == 0.1
+    assert sampling_params["frequency_penalty"] == 0.2
+    assert sampling_params["repetition_penalty"] == 1.05
+    assert sampling_params["temperature"] == 1.0
+    assert sampling_params["top_p"] == 0.95
+    assert sampling_params["top_k"] == 40
+    assert sampling_params["min_p"] == 0.01
+    assert sampling_params["sampling_seed"] == 1234
+    assert "seed" not in sampling_params
+
+
+def test_build_sampling_params_maps_guided_decoding_to_json_schema():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {
+                    "json": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }
+                }
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["json_schema"] == (
+        '{"type": "object", "properties": {"city": {"type": "string"}}}'
+    )
+
+
+@pytest.mark.parametrize(
+    "guided_decoding, expected",
+    [
+        ({"regex": "a+"}, {"regex": "a+"}),
+        ({"choice": ["yes", "no"]}, {"regex": "(yes|no)"}),
+        ({"grammar": 'root ::= "a"'}, {"ebnf": 'root ::= "a"'}),
+    ],
+)
+def test_build_sampling_params_maps_non_json_guided_decoding(guided_decoding, expected):
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {"guided_decoding": guided_decoding},
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    for key, value in expected.items():
+        assert sampling_params[key] == value
+
+
+def test_build_sampling_params_degenerate_choice_does_not_hide_later_constraint():
+    """A choice list that filters to nothing must not consume the constraint slot.
+
+    The nested cascade this replaced entered the choice branch on a truthy list,
+    filtered it empty, and then skipped grammar and structural_tag entirely.
+    """
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {"choice": [None], "grammar": 'root ::= "a"'}
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["ebnf"] == 'root ::= "a"'
+
+
+@pytest.mark.parametrize(
+    "guided_decoding",
+    [
+        {"json": {"type": "object"}},
+        {"regex": "a+"},
+        {"choice": ["yes", "no"]},
+        {"grammar": 'root ::= "a"'},
+        # Modifiers ride along with a constraint on the wire. SGLang has no
+        # SamplingParams field for either, so they must not be forwarded.
+        {"json": {"type": "object"}, "whitespace_pattern": "[\n ]?"},
+        {"regex": "a+", "backend": "xgrammar"},
+    ],
+)
+def test_guided_decoding_params_are_accepted_by_sglang(guided_decoding):
+    """Every key we emit must exist on SGLang's SamplingParams.
+
+    SamplingParams raises TypeError on an unknown keyword rather than ignoring
+    it, and the dict built here is passed straight to engine.async_generate,
+    which splats it into that constructor. Asserting only on the dict we return
+    cannot catch a key SGLang does not accept, so construct it for real.
+    """
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {"guided_decoding": guided_decoding},
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    SamplingParams(**sampling_params)
+
+
+def test_build_sampling_params_holds_tokenizer_free_engine_open_for_min_tokens():
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=True,
+    )
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "max_tokens": 64,
+                "min_tokens": 8,
+                "stop_token_ids": [7],
+                "stop_token_ids_hidden": [151643],
+            },
+        }
+    )
+
+    assert "min_new_tokens" not in sampling_params
+    assert "stop_token_ids" not in sampling_params
+    assert sampling_params["ignore_eos"] is True
+    assert sampling_params["max_new_tokens"] == 64
+
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    SamplingParams(**sampling_params).normalize(tokenizer=None)
+
+
+def test_build_sampling_params_forwards_min_tokens_when_engine_has_tokenizer():
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=False,
+    )
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "max_tokens": 64,
+                "min_tokens": 8,
+                "stop_token_ids": [7],
+            },
+        }
+    )
+
+    assert sampling_params["min_new_tokens"] == 8
+    assert sampling_params["stop_token_ids"] == [7]
+    assert "ignore_eos" not in sampling_params
+    assert sampling_params["max_new_tokens"] == 64
+
+
+def test_build_sampling_params_maps_min_tokens_for_sglang_tokenizer_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    sampling_params = handler._build_sampling_params(
+        {"max_tokens": 64, "min_tokens": 16}
+    )
+
+    assert sampling_params["min_new_tokens"] == 16
+    assert sampling_params["max_new_tokens"] == 64
+
+
+def test_build_sampling_params_omits_min_new_tokens_when_min_tokens_absent():
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=True,
+    )
+
+    sampling_params = handler._build_sampling_params(
+        {"sampling_options": {}, "stop_conditions": {"max_tokens": 8}}
+    )
+
+    assert "min_new_tokens" not in sampling_params
+
+
+def test_build_sampling_params_forwards_explicit_zero_min_tokens():
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=True,
+    )
+
+    sampling_params = handler._build_sampling_params(
+        {"sampling_options": {}, "stop_conditions": {"max_tokens": 8, "min_tokens": 0}}
+    )
+
+    assert sampling_params["min_new_tokens"] == 0
+
+
+def test_multimodal_build_sampling_params_maps_min_tokens():
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(
+                max_tokens=64, min_tokens=64, ignore_eos=True
+            ),
+            sampling_options=SamplingOptions(),
+        )
+    )
+
+    sampling_params = SglangUtils.build_sampling_params(request)
+
+    assert sampling_params["min_new_tokens"] == 64
+    assert sampling_params["max_new_tokens"] == 64
+    assert sampling_params["ignore_eos"] is True
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "#"},
+        {
+            "$defs": {
+                "A": {"$ref": "#/$defs/B"},
+                "B": {"$ref": "#/$defs/A"},
+            },
+            "$ref": "#/$defs/A",
+        },
+    ],
+)
+def test_build_sampling_params_rejects_guided_json_reference_cycles(schema):
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    with pytest.raises(HttpError) as error:
+        handler._build_sampling_params(
+            {
+                "sampling_options": {"guided_decoding": {"json": schema}},
+                "stop_conditions": {"max_tokens": 8},
+            }
+        )
+
+    assert error.value.code == 400
+
+
+def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "n": 2,
+            "max_tokens": 8,
+            "stop": [32, 34],
+        }
+    )
+
+    assert sampling_params["n"] == 2
+    assert sampling_params["temperature"] == 0.2
+    assert sampling_params["max_new_tokens"] == 8
+    assert sampling_params["stop_token_ids"] == [32, 34]
+
+
+def test_build_sampling_params_forwards_repetition_controls_for_openai_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.2,
+            "repetition_penalty": 1.05,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 40,
+            "min_p": 0.01,
+            "seed": 1234,
+            "max_tokens": 8,
+        }
+    )
+
+    assert sampling_params["presence_penalty"] == 0.1
+    assert sampling_params["frequency_penalty"] == 0.2
+    assert sampling_params["repetition_penalty"] == 1.05
+    assert sampling_params["temperature"] == 1.0
+    assert sampling_params["top_p"] == 0.95
+    assert sampling_params["top_k"] == 40
+    assert sampling_params["min_p"] == 0.01
+    assert sampling_params["sampling_seed"] == 1234
+    assert "seed" not in sampling_params
+
+
+class TestMultimodalGuard:
+    """Tests for multimodal guard when frontend extraction is missing."""
+
+    @staticmethod
+    def _image_message():
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/a.jpg"},
+                },
+                {"type": "text", "text": "describe image"},
+            ],
+        }
+
+    @pytest.mark.parametrize(
+        "request_factory",
+        [
+            lambda msg: {"token_ids": [1, 2, 3], "messages": [msg]},
+            lambda msg: {"token_ids": [1, 2, 3], "extra_args": {"messages": [msg]}},
+        ],
+        ids=["top_level_messages", "extra_args_messages"],
+    )
+    def test_raises_for_image_url(self, request_factory):
+        with pytest.raises(InvalidArgument, match="multi_modal_data"):
+            raise_if_unextracted_multimodal(request_factory(self._image_message()))
+
+    def test_raises_for_audio_url(self):
+        request = {
+            "token_ids": [1, 2, 3],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "audio_url",
+                            "audio_url": {"url": "https://example.com/audio.wav"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(InvalidArgument, match="audio_url"):
+            raise_if_unextracted_multimodal(request)
+
+    def test_text_only_request_bypasses_guard(self):
+        raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
+
+    @pytest.mark.multimodal
+    def test_rejects_multimodal_cache_uuid(self):
+        with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+            raise_if_unextracted_multimodal(
+                {
+                    "token_ids": [10, 20, 30],
+                    "multi_modal_uuids": {"image_url": ["cached-image"]},
+                }
+            )
+
+
+def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+
+    kwargs = DecodeWorkerHandler._build_logprob_kwargs(
+        {"output_options": {"logprobs": 0}}
+    )
+
+    assert kwargs == {"return_logprob": True, "top_logprobs_num": 0}
+
+
+def test_build_logprob_kwargs_rejects_top_logprobs_by_default(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+
+    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
+        DecodeWorkerHandler._build_logprob_kwargs({"output_options": {"logprobs": 1}})
+
+
+def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+
+    kwargs = DecodeWorkerHandler._build_logprob_kwargs(
+        {"output_options": {"logprobs": 2}}
+    )
+
+    assert kwargs == {"return_logprob": True, "top_logprobs_num": 2}
+
+
+def test_extract_logprobs_formats_top_tokens_as_token_ids():
+    log_probs, top_logprobs = DecodeWorkerHandler._extract_logprobs(
+        {
+            "output_token_logprobs": [(-0.1, 101, "a")],
+            "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
+        },
+        return_tokens_as_token_ids=True,
+    )
+
+    assert log_probs == [-0.1]
+    assert top_logprobs == [
+        [
+            {"rank": 1, "token_id": 101, "token": "token_id:101", "logprob": -0.1},
+            {"rank": 2, "token_id": 102, "token": "token_id:102", "logprob": -0.2},
+        ]
+    ]
+
+
+def test_metadata_uploader_parses_extra_args_nvext():
+    uploader = MetadataUploader.from_backend_request(
+        {
+            "extra_args": {
+                "nvext": {
+                    "metadata_upload": {
+                        "url": "s3://bucket/root/rollouts",
+                    }
+                }
+            }
+        }
+    )
+
+    assert uploader is not None
+    assert uploader.url == "s3://bucket/root/rollouts"
+
+    uploader = MetadataUploader.from_backend_request(
+        {"nvext": {"metadata_upload": {"url": "s3://bucket/root/rollouts"}}}
+    )
+    assert uploader is not None
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ({}, "metadata_upload.url is required"),
+        ({"url": ""}, "metadata_upload.url must not be empty"),
+        ({"url": 1}, "metadata_upload.url must be a string"),
+        ("invalid", "metadata_upload must be an object"),
+        (
+            {"url": "s3://bucket/root/rollouts", "format": "json"},
+            "metadata_upload.format is not supported",
+        ),
+    ],
+)
+def test_metadata_uploader_rejects_invalid_settings(settings, message):
+    with pytest.raises(ValueError, match=message):
+        MetadataUploader.from_backend_request({"nvext": {"metadata_upload": settings}})
+
+
+def test_nvext_extra_field_requested_supports_raw_and_preprocessed_shapes():
+    assert _nvext_extra_field_requested(
+        {"nvext": {"extra_fields": ["stop_reason"]}}, "stop_reason"
+    )
+    assert _nvext_extra_field_requested(
+        {"extra_args": {"nvext": {"extra_fields": ["stop_reason"]}}},
+        "stop_reason",
+    )
+    assert not _nvext_extra_field_requested(
+        {"extra_args": {"nvext": {"extra_fields": ["engine_data"]}}},
+        "stop_reason",
+    )
+
+
+def test_metadata_upload_requires_enable_rl():
+    request = {
+        "extra_args": {
+            "nvext": {"metadata_upload": {"url": "s3://bucket/root/rollouts/run-1"}}
+        }
+    }
+
+    assert _new_decode_handler()._metadata_uploader_from_request(request) is None
+
+    uploader = _new_decode_handler(enable_rl=True)._metadata_uploader_from_request(
+        request
+    )
+    assert uploader is not None
+    assert uploader.url == "s3://bucket/root/rollouts/run-1"
+
+
+@pytest.mark.asyncio
+async def test_metadata_upload_normalizes_tensor_values(tmp_path):
+    torch = pytest.importorskip("torch")
+    uploader = MetadataUploader(url=(tmp_path / "metadata/tensors").as_uri())
+    tensor = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+
+    await uploader.upload_choice(0, {"router_tensor": tensor})
+
+    payload = _read_zstd_payload(tmp_path / "metadata/tensors/choice_0.msgpack.zst")
+    uploaded_tensor = payload["metadata"]["router_tensor"]
+    assert uploaded_tensor["type"] == "tensor"
+    assert uploaded_tensor["dtype"] == "int32"
+    assert uploaded_tensor["shape"] == [2, 2]
+    assert uploaded_tensor["data"] == tensor.numpy().tobytes()
+
+    bfloat_tensor = torch.tensor([1, 2], dtype=torch.bfloat16)
+    await uploader.upload_choice(1, {"router_tensor": bfloat_tensor})
+
+    payload = _read_zstd_payload(tmp_path / "metadata/tensors/choice_1.msgpack.zst")
+    uploaded_tensor = payload["metadata"]["router_tensor"]
+    assert uploaded_tensor["dtype"] == "bfloat16"
+    assert uploaded_tensor["shape"] == [2]
+    assert uploaded_tensor["data"] == bfloat_tensor.view(torch.uint8).numpy().tobytes()
+
+
+@pytest.mark.asyncio
+async def test_metadata_upload_normalizes_numpy_values(tmp_path):
+    np = pytest.importorskip("numpy")
+    uploader = MetadataUploader(url=(tmp_path / "metadata/arrays").as_uri())
+    array = np.array([[1.5, 2.5], [3.5, 4.5]], dtype=np.float32)
+
+    await uploader.upload_choice(0, {"scores": array[:, ::-1]})
+
+    payload = _read_zstd_payload(tmp_path / "metadata/arrays/choice_0.msgpack.zst")
+    uploaded_array = payload["metadata"]["scores"]
+    expected = np.ascontiguousarray(array[:, ::-1])
+    assert uploaded_array["type"] == "ndarray"
+    assert uploaded_array["dtype"] == "float32"
+    assert uploaded_array["shape"] == [2, 2]
+    assert uploaded_array["data"] == expected.tobytes()
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_treats_completion_usage_as_optional():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 2,
+                            "completion_tokens": 3,
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks == [
+        {"index": 0, "finish_reason": "stop", "token_ids": []},
+        {
+            "index": 1,
+            "finish_reason": "stop",
+            "token_ids": [],
+            "completion_usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5,
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_accepts_incremental_logprob_arrays():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "text": "a",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": [(-0.1, 101, "")],
+                            "output_top_logprobs": [
+                                [
+                                    (-0.1, 101, "a"),
+                                    (-0.2, 201, "b"),
+                                    (-0.3, 202, "c"),
+                                    (-0.4, 203, "d"),
+                                    (-0.5, 204, "e"),
+                                ]
+                            ],
+                        },
+                        "engine_data": {"native_chunk": 1},
+                    },
+                    {
+                        "index": 0,
+                        "output_ids": [102],
+                        "text": "c",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": [(-0.3, 102, "")],
+                            "output_top_logprobs": [
+                                [
+                                    (-0.3, 102, "c"),
+                                    (-0.4, 301, "d"),
+                                    (-0.5, 302, "e"),
+                                    (-0.6, 303, "f"),
+                                    (-0.7, 304, "g"),
+                                ]
+                            ],
+                        },
+                        "engine_data": {"native_chunk": 2},
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
+    assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.3]]
+    assert [
+        [len(position) for position in chunk["top_logprobs"]] for chunk in chunks
+    ] == [[5], [5]]
+    assert all("text" not in chunk for chunk in chunks)
+    assert all("tokens" not in chunk for chunk in chunks)
+    assert [chunk["engine_data"]["native_chunk"] for chunk in chunks] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_passes_through_encoded_routed_experts():
+    """Preserve SGLang's base64 routed-experts payload without re-encoding."""
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "routed_experts": "AQIDBA==",
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks[0]["engine_data"]["routed_experts"] == "AQIDBA=="
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_uploads_large_metadata(tmp_path):
+    handler = _new_decode_handler()
+    uploader = MetadataUploader(
+        url=(tmp_path / "metadata/rollout-7").as_uri(),
+    )
+    meta_info = {
+        "id": "sglang-1",
+        "finish_reason": {"type": "stop"},
+        "output_token_logprobs": [(-0.1, 101, "a")],
+        "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
+        "routed_experts": b"expert-bytes",
+        "custom_router_state": {"step": 1, "scores": [0.25, 0.75]},
+        "prompt_tokens": 2,
+        "completion_tokens": 1,
+        "cached_tokens": 0,
+    }
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": meta_info,
+                    }
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert "log_probs" not in chunk
+    assert "top_logprobs" not in chunk
+    assert "disaggregated_params" not in chunk
+    assert "engine_data" not in chunk
+    uploaded_path = tmp_path / "metadata/rollout-7/choice_0.msgpack.zst"
+
+    payload = _read_zstd_payload(uploaded_path)
+    assert payload["metadata"]["id"] == "sglang-1"
+    assert payload["metadata"]["finish_reason"] == {"type": "stop"}
+    assert payload["metadata"]["output_token_logprobs"] == [[-0.1, 101, "a"]]
+    assert payload["metadata"]["output_top_logprobs"][0][1][1] == 102
+    assert payload["metadata"]["routed_experts"] == b"expert-bytes"
+    assert payload["metadata"]["custom_router_state"] == {
+        "step": 1,
+        "scores": [0.25, 0.75],
+    }
+    assert payload["metadata"]["prompt_tokens"] == 2
+    assert meta_info == {}
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_uploads_only_final_meta_info(tmp_path):
+    handler = _new_decode_handler()
+    uploader = MetadataUploader(url=(tmp_path / "metadata/rollout-final").as_uri())
+    first_meta_info = {
+        "id": "sglang-1",
+        "finish_reason": None,
+        "output_token_logprobs": [(-0.1, 101, "a")],
+        "custom_router_state": {"step": 1},
+    }
+    final_meta_info = {
+        "id": "sglang-1",
+        "finish_reason": {"type": "stop"},
+        "output_token_logprobs": [(-0.1, 101, "a"), (-0.2, 102, "b")],
+        "custom_router_state": {"step": 2},
+        "prompt_tokens": 2,
+        "completion_tokens": 2,
+        "cached_tokens": 0,
+    }
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {"index": 0, "output_ids": [101], "meta_info": first_meta_info},
+                    {"index": 0, "output_ids": [102], "meta_info": final_meta_info},
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert len(chunks) == 2
+    assert "log_probs" not in chunks[0]
+    assert "log_probs" not in chunks[1]
+    payload = _read_zstd_payload(
+        tmp_path / "metadata/rollout-final/choice_0.msgpack.zst"
+    )
+    assert payload["metadata"]["output_token_logprobs"] == [
+        [-0.1, 101, "a"],
+        [-0.2, 102, "b"],
+    ]
+    assert payload["metadata"]["custom_router_state"] == {"step": 2}
+    assert first_meta_info == {}
+    assert final_meta_info == {}
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_upload_failure_blocks_final_chunk(tmp_path):
+    handler = _new_decode_handler()
+
+    class FailingUploader(MetadataUploader):
+        async def upload_choice(self, choice_index, metadata):
+            raise RuntimeError("metadata upload failed")
+
+    with pytest.raises(RuntimeError, match="metadata upload failed"):
+        await _collect(
+            handler._process_token_stream(
+                _stream(
+                    [
+                        {
+                            "index": 0,
+                            "output_ids": [101],
+                            "meta_info": {
+                                "id": "sglang-1",
+                                "finish_reason": {"type": "stop"},
+                                "output_token_logprobs": [(-0.1, 101, "a")],
+                                "prompt_tokens": 2,
+                                "completion_tokens": 1,
+                                "cached_tokens": 0,
+                            },
+                        }
+                    ]
+                ),
+                _Context(),
+                metadata_uploader=FailingUploader(
+                    url=(tmp_path / "metadata/rollout-fail").as_uri(),
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_forwards_incremental_text_per_choice():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "He",
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "index": 1,
+                        "text": "Go",
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "index": 0,
+                        "text": "llo",
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "index": 1,
+                        "text": "od",
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    choices = [chunk["choices"][0] for chunk in chunks]
+    assert [choice["index"] for choice in choices] == [0, 1, 0, 1]
+    assert [choice["delta"]["content"] for choice in choices] == [
+        "He",
+        "Go",
+        "llo",
+        "od",
+    ]
+    assert [chunk["id"] for chunk in chunks] == ["public-request-id"] * 4
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_forwards_sglang_trimmed_stop_response():
+    """SGLang trims display text but retains matched token IDs upstream."""
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": " delta",
+                        "output_ids": [9477],
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "index": 0,
+                        # Vanilla SGLang's default no_stop_trim=False response:
+                        # the text is already trimmed while output_ids still
+                        # include the three-token matched stop string.
+                        "text": " epsilon",
+                        "output_ids": [31204, 1147, 1915, 38997, 18526],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {
+                                "type": "stop",
+                                "matched": " zeta eta theta",
+                            },
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+            request={"stop": [" zeta eta theta"]},
+        )
+    )
+
+    assert [chunk["choices"][0]["delta"]["content"] for chunk in chunks] == [
+        " delta",
+        " epsilon",
+    ]
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_notifies_for_empty_decoded_token():
+    handler = _new_decode_handler()
+
+    class Context(_Context):
+        def __init__(self):
+            self.notifications = 0
+
+        def notify_first_token(self):
+            self.notifications += 1
+
+    context = Context()
+
+    async def token_stream():
+        yield {
+            "output_ids": [101],
+            "text": "",
+            "meta_info": {"id": "request-1", "finish_reason": None},
+        }
+        assert context.notifications == 1
+        yield {
+            "output_ids": [102],
+            "text": "a",
+            "meta_info": {"id": "request-1", "finish_reason": None},
+        }
+
+    await _collect(handler._process_text_stream(token_stream(), context))
+
+    assert context.notifications == 1
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_stop_reason_uses_response_nvext():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop", "matched": "END"},
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            request={"nvext": {"extra_fields": ["stop_reason"]}},
+        )
+    )
+
+    assert "stop_reason" not in chunks[0]["choices"][0]
+    assert chunks[0]["nvext"]["stop_reason"] == "END"
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_stop_reason_requires_nvext_extra_field():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop", "matched": "END"},
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert "stop_reason" not in chunks[0]["choices"][0]
+    assert "nvext" not in chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_passes_through_encoded_routed_experts():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "routed_experts": "AQIDBA==",
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            request={"nvext": {"extra_fields": ["routed_experts"]}},
+        )
+    )
+
+    assert chunks[0]["nvext"]["routed_experts"] == "AQIDBA=="
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_uploads_routed_experts(tmp_path):
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+    uploader = MetadataUploader(url=(tmp_path / "metadata/rollout-8").as_uri())
+    meta_info = {
+        "id": "sglang-2",
+        "finish_reason": {"type": "stop"},
+        "routed_experts": "base64-experts",
+    }
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": meta_info,
+                    }
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert "nvext" not in chunks[0]
+    payload = _read_zstd_payload(tmp_path / "metadata/rollout-8/choice_0.msgpack.zst")
+    assert payload["metadata"]["id"] == "sglang-2"
+    assert payload["metadata"]["finish_reason"] == {"type": "stop"}
+    assert payload["metadata"]["routed_experts"] == "base64-experts"
+    assert meta_info == {}
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_preserves_hidden_stop_token_but_not_reason():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [128001],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop", "matched": 128001},
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "cached_tokens": None,
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            user_stop_token_ids={576},
+        )
+    )
+
+    assert chunks[0]["token_ids"] == [128001]
+    assert "stop_reason" not in chunks[0]
+
+
+async def _collect(stream):
+    return [item async for item in stream]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler_type", [PrefillWorkerHandler, DecodeWorkerHandler])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sampling_options": {"n": 2}},
+        {"n": 2},
+        {"request": {"sampling_options": {"n": 2}}, "sampling_params": {"n": 1}},
+        {"request": {}, "sampling_params": {"n": 2}},
+        {"extra_args": {"sglang_tito": {"sampling_params": {"n": 2}}}},
+        {"request": {"extra_args": {"sglang_tito": {"sampling_params": {"n": 2}}}}},
+    ],
+    ids=[
+        "tokens",
+        "openai",
+        "wrapped-original",
+        "wrapped-params",
+        "native",
+        "wrapped-native",
+    ],
+)
+async def test_disagg_parallel_sampling_rejected_before_handoff(handler_type, payload):
+    """Reject n greater than one before either disaggregated handler starts work."""
+    handler = handler_type.__new__(handler_type)
+    handler.serving_mode = DisaggregationMode.DECODE
+    handler._first_token_source = None
+    handler.engine = SimpleNamespace(async_generate=AsyncMock())
+    handler._generate_bootstrap_room = Mock(return_value=123)
+    handler._get_input_param = Mock(
+        side_effect=AssertionError("input preparation ran before rejection")
+    )
+    handler.bootstrap_host = "prefill.invalid"
+    handler.bootstrap_port = 1234
+    context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
+    original = deepcopy(payload)
+
+    with pytest.raises(
+        InvalidArgument, match="disaggregated serving supports only n=1"
+    ):
+        await anext(handler.generate(payload, context))
+
+    handler.engine.async_generate.assert_not_awaited()
+    handler._generate_bootstrap_room.assert_not_called()
+    handler._get_input_param.assert_not_called()
+    assert payload == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode,n", [(DisaggregationMode.AGGREGATED, 2), (DisaggregationMode.DECODE, 1)]
+)
+async def test_supported_sampling_reaches_engine(mode, n):
+    """Allow aggregated parallel sampling and disaggregated single sampling."""
+    handler = _new_decode_handler()
+    handler.serving_mode = mode
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    chunks = [
+        {
+            "index": index,
+            "output_ids": [42],
+            "meta_info": {"id": f"sample-{index}", "finish_reason": {"type": "length"}},
+        }
+        for index in range(n)
+    ]
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream(chunks))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {
+        "sampling_options": {"n": n},
+        "stop_conditions": {"max_tokens": 1},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 123,
+        },
+    }
+
+    outputs = [output async for output in handler.generate(request, context)]
+
+    assert [output["index"] for output in outputs] == list(range(n))
+    assert handler.engine.async_generate.await_args.kwargs["sampling_params"]["n"] == n
+    assert all(output["finish_reason"] for output in outputs)
+
+
+def test_prefill_dp_rank_kwargs_follows_engine_signature():
+    from dynamo.sglang._compat import prefill_dp_rank_kwargs
+
+    class Engine:
+        async def async_generate(
+            self, *, bootstrap_room=None, disagg_prefill_dp_rank=None
+        ):
+            pass
+
+    class OlderEngine:
+        async def async_generate(self, *, bootstrap_room=None):
+            pass
+
+    assert prefill_dp_rank_kwargs(Engine(), 3) == {"disagg_prefill_dp_rank": 3}
+    assert prefill_dp_rank_kwargs(Engine(), None) == {}
+    assert prefill_dp_rank_kwargs(OlderEngine(), 3) == {}
+
+
+@pytest.mark.asyncio
+async def test_disagg_decode_passes_prefill_dp_rank_to_engine():
+    handler = _new_decode_handler()
+    handler.serving_mode = DisaggregationMode.DECODE
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    chunk = {
+        "index": 0,
+        "output_ids": [42],
+        "meta_info": {"id": "sample-0", "finish_reason": {"type": "length"}},
+    }
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream([chunk]))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {
+        "sampling_options": {"n": 1},
+        "stop_conditions": {"max_tokens": 1},
+        "routing": {"dp_rank": 1, "prefill_dp_rank": 3},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 23,
+        },
+    }
+    [output async for output in handler.generate(request, context)]
+    kwargs = handler.engine.async_generate.await_args.kwargs
+    assert kwargs["disagg_prefill_dp_rank"] == 3
+    assert kwargs["data_parallel_rank"] == 1
+
+
+def test_build_native_generate_request_forwards_prefill_dp_rank():
+    native = build_native_generate_request(
+        {"sampling_params": {"max_new_tokens": 1}},
+        input_ids=[7, 8],
+        request_id="internal-request-id",
+        priority=None,
+        bootstrap_host="prefill.internal",
+        bootstrap_port=1234,
+        bootstrap_room=23,
+        routed_dp_rank=1,
+        prefill_dp_rank=3,
+    )
+    assert native.disagg_prefill_dp_rank == 3

@@ -27,6 +27,12 @@ const (
 	DynamoNixlPort     = 19090
 	DynamoNixlPortName = "nixl"
 
+	// DynamoMaxNixlPorts bounds the per-pod NIXL exporter ports: rank i uses
+	// DynamoNixlPort+i. Keep in sync with MAX_COLOCATED_NIXL_EXPORTERS (nixl_telemetry.py).
+	DynamoMaxNixlPorts = 8
+
+	DynamoFPMBasePort = 20380
+
 	MpiRunSshPort = 2222
 
 	// Default security context values
@@ -40,20 +46,100 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	// KubeAnnotationWorkloadProvider records the controller-owned immutable graph-level workload provider.
+	KubeAnnotationWorkloadProvider = "nvidia.com/workload-provider"
+	WorkloadProviderComponent      = "component"
+	WorkloadProviderGrove          = "grove"
+
+	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
+	// PodCliqueSet update strategy while the long-term DGD API is settled.
+	// Supported values match Grove exactly: "RollingRecreate" and "OnDelete".
+	KubeAnnotationGroveUpdateStrategy = "nvidia.com/grove-update-strategy"
+
+	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that
+	// controls whether the mutating webhook injects an istio-proxy sidecar into
+	// a pod. Setting it to "false" opts the pod out of sidecar injection even
+	// when the namespace carries istio-injection=enabled.
+	KubeAnnotationIstioSidecarInject = "sidecar.istio.io/inject"
+
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
+	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
+	KubeAnnotationGPUPowerLimit                   = "dynamo.nvidia.com/gpu-power-limit"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
 	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
-	KubeLabelDynamoComponentType       = "nvidia.com/dynamo-component-type"
-	KubeLabelDynamoSubComponentType    = "nvidia.com/dynamo-sub-component-type"
-	KubeLabelDynamoBaseModel           = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoBaseModelHash       = "nvidia.com/dynamo-base-model-hash"
-	KubeAnnotationDynamoBaseModel      = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoDiscoveryBackend    = "nvidia.com/dynamo-discovery-backend"
-	KubeLabelDynamoDiscoveryEnabled    = "nvidia.com/dynamo-discovery-enabled"
-	KubeLabelDynamoWorkerHash          = "nvidia.com/dynamo-worker-hash"
+	// KubeLabelDynamoComponentType is the workload selector contract stamped on
+	// DCDs and rendered onto pods/services. Native v1beta1 prefill/decode worker
+	// DCDs use "prefill" or "decode". A DCD generation that is already serving
+	// alpha-era selectors uses "worker" and pairs it with
+	// KubeLabelDynamoSubComponentType so a no-op upgrade keeps matching existing
+	// pods. This selector contract is separate from worker-hash currentness:
+	// matching current-worker-hash does not imply legacy selectors.
+	KubeLabelDynamoComponentType    = "nvidia.com/dynamo-component-type"
+	KubeLabelDynamoSubComponentType = "nvidia.com/dynamo-sub-component-type"
+	KubeLabelDynamoComponentClass   = "nvidia.com/dynamo-component-class"
+	KubeLabelDynamoBaseModel        = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoBaseModelHash    = "nvidia.com/dynamo-base-model-hash"
+	KubeAnnotationDynamoBaseModel   = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoDiscoveryBackend = "nvidia.com/dynamo-discovery-backend"
+	KubeLabelDynamoDiscoveryEnabled = "nvidia.com/dynamo-discovery-enabled"
+	// KubeLabelDynamoWorkerHash is the worker generation label on worker DCDs
+	// and worker pods. During v1/v2 hash compatibility the label key remains
+	// stable and the value may be either the active v1 hash or the active v2 hash
+	// recorded on the parent DGD. Older operators understand only the v1 value,
+	// so v1-compatible releases continue to generate new DCDs with the v1 value.
+	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
+
+	// CheckpointAutoAnnotation marks operator-created checkpoints whose
+	// lifecycle is tied to an owning DGD generation.
+	CheckpointAutoAnnotation = "nvidia.com/dynamo-auto-checkpoint"
+	// CheckpointDeletionPolicyAnnotation stores whether a DGD-managed
+	// automatic checkpoint should be deleted or retained when the owning DGD is
+	// deleted.
+	CheckpointDeletionPolicyAnnotation = "nvidia.com/dynamo-checkpoint-deletion-policy"
+	// CheckpointOwnerUIDAnnotation binds DGD-managed automatic capture resources
+	// to one concrete graph incarnation.
+	CheckpointOwnerUIDAnnotation = "nvidia.com/dynamo-checkpoint-owner-uid"
+	// CheckpointRestoreCandidateAnnotation marks owner pod templates whose Pods
+	// should be restore-shaped by the operator's pod-create mutating webhook
+	// once the referenced checkpoint is Ready. This intentionally does not use
+	// Snapshot's public restore annotation because the node agent watches that
+	// annotation to start a restore.
+	CheckpointRestoreCandidateAnnotation = "nvidia.com/dynamo-checkpoint-restore-candidate"
+	// CheckpointNameAnnotation stores the candidate checkpoint resource name.
+	CheckpointNameAnnotation = "nvidia.com/dynamo-checkpoint-name"
+	// RestoreCandidateSourceKindAnnotation identifies whether the private
+	// admission handoff names a PodSnapshot or the SnapshotJob that will
+	// eventually produce one.
+	RestoreCandidateSourceKindAnnotation = "nvidia.com/dynamo-restore-source-kind"
+	RestoreCandidateSourcePodSnapshot    = "PodSnapshot"
+	RestoreCandidateSourceSnapshotJob    = "SnapshotJob"
+	// SnapshotJobCandidateUIDAnnotation pins an automatic candidate to one
+	// immutable SnapshotJob incarnation while capture is still pending.
+	SnapshotJobCandidateUIDAnnotation = "nvidia.com/dynamo-restore-snapshot-job-uid"
+	// CheckpointStartupPolicyAnnotation stores the DGD checkpoint startup policy
+	// on generated pod templates for debugging and admission.
+	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
+	// Snapshot compatibility metadata is written by Dynamo capture producers
+	// and validated before a PodSnapshot may restore a Dynamo worker.
+	SnapshotCompatibilityVersionAnnotation = "nvidia.com/dynamo-snapshot-compatibility-version"
+	SnapshotCompatibilityHashAnnotation    = "nvidia.com/dynamo-snapshot-compatibility-hash"
+	SnapshotGMSModeAnnotation              = "nvidia.com/dynamo-snapshot-gms-mode"
+	SnapshotCompatibilityVersion           = "v2"
+	SnapshotGMSModeDisabled                = "disabled"
+
+	// Native restore candidate metadata pins the PodSnapshot observation used
+	// by workload reconciliation so admission can detect intervening changes.
+	SnapshotCandidateUIDAnnotation               = "nvidia.com/dynamo-restore-snapshot-uid"
+	SnapshotCandidateContentAnnotation           = "nvidia.com/dynamo-restore-snapshot-content"
+	SnapshotCandidateGMSModeAnnotation           = "nvidia.com/dynamo-restore-snapshot-gms-mode"
+	SnapshotCandidateVersionAnnotation           = "nvidia.com/dynamo-restore-snapshot-version"
+	SnapshotCandidateCompatibilityHashAnnotation = "nvidia.com/dynamo-restore-snapshot-compatibility-hash"
+	// RestoreCandidateTargetContainersAnnotation carries Dynamo's rendered
+	// restore destinations from workload reconciliation to Pod admission.
+	RestoreCandidateTargetContainersAnnotation = "nvidia.com/dynamo-restore-target-containers"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -61,6 +147,34 @@ const (
 	KubeLabelDynamoComponentPod = "nvidia.com/dynamo-component-pod"
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
+
+	// KV transfer policy env vars (worker) — injected when
+	// spec.experimental.kvTransferPolicy is configured. Workers publish these
+	// in their MDC so the router reads policy per-worker rather than from its
+	// own env.
+	EnvKvTransferDomain          = "DYN_KV_TRANSFER_DOMAIN"
+	EnvKvTransferEnforcement     = "DYN_KV_TRANSFER_ENFORCEMENT"
+	EnvKvTransferPreferredWeight = "DYN_KV_TRANSFER_PREFERRED_WEIGHT"
+
+	// Topology env vars (worker) injected when
+	// spec.experimental.kvTransferPolicy is configured.
+	EnvTopologyEnabled   = "DYN_TOPOLOGY_ENABLED"
+	EnvTopologyMountPath = "DYN_TOPOLOGY_MOUNT_PATH"
+
+	// Topology source annotations are set on worker pods when spec.experimental.kvTransferPolicy is
+	// configured. The topology label controller watches for pods being scheduled with these annotations
+	// and uses the annotation value to determine the node label(s) to copy onto the pod. The copied labels
+	// are projected through a Downward API volume for the runtime to consume (i.e. zone="us-east-1a")
+	//
+	// KubeAnnotationTopologyLabelKey defines a single node label key (i.e. "topology.kubernetes.io/zone") to copy
+	// onto the pod under the same label key.
+	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
+
+	// KubeAnnotationTopologyClusterTopologyName specifies the Grove ClusterTopology resource that defines domains to node labels mappings
+	// (i.e. zone -> "nvidia.com/topology.zone"). The topology label controller copies each domain's node label(s) onto the pod under
+	// KubeLabelDynamoTopologyPrefix + domain (i.e. nvidia.com/dynamo-topology.zone)
+	KubeAnnotationTopologyClusterTopologyName = "nvidia.com/topology-cluster-topology-name"
+	KubeLabelDynamoTopologyPrefix             = "nvidia.com/dynamo-topology."
 
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
@@ -71,13 +185,15 @@ const (
 
 	GlobalDynamoNamespace = "dynamo"
 
-	ComponentTypePlanner      = "planner"
-	ComponentTypeFrontend     = "frontend"
-	ComponentTypeWorker       = "worker"
-	ComponentTypePrefill      = "prefill"
-	ComponentTypeDecode       = "decode"
-	ComponentTypeEPP          = "epp"
-	ComponentTypeDefault      = "default"
+	ComponentTypePlanner  = "planner"
+	ComponentTypeFrontend = "frontend"
+	ComponentTypeWorker   = "worker"
+	ComponentTypePrefill  = "prefill"
+	ComponentTypeDecode   = "decode"
+	ComponentTypeEPP      = "epp"
+	ComponentTypeDefault  = "default"
+
+	ComponentClassWorker      = "worker"
 	PlannerServiceAccountName = "planner-serviceaccount"
 	EPPServiceAccountName     = "epp-serviceaccount"
 	EPPClusterRoleName        = "epp-cluster-role"
@@ -101,6 +217,13 @@ const (
 	// VLLMNixlSideChannelHostEnvVar is the env var that tells vLLM which host IP to use for the NIXL side channel.
 	VLLMNixlSideChannelHostEnvVar = "VLLM_NIXL_SIDE_CHANNEL_HOST"
 
+	// VLLMDPMasterIPEnvVar is the env var that tells vLLM which IP hosts the data-parallel master.
+	VLLMDPMasterIPEnvVar = "VLLM_DP_MASTER_IP"
+
+	// PodIPEnvVar carries the pod's own IP from the downward API, for launch
+	// commands that must name an address rather than let a library guess one.
+	PodIPEnvVar = "POD_IP"
+
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
 	KubeLabelMetricsEnabled      = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection
@@ -117,10 +240,26 @@ const (
 	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
 	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
 
+	// Volcano scheduler related constants
+	KubeAnnotationVolcanoQueue  = "nvidia.com/volcano-queue" // User-provided annotation to specify Volcano queue name
+	GroveAnnotationVolcanoQueue = "scheduling.grove.io/volcano-queue"
+	VolcanoSchedulerName        = "volcano"
+
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
+	GroveRoleSuffixGMS    = "gms"
 
+	// MaxCombinedGroveResourceNameLength is the maximum allowed combined length for Grove
+	// resource names (PCS name + PCSG config name + PCLQ template name).
+	// This constraint comes from Grove's PodCliqueSet webhook validation.
+	// Pod names follow: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
+	// The hyphens, indices, and random suffix consume additional characters beyond this limit.
+	MaxCombinedGroveResourceNameLength = 45
+
+	KubeLabelDynamoFailoverEngineGroupMember = "nvidia.com/dynamo-failover-engine-group-member"
+
+	DiscoveryBackendKubernetes   = "kubernetes" // label value for KubeLabelDynamoDiscoveryBackend
 	MainContainerName            = "main"
 	FrontendSidecarContainerName = "sidecar-frontend"
 
@@ -139,56 +278,23 @@ const (
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
 
-	// Checkpoint/restore constants
-	// CROSS-REFERENCE: Some constants below are duplicated in the snapshot package at
-	// deploy/snapshot/pkg/config/constants.go. If you change a value here, update there too.
+	// Worker hash rolling-update annotations are controller-owned annotations on
+	// DynamoGraphDeployment, not on worker DCDs. During a managed rolling update,
+	// they remain on the previously serving generation until the new generation
+	// is fully ready and old workers have drained.
+	//
+	// Existing 1.2 DGDs keep both annotations until a worker change completes.
+	// AnnotationCurrentWorkerHash stores their active v1 hash and
+	// AnnotationCurrentWorkerHashV2 the v2 hash for the same worker spec. Fresh
+	// DGDs and completed v2 generations omit AnnotationCurrentWorkerHash and use
+	// AnnotationCurrentWorkerHashV2 as the active DCD generation hash.
 
-	// Kubernetes labels
-	KubeLabelIsCheckpointSource = "nvidia.com/snapshot-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
-	KubeLabelCheckpointHash     = "nvidia.com/snapshot-checkpoint-hash"      // Checkpoint identity hash (= DynamoCheckpoint CR name)
-	KubeLabelIsRestoreTarget    = "nvidia.com/snapshot-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
-
-	// Environment variables injected into pods
-	EnvCheckpointStorageType  = "DYN_CHECKPOINT_STORAGE_TYPE"   // Storage backend (pvc, s3, oci) — checkpoint job pods only
-	EnvCheckpointLocation     = "DYN_CHECKPOINT_LOCATION"       // Full checkpoint URI — future S3/OCI; for PVC, use PATH+HASH instead
-	EnvCheckpointPath         = "DYN_CHECKPOINT_PATH"           // Base checkpoint directory (e.g., /checkpoints) — PVC restored pods
-	EnvCheckpointHash         = "DYN_CHECKPOINT_HASH"           // Identity hash — all checkpoint-related pods
-	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
-	EnvSkipWaitForCheckpoint  = "SKIP_WAIT_FOR_CHECKPOINT"      // Skip polling, check once — restored/DGD pods
-	// Checkpoint pod-internal constants
-	CheckpointVolumeName = "checkpoint-storage" // Pod-internal volume name for checkpoint PVC
-
-	// SeccompProfilePath is the localhost seccomp profile that blocks io_uring syscalls.
-	// Deployed to nodes by the snapshot DaemonSet init container.
-	SeccompProfilePath = "profiles/block-iouring.json"
-
-	// Pod identity (Downward API) ---
-	// After CRIU restore, env vars contain stale values from the checkpoint pod.
-	// The Downward API files at /etc/podinfo always reflect the current pod.
-	PodInfoVolumeName = "podinfo"
-	PodInfoMountPath  = "/etc/podinfo"
-
-	// Downward API field paths
-	PodInfoFieldPodName      = "metadata.name"
-	PodInfoFieldPodUID       = "metadata.uid"
-	PodInfoFieldPodNamespace = "metadata.namespace"
-
-	// Downward API file names for DGD annotations
-	PodInfoFileDynNamespace        = "dyn_namespace"
-	PodInfoFileDynComponent        = "dyn_component"
-	PodInfoFileDynParentDGDName    = "dyn_parent_dgd_name"
-	PodInfoFileDynParentDGDNS      = "dyn_parent_dgd_namespace"
-	PodInfoFileDynDiscoveryBackend = "dyn_discovery_backend"
-
-	// Annotation keys for DGD info (exposed via Downward API)
-	AnnotationDynNamespace        = "nvidia.com/dyn-namespace"
-	AnnotationDynComponent        = "nvidia.com/dyn-component"
-	AnnotationDynParentDGDName    = "nvidia.com/dyn-parent-dgd-name"
-	AnnotationDynParentDGDNS      = "nvidia.com/dyn-parent-dgd-namespace"
-	AnnotationDynDiscoveryBackend = "nvidia.com/dyn-discovery-backend"
-
-	// Rolling update annotations
+	// AnnotationCurrentWorkerHash stores the active v1alpha1-compatible worker
+	// generation hash.
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
+
+	// AnnotationCurrentWorkerHashV2 stores the active v2 worker generation hash.
+	AnnotationCurrentWorkerHashV2 = "nvidia.com/current-worker-hash-v2"
 
 	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
 	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged
@@ -202,6 +308,21 @@ const (
 	MultinodeDeploymentTypeGrove MultinodeDeploymentType = "grove"
 	MultinodeDeploymentTypeLWS   MultinodeDeploymentType = "lws"
 )
+
+// DynamoTopologyLabelKey returns the Dynamo-owned pod label key used to expose
+// a ClusterTopology domain through the Downward API.
+func DynamoTopologyLabelKey(domain string) string {
+	return KubeLabelDynamoTopologyPrefix + domain
+}
+
+// KubeTopologySourceAnnotationKeys returns pod annotations consumed by the
+// topology label controller.
+func KubeTopologySourceAnnotationKeys() []string {
+	return []string{
+		KubeAnnotationTopologyLabelKey,
+		KubeAnnotationTopologyClusterTopologyName,
+	}
+}
 
 // GroupVersionResources for external APIs
 var (

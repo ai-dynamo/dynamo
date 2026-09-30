@@ -3,27 +3,26 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
-use futures::{Stream, StreamExt};
+use dynamo_runtime::error::DynamoError;
+use futures::{Stream, StreamExt, TryStreamExt};
 
 use super::NvCreateCompletionResponse;
 use crate::protocols::{
     Annotated, DataStream,
     codec::{Message, SseCodecError},
-    common::FinishReason,
+    common::{FinishReason, extensions::merge_response_nvext},
     convert_sse_stream,
     openai::ParsingOptions,
 };
 
-/// Aggregates a stream of [`CompletionResponse`]s into a single [`CompletionResponse`].
+/// Aggregates a stream of `CompletionResponse`s into a single `CompletionResponse`.
 pub struct DeltaAggregator {
     id: String,
     model: String,
     created: u32,
-    usage: Option<dynamo_async_openai::types::CompletionUsage>,
+    usage: Option<dynamo_protocols::types::CompletionUsage>,
     system_fingerprint: Option<String>,
     choices: HashMap<u32, DeltaChoice>,
-    error: Option<String>,
     nvext: Option<serde_json::Value>,
 }
 
@@ -31,7 +30,7 @@ struct DeltaChoice {
     index: u32,
     text: String,
     finish_reason: Option<FinishReason>,
-    logprobs: Option<dynamo_async_openai::types::Logprobs>,
+    logprobs: Option<dynamo_protocols::types::Logprobs>,
 }
 
 impl Default for DeltaAggregator {
@@ -49,30 +48,20 @@ impl DeltaAggregator {
             usage: None,
             system_fingerprint: None,
             choices: HashMap::new(),
-            error: None,
             nvext: None,
         }
     }
 
-    /// Aggregates a stream of [`Annotated<CompletionResponse>`]s into a single [`CompletionResponse`].
+    /// Aggregates a stream of `Annotated<CompletionResponse>`s into a single `CompletionResponse`.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateCompletionResponse> {
+    ) -> Result<NvCreateCompletionResponse, DynamoError> {
         tracing::debug!("Tool Call Parser: {:?}", parsing_options.tool_call_parser); // TODO: remove this once completion has tool call support
         let aggregator = stream
-            .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
-                let delta = match delta.ok() {
-                    Ok(delta) => delta,
-                    Err(error) => {
-                        aggregator.error = Some(error);
-                        return aggregator;
-                    }
-                };
-
-                if aggregator.error.is_none()
-                    && let Some(delta) = delta.data
-                {
+            .map(Annotated::into_data)
+            .try_fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
+                if let Some(delta) = delta {
                     // TODO(#14) - Aggregate Annotation
 
                     // these are cheap to move so we do it every time since we are consuming the delta
@@ -85,10 +74,7 @@ impl DeltaAggregator {
                     if let Some(system_fingerprint) = delta.inner.system_fingerprint {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
-                    // Aggregate nvext field (take the last non-None value)
-                    if delta.inner.nvext.is_some() {
-                        aggregator.nvext = delta.inner.nvext;
-                    }
+                    merge_response_nvext(&mut aggregator.nvext, delta.nvext);
 
                     // handle the choices
                     for choice in delta.inner.choices {
@@ -109,14 +95,14 @@ impl DeltaAggregator {
 
                         // Handle CompletionFinishReason -> FinishReason conversation
                         state_choice.finish_reason = match choice.finish_reason {
-                            Some(dynamo_async_openai::types::CompletionFinishReason::Stop) => {
+                            Some(dynamo_protocols::types::CompletionFinishReason::Stop) => {
                                 Some(FinishReason::Stop)
                             }
-                            Some(dynamo_async_openai::types::CompletionFinishReason::Length) => {
+                            Some(dynamo_protocols::types::CompletionFinishReason::Length) => {
                                 Some(FinishReason::Length)
                             }
                             Some(
-                                dynamo_async_openai::types::CompletionFinishReason::ContentFilter,
+                                dynamo_protocols::types::CompletionFinishReason::ContentFilter,
                             ) => Some(FinishReason::ContentFilter),
                             None => None,
                         };
@@ -124,7 +110,7 @@ impl DeltaAggregator {
                         // Update logprobs
                         if let Some(logprobs) = &choice.logprobs {
                             let state_lps = state_choice.logprobs.get_or_insert(
-                                dynamo_async_openai::types::Logprobs {
+                                dynamo_protocols::types::Logprobs {
                                     tokens: Vec::new(),
                                     token_logprobs: Vec::new(),
                                     top_logprobs: Vec::new(),
@@ -140,27 +126,20 @@ impl DeltaAggregator {
                         }
                     }
                 }
-                aggregator
+                Ok(aggregator)
             })
-            .await;
-
-        // If we have an error, return it
-        let aggregator = if let Some(error) = aggregator.error {
-            return Err(anyhow::anyhow!(error));
-        } else {
-            aggregator
-        };
+            .await?;
 
         // extra the aggregated deltas and sort by index
         let mut choices: Vec<_> = aggregator
             .choices
             .into_values()
-            .map(dynamo_async_openai::types::Choice::from)
+            .map(dynamo_protocols::types::Choice::from)
             .collect();
 
-        choices.sort_by(|a, b| a.index.cmp(&b.index));
+        choices.sort_by_key(|a| a.index);
 
-        let inner = dynamo_async_openai::types::CreateCompletionResponse {
+        let inner = dynamo_protocols::types::CreateCompletionResponse {
             id: aggregator.id,
             created: aggregator.created,
             usage: aggregator.usage,
@@ -168,20 +147,22 @@ impl DeltaAggregator {
             object: "text_completion".to_string(),
             system_fingerprint: aggregator.system_fingerprint,
             choices,
-            nvext: aggregator.nvext,
         };
 
-        let response = NvCreateCompletionResponse { inner };
+        let response = NvCreateCompletionResponse {
+            inner,
+            nvext: aggregator.nvext,
+        };
 
         Ok(response)
     }
 }
 
-impl From<DeltaChoice> for dynamo_async_openai::types::Choice {
+impl From<DeltaChoice> for dynamo_protocols::types::Choice {
     fn from(delta: DeltaChoice) -> Self {
         let finish_reason = delta.finish_reason.map(Into::into);
 
-        dynamo_async_openai::types::Choice {
+        dynamo_protocols::types::Choice {
             index: delta.index,
             text: delta.text,
             finish_reason,
@@ -194,7 +175,7 @@ impl NvCreateCompletionResponse {
     pub async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateCompletionResponse> {
+    ) -> Result<NvCreateCompletionResponse, DynamoError> {
         let stream = convert_sse_stream::<NvCreateCompletionResponse>(stream);
         NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
@@ -202,7 +183,7 @@ impl NvCreateCompletionResponse {
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
         parsing_options: ParsingOptions,
-    ) -> Result<NvCreateCompletionResponse> {
+    ) -> Result<NvCreateCompletionResponse, DynamoError> {
         DeltaAggregator::apply(stream, parsing_options).await
     }
 }
@@ -229,11 +210,11 @@ mod tests {
             .and_then(|s| FinishReason::from_str(s).ok())
             .map(Into::into);
 
-        let logprobs = logprob.map(|lp| dynamo_async_openai::types::Logprobs {
+        let logprobs = logprob.map(|lp| dynamo_protocols::types::Logprobs {
             tokens: vec![text.to_string()],
             token_logprobs: vec![Some(lp)],
             top_logprobs: vec![
-                serde_json::to_value(dynamo_async_openai::types::TopLogprobs {
+                serde_json::to_value(dynamo_protocols::types::TopLogprobs {
                     token: text.to_string(),
                     logprob: lp,
                     bytes: None,
@@ -243,23 +224,22 @@ mod tests {
             text_offset: vec![0],
         });
 
-        let inner = dynamo_async_openai::types::CreateCompletionResponse {
+        let inner = dynamo_protocols::types::CreateCompletionResponse {
             id: "test_id".to_string(),
             model: "meta/llama-3.1-8b".to_string(),
             created: 1234567890,
             usage: None,
             system_fingerprint: None,
-            choices: vec![dynamo_async_openai::types::Choice {
+            choices: vec![dynamo_protocols::types::Choice {
                 index,
                 text: text.to_string(),
                 finish_reason,
                 logprobs,
             }],
             object: "text_completion".to_string(),
-            nvext: None,
         };
 
-        let response = NvCreateCompletionResponse { inner };
+        let response = NvCreateCompletionResponse { inner, nvext: None };
 
         Annotated {
             data: Some(response),
@@ -318,11 +298,11 @@ mod tests {
         assert_eq!(choice.text, "Hello,".to_string());
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::CompletionFinishReason::Length)
+            Some(dynamo_protocols::types::CompletionFinishReason::Length)
         );
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::CompletionFinishReason::Length)
+            Some(dynamo_protocols::types::CompletionFinishReason::Length)
         );
         assert!(choice.logprobs.is_none());
     }
@@ -333,8 +313,10 @@ mod tests {
         // One will have a MessageRole and no FinishReason,
         // the other will have a FinishReason and no MessageRole
         let annotated_delta1 = create_test_delta(0, "Hello,", None, Some(-0.1));
-        let annotated_delta2 =
+        let mut annotated_delta2 =
             create_test_delta(0, " world!", Some("stop".to_string()), Some(-0.2));
+        annotated_delta2.data.as_mut().expect("delta data").nvext =
+            Some(serde_json::json!({ "stop_reason": 128001 }));
 
         // Create a stream
         let annotated_deltas = vec![annotated_delta1, annotated_delta2];
@@ -354,7 +336,11 @@ mod tests {
         assert_eq!(choice.text, "Hello, world!".to_string());
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_async_openai::types::CompletionFinishReason::Stop)
+            Some(dynamo_protocols::types::CompletionFinishReason::Stop)
+        );
+        assert_eq!(
+            response.nvext,
+            Some(serde_json::json!({ "stop_reason": 128001 }))
         );
         assert_eq!(choice.logprobs.as_ref().unwrap().tokens.len(), 2);
         assert_eq!(
@@ -364,33 +350,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_multiple_deltas_merge_nvext_fields() {
+        let mut annotated_delta1 = create_test_delta(0, "Hello,", None, None);
+        annotated_delta1.data.as_mut().expect("delta data").nvext =
+            Some(serde_json::json!({ "engine_data": { "trace_id": "abc" } }));
+        let mut annotated_delta2 = create_test_delta(0, " world!", Some("stop".to_string()), None);
+        annotated_delta2.data.as_mut().expect("delta data").nvext =
+            Some(serde_json::json!({ "stop_reason": 128001 }));
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta1, annotated_delta2]));
+        let response = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .expect("aggregate stream");
+
+        assert_eq!(
+            response.nvext,
+            Some(serde_json::json!({
+                "engine_data": { "trace_id": "abc" },
+                "stop_reason": 128001,
+            }))
+        );
+    }
+
+    #[tokio::test]
     async fn test_multiple_choices() {
         // Create a delta with multiple choices
-        let inner = dynamo_async_openai::types::CreateCompletionResponse {
+        let inner = dynamo_protocols::types::CreateCompletionResponse {
             id: "test_id".to_string(),
             model: "meta/llama-3.1-8b".to_string(),
             created: 1234567890,
             usage: None,
             system_fingerprint: None,
             choices: vec![
-                dynamo_async_openai::types::Choice {
+                dynamo_protocols::types::Choice {
                     index: 0,
                     text: "Choice 0".to_string(),
-                    finish_reason: Some(dynamo_async_openai::types::CompletionFinishReason::Stop),
+                    finish_reason: Some(dynamo_protocols::types::CompletionFinishReason::Stop),
                     logprobs: None,
                 },
-                dynamo_async_openai::types::Choice {
+                dynamo_protocols::types::Choice {
                     index: 1,
                     text: "Choice 1".to_string(),
-                    finish_reason: Some(dynamo_async_openai::types::CompletionFinishReason::Stop),
+                    finish_reason: Some(dynamo_protocols::types::CompletionFinishReason::Stop),
                     logprobs: None,
                 },
             ],
             object: "text_completion".to_string(),
-            nvext: None,
         };
 
-        let response = NvCreateCompletionResponse { inner };
+        let response = NvCreateCompletionResponse { inner, nvext: None };
 
         let annotated_delta = Annotated {
             data: Some(response),
@@ -412,17 +420,17 @@ mod tests {
 
         // Verify the response fields
         assert_eq!(response.inner.choices.len(), 2);
-        response.inner.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
+        response.inner.choices.sort_by_key(|a| a.index); // Ensure the choices are ordered
         let choice0 = &response.inner.choices[0];
         assert_eq!(choice0.index, 0);
         assert_eq!(choice0.text, "Choice 0".to_string());
         assert_eq!(
             choice0.finish_reason,
-            Some(dynamo_async_openai::types::CompletionFinishReason::Stop)
+            Some(dynamo_protocols::types::CompletionFinishReason::Stop)
         );
         assert_eq!(
             choice0.finish_reason,
-            Some(dynamo_async_openai::types::CompletionFinishReason::Stop)
+            Some(dynamo_protocols::types::CompletionFinishReason::Stop)
         );
 
         let choice1 = &response.inner.choices[1];
@@ -430,11 +438,40 @@ mod tests {
         assert_eq!(choice1.text, "Choice 1".to_string());
         assert_eq!(
             choice1.finish_reason,
-            Some(dynamo_async_openai::types::CompletionFinishReason::Stop)
+            Some(dynamo_protocols::types::CompletionFinishReason::Stop)
         );
         assert_eq!(
             choice1.finish_reason,
-            Some(dynamo_async_openai::types::CompletionFinishReason::Stop)
+            Some(dynamo_protocols::types::CompletionFinishReason::Stop)
         );
+    }
+
+    #[tokio::test]
+    async fn preserves_typed_error_after_partial_output() {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("unsupported logprobs")
+            .build();
+        let stream = stream::iter(vec![
+            create_test_delta(0, "partial", None, None),
+            Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            },
+        ]);
+
+        let error = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "unsupported logprobs");
     }
 }

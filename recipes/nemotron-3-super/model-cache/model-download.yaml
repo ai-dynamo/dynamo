@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Downloads the NVFP4 Nemotron-3-Super checkpoint into the PVC using the
+# default HF cache layout (HF_HOME=/model-cache, files end up at
+# /model-cache/hub/models--nvidia--NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/snapshots/<sha>/).
+#
+# Reason for HF cache layout (instead of --local-dir): the worker keeps --model as an
+# HF ID so the Dynamo frontend's discovery watcher can fetch model metadata
+# from HuggingFace, while the actual weights are still resolved from the
+# local cache (no runtime network pull). Using --local-dir instead would
+# break frontend model registration (it issues hub::from_hf(<--model value>)
+# which 404s when --model is a filesystem path).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: MODEL_NAME
+              value: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.16.4
+              hf download "$MODEL_NAME"
+              ls /model-cache/hub/models--*/snapshots/*/ | head
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

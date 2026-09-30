@@ -85,18 +85,17 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.GPU.DiscoveryEnabled = ptr.To(true)
 	}
 
-	// Checkpoint defaults
-	if obj.Checkpoint.ReadyForCheckpointFilePath == "" {
-		obj.Checkpoint.ReadyForCheckpointFilePath = "/tmp/ready-for-checkpoint"
+	// ServiceMesh defaults
+	if ServiceMeshProvider(obj.ServiceMesh.Provider) == ServiceMeshProviderIstio && obj.ServiceMesh.Istio == nil {
+		obj.ServiceMesh.Istio = &IstioMeshConfiguration{}
 	}
-	if obj.Checkpoint.Storage.Type == "" {
-		obj.Checkpoint.Storage.Type = CheckpointStorageTypePVC
-	}
-	if obj.Checkpoint.Storage.PVC.PVCName == "" {
-		obj.Checkpoint.Storage.PVC.PVCName = "snapshot-pvc"
-	}
-	if obj.Checkpoint.Storage.PVC.BasePath == "" {
-		obj.Checkpoint.Storage.PVC.BasePath = "/checkpoints"
+	if obj.ServiceMesh.Istio != nil {
+		if obj.ServiceMesh.Istio.TLSMode == "" {
+			obj.ServiceMesh.Istio.TLSMode = "SIMPLE"
+		}
+		if obj.ServiceMesh.Istio.InsecureSkipVerify == nil {
+			obj.ServiceMesh.Istio.InsecureSkipVerify = ptr.To(true)
+		}
 	}
 
 	// Logging defaults

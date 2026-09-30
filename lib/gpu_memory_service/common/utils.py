@@ -3,36 +3,98 @@
 
 """Shared utilities for GPU Memory Service."""
 
+import logging
 import os
 import tempfile
-import uuid
+from typing import NoReturn
 
-from cuda.bindings import driver as cuda
-from gpu_memory_service.common.cuda_vmm_utils import (
-    check_cuda_result,
-    ensure_cuda_initialized,
-)
+logger = logging.getLogger(__name__)
 
 
-def get_socket_path(device: int) -> str:
-    """Get GMS socket path for the given CUDA device.
+# Canonical names for GMS-related environment variables. Defined here so
+# operator code, launcher code, and engine integration code all reference
+# one source of truth — keeping these in lockstep with the Go-side
+# constants in deploy/operator/internal/gms/gms.go.
+ENV_SCRATCH_KV_ENABLED = "DYN_GMS_SCRATCH_KV_ENABLED"
+ENV_VMM_GRANULARITY = "DYN_GMS_VMM_GRANULARITY"
 
-    The socket path is based on GPU UUID resolved by CUDA.
-    CUDA_VISIBLE_DEVICES remapping is handled by CUDA device enumeration.
+# Production GMS tags: the per-GPU server child and every engine integration
+# serve exactly these logical memory pools, one UDS socket per (device, tag).
+GMS_TAGS = ("weights", "kv_cache")
+
+_TRUTHY = ("true", "1", "yes")
+
+
+def is_truthy_env(name: str) -> bool:
+    """True when the named env var is set to a recognized truthy string."""
+    return os.environ.get(name, "").lower() in _TRUTHY
+
+
+def is_scratch_kv_enabled() -> bool:
+    """True when this engine should use two-phase (scratch → real) KV allocation."""
+    return is_truthy_env(ENV_SCRATCH_KV_ENABLED)
+
+
+def fail(message: str, *args, exc_info=None) -> NoReturn:
+    logger.critical(message, *args, exc_info=exc_info)
+    logging.shutdown()
+    os._exit(1)
+
+
+_uuid_cache: dict[int, str] = {}
+
+
+def invalidate_uuid_cache() -> None:
+    """Clear cached GPU UUIDs. Call after CRIU restore when GPU assignment may change."""
+    _uuid_cache.clear()
+
+
+def get_socket_path(device: int, tag: str = "weights") -> str:
+    """Get GMS socket path for the given GPU device and tag.
+
+    The socket path is based on GPU UUID, making it stable across different
+    device-visibility configurations. UUIDs are cached per device index.
+
+    The device type (CUDA vs XPU) is auto-detected via ``get_vmm_device_type()``.
 
     Args:
-        device: CUDA device index.
+        device: GPU device index.
 
     Returns:
-        Socket path (e.g., "<tempdir>/gms_GPU-12345678-1234-1234-1234-123456789abc.sock").
+        Socket path
+        (e.g., "<tempdir>/gms_GPU-12345678-1234-1234-1234-123456789abc_weights.sock").
     """
-    ensure_cuda_initialized()
+    uuid = _uuid_cache.get(device)
+    if uuid is None:
+        from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
 
-    result, cu_device = cuda.cuDeviceGet(device)
-    check_cuda_result(result, "cuDeviceGet")
+        if get_vmm_device_type() == VMMDeviceType.XPU:
+            from gpu_memory_service.common.vmm import _sycl_vmm
 
-    result, cu_uuid = cuda.cuDeviceGetUuid(cu_device)
-    check_cuda_result(result, "cuDeviceGetUuid")
+            _sycl_vmm.ensure_initialized()
+            uuid = _sycl_vmm.device_uuid(device)
+        else:
+            import pynvml
 
-    gpu_uuid = f"GPU-{uuid.UUID(bytes=bytes(cu_uuid.bytes))}"
-    return os.path.join(tempfile.gettempdir(), f"gms_{gpu_uuid}.sock")
+            pynvml.nvmlInit()
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+            finally:
+                pynvml.nvmlShutdown()
+        _uuid_cache[device] = uuid
+    socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
+    return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
+
+
+def align_to_granularity(size: int, granularity: int) -> int:
+    """Align size up to VMM granularity.
+
+    Args:
+        size: Size in bytes
+        granularity: Allocation granularity
+
+    Returns:
+        Aligned size
+    """
+    return ((size + granularity - 1) // granularity) * granularity

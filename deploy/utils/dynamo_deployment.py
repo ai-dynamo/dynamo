@@ -32,6 +32,27 @@ import kubernetes_asyncio as kubernetes
 import yaml
 from kubernetes_asyncio import client, config
 
+# Container `state.waiting.reason` values that indicate the pod is in a
+# non-recoverable failure state. Once a container reports one of these,
+# kubectl-style retries are pointless — the kubelet has already failed at
+# least once and is in backoff. Used by `wait_for_deployment_ready` to
+# fail fast instead of running out the deployment timeout.
+TERMINAL_POD_WAITING_REASONS: frozenset[str] = frozenset(
+    {
+        "CrashLoopBackOff",
+    }
+)
+
+
+class DeploymentFailedError(RuntimeError):
+    """Raised when a DynamoGraphDeployment's pods enter a terminal failure
+    state (e.g. CrashLoopBackOff) while waiting for readiness.
+
+    Distinct from `TimeoutError` so callers (e.g. the thorough-mode
+    profiler) can skip a candidate immediately rather than waiting out
+    the full deployment timeout.
+    """
+
 
 def find_available_port(start_port: int = 8000) -> int:
     """Find the first available TCP port on 127.0.0.1 starting at start_port (inclusive), scanning up to start_port+99."""
@@ -120,6 +141,10 @@ class DynamoDeploymentClient:
         self.model_name = model_name
         self.service_name = service_name or f"{self.deployment_name}-frontend"
         self.components: List[str] = []  # Will store component names from CR
+        self._original_components: List[str] = []
+        # Version segment of the DynamoGraphDeployment apiVersion, reset from the
+        # manifest in create_deployment: the request path must match the body.
+        self.api_version: str = "v1beta1"
         self.deployment_spec: Optional[
             Dict[str, Any]
         ] = None  # Will store the full deployment spec
@@ -240,10 +265,20 @@ class DynamoDeploymentClient:
             self.deployment_spec is not None
         ), "Failed to load deployment specification"
 
-        # Extract component names
-        self.components = [
-            svc.lower() for svc in self.deployment_spec["spec"]["services"].keys()
-        ]
+        self.api_version = (
+            self.deployment_spec.get("apiVersion") or "nvidia.com/v1beta1"
+        ).split("/")[-1]
+
+        # Extract component names (original case for label queries, lowercase for directories)
+        # v1beta1 spells this `spec.components`, a list of objects each with a
+        # `name`; v1alpha1 spelled it `spec.services`, a mapping keyed by name.
+        spec = self.deployment_spec["spec"]
+        components = spec.get("components")
+        if isinstance(components, list):
+            self._original_components = [component["name"] for component in components]
+        else:
+            self._original_components = list(spec["services"].keys())
+        self.components = [svc.lower() for svc in self._original_components]
 
         # Ensure name and namespace are set correctly
         self.deployment_spec["metadata"]["name"] = self.deployment_name
@@ -259,7 +294,7 @@ class DynamoDeploymentClient:
             if self.namespace == dgdr_namespace:
                 self.deployment_spec["metadata"]["ownerReferences"] = [
                     {
-                        "apiVersion": "nvidia.com/v1alpha1",
+                        "apiVersion": "nvidia.com/v1beta1",
                         "kind": "DynamoGraphDeploymentRequest",
                         "name": dgdr_name,
                         "uid": dgdr_uid,
@@ -272,7 +307,7 @@ class DynamoDeploymentClient:
         try:
             await self.custom_api.create_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 body=self.deployment_spec,
@@ -285,6 +320,65 @@ class DynamoDeploymentClient:
                 print(f"Failed to create deployment {self.deployment_name}: {e}")
                 raise
 
+    async def _detect_terminal_pod_failure(self) -> Optional[str]:
+        """Inspect this deployment's worker pods for a terminal failure.
+
+        Returns a human-readable description of the first failing
+        (pod, container, reason, message) tuple if any container is in a
+        `TERMINAL_POD_WAITING_REASONS` state, otherwise None.
+
+        Transient API errors are swallowed (return None) so a single
+        flaky list call never short-circuits readiness polling.
+        """
+        if not self._original_components:
+            return None
+
+        # Match the same labels used by `get_deployment_logs` so the two
+        # paths agree on which pods belong to this deployment.
+        for original_name in self._original_components:
+            label_selector = (
+                f"nvidia.com/dynamo-graph-deployment-name={self.deployment_name},"
+                f"nvidia.com/dynamo-component={original_name}"
+            )
+            try:
+                pods = await self.core_api.list_namespaced_pod(
+                    namespace=self.namespace, label_selector=label_selector
+                )
+            except kubernetes.client.rest.ApiException:
+                continue
+            except Exception:
+                continue
+
+            for pod in pods.items or []:
+                pod_status = getattr(pod, "status", None)
+                if pod_status is None:
+                    continue
+
+                # Check both init and main container statuses; either can
+                # be the source of a CrashLoopBackOff.
+                container_status_lists = [
+                    getattr(pod_status, "init_container_statuses", None) or [],
+                    getattr(pod_status, "container_statuses", None) or [],
+                ]
+                for cstatuses in container_status_lists:
+                    for cstatus in cstatuses:
+                        waiting = getattr(
+                            getattr(cstatus, "state", None), "waiting", None
+                        )
+                        if waiting is None:
+                            continue
+                        reason = getattr(waiting, "reason", None)
+                        if reason in TERMINAL_POD_WAITING_REASONS:
+                            message = getattr(waiting, "message", "") or ""
+                            pod_name = getattr(pod.metadata, "name", "<unknown>")
+                            container_name = getattr(cstatus, "name", "<unknown>")
+                            detail = f": {message}" if message else ""
+                            return (
+                                f"pod {pod_name} container {container_name} "
+                                f"in {reason}{detail}"
+                            )
+        return None
+
     async def wait_for_deployment_ready(
         self, timeout: int = 1800, verbose: Optional[bool] = None
     ):
@@ -294,6 +388,16 @@ class DynamoDeploymentClient:
         Args:
             timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
             verbose: If True, show detailed status updates. If None, uses DYNAMO_VERBOSE env var.
+
+        Raises:
+            DeploymentFailedError: If any worker pod enters a terminal
+                failure state (e.g. ``CrashLoopBackOff``) before the
+                deployment becomes ready. Allows callers (e.g. the
+                thorough-mode profiler) to skip a failing candidate
+                immediately instead of waiting for the full timeout.
+            TimeoutError: If the deployment fails to become ready within
+                ``timeout`` seconds without any detectable terminal pod
+                failure.
         """
         # Allow environment variable to control verbosity
         if verbose is None:
@@ -313,7 +417,7 @@ class DynamoDeploymentClient:
             try:
                 status = await self.custom_api.get_namespaced_custom_object(
                     group="nvidia.com",
-                    version="v1alpha1",
+                    version=self.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self.deployment_name,
@@ -390,6 +494,25 @@ class DynamoDeploymentClient:
                     )
                     return True
 
+                # Fail fast if any worker pod is in a terminal state
+                # (e.g. CrashLoopBackOff). Without this, the loop runs
+                # the full `timeout` even when the failure is permanent.
+                failure_detail = await self._detect_terminal_pod_failure()
+                if failure_detail is not None:
+                    progress.finish(
+                        f"❌ Deployment '{self.deployment_name}' "
+                        f"failed: {failure_detail}"
+                    )
+                    raise DeploymentFailedError(
+                        f"Deployment '{self.deployment_name}' entered a "
+                        f"terminal failure state after {elapsed:.1f}s: "
+                        f"{failure_detail}"
+                    )
+
+            except DeploymentFailedError:
+                # Terminal failure — propagate so the caller can skip
+                # this deployment instead of waiting for the timeout.
+                raise
             except kubernetes.client.rest.ApiException as e:
                 if verbose:
                     progress.update(
@@ -442,27 +565,57 @@ class DynamoDeploymentClient:
             if use_port_forward or not inside_cluster:
                 self.stop_port_forward()
 
-    async def get_deployment_logs(self):
+    async def get_deployment_logs(
+        self, max_retries: int = 6, retry_interval: float = 5.0
+    ):
         """
         Get logs from all pods in the deployment, organized by component.
+
+        Retries pod discovery for each component to handle transient cases
+        where pods are not yet visible via the API immediately after the
+        deployment reports ready (e.g. API/informer cache lag).
+
+        Args:
+            max_retries: Maximum number of retries per component when no pods are found.
+            retry_interval: Seconds to wait between retries.
         """
-        # Create logs directory
         base_dir = self.base_log_dir / self.deployment_name
         base_dir.mkdir(parents=True, exist_ok=True)
 
-        for component in self.components:
+        for component, original_name in zip(self.components, self._original_components):
             component_dir = base_dir / component
             component_dir.mkdir(exist_ok=True)
 
-            # List pods for this component using the selector label
-            # nvidia.com/selector: deployment-name-component
+            # Use DGD name + component name labels which are consistent across
+            # both Grove (PodCliqueSet) and non-Grove (DCD) deployment pathways.
+            # The previous nvidia.com/selector label includes a worker hash suffix
+            # on the DCD pathway, causing a mismatch with the expected base name.
             label_selector = (
-                f"nvidia.com/selector={self.deployment_name}-{component.lower()}"
+                f"nvidia.com/dynamo-graph-deployment-name={self.deployment_name},"
+                f"nvidia.com/dynamo-component={original_name}"
             )
 
-            pods = await self.core_api.list_namespaced_pod(
-                namespace=self.namespace, label_selector=label_selector
-            )
+            pods = None
+            for attempt in range(max_retries + 1):
+                pods = await self.core_api.list_namespaced_pod(
+                    namespace=self.namespace, label_selector=label_selector
+                )
+                if pods.items:
+                    break
+                if attempt < max_retries:
+                    print(
+                        f"No pods found for component {original_name} "
+                        f"(attempt {attempt + 1}/{max_retries + 1}), "
+                        f"retrying in {retry_interval}s..."
+                    )
+                    await asyncio.sleep(retry_interval)
+
+            if not pods or not pods.items:
+                print(
+                    f"WARNING: No pods found for component {original_name} "
+                    f"after {max_retries + 1} attempts with selector: {label_selector}"
+                )
+                continue
 
             # Get logs for each pod
             for i, pod in enumerate(pods.items):
@@ -482,7 +635,7 @@ class DynamoDeploymentClient:
         try:
             await self.custom_api.delete_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 name=self.deployment_name,

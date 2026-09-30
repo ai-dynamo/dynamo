@@ -7,52 +7,75 @@
 //! chat completions, processed by the existing engine, and responses/streams
 //! are converted back to Anthropic format.
 
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
     body::Body,
     extract::State,
-    http::{HeaderMap, Request, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode, Uri},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
         sse::{KeepAlive, Sse},
     },
-    routing::post,
+    routing::{get, post},
 };
-use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
+use dynamo_runtime::error::{DynamoError, ErrorClass};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
-use futures::{StreamExt, stream};
+use futures::StreamExt;
 use tracing::Instrument;
 
 use super::{
-    RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    metrics::{Endpoint, process_response_and_observe_metrics},
-    service_v2,
+    RouteDoc, apply_request_tool_call_parsing_options,
+    disconnect::{
+        ConnectionHandle, StreamErrorSignal, create_connection_monitor,
+        monitor_for_disconnects_with_activity_and_error_signal,
+    },
+    metrics::{
+        CancellationLabels, Endpoint, ErrorType, InflightGuard,
+        process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
+    },
+    service_v2::{self, BackendErrorCheck},
 };
-use crate::preprocessor::OpenAIPreprocessor;
+use crate::engines::ValidateRequest;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
-    AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
-    AnthropicErrorBody, AnthropicErrorResponse, SystemContent,
-    chat_completion_to_anthropic_response,
+    AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
+    AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
+    AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
 };
+use crate::protocols::common::extensions::{
+    AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
+    apply_cache_salt_header_override, apply_header_routing_overrides,
+    has_non_cache_salt_routing_headers, session_affinity_from_headers,
+};
+use crate::protocols::common::input_trigger::classify_anthropic_request;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
 };
-use crate::request_template::RequestTemplate;
+use crate::protocols::unified::UnifiedRequest;
+use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
-use super::openai::{get_body_limit, get_or_create_request_id};
+use super::error::{
+    ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
+    invalid_argument,
+};
+use super::metadata::{attach_x_request_id, extract_metadata_from_http};
+use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
 
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
+
+/// Default route for the Anthropic Messages API when no override is configured.
+pub(crate) const DEFAULT_MESSAGES_PATH: &str = "/v1/messages";
 
 /// Creates the router for the `/v1/messages` and `/v1/messages/count_tokens` endpoints.
 pub fn anthropic_messages_router(
@@ -60,7 +83,7 @@ pub fn anthropic_messages_router(
     template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/messages".to_string());
+    let path = path.unwrap_or_else(|| DEFAULT_MESSAGES_PATH.to_string());
     let count_tokens_path = format!("{}/count_tokens", &path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let count_doc = RouteDoc::new(axum::http::Method::POST, &count_tokens_path);
@@ -71,6 +94,27 @@ pub fn anthropic_messages_router(
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc, count_doc], router)
+}
+
+/// Creates the router for model listing and retrieval.
+///
+/// When the `anthropic-version` header is present, returns the Anthropic model
+/// format (with `context_window`, `display_name`, etc.). Otherwise returns the
+/// standard OpenAI format. This keeps Anthropic-specific content negotiation
+/// out of the OpenAI handler.
+pub fn anthropic_models_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let models_path = path.unwrap_or("/v1/models".to_string());
+    let retrieve_path = format!("{}/{{*model_id}}", models_path);
+    let list_doc = RouteDoc::new(axum::http::Method::GET, &models_path);
+    let retrieve_doc = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    let router = Router::new()
+        .route(&models_path, get(list_models))
+        .route(&retrieve_path, get(get_model))
+        .with_state(state);
+    (vec![list_doc, retrieve_doc], router)
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +132,7 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
             .unwrap_or_default();
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();
         return anthropic_error(
+            ErrorClass::InvalidRequest,
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             &error_message,
@@ -101,47 +146,315 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 // Handlers
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
+enum AnthropicRequestValidationError {
+    InvalidArgument(String),
+    NotImplemented(String),
+    UnsupportedContent(String),
+}
+
+impl AnthropicRequestValidationError {
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::InvalidArgument(_) => StatusCode::BAD_REQUEST,
+            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            Self::UnsupportedContent(_) => StatusCode::BAD_REQUEST,
+        }
+    }
+
+    fn anthropic_error_type(&self) -> &'static str {
+        match self {
+            Self::InvalidArgument(_) => "invalid_request_error",
+            Self::NotImplemented(_) => "api_error",
+            Self::UnsupportedContent(_) => "invalid_request_error",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::InvalidArgument(message)
+            | Self::NotImplemented(message)
+            | Self::UnsupportedContent(message) => message,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AnthropicHandlerError {
+    class: ErrorClass,
+    status: StatusCode,
+    anthropic_error_type: &'static str,
+    message: String,
+    metric_error_type: ErrorType,
+}
+
+impl AnthropicHandlerError {
+    fn new(
+        class: ErrorClass,
+        status: StatusCode,
+        anthropic_error_type: &'static str,
+        message: impl Into<String>,
+        metric_error_type: ErrorType,
+    ) -> Self {
+        Self {
+            class,
+            status,
+            anthropic_error_type,
+            message: message.into(),
+            metric_error_type,
+        }
+    }
+
+    fn validation(message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorClass::InvalidRequest,
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            message,
+            ErrorType::Validation,
+        )
+    }
+
+    // Validation is reused by /v1/messages/count_tokens, which has no request-scoped
+    // guard. Attach metrics only at the /v1/messages handler boundary.
+    fn from_request_validation(error: AnthropicRequestValidationError) -> Self {
+        let (class, metric_error_type) = match &error {
+            AnthropicRequestValidationError::InvalidArgument(_) => {
+                (ErrorClass::InvalidRequest, ErrorType::Validation)
+            }
+            AnthropicRequestValidationError::UnsupportedContent(_) => {
+                (ErrorClass::InvalidRequest, ErrorType::NotImplemented)
+            }
+            AnthropicRequestValidationError::NotImplemented(_) => {
+                (ErrorClass::NotImplemented, ErrorType::NotImplemented)
+            }
+        };
+        Self::new(
+            class,
+            error.status(),
+            error.anthropic_error_type(),
+            error.message().to_string(),
+            metric_error_type,
+        )
+    }
+
+    fn sanitized(
+        err: SanitizedError,
+        details: impl std::fmt::Display,
+        metric_error_type: ErrorType,
+    ) -> Self {
+        let status = err.status();
+        let class = match err {
+            SanitizedError::Cancelled => ErrorClass::Cancelled,
+            SanitizedError::Overloaded => ErrorClass::CapacityExhausted,
+            SanitizedError::Unavailable => ErrorClass::Unavailable,
+            SanitizedError::Internal | SanitizedError::PreserveServerError(_) => {
+                ErrorClass::Internal
+            }
+        };
+        if err.log_as_error() {
+            tracing::error!(status = %status, "Anthropic {err}: {details}");
+        } else {
+            tracing::debug!(status = %status, "Anthropic {err}: {details}");
+        }
+        Self::new(
+            class,
+            status,
+            err.anthropic_type(),
+            err.to_string(),
+            metric_error_type,
+        )
+    }
+
+    fn into_response(self) -> Response {
+        let Self {
+            class,
+            status,
+            anthropic_error_type,
+            message,
+            ..
+        } = self;
+        anthropic_error(class, status, anthropic_error_type, &message)
+    }
+
+    fn into_marked_response(self, inflight_guard: &mut InflightGuard) -> Response {
+        let Self {
+            class,
+            status,
+            anthropic_error_type,
+            message,
+            metric_error_type,
+        } = self;
+        inflight_guard.mark_error(metric_error_type.clone());
+        anthropic_error(class, status, anthropic_error_type, &message)
+    }
+}
+
+fn validate_anthropic_messages(
+    messages: &[AnthropicMessage],
+) -> Result<(), AnthropicRequestValidationError> {
+    if messages.is_empty() {
+        return Err(AnthropicRequestValidationError::InvalidArgument(
+            "messages: field required".to_string(),
+        ));
+    }
+
+    for (message_index, message) in messages.iter().enumerate() {
+        let AnthropicMessageContent::Blocks { content } = &message.content else {
+            continue;
+        };
+        if content.is_empty() {
+            return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                "messages[{message_index}].content: must contain at least one content block"
+            )));
+        }
+        for (block_index, block) in content.iter().enumerate() {
+            if let AnthropicContentBlock::Other(value) = block {
+                if !value.is_object() {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "messages[{message_index}].content[{block_index}]: content blocks must be objects"
+                    )));
+                }
+                let Some(block_type) = value
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|block_type| !block_type.is_empty())
+                else {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "messages[{message_index}].content[{block_index}].type: must be a non-empty string"
+                    )));
+                };
+                return Err(AnthropicRequestValidationError::UnsupportedContent(
+                    format!(
+                        "messages[{message_index}].content[{block_index}]: content block type \"{block_type}\" is not supported"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_anthropic_tools(
+    tools: Option<&[AnthropicTool]>,
+) -> Result<(), AnthropicRequestValidationError> {
+    for (tool_index, tool) in tools.unwrap_or_default().iter().enumerate() {
+        match tool.tool_type.as_deref() {
+            Some("") => {
+                return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                    "tools[{tool_index}].type: must be a non-empty string"
+                )));
+            }
+            Some("custom") | None => {
+                if tool.input_schema.is_none() {
+                    return Err(AnthropicRequestValidationError::InvalidArgument(format!(
+                        "tools[{tool_index}].input_schema: field required for client tools"
+                    )));
+                }
+            }
+            Some(tool_type) => {
+                return Err(AnthropicRequestValidationError::NotImplemented(format!(
+                    "tools[{tool_index}]: server tool type \"{tool_type}\" is not supported"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Top-level HTTP handler for POST /v1/messages.
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<AnthropicCreateMessageRequest>,
+    Json(mut request): Json<AnthropicCreateMessageRequest>,
 ) -> Result<Response, Response> {
-    // Validate required fields
-    if request.messages.is_empty() {
-        return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "messages: field required",
-        ));
-    }
+    let request_id = get_or_create_request_id(&headers);
+    let streaming = request.stream;
+    let resolved_model = resolve_request_model(&request.model, template.as_ref());
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
+    let metric_model = state
+        .manager()
+        .metric_model_for(&canonical_model)
+        .to_string();
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::AnthropicMessages,
+        streaming,
+        &request_id,
+    );
+
+    validate_anthropic_messages(&request.messages).map_err(|error| {
+        AnthropicHandlerError::from_request_validation(error)
+            .into_marked_response(&mut inflight_guard)
+    })?;
+    validate_anthropic_tools(request.tools.as_deref()).map_err(|error| {
+        AnthropicHandlerError::from_request_validation(error)
+            .into_marked_response(&mut inflight_guard)
+    })?;
     if request.max_tokens == 0 {
-        return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "max_tokens: must be greater than 0",
-        ));
+        return Err(
+            AnthropicHandlerError::validation("max_tokens: must be greater than 0")
+                .into_marked_response(&mut inflight_guard),
+        );
     }
+    gate_anthropic_nvext(&mut request, &headers, state.nvext_enabled()).map_err(|error| {
+        AnthropicHandlerError::validation(error.to_string())
+            .into_marked_response(&mut inflight_guard)
+    })?;
 
     // Create request context
-    let request_id = get_or_create_request_id(None, &headers);
-    let request = Context::with_id(request, request_id);
+    let cancellation_labels = CancellationLabels {
+        model: metric_model,
+        endpoint: Endpoint::AnthropicMessages.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
+    let metadata = extract_metadata_from_http(&headers).map_err(|err| {
+        AnthropicHandlerError::new(
+            ErrorClass::PayloadTooLarge,
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "invalid_request_error",
+            err.to_string(),
+            ErrorType::Validation,
+        )
+        .into_marked_response(&mut inflight_guard)
+    })?;
+    let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    attach_x_request_id(&mut request, &headers);
+    if let Some(mut agent_context) = agent_context_from_headers(&headers) {
+        agent_context.input_trigger = Some(classify_anthropic_request(request.content()));
+        request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+    }
+    if let Some(session_affinity) = session_affinity_from_headers(&headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
     let context = request.context();
 
     // Create connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
 
-    let response =
-        tokio::spawn(anthropic_messages(state, template, request, stream_handle).in_current_span())
-            .await
-            .map_err(|e| {
-                anthropic_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "api_error",
-                    &format!("Failed to await messages task: {:?}", e),
-                )
-            })?;
+    let response = tokio::spawn(
+        anthropic_messages(
+            state,
+            template,
+            request,
+            headers,
+            stream_handle,
+            inflight_guard,
+        )
+        .in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        anthropic_sanitized_error_with_details(
+            SanitizedError::Internal,
+            format!("Failed to await Anthropic messages task: {e:?}"),
+        )
+    })?;
 
     connection_handle.disarm();
     response
@@ -153,7 +466,9 @@ async fn anthropic_messages(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<AnthropicCreateMessageRequest>,
+    headers: HeaderMap,
     mut stream_handle: ConnectionHandle,
+    mut inflight_guard: InflightGuard,
 ) -> Result<Response, Response> {
     let streaming = request.stream;
     let request_id = request.id().to_string();
@@ -173,176 +488,405 @@ async fn anthropic_messages(
     }
 
     // Strip Claude Code billing preamble from system prompt if enabled
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
 
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (matching the OpenAI handlers). Non-aliases pass through.
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+
     let model = request.model.clone();
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
+
+    // Look up engine and parsing options early so we know whether a reasoning
+    // parser is configured before converting the request.
+    let (engine, parsing_options) = state
+        .manager()
+        .get_chat_completions_engine_with_parsing(&model)
+        .map_err(|e| match e {
+            // Registered but not ready to serve yet → retryable 503 (mapped to
+            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
+            // canonical, customer-facing message so both APIs report the same
+            // text. Anything else is a genuine missing model → 404.
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
+                ErrorClass::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                super::openai::model_not_ready_message(&model),
+                ErrorType::Unavailable,
+            )
+            .into_marked_response(&mut inflight_guard),
+            _ => AnthropicHandlerError::new(
+                ErrorClass::NotFound,
+                StatusCode::NOT_FOUND,
+                "not_found_error",
+                format!("Model '{}' not found", model),
+                ErrorType::NotFound,
+            )
+            .into_marked_response(&mut inflight_guard),
+        })?;
 
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
-    // Check if the Anthropic request explicitly enabled thinking. When thinking
-    // is enabled, reasoning-capable models' chat templates typically inject
-    // `<think>` into the prompt, so the completion starts mid-reasoning.
-    let thinking_enabled = orig_request
+    // Anthropic exposes input usage in `message_start`, before the backend's
+    // authoritative count is available. Seed the stream with the same
+    // best-effort estimate as `/count_tokens`; the converter replaces it when
+    // the backend reports final usage.
+    let estimated_input_tokens = if streaming {
+        estimate_input_tokens(&orig_request)
+    } else {
+        0
+    };
+
+    // Check if the Anthropic request explicitly disabled thinking.
+    let thinking_explicitly_disabled = orig_request
         .thinking
         .as_ref()
-        .is_some_and(|t| t.thinking_type == "enabled");
+        .is_some_and(|t| t.thinking_type == "disabled");
 
-    // Convert Anthropic request -> Chat Completion request
-    let chat_request: NvCreateChatCompletionRequest =
-        orig_request.try_into().map_err(|e: anyhow::Error| {
-            tracing::error!(
-                request_id,
-                error = %e,
-                "Failed to convert AnthropicCreateMessageRequest to NvCreateChatCompletionRequest",
-            );
-            anthropic_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                &format!("Failed to convert request: {}", e),
-            )
-        })?;
+    // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
+    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        tracing::error!(
+            request_id,
+            error = %e,
+            "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
+        );
+        AnthropicHandlerError::validation(format!("Failed to convert request: {e}"))
+            .into_marked_response(&mut inflight_guard)
+    })?;
+
+    // Extract the API context before consuming the UnifiedRequest — this
+    // carries Anthropic-specific fields (thinking config, cache breakpoints,
+    // etc.) that the stream converter needs for faithful response reconstruction.
+    let anthropic_ctx = unified_request.anthropic_context().cloned();
+    let mut chat_request = unified_request.into_inner();
+    apply_anthropic_nvext_policy(&mut chat_request, &headers, state.nvext_enabled());
+    if let Err(error) = chat_request.validate() {
+        let error = invalid_argument(error.to_string());
+        return Err(AnthropicHandlerError::validation(error.message())
+            .into_marked_response(&mut inflight_guard));
+    }
+    // When a reasoning parser is configured and the client hasn't explicitly
+    // disabled thinking, assume the model's chat template will inject `<think>`.
+    //
+    // Two things must be aligned:
+    //   1. chat_template_args must include enable_thinking=true so the backend's
+    //      template actually injects `<think>` into the prompt. For the
+    //      ModelInput::Text path (SGLang without --skip-tokenizer-init), the
+    //      backend applies the template — without explicit enable_thinking the
+    //      result depends on the template's default which varies by model.
+    //   2. prompt_injected_reasoning must be true so the parser starts in
+    //      reasoning mode with stripped_think_start=true, which is critical for
+    //      correct `</think>` boundary detection in the streaming path.
+    //
+    // The OpenAI path handles this in the preprocessor: it renders the template,
+    // inspects the formatted prompt for a trailing `<think>`, and sets
+    // prompt_injected_reasoning accordingly. The Anthropic path bypasses the
+    // preprocessor, so we infer prompt injection from the reasoning parser config.
+    let prompt_injected_reasoning =
+        parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled;
+
+    if prompt_injected_reasoning {
+        let args = chat_request
+            .chat_template_args
+            .get_or_insert_with(Default::default);
+        args.entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+        // Preserve reasoning from prior turns. Some templates (Nemotron)
+        // strip historical <think> content by default to save context.
+        // For agentic flows the model needs to see why it made prior decisions.
+        // Ref: NVIDIA's SWE training config also sets this to false:
+        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
+        args.entry("truncate_history_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+    }
 
     let request = context.map(|_req| chat_request);
 
-    tracing::trace!("Getting chat completions engine for model: {}", model);
-
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            anthropic_error(
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                &format!("Model '{}' not found", model),
-            )
+    // Anthropic requests are converted to the same chat request contract. Keep
+    // parser activation identical to the OpenAI Chat Completions and Responses
+    // entry points so content-only turns cannot be reclassified as tool calls.
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            AnthropicHandlerError::validation(format!("Invalid tool_choice: {}", e.message()))
+                .into_marked_response(&mut inflight_guard)
         })?;
+
+    // Same backstop as the chat handler, so the two aggregation entry points
+    // cannot drift. See `wants_reasoning_as_content_when_empty`.
+    let move_reasoning_to_content_when_empty =
+        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
+            request.chat_template_args.as_ref(),
+        );
+    let parsing_options = parsing_options
+        .with_parallel_tool_calls(request.inner.parallel_tool_calls)
+        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
+    // Computed before `request` moves into `generate`. Only a stream that can
+    // withhold every data frame needs forced keep-alive frames.
+    let stream_can_defer_all_output =
+        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        anthropic_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "api_error",
-            &format!("Failed to generate completions: {}", e),
+        // Deadline is checked before overload so a chain carrying both markers
+        // keeps the deadline outcome, matching the OpenAI surface: HTTP 429
+        // (`rate_limit_error`) with a `Cancelled` metric label and no
+        // rejection accounting.
+        if let Some(error) = super::metrics::queue_deadline_error(e.as_ref()) {
+            super::metrics::record_failure(error);
+            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+            return anthropic_error_unrecorded(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+            );
+        }
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+            return AnthropicHandlerError::sanitized(
+                SanitizedError::Overloaded,
+                format!("{e:#}"),
+                ErrorType::Overload,
+            )
+            .into_marked_response(&mut inflight_guard);
+        }
+        if super::metrics::request_was_cancelled(e.as_ref()) {
+            return AnthropicHandlerError::sanitized(
+                SanitizedError::Cancelled,
+                format!("{e:#}"),
+                ErrorType::Cancelled,
+            )
+            .into_marked_response(&mut inflight_guard);
+        }
+        if let Some(error) = find_canonical_error_in_chain(e.as_ref())
+            && let Some(response) = anthropic_semantic_error(error)
+        {
+            inflight_guard.mark_error(super::openai::metric_error_type_for_class(error.class()));
+            return response;
+        }
+        if super::metrics::request_was_unavailable(e.as_ref()) {
+            return AnthropicHandlerError::sanitized(
+                SanitizedError::Unavailable,
+                format!("{e:#}"),
+                ErrorType::Unavailable,
+            )
+            .into_marked_response(&mut inflight_guard);
+        }
+        AnthropicHandlerError::sanitized(
+            SanitizedError::Internal,
+            format!("Failed to generate Anthropic completions: {e}"),
+            ErrorType::Internal,
         )
+        .into_marked_response(&mut inflight_guard)
     })?;
 
     let ctx = engine_stream.context();
 
-    // Apply reasoning parser to the engine stream if configured.
-    // The preprocessor (which normally handles this for the OpenAI path) is
-    // bypassed by the Anthropic endpoint, so we apply the same stream
-    // transform here.  This populates `delta.reasoning_content` which the
-    // AnthropicStreamConverter translates into thinking content blocks.
+    // NOTE: We intentionally do NOT apply a reasoning parser here.
     //
-    // When thinking is enabled, the model's chat template likely injected
-    // `<think>` into the prompt (e.g., Qwen3.5), so the parser must start
-    // in reasoning mode — the completion begins mid-reasoning without an
-    // explicit `<think>` tag.
+    // For ModelInput::Tokens backends (skip_tokenizer_init=True), the engine
+    // pipeline includes the OpenAI preprocessor which already applies reasoning
+    // parsing in its backward edge (postprocessor_parsing_stream). The stream
+    // arriving here already has reasoning_content and content correctly split.
+    // Applying a second parser would re-classify post-think content chunks
+    // (where reasoning_content=None, content=Some) as reasoning, because the
+    // </think> boundary was consumed by the first parser and doesn't appear
+    // in the detokenized text.
+    //
+    // For ModelInput::Text backends (PushRouter, no preprocessor), reasoning
+    // parsing is NOT handled in the streaming path — the backend puts raw text
+    // (including <think> tags) in delta.content with reasoning_content=None.
+    // This is a known gap that affects all streaming handlers (OpenAI, Anthropic,
+    // Responses API) equally.
     let engine_stream: Pin<
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
-    > = if let Some(ref reasoning_parser_name) = parsing_options.reasoning_parser {
-        Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
-            engine_stream,
-            reasoning_parser_name.clone(),
-            thinking_enabled,
-        ))
-    } else {
-        Box::pin(engine_stream)
-    };
-
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::AnthropicMessages, streaming);
+    > = Box::pin(engine_stream);
 
     if streaming {
+        // Same pre-commit check as the OpenAI streaming handlers, so one
+        // service-wide policy covers every streaming route: a backend error
+        // before the first event maps to its HTTP status instead of arriving
+        // as an SSE error frame behind an HTTP 200.
+        let engine_stream = super::openai::until_client_disconnects(
+            super::openai::check_for_backend_error_info(
+                engine_stream,
+                state.streaming_backend_error_check(),
+            ),
+            &ctx,
+        )
+        .await
+        .map_err(|error_response| {
+            // Classify before the body is rewritten: only the status survives
+            // into Anthropic's error format, and the status alone cannot tell a
+            // capacity rejection from a validation failure, or a client hangup
+            // from a backend fault. Mark the guard from the typed error the
+            // response carries rather than letting `into_marked_response`
+            // re-derive it from the status.
+            super::openai::log_pre_commit_error(&request_id, &error_response);
+            inflight_guard.mark_error(super::openai::extract_error_type_from_response(
+                &error_response,
+            ));
+            anthropic_backend_error_response(error_response)
+        })?;
+
         stream_handle.arm();
 
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let mut converter = AnthropicStreamConverter::new(model_for_resp);
-        let start_events = converter.emit_start_events();
-
-        let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
-        let converter_end = converter.clone();
-
-        let saw_error = std::sync::Arc::new(AtomicBool::new(false));
-        let saw_error_end = saw_error.clone();
+        let mut converter = match anthropic_ctx {
+            Some(ctx) => {
+                AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx)
+            }
+            None => AnthropicStreamConverter::new(model_for_resp, estimated_input_tokens),
+        };
 
         let mut http_queue_guard = Some(http_queue_guard);
+        let mut engine_stream = engine_stream;
+        // Clone for the inner cancellation watch; the original `ctx` is handed
+        // to `monitor_for_disconnects` below.
+        let cancel_ctx = ctx.clone();
 
-        let event_stream = engine_stream
-            .inspect(move |response| {
-                process_response_and_observe_metrics(
-                    response,
-                    &mut response_collector,
-                    &mut http_queue_guard,
-                );
-            })
-            .filter_map(move |annotated_chunk| {
-                let converter = converter.clone();
-                let saw_error = saw_error.clone();
-                async move {
-                    if annotated_chunk.data.is_none() {
-                        if annotated_chunk.event.as_deref() == Some("error") {
-                            saw_error.store(true, Ordering::Release);
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
+        let full_stream = async_stream::stream! {
+            let mut events = Vec::with_capacity(4);
+            converter.append_start_events(&mut events);
+            for event in events.drain(..) {
+                yield event.map_err(axum::Error::new);
+            }
+
+            let mut saw_error = false;
+            let mut stream_error_body = None;
+            let mut cancelled = false;
+
+            // Match the outer monitor: graceful stops must drain the backend's
+            // remaining chunks; only kill triggers cancellation and parking below.
+            // Keep one future across chunks to avoid Notify churn (disconnect.rs).
+            let killed = cancel_ctx.killed();
+            tokio::pin!(killed);
+
+            loop {
+                tokio::select! {
+                    // Prefer draining a ready backend chunk before honoring a
+                    // cancel so no already-generated token is dropped.
+                    biased;
+                    maybe_chunk = engine_stream.next() => {
+                        let Some(annotated_chunk) = maybe_chunk else {
+                            break; // backend stream ended normally
+                        };
+                        let _ = activity_tx.send(());
+                        process_response_and_observe_metrics(
+                            &annotated_chunk,
+                            &mut response_collector,
+                            &mut http_queue_guard,
+                        );
+
+                        let semantic_error = !saw_error
+                            && super::openai::set_stream_semantic_error(
+                                &annotated_chunk,
+                                &producer_error_signal,
+                            );
+                        if semantic_error {
+                            saw_error = true;
+                            stream_error_body = annotated_chunk
+                                .error
+                                .as_ref()
+                                .map(anthropic_stream_error_body);
                         }
-                        return None;
+                        let Some(stream_resp) = annotated_chunk.data else {
+                            if annotated_chunk.event.as_deref() == Some("error") {
+                                saw_error = true;
+                                if !semantic_error {
+                                    producer_error_signal.set(ErrorType::Internal);
+                                }
+                            }
+                            continue;
+                        };
+
+                        converter.append_chunk_events(&stream_resp, &mut events);
+                        for event in events.drain(..) {
+                            yield event.map_err(axum::Error::new);
+                        }
                     }
-                    let stream_resp = annotated_chunk.data?;
-                    let mut conv = converter.lock().expect("converter lock poisoned");
-                    let events = conv.process_chunk(&stream_resp);
-                    Some(stream::iter(events))
+                    _ = &mut killed => {
+                        // Client disconnected (or the request was otherwise
+                        // cancelled). Best-effort flush the terminal usage +
+                        // message_stop below so a still-writable proxy records
+                        // the final token counts for the tokens produced so far.
+                        cancelled = true;
+                        break;
+                    }
                 }
-            })
-            .flatten();
+            }
 
-        let start_stream = stream::iter(start_events);
-
-        let done_stream = stream::once(async move {
-            let mut conv = converter_end.lock().expect("converter lock poisoned");
-            let end_events = if saw_error_end.load(Ordering::Acquire) {
-                conv.emit_error_events()
+            if saw_error {
+                if let Some(error) = stream_error_body {
+                    converter.append_error_events_with_body(&mut events, error);
+                } else {
+                    converter.append_error_events(&mut events);
+                }
+                producer_error_signal.mark_terminal_event_emitted();
             } else {
-                conv.emit_end_events()
-            };
-            stream::iter(end_events)
-        })
-        .flatten();
+                converter.append_end_events(&mut events);
+            }
+            for event in events.drain(..) {
+                yield event.map_err(axum::Error::new);
+            }
 
-        let full_stream = start_stream.chain(event_stream).chain(done_stream);
-        let full_stream = full_stream.map(|result| result.map_err(axum::Error::new));
+            if cancelled {
+                // Park so the outer `monitor_for_disconnects` (whose select is
+                // biased toward the stream) forwards the finalizer events above,
+                // then observes the kill itself and records the request as
+                // cancelled rather than completed.
+                std::future::pending::<()>().await;
+            }
+        };
 
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
+        let stream = monitor_for_disconnects_with_activity_and_error_signal(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            activity_rx,
+            error_signal,
+        );
 
         let mut sse_stream = Sse::new(stream);
-        if let Some(keep_alive) = state.sse_keep_alive() {
+        if let Some(keep_alive) = keep_alive {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
-
         Ok(sse_stream.into_response())
     } else {
         // Non-streaming path: aggregate stream into single response
 
         // Check first event for backend errors using the openai helper
-        let stream_with_check = super::openai::check_for_backend_error(engine_stream)
+        let check = BackendErrorCheck::UntilFirstEvent;
+        let stream_with_check = super::openai::check_for_backend_error(engine_stream, check)
             .await
-            .map_err(|(status, json_err)| {
-                tracing::error!(request_id, %status, ?json_err, "Backend error detected");
-                anthropic_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "api_error",
-                    "Backend error during generation",
-                )
+            .map_err(|error_response| {
+                inflight_guard.mark_error(super::openai::extract_error_type_from_response(
+                    &error_response,
+                ));
+                anthropic_backend_error_response(error_response)
             })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -357,16 +901,21 @@ async fn anthropic_messages(
         let chat_response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
-                .map_err(|e| {
-                    tracing::error!(request_id, "Failed to fold messages stream: {:?}", e);
-                    anthropic_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "api_error",
-                        &format!("Failed to fold messages stream: {}", e),
-                    )
+                .map_err(|error| {
+                    let error_type = if super::metrics::request_was_cancelled(&error) {
+                        super::metrics::ErrorType::Cancelled
+                    } else {
+                        super::openai::metric_error_type_for_class(error.class())
+                    };
+                    inflight_guard.mark_error(error_type);
+                    anthropic_non_streaming_aggregation_error(error)
                 })?;
 
-        let response = chat_completion_to_anthropic_response(chat_response, &model_for_resp);
+        let response = chat_completion_to_anthropic_response(
+            chat_response,
+            &model_for_resp,
+            anthropic_ctx.as_ref(),
+        );
 
         inflight_guard.mark_ok();
 
@@ -381,10 +930,15 @@ async fn anthropic_messages(
 /// Handler for POST /v1/messages/count_tokens.
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
-    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if let Err(error) = validate_anthropic_messages(&request.messages) {
+        return Err(AnthropicHandlerError::from_request_validation(error).into_response());
+    }
+    // Count Tokens does not convert or execute tools, so keep tool definitions
+    // permissive here. TODO: Add validation when Anthropic server tools are supported.
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
     let tokens = request.estimate_tokens();
@@ -392,6 +946,210 @@ async fn handler_count_tokens(
         input_tokens: tokens,
     })
     .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Model listing / retrieval (content-negotiating)
+// ---------------------------------------------------------------------------
+
+/// Build a lookup of model display_name -> context_length from model cards.
+fn build_model_context_map(state: &service_v2::State) -> std::collections::HashMap<String, u32> {
+    state
+        .manager()
+        .get_model_cards()
+        .iter()
+        .map(|c| (c.display_name.clone(), c.effective_context_length()))
+        .collect()
+}
+
+/// Read optional env var overrides for context window and max output tokens.
+fn model_env_overrides() -> (Option<u64>, Option<u64>) {
+    let context_window = match std::env::var("DYN_CONTEXT_WINDOW") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_CONTEXT_WINDOW value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let max_output_tokens = match std::env::var("DYN_MAX_OUTPUT_TOKENS") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_MAX_OUTPUT_TOKENS value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    (context_window, max_output_tokens)
+}
+
+/// Resolve context_window for a model: env override takes precedence over MDC.
+/// Aliases have no card of their own (the map is keyed by the primary's
+/// display_name), so fall back to the primary's context length.
+fn resolve_context_window(
+    state: &service_v2::State,
+    model_name: &str,
+    card_map: &std::collections::HashMap<String, u32>,
+    env_override: Option<u64>,
+) -> Option<u64> {
+    env_override.or_else(|| {
+        card_map
+            .get(model_name)
+            .or_else(|| card_map.get(&state.manager().resolve_canonical_name(model_name)))
+            .map(|&cl| cl as u64)
+    })
+}
+
+/// List all models. Returns Anthropic format when `anthropic-version` header
+/// is present, otherwise OpenAI format.
+async fn list_models(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+) -> Result<Response, super::openai::ErrorResponse> {
+    super::openai::check_ready(&state)?;
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // Only advertise models whose worker set is complete in at least one
+    // namespace, matching the OpenAI `/v1/models` gate. A registered-but-broken
+    // deployment (e.g. decode-only with no prefill peer) stays hidden.
+    let models: HashSet<String> = state.manager().serving_ready_display_names();
+    let card_map = build_model_context_map(&state);
+    let (cw_override, mot_override) = model_env_overrides();
+
+    if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let data: Vec<serde_json::Value> = models
+            .iter()
+            .map(|name| {
+                let mut obj = serde_json::json!({
+                    "id": name,
+                    "display_name": name,
+                    "type": "model",
+                    "created_at": created_at,
+                });
+                if let Some(cw) = resolve_context_window(&state, name, &card_map, cw_override) {
+                    obj["max_input_tokens"] = serde_json::json!(cw);
+                }
+                if let Some(mot) = mot_override {
+                    obj["max_tokens"] = serde_json::json!(mot);
+                }
+                obj
+            })
+            .collect();
+        let first_id = data
+            .first()
+            .and_then(|d| d["id"].as_str().map(String::from));
+        let last_id = data.last().and_then(|d| d["id"].as_str().map(String::from));
+        return Ok(Json(serde_json::json!({
+            "data": data,
+            "has_more": false,
+            "first_id": first_id,
+            "last_id": last_id,
+        }))
+        .into_response());
+    }
+
+    // OpenAI format fallback
+    let data: Vec<serde_json::Value> = models
+        .iter()
+        .map(|name| {
+            let mut obj = serde_json::json!({
+                "id": name,
+                "object": "model",
+                "created": created,
+                "owned_by": "nvidia",
+            });
+            if let Some(cw) = resolve_context_window(&state, name, &card_map, cw_override) {
+                obj["context_window"] = serde_json::json!(cw);
+            }
+            if let Some(mot) = mot_override {
+                obj["max_output_tokens"] = serde_json::json!(mot);
+            }
+            obj
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+    }))
+    .into_response())
+}
+
+/// Retrieve a single model by ID. Returns Anthropic format when
+/// `anthropic-version` header is present, otherwise OpenAI format.
+///
+/// The model ID may contain slashes (e.g. `Qwen/Qwen3.5-35B-A3B-FP8`),
+/// which is why this uses a wildcard `/{*model_id}` path parameter.
+async fn get_model(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    axum::extract::Path(model_id): axum::extract::Path<String>,
+) -> Result<Response, super::openai::ErrorResponse> {
+    super::openai::check_ready(&state)?;
+
+    // Strip leading slash from wildcard capture (axum `/{*key}` includes it).
+    let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    let models: HashSet<String> = state.manager().model_display_names();
+    if !models.contains(model_id) {
+        return Err(super::openai::ErrorMessage::model_not_found());
+    }
+
+    // Registered but incomplete worker set → 503, mirroring the OpenAI retrieve
+    // path so an incomplete deployment isn't reported as retrievable.
+    super::openai::check_model_serving_ready(&state, model_id)?;
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let card_map = build_model_context_map(&state);
+    let (cw_override, mot_override) = model_env_overrides();
+    let context_window = resolve_context_window(&state, model_id, &card_map, cw_override);
+
+    if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let mut obj = serde_json::json!({
+            "id": model_id,
+            "display_name": model_id,
+            "type": "model",
+            "created_at": created_at,
+        });
+        if let Some(cw) = context_window {
+            obj["max_input_tokens"] = serde_json::json!(cw);
+        }
+        if let Some(mot) = mot_override {
+            obj["max_tokens"] = serde_json::json!(mot);
+        }
+        Ok(Json(obj).into_response())
+    } else {
+        let mut obj = serde_json::json!({
+            "id": model_id,
+            "object": "model",
+            "created": created,
+            "owned_by": "nvidia",
+        });
+        if let Some(cw) = context_window {
+            obj["context_window"] = serde_json::json!(cw);
+        }
+        if let Some(mot) = mot_override {
+            obj["max_output_tokens"] = serde_json::json!(mot);
+        }
+        Ok(Json(obj).into_response())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -414,29 +1172,600 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
     }
 }
 
-/// Build an Anthropic-formatted error response.
-/// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
-fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Response {
-    let mapped_type = match status.as_u16() {
-        400 => "invalid_request_error",
-        401 => "authentication_error",
-        403 => "permission_error",
-        404 => "not_found_error",
-        429 => "rate_limit_error",
-        503 | 529 => "overloaded_error",
-        // Use the caller-provided type for other codes (e.g. 500 → "api_error")
-        _ => error_type,
-    };
+/// Estimate input usage for a streaming `message_start` event.
+///
+/// The backend's rendered prompt and cache-hit split are not available when
+/// the event is emitted. Final `message_delta` usage replaces this estimate.
+fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
+    AnthropicCountTokensRequest {
+        model: req.model.clone(),
+        messages: req.messages.clone(),
+        system: req.system.clone(),
+        tools: req.tools.clone(),
+    }
+    .estimate_tokens()
+}
 
+fn gate_anthropic_nvext(
+    request: &mut AnthropicCreateMessageRequest,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) -> anyhow::Result<()> {
+    if nvext_enabled {
+        return Ok(());
+    }
+
+    let mut discarded = has_non_cache_salt_routing_headers(headers);
+    if let Some(raw_nvext) = request.nvext.take() {
+        if let serde_json::Value::Object(mut fields) = raw_nvext {
+            if fields.keys().any(|field| field != "cache_salt") {
+                discarded = true;
+            }
+
+            request.nvext = match fields.remove("cache_salt") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(cache_salt)) if cache_salt.is_empty() => None,
+                Some(serde_json::Value::String(cache_salt)) => {
+                    Some(serde_json::json!({ "cache_salt": cache_salt }))
+                }
+                Some(_) => anyhow::bail!("invalid nvext.cache_salt: expected a string or null"),
+            };
+        } else {
+            discarded = true;
+        }
+    }
+
+    warn_nvext_disabled("anthropic_messages", discarded);
+    Ok(())
+}
+
+fn apply_anthropic_nvext_policy(
+    request: &mut NvCreateChatCompletionRequest,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) {
+    let nvext = apply_cache_salt_header_override(request.nvext.take(), headers);
+    request.nvext = if nvext_enabled {
+        apply_header_routing_overrides(nvext, headers)
+    } else {
+        nvext
+    };
+}
+
+/// Re-render a backend error event whose semantic failure was already recorded.
+fn anthropic_backend_error_response(error_response: super::openai::ErrorResponse) -> Response {
+    let (status, Json(error)) = error_response;
+    let error_type = if error.is_overload() {
+        "overloaded_error"
+    } else {
+        anthropic_error_type_for_status(status, "api_error")
+    };
+    anthropic_error_unrecorded(status, error_type, error.message())
+}
+
+/// Build an Anthropic-formatted error response from a canonical
+/// [`SanitizedError`] variant. The status, public message, and Anthropic
+/// `error_type` all come from the variant; `details` are logged
+/// server-side but never reach the client.
+fn anthropic_sanitized_error_with_details(
+    err: SanitizedError,
+    details: impl std::fmt::Display,
+) -> Response {
+    let class = match err {
+        SanitizedError::Cancelled => ErrorClass::Cancelled,
+        SanitizedError::Overloaded => ErrorClass::CapacityExhausted,
+        SanitizedError::Unavailable => ErrorClass::Unavailable,
+        SanitizedError::Internal | SanitizedError::PreserveServerError(_) => ErrorClass::Internal,
+    };
+    super::openai::record_local_failure(class);
+    anthropic_sanitized_error_with_details_unrecorded(err, details)
+}
+
+fn anthropic_sanitized_error_with_details_unrecorded(
+    err: SanitizedError,
+    details: impl std::fmt::Display,
+) -> Response {
+    let status = err.status();
+    if err.log_as_error() {
+        tracing::error!(status = %status, "Anthropic {err}: {details}");
+    } else {
+        tracing::debug!(status = %status, "Anthropic {err}: {details}");
+    }
     (
         status,
         Json(AnthropicErrorResponse {
             object_type: "error".to_string(),
             error: AnthropicErrorBody {
-                error_type: mapped_type.to_string(),
+                error_type: err.anthropic_type().to_string(),
+                message: err.to_string(),
+            },
+        }),
+    )
+        .into_response()
+}
+
+/// Find a request or backend invalid-argument error anywhere in the chain.
+#[cfg(test)]
+fn find_invalid_argument_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_runtime::error::DynamoError> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(dynamo_error) = error.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && matches!(
+                dynamo_error.reason().as_str(),
+                "backend.invalid_argument" | "request.invalid_argument"
+            )
+        {
+            return Some(dynamo_error);
+        }
+        current = error.source();
+    }
+    None
+}
+
+fn anthropic_stream_error_body(error: &dynamo_runtime::error::DynamoError) -> AnthropicErrorBody {
+    let message = match http_action_for_error(error) {
+        ClientErrorAction::Respond { public_message, .. } => public_message,
+        ClientErrorAction::NoDelivery => "Request cancelled",
+    };
+    AnthropicErrorBody {
+        error_type: anthropic_error_type_for_class(error.class()).to_string(),
+        message: error.public_message().unwrap_or(message).to_string(),
+    }
+}
+
+fn anthropic_non_streaming_aggregation_error(error: DynamoError) -> Response {
+    if super::metrics::request_was_cancelled(&error) {
+        return anthropic_sanitized_error_with_details(SanitizedError::Cancelled, error);
+    }
+    anthropic_semantic_error(&error)
+        .unwrap_or_else(|| anthropic_sanitized_error_with_details(SanitizedError::Internal, error))
+}
+
+fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Option<Response> {
+    let ClientErrorAction::Respond {
+        status,
+        public_message,
+    } = http_action_for_error(error)
+    else {
+        return None;
+    };
+
+    super::metrics::record_failure(error);
+    if matches!(
+        error.class(),
+        dynamo_runtime::error::ErrorClass::Internal
+            | dynamo_runtime::error::ErrorClass::BackendProtocol
+    ) {
+        tracing::error!(class = %error.class(), reason = %error.reason(), diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str), "Semantic request failure");
+    } else {
+        tracing::debug!(class = %error.class(), reason = %error.reason(), diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str), "Semantic request failure");
+    }
+    Some(anthropic_error_unrecorded(
+        status,
+        anthropic_error_type_for_class(error.class()),
+        error.public_message().unwrap_or(public_message),
+    ))
+}
+
+/// Build an Anthropic-formatted error response.
+/// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
+fn anthropic_error(
+    class: ErrorClass,
+    status: StatusCode,
+    error_type: &str,
+    message: &str,
+) -> Response {
+    super::openai::record_local_failure(class);
+    anthropic_error_unrecorded(status, error_type, message)
+}
+
+fn anthropic_error_type_for_class(class: ErrorClass) -> &'static str {
+    match class.normalized() {
+        ErrorClass::InvalidRequest | ErrorClass::UnsupportedMedia => "invalid_request_error",
+        ErrorClass::Unauthenticated => "authentication_error",
+        ErrorClass::PermissionDenied => "permission_error",
+        ErrorClass::NotFound => "not_found_error",
+        ErrorClass::Conflict => "conflict_error",
+        ErrorClass::PayloadTooLarge => "request_too_large",
+        ErrorClass::RateLimited => "rate_limit_error",
+        ErrorClass::CapacityExhausted | ErrorClass::Unavailable => "overloaded_error",
+        ErrorClass::DeadlineExceeded => "timeout_error",
+        ErrorClass::Cancelled
+        | ErrorClass::BackendProtocol
+        | ErrorClass::NotImplemented
+        | ErrorClass::Internal => "api_error",
+        _ => "api_error",
+    }
+}
+
+fn anthropic_error_type_for_status(status: StatusCode, fallback: &str) -> &str {
+    match status.as_u16() {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        409 => "conflict_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        499 => "api_error",
+        503 | 529 => "overloaded_error",
+        504 => "timeout_error",
+        _ if status.is_client_error() => "invalid_request_error",
+        _ => fallback,
+    }
+}
+
+fn anthropic_error_unrecorded(status: StatusCode, error_type: &str, message: &str) -> Response {
+    (
+        status,
+        Json(AnthropicErrorResponse {
+            object_type: "error".to_string(),
+            error: AnthropicErrorBody {
+                error_type: error_type.to_string(),
                 message: message.to_string(),
             },
         }),
     )
         .into_response()
+}
+
+/// Returns an Anthropic-compatible JSON `404` error response for an unmatched route.
+/// Anthropic clients expect the nested `{"type": "error", "error": {...}}`
+pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
+    anthropic_error(
+        ErrorClass::NotFound,
+        StatusCode::NOT_FOUND,
+        "not_found_error",
+        &format!("Route not found: {} {}", method, uri.path()),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::extensions::parse_nvext;
+
+    fn request_with_nvext() -> AnthropicCreateMessageRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {
+                "cache_salt": "tenant-body",
+                "agent_hints": {
+                    "priority": 5
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn anthropic_backend_error_rewrap_records_once() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass};
+
+        let error = DynamoError::builder()
+            .class(ErrorClass::BackendProtocol)
+            .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
+            .build();
+        let counter = super::super::metrics::DYNAM_FAILURES_TOTAL
+            .with_label_values(&[error.class().as_str(), error.reason().as_str()]);
+        let before = counter.get();
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response = match super::super::openai::check_for_backend_error(
+            futures::stream::iter([event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Err(response) => anthropic_backend_error_response(response),
+            Ok(_) => panic!("typed backend failure must fail preflight"),
+        };
+
+        assert_eq!(counter.get() - before, 1);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "api_error");
+        assert_eq!(body.error.message, "Bad gateway");
+        assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn anthropic_backend_error_rewrap_preserves_safe_public_message() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(ErrorReason::new("request.invalid_argument").unwrap())
+            .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
+            .public_message("CLIENT_SAFE_MESSAGE")
+            .build();
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response = match super::super::openai::check_for_backend_error(
+            futures::stream::iter([event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Err(response) => anthropic_backend_error_response(response),
+            Ok(_) => panic!("typed backend failure must fail preflight"),
+        };
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(body.error.message, "CLIENT_SAFE_MESSAGE");
+        assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_preserves_when_enabled() {
+        let mut request = request_with_nvext();
+        gate_anthropic_nvext(&mut request, &HeaderMap::new(), true).unwrap();
+        let nvext = parse_nvext(request.nvext).unwrap();
+
+        assert_eq!(
+            nvext.and_then(|ext| ext.agent_hints.and_then(|hints| hints.priority)),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_retains_only_cache_salt_when_disabled() {
+        let mut request = request_with_nvext();
+        gate_anthropic_nvext(&mut request, &HeaderMap::new(), false).unwrap();
+        let nvext = parse_nvext(request.nvext).unwrap().unwrap();
+
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+        assert!(!nvext.has_non_cache_salt_fields());
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_rejects_invalid_cache_salt_when_disabled() {
+        let mut request = request_with_nvext();
+        request.nvext = Some(serde_json::json!({
+            "cache_salt": 42,
+            "ignored_field": true
+        }));
+
+        let error = gate_anthropic_nvext(&mut request, &HeaderMap::new(), false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid nvext.cache_salt: expected a string or null"
+        );
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_ignores_malformed_non_salt_data_when_disabled() {
+        for raw_nvext in [
+            serde_json::json!(42),
+            serde_json::json!({"agent_hints": 42}),
+            serde_json::json!({"unsupported_future_field": true}),
+        ] {
+            let mut request = request_with_nvext();
+            request.nvext = Some(raw_nvext);
+
+            gate_anthropic_nvext(&mut request, &HeaderMap::new(), false).unwrap();
+            assert!(request.nvext.is_none());
+        }
+    }
+
+    #[test]
+    fn anthropic_nvext_rejects_agent_context() {
+        let err = parse_nvext(Some(serde_json::json!({
+            "agent_context": {
+                "session_id": "run-123"
+            }
+        })))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn anthropic_nvext_policy_applies_routing_when_enabled() {
+        let request = request_with_nvext();
+        let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-prefill-instance-id", "7".parse().unwrap());
+        headers.insert("x-dynamo-dp-rank", "3".parse().unwrap());
+
+        apply_anthropic_nvext_policy(&mut chat_request, &headers, true);
+        let nvext = chat_request.nvext.unwrap();
+
+        assert_eq!(nvext.backend_instance_id, Some(42));
+        assert_eq!(nvext.decode_worker_id, Some(42));
+        assert_eq!(nvext.prefill_worker_id, Some(7));
+        assert_eq!(nvext.dp_rank, Some(3));
+    }
+
+    #[test]
+    fn anthropic_nvext_policy_applies_only_tenant_when_disabled() {
+        let mut request = request_with_nvext();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-dp-rank", "3".parse().unwrap());
+        headers.insert("x-dynamo-request-priority", "7".parse().unwrap());
+        headers.insert("x-tenant-id", "tenant-client".parse().unwrap());
+        headers.append("x-tenant-id", "   ".parse().unwrap());
+        headers.append("x-tenant-id", " tenant-gateway ".parse().unwrap());
+        gate_anthropic_nvext(&mut request, &headers, false).unwrap();
+        let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+        apply_anthropic_nvext_policy(&mut chat_request, &headers, false);
+        let nvext = chat_request.nvext.unwrap();
+
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-gateway"));
+        assert_eq!(nvext.backend_instance_id, None);
+        assert_eq!(nvext.decode_worker_id, None);
+        assert_eq!(nvext.dp_rank, None);
+        assert_eq!(nvext.agent_hints, None);
+    }
+
+    #[test]
+    fn anthropic_empty_tenant_header_falls_back_to_body_salt_when_disabled() {
+        let mut request = request_with_nvext();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tenant-id", "   ".parse().unwrap());
+        gate_anthropic_nvext(&mut request, &headers, false).unwrap();
+        let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+        apply_anthropic_nvext_policy(&mut chat_request, &headers, false);
+
+        assert_eq!(
+            chat_request
+                .nvext
+                .and_then(|nvext| nvext.cache_salt)
+                .as_deref(),
+            Some("tenant-body")
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_semantic_error_hides_private_diagnostic() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL")
+            .build();
+        let response = anthropic_semantic_error(&error).expect("invalid request response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Invalid request"));
+        assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_semantic_conflict_uses_invalid_request_type() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::Conflict)
+            .reason(dynamo_runtime::error::ErrorReason::new("request.conflict").unwrap())
+            .build();
+        let response = anthropic_semantic_error(&error).expect("client response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "conflict_error");
+    }
+
+    #[tokio::test]
+    async fn anthropic_semantic_deadline_uses_timeout_type() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::DeadlineExceeded)
+            .reason(dynamo_runtime::error::ErrorReason::new("request.deadline_exceeded").unwrap())
+            .build();
+        let response = anthropic_semantic_error(&error).expect("client response");
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "timeout_error");
+    }
+
+    #[tokio::test]
+    async fn anthropic_non_streaming_aggregation_preserves_unavailable() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::Unavailable)
+            .diagnostic("worker unavailable at /srv/private/backend.rs")
+            .build();
+        let response = anthropic_non_streaming_aggregation_error(error);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "overloaded_error");
+        assert!(!body.error.message.contains("/srv/private"));
+    }
+
+    #[test]
+    fn anthropic_stream_error_uses_semantic_identity_without_diagnostic() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("PRIVATE_STREAM_DIAGNOSTIC")
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(body.error_type, "invalid_request_error");
+        assert_eq!(body.message, "Invalid request");
+        assert!(!body.message.contains("PRIVATE_STREAM_DIAGNOSTIC"));
+    }
+
+    #[test]
+    fn anthropic_stream_cancellation_uses_a_spec_error_type() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(ErrorClass::Cancelled)
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(body.error_type, "api_error");
+        assert_eq!(body.message, "Request cancelled");
+    }
+
+    #[test]
+    fn anthropic_invalid_argument_is_found_through_error_context() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let original = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid request")
+            .build();
+        let wire = serde_json::to_value(original).unwrap();
+        let normalized: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            normalized.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(normalized.class(), ErrorType::InvalidRequest);
+
+        let error = anyhow::Error::new(normalized).context("request validation failed");
+        assert_eq!(
+            find_invalid_argument_in_chain(error.as_ref()).map(DynamoError::message),
+            Some("invalid request")
+        );
+
+        let private_error = anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidRequest)
+                .message("private diagnostic")
+                .build(),
+        );
+        assert!(find_invalid_argument_in_chain(private_error.as_ref()).is_none());
+    }
 }

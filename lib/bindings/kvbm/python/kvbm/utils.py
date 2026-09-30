@@ -2,7 +2,32 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
+
+
+def is_truthy(val: str) -> bool:
+    """Truthy values: "1", "true", "on", "yes" (case-insensitive)."""
+    return val.strip().lower() in ("1", "true", "on", "yes")
+
+
+def get_consolidator_mode() -> str:
+    """Return the KV event consolidator mode from DYN_KVBM_KV_EVENTS_CONSOLIDATOR_MODE.
+
+    Returns "dedup" or "passthrough"; invalid/unset values fall back to "dedup".
+    """
+    mode = os.getenv("DYN_KVBM_KV_EVENTS_CONSOLIDATOR_MODE", "dedup").strip().lower()
+    if mode in ("dedup", "passthrough"):
+        return mode
+
+    logger.warning(
+        "Invalid DYN_KVBM_KV_EVENTS_CONSOLIDATOR_MODE=%r. Falling back to 'dedup'.",
+        mode,
+    )
+    return "dedup"
+
 
 try:
     from nvtx import annotate  # type: ignore

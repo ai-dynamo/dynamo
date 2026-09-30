@@ -1,0 +1,36 @@
+name: 'Install vCluster CLI'
+description: 'Download and install the vCluster CLI binary (architecture-aware)'
+
+inputs:
+  vcluster_version:
+    description: 'vCluster CLI version to install'
+    required: false
+    default: 'v0.33.0'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install vCluster CLI
+      shell: bash
+      run: |
+        echo "::group::Install vCluster CLI ${{ inputs.vcluster_version }}"
+        if command -v vcluster &>/dev/null; then
+          echo "vCluster CLI already installed: $(vcluster version)"
+        else
+          ARCH=$(uname -m)
+          case "${ARCH}" in
+            x86_64)  VCLUSTER_ARCH="amd64" ;;
+            aarch64) VCLUSTER_ARCH="arm64" ;;
+            *)       echo "Unsupported architecture: ${ARCH}"; exit 1 ;;
+          esac
+          TMP_BIN="$(mktemp -p /tmp vcluster.XXXXXX)"
+          curl --retry 5 --retry-delay 2 \
+            --connect-timeout 10 --max-time 120 \
+            --fail --show-error -sL \
+            -o "${TMP_BIN}" \
+            "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-${VCLUSTER_ARCH}"
+          sudo install -m 0755 "${TMP_BIN}" /usr/local/bin/vcluster
+          rm -f "${TMP_BIN}"
+          vcluster version
+        fi
+        echo "::endgroup::"

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 from typing import Sequence
 
 
@@ -27,7 +28,20 @@ def compute_pareto(
         return [], [], []
 
     # Build point list with original indices and sort by x asc, then y desc
-    points = [(x[i], y[i], i) for i in range(len(x))]
+    points = []
+    for i in range(len(x)):
+        try:
+            px = float(x[i])
+            py = float(y[i])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(px) or not math.isfinite(py):
+            continue
+        points.append((px, py, i))
+
+    if len(points) == 0:
+        return [], [], []
+
     points.sort(key=lambda p: (p[0], -p[1]))
 
     # Single pass to keep only non-dominated points (minimize x, maximize y)

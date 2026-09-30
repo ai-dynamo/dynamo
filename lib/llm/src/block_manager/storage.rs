@@ -155,6 +155,18 @@ pub enum StorageError {
     OutOfBounds(String),
 }
 
+impl From<dynamo_memory::StorageError> for StorageError {
+    fn from(e: dynamo_memory::StorageError) -> Self {
+        match e {
+            dynamo_memory::StorageError::AllocationFailed(s) => StorageError::AllocationFailed(s),
+            dynamo_memory::StorageError::OperationFailed(s) => StorageError::OperationFailed(s),
+            dynamo_memory::StorageError::Cuda(e) => StorageError::Cuda(e),
+            dynamo_memory::StorageError::Nixl(e) => StorageError::NixlError(e),
+            e => StorageError::OperationFailed(e.to_string()),
+        }
+    }
+}
+
 /// Core storage trait that provides access to memory regions
 pub trait Storage: Debug + Send + Sync + 'static {
     /// Returns the type of storage
@@ -243,14 +255,14 @@ pub trait RegistationHandle: std::any::Any + Send + Sync + 'static {
     /// This should be called when the external registration of this storage
     /// is no longer needed.
     ///
-    /// Note: All [RegistrationHandle]s should be explicitly released before
+    /// Note: All `RegistationHandle`s should be explicitly released before
     /// the [Storage] is dropped.
     fn release(&mut self);
 }
 
-/// A collection of [RegistrationHandle]s for a [RegisterableStorage].
+/// A collection of `RegistationHandle`s for a [RegisterableStorage].
 ///
-/// This is used to ensure that all [RegistrationHandle]s are explicitly released
+/// This is used to ensure that all `RegistationHandle`s are explicitly released
 /// before the [RegisterableStorage] is dropped.
 #[derive(Default)]
 pub struct RegistrationHandles {

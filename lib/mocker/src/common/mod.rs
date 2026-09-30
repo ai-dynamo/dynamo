@@ -3,10 +3,9 @@
 
 //! Shared components used across all engine implementations.
 
-pub mod bootstrap;
-pub mod evictor;
+pub mod handoff;
 pub mod perf_model;
 pub mod protocols;
 pub mod running_mean;
-pub mod sequence;
+pub(crate) mod speculative;
 pub mod utils;

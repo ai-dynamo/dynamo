@@ -11,8 +11,11 @@ Note: Engine metrics take time to appear after engine initialization,
 while Dynamo runtime metrics are available immediately after component creation.
 """
 
+import enum
 import logging
 import re
+import threading
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
@@ -25,11 +28,61 @@ from dynamo.prometheus_names import kvstats, labels, model_info, name_prefix
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
 
+    from dynamo.common.memory import MultimodalEmbeddingCacheManager
+    from dynamo.common.multimodal.image_loader import ImageLoader
+
 # Auto-label injection: always injects dynamo_namespace, dynamo_component, dynamo_endpoint labels
 # into engine metrics based on the endpoint hierarchy.
 #
 # Rust counterpart: lib/runtime/src/metrics.rs create_metric() function
 # Label constants defined in: lib/runtime/src/metrics/prometheus_names.rs labels module
+
+
+# Single source of truth for embedding cache metric names.
+EMBEDDING_CACHE_METRIC_PREFIX = f"{name_prefix.COMPONENT}_embedding_cache"
+
+
+class EmbeddingCacheMetrics(str, enum.Enum):
+    """Prometheus metric names for the multimodal embedding cache."""
+
+    HITS_TOTAL = f"{EMBEDDING_CACHE_METRIC_PREFIX}_hits_total"
+    MISSES_TOTAL = f"{EMBEDDING_CACHE_METRIC_PREFIX}_misses_total"
+    EVICTIONS_TOTAL = f"{EMBEDDING_CACHE_METRIC_PREFIX}_evictions_total"
+    UTILIZATION = f"{EMBEDDING_CACHE_METRIC_PREFIX}_utilization"
+    CURRENT_BYTES = f"{EMBEDDING_CACHE_METRIC_PREFIX}_current_bytes"
+    ENTRIES = f"{EMBEDDING_CACHE_METRIC_PREFIX}_entries"
+
+
+# Single source of truth for image loader metric names.
+IMAGE_LOADER_METRIC_PREFIX = f"{name_prefix.COMPONENT}_image"
+
+
+class ImageLoaderMetrics(str, enum.Enum):
+    """Prometheus metric names for the multimodal image loader."""
+
+    CACHE_ENTRIES = f"{IMAGE_LOADER_METRIC_PREFIX}_cache_entries"
+    SHARED_CACHE_GET_DURATION_SECONDS = (
+        f"{IMAGE_LOADER_METRIC_PREFIX}_shared_cache_get_duration_seconds"
+    )
+    SHARED_CACHE_SET_DURATION_SECONDS = (
+        f"{IMAGE_LOADER_METRIC_PREFIX}_shared_cache_set_duration_seconds"
+    )
+
+
+_SHARED_IMAGE_CACHE_DURATION_BUCKETS = (
+    0.001,
+    0.0025,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0,
+)
 
 
 def register_engine_metrics_callback(
@@ -49,12 +102,12 @@ def register_engine_metrics_callback(
     This registers a callback that is invoked when /metrics is scraped, passing through
     engine-specific metrics alongside Dynamo runtime metrics.
 
-    Automatically injects dynamo_namespace, dynamo_component, dynamo_endpoint, model,
-    and model_name labels when namespace_name and component_name are provided.
+    Automatically injects dynamo_namespace, dynamo_component, dynamo_endpoint, worker_id,
+    model, and model_name labels when namespace_name and component_name are provided.
 
     Label Precedence (highest to lowest):
     1. Existing labels from source metrics - never changed, never overwritten
-    2. Auto-injected labels (dynamo_*, model*) - added by Dynamo automatically
+    2. Auto-injected labels (dynamo_*, worker_id, model*) - added by Dynamo automatically
     3. Custom labels (inject_custom_labels) - user-provided, lowest precedence
 
     If inject_custom_labels contains keys that conflict with auto-injected labels,
@@ -68,8 +121,8 @@ def register_engine_metrics_callback(
         inject_custom_labels: Optional dict of custom labels to inject (e.g. {"lora_adapter": "my-lora"}).
                       Injected at collection time without modifying source metrics.
                       Reserved labels (le, quantile) will raise ValueError.
-                      Auto-labels (dynamo_namespace, dynamo_component, dynamo_endpoint, model,
-                      model_name) are added automatically and should not be in inject_custom_labels.
+                      Auto-labels (dynamo_namespace, dynamo_component, dynamo_endpoint, worker_id,
+                      model, model_name) are added automatically and should not be in inject_custom_labels.
         namespace_name: Explicit namespace name for auto-labels (from config.namespace)
         component_name: Explicit component name for auto-labels (from config.component)
         endpoint_name: Explicit endpoint name for auto-labels (from config.endpoint, defaults to "generate")
@@ -81,7 +134,7 @@ def register_engine_metrics_callback(
         register_engine_metrics_callback(
             generate_endpoint, REGISTRY,
             metric_prefix_filters=["vllm:"],
-            namespace_name="prod", component_name="vllm-worker", endpoint_name="generate"
+            namespace_name="prod", component_name="worker", endpoint_name="generate"
         )
 
         # Include multiple metric prefixes
@@ -120,6 +173,18 @@ def register_engine_metrics_callback(
             labels.ENDPOINT: endpoint_name_final,  # "dynamo_endpoint"
         }
 
+        # Add worker_id label from connection_id (discovery instance ID).
+        # This provides a stable per-worker identity label so metrics from different
+        # workers serving the same endpoint can be distinguished without relying on
+        # Kubernetes labels. Mirrors Rust auto-label injection in create_metric().
+        try:
+            conn_id = endpoint.connection_id()
+            auto_labels[labels.WORKER_ID] = format(conn_id, "x")
+        except Exception as e:
+            logging.debug(
+                f"Could not obtain connection_id for worker_id label injection: {e}"
+            )
+
         # Add model labels if model_name is provided
         if model_name:
             auto_labels[labels.MODEL] = model_name  # "model" (OpenAI standard)
@@ -139,7 +204,7 @@ def register_engine_metrics_callback(
 
         # Merge labels with correct precedence:
         # 1. Existing labels (from source metrics) - never overwritten
-        # 2. Auto-labels (dynamo_*, model*) - injected by Dynamo
+        # 2. Auto-labels (dynamo_*, worker_id, model*) - injected by Dynamo
         # 3. Custom labels (inject_custom_labels) - user-provided, lowest precedence
         # Put custom labels first, then overwrite with auto-labels (higher precedence)
         final_inject_labels = {**final_inject_labels, **auto_labels}
@@ -158,7 +223,95 @@ def register_engine_metrics_callback(
         )
         return result
 
+    def get_typed() -> list:
+        """Callback returning engine metrics as a typed structure."""
+        return get_prometheus_typed(
+            registry,
+            metric_prefix_filters=metric_prefix_filters,
+            exclude_prefixes=exclude_prefixes,
+            inject_custom_labels=final_inject_labels or None,
+        )
+
+    # Two independent surfaces: /metrics renders the engine's own exposition
+    # text, OTLP exports the same metrics handed over as a structure. Both are
+    # registered here so an engine cannot end up on only one of them.
     endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
+    endpoint.metrics.register_prometheus_typed_callback(get_typed)
+
+
+def get_prometheus_typed(
+    registry: "CollectorRegistry",
+    metric_prefix_filters: Optional[list[str]] = None,
+    exclude_prefixes: Optional[list[str]] = None,
+    inject_custom_labels: Optional[dict[str, str]] = None,
+) -> list:
+    """Collect a registry as a typed structure rather than exposition text.
+
+    Returns ``[(name, help, type, unit, [(sample, [(label, value)], value, ts)])]``,
+    which pyo3 extracts natively. Nothing is serialized to a string on either
+    side, so the family name, type and help arrive authoritative instead of
+    being re-derived from ``# TYPE`` lines by a parser.
+
+    ``generate_latest`` flattens this same structure; :func:`get_prometheus_expfmt`
+    remains for ``/metrics``, where the engine's own rendering is what consumers
+    already scrape.
+    """
+    if inject_custom_labels:
+        # Injected at collection time, exactly as the text path does, so
+        # dynamo_namespace / dynamo_component / worker_id reach the typed form
+        # too. Dropping this would silently unlabel every engine metric.
+        from prometheus_client import CollectorRegistry as _Registry
+
+        from dynamo.common.utils.label_injecting_collector import (
+            LabelInjectingCollector,
+        )
+
+        wrapped = _Registry()
+        wrapped.register(LabelInjectingCollector(registry, inject_custom_labels))
+        registry = wrapped
+
+    # Compile only when a filter was actually requested: an empty prefix tuple
+    # compiles to a pattern that matches everything, which would exclude every
+    # family rather than none.
+    include = (
+        _compile_include_pattern(tuple(metric_prefix_filters))
+        if metric_prefix_filters
+        else None
+    )
+    exclude = (
+        _compile_exclude_pattern(tuple(exclude_prefixes)) if exclude_prefixes else None
+    )
+
+    out = []
+    for metric in registry.collect():
+        if include and not include.match(metric.name):
+            continue
+        if exclude and exclude.match(metric.name):
+            continue
+        out.append(
+            (
+                metric.name,
+                metric.documentation,
+                metric.type,
+                # UNIT metadata. The spec requires it reach OTLP when declared;
+                # the proto model has no field for it, so it travels alongside.
+                metric.unit,
+                # The sample timestamp is carried, not dropped: standard
+                # prometheus_client metrics leave it None, but a custom
+                # collector or a federated source can set it, and defaulting to
+                # the collection instant would silently relabel a stale sample.
+                [
+                    (
+                        s.name,
+                        list(s.labels.items()),
+                        float(s.value),
+                        s.timestamp if s.timestamp is None else float(s.timestamp),
+                    )
+                    for s in metric.samples
+                ],
+            )
+        )
+    return out
 
 
 @lru_cache(maxsize=64)
@@ -300,14 +453,42 @@ def get_prometheus_expfmt(
         return ""
 
 
+def gather_with_labels(
+    registry: "CollectorRegistry",
+    auto_labels: Mapping[str, str],
+    *,
+    prefix_filters: Optional[list[str]] = None,
+    exclude_prefixes: Optional[list[str]] = None,
+) -> str:
+    """Scrape ``registry`` into Prometheus exposition text with
+    ``auto_labels`` injected at collection time. Existing labels on the
+    source metrics win over auto-labels of the same name.
+
+    Lives here (as a leaf utility next to :func:`get_prometheus_expfmt`)
+    so ``dynamo.common.backend.metrics`` can import it without dragging
+    in the broader backend module.
+    """
+    return get_prometheus_expfmt(
+        registry,
+        metric_prefix_filters=prefix_filters,
+        exclude_prefixes=exclude_prefixes,
+        inject_custom_labels=dict(auto_labels) if auto_labels else None,
+    )
+
+
 class LLMBackendMetrics:
-    """Prometheus metrics for LLM backends with `dynamo_component_` prefix.
+    """Engine-side gauges in the `dynamo_component_` namespace.
+
+    Lifecycle gauges that the framework times (cleanup, drain) live
+    Rust-side via `dynamo_backend_common::LifecycleGauges` — they emit
+    regardless of engine opt-in. `model_load_time_seconds` stays here for
+    parity with the legacy entry points (both legacy `main.py` and the
+    unified bridge populate it).
 
     Usage:
         metrics = LLMBackendMetrics(registry, model_name="Qwen/Qwen3-0.6B", component_name="backend")
         metrics.set_total_blocks("0", 1000)
         metrics.set_gpu_cache_usage("0", 0.75)
-        metrics.set_model_load_time(5.2)
     """
 
     def __init__(
@@ -316,7 +497,7 @@ class LLMBackendMetrics:
         model_name: str = "",
         component_name: str = "",
     ) -> None:
-        """Create all Dynamo component gauges."""
+        """Create per-rank engine gauges plus `model_load_time_seconds`."""
         from prometheus_client import Gauge
 
         self.total_blocks = Gauge(
@@ -329,6 +510,13 @@ class LLMBackendMetrics:
         self.gpu_cache_usage_percent = Gauge(
             f"{name_prefix.COMPONENT}_{kvstats.GPU_CACHE_USAGE_PERCENT}",
             "GPU cache usage as a percentage (0.0-1.0).",
+            labelnames=[labels.MODEL, labels.COMPONENT, labels.DP_RANK],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.kv_cache_hit_rate = Gauge(
+            f"{name_prefix.COMPONENT}_{kvstats.KV_CACHE_HIT_RATE}",
+            "Prefix cache hit rate (0.0-1.0). Portable across engines.",
             labelnames=[labels.MODEL, labels.COMPONENT, labels.DP_RANK],
             registry=registry,
             multiprocess_mode="max",
@@ -361,7 +549,261 @@ class LLMBackendMetrics:
             }
         ).set(value)
 
+    def set_kv_cache_hit_rate(self, dp_rank: str, value: float) -> None:
+        self.kv_cache_hit_rate.labels(
+            **{
+                labels.MODEL: self.model_name,
+                labels.COMPONENT: self.component_name,
+                labels.DP_RANK: dp_rank,
+            }
+        ).set(value)
+
     def set_model_load_time(self, value: float) -> None:
         self.model_load_time.labels(
             **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
         ).set(value)
+
+
+def register_embedding_cache_metrics(
+    endpoint: "Endpoint",
+    cache: "MultimodalEmbeddingCacheManager",
+    model_name: str = "",
+    component_name: str = "",
+) -> None:
+    """Register Prometheus metrics for a MultimodalEmbeddingCacheManager instance.
+
+    Creates a dedicated CollectorRegistry to avoid prometheus_client import-ordering
+    issues with SGLang's multiprocess mode. Counters use delta-based increments
+    derived from the cache's monotonic stats. A threading.Lock protects against
+    concurrent scrape races (axum may serve /metrics from multiple threads).
+
+    Must be called AFTER engine initialization to ensure prometheus_client is safe
+    to import.
+
+    Thread safety note:
+        The callback reads cache.stats from the axum HTTP thread while the asyncio
+        event loop thread mutates the cache. Under CPython, individual attribute reads
+        (ints, len()) are GIL-protected, so the worst case is a slightly inconsistent
+        snapshot within a single scrape (e.g., hits incremented but misses not yet).
+        This is acceptable for monitoring metrics — values are eventually consistent.
+        The threading.Lock only serializes concurrent scrapes against each other.
+
+    Args:
+        endpoint: Dynamo Endpoint with metrics.register_prometheus_expfmt_callback().
+        cache: The MultimodalEmbeddingCacheManager instance to observe.
+        model_name: Model name for the 'model' label.
+        component_name: Component name for the 'dynamo_component' label.
+    """
+    # Lazy import: prometheus_client must be imported AFTER set_prometheus_multiproc_dir()
+    # in SGLang's multiprocess mode. This matches the existing pattern used by
+    # get_prometheus_expfmt() and LLMBackendMetrics.__init__() in this file.
+    from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
+
+    registry = CollectorRegistry()
+    label_names = [labels.MODEL, labels.COMPONENT]
+    label_values = {labels.MODEL: model_name, labels.COMPONENT: component_name}
+
+    ECM = EmbeddingCacheMetrics
+
+    # Counters (delta-incremented from cache's monotonic stats on each scrape)
+    hits_counter = Counter(
+        ECM.HITS_TOTAL,
+        "Total embedding cache hits.",
+        labelnames=label_names,
+        registry=registry,
+    )
+    misses_counter = Counter(
+        ECM.MISSES_TOTAL,
+        "Total embedding cache misses.",
+        labelnames=label_names,
+        registry=registry,
+    )
+    evictions_counter = Counter(
+        ECM.EVICTIONS_TOTAL,
+        "Total embedding cache evictions.",
+        labelnames=label_names,
+        registry=registry,
+    )
+
+    # Gauges (snapshot values set on each scrape)
+    utilization_gauge = Gauge(
+        ECM.UTILIZATION,
+        "Cache memory utilization ratio (0.0-1.0).",
+        labelnames=label_names,
+        registry=registry,
+    )
+    current_bytes_gauge = Gauge(
+        ECM.CURRENT_BYTES,
+        "Current cache memory usage in bytes.",
+        labelnames=label_names,
+        registry=registry,
+    )
+    entries_gauge = Gauge(
+        ECM.ENTRIES,
+        "Number of entries in the cache.",
+        labelnames=label_names,
+        registry=registry,
+    )
+    # Initialize all labeled metrics so they appear in output from the first scrape,
+    # even before any cache activity (Prometheus best practice: export zeros, not absent).
+    hits_counter.labels(**label_values)
+    misses_counter.labels(**label_values)
+    evictions_counter.labels(**label_values)
+
+    lock = threading.Lock()
+    prev_state = {"hits": 0, "misses": 0, "evictions": 0}
+
+    def _refresh_locked() -> None:
+        """Fold the cache's monotonic stats into the registry. Caller holds `lock`.
+
+        Safe to call from either callback: increments are deltas against
+        ``prev_state``, which advances on every call, so whichever surface
+        collects next sees only what has accumulated since.
+        """
+        stats = cache.stats
+
+        # Delta-based counter increments from monotonic source values
+        delta_hits = stats["hits"] - prev_state["hits"]
+        delta_misses = stats["misses"] - prev_state["misses"]
+        delta_evictions = stats["evictions"] - prev_state["evictions"]
+
+        if delta_hits > 0:
+            hits_counter.labels(**label_values).inc(delta_hits)
+        if delta_misses > 0:
+            misses_counter.labels(**label_values).inc(delta_misses)
+        if delta_evictions > 0:
+            evictions_counter.labels(**label_values).inc(delta_evictions)
+
+        prev_state["hits"] = stats["hits"]
+        prev_state["misses"] = stats["misses"]
+        prev_state["evictions"] = stats["evictions"]
+
+        # Set gauge snapshots
+        utilization_gauge.labels(**label_values).set(stats["utilization"])
+        current_bytes_gauge.labels(**label_values).set(stats["current_bytes"])
+        entries_gauge.labels(**label_values).set(stats["entries"])
+
+    def _collect_embedding_cache_metrics() -> str:
+        """Callback invoked on each /metrics scrape."""
+        with lock:
+            _refresh_locked()
+            return generate_latest(registry).decode("utf-8")
+
+    def _collect_embedding_cache_typed() -> list:
+        """Same metrics, handed over typed for the OTLP export."""
+        with lock:
+            _refresh_locked()
+            return get_prometheus_typed(registry)
+
+    # Registered on both surfaces: /metrics renders the exposition text, OTLP
+    # exports the same registry typed. Registering only one would leave these
+    # metrics visible on a Prometheus dashboard and absent from the collector.
+    endpoint.metrics.register_prometheus_expfmt_callback(
+        _collect_embedding_cache_metrics
+    )
+    endpoint.metrics.register_prometheus_typed_callback(_collect_embedding_cache_typed)
+    logging.info(
+        "Registered embedding cache metrics (model=%s, component=%s)",
+        model_name,
+        component_name,
+    )
+
+
+def register_image_loader_metrics(
+    endpoint: "Endpoint",
+    loader: "ImageLoader",
+    model_name: str = "",
+    component_name: str = "",
+) -> None:
+    """Register Prometheus metrics for an ImageLoader instance.
+
+    Same mechanics as register_embedding_cache_metrics: a dedicated
+    CollectorRegistry (avoids prometheus_client import-ordering issues with
+    SGLang's multiprocess mode) and a threading.Lock against concurrent scrape
+    races. Shared-cache operation latencies are drained from the loader's
+    pending sample buffer and observed into the histograms once per scrape.
+
+    Must be called AFTER engine initialization to ensure prometheus_client is
+    safe to import.
+
+    Args:
+        endpoint: Dynamo Endpoint with metrics.register_prometheus_expfmt_callback().
+        loader: The ImageLoader instance to observe.
+        model_name: Model name for the 'model' label.
+        component_name: Component name for the 'dynamo_component' label.
+    """
+    from prometheus_client import CollectorRegistry, Gauge, Histogram, generate_latest
+
+    registry = CollectorRegistry()
+    label_names = [labels.MODEL, labels.COMPONENT]
+    label_values = {labels.MODEL: model_name, labels.COMPONENT: component_name}
+
+    ILM = ImageLoaderMetrics
+
+    shared_cache_get_duration_histogram = Histogram(
+        ILM.SHARED_CACHE_GET_DURATION_SECONDS,
+        "Shared encoded-image cache GET latency in seconds by terminal outcome "
+        "and encoded payload size bucket.",
+        labelnames=label_names + ["outcome", "size_bucket"],
+        registry=registry,
+        buckets=_SHARED_IMAGE_CACHE_DURATION_BUCKETS,
+    )
+    shared_cache_set_duration_histogram = Histogram(
+        ILM.SHARED_CACHE_SET_DURATION_SECONDS,
+        "Shared encoded-image cache SET latency in seconds by terminal outcome "
+        "and encoded payload size bucket.",
+        labelnames=label_names + ["outcome", "size_bucket"],
+        registry=registry,
+        buckets=_SHARED_IMAGE_CACHE_DURATION_BUCKETS,
+    )
+    entries_gauge = Gauge(
+        ILM.CACHE_ENTRIES,
+        "Number of entries in the image cache.",
+        labelnames=label_names,
+        registry=registry,
+    )
+
+    lock = threading.Lock()
+
+    def _refresh_locked() -> None:
+        shared_cache_stats = loader.shared_image_cache_stats
+        if shared_cache_stats is not None:
+            shared_cache_durations = shared_cache_stats.snapshot_and_drain()
+            for (
+                operation,
+                outcome,
+                size_bucket,
+            ), samples in shared_cache_durations.items():
+                histogram = (
+                    shared_cache_get_duration_histogram
+                    if operation == "get"
+                    else shared_cache_set_duration_histogram
+                )
+                for duration in samples:
+                    histogram.labels(
+                        **label_values,
+                        outcome=outcome,
+                        size_bucket=size_bucket,
+                    ).observe(duration)
+
+        entries_gauge.labels(**label_values).set(loader.cache_entries)
+
+    def _collect_image_loader_metrics() -> str:
+        """Callback invoked on each /metrics scrape."""
+        with lock:
+            _refresh_locked()
+            return generate_latest(registry).decode("utf-8")
+
+    def _collect_image_loader_typed() -> list:
+        """Return the same image-loader metrics for OTLP export."""
+        with lock:
+            _refresh_locked()
+            return get_prometheus_typed(registry)
+
+    endpoint.metrics.register_prometheus_expfmt_callback(_collect_image_loader_metrics)
+    endpoint.metrics.register_prometheus_typed_callback(_collect_image_loader_typed)
+    logging.info(
+        "Registered image loader metrics (model=%s, component=%s)",
+        model_name,
+        component_name,
+    )

@@ -1,35 +1,30 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-# Usage: `python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B`
-# Now supports vLLM-style individual arguments for MockEngineArgs
+# Offline virtual-clock replay lives in AISimulate.
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import signal
-import socket
-import tempfile
 from pathlib import Path
 
 import uvloop
 
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
-from dynamo.llm import (
-    EngineType,
-    EntrypointArgs,
-    ModelRuntimeConfig,
-    fetch_model,
-    make_engine,
-    run_input,
-)
-from dynamo.runtime import DistributedRuntime
+from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.utils.runtime import create_runtime
+from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
+from .args import parse_args, resolve_planner_profile_data
+from .config import (
+    apply_worker_engine_args_overrides,
+    build_runtime_config,
+    load_mocker_engine_args,
+)
 from .utils.kv_cache import compute_kv_bytes_per_token
 
 configure_dynamo_logging()
@@ -47,22 +42,36 @@ async def graceful_shutdown(runtimes: list):
     logger.info("DistributedRuntime shutdown complete")
 
 
-async def prefetch_model(model_path: str) -> None:
-    """Pre-fetch model from HuggingFace to avoid rate limiting with many workers."""
+async def prefetch_model(model_path: str) -> str:
+    """Resolve ``model_path`` to a local directory, fetching config/tokenizer if needed.
+
+    ``fetch_model`` returns the cached snapshot directory without contacting the
+    hub when config.json and the tokenizer files are already present, and downloads
+    only those files otherwise. Resolving once here means neither the workers nor
+    the KV-bytes estimate below resolve a hub ID over the network. Returns the
+    original path on failure so callers degrade to their previous behavior.
+    """
 
     if Path(model_path).exists():
         logger.info(f"Using local model path: {model_path}")
-        return
+        return model_path
 
     logger.info(f"Pre-fetching model from HuggingFace: {model_path}")
     try:
         local_path = await fetch_model(model_path, ignore_weights=True)
         logger.info(f"Model cached at: {local_path}")
+        return str(local_path)
     except Exception as e:
+        # The binding raises the base ``Exception`` for every Rust-side failure
+        # (``to_pyerr``), so there is nothing narrower to catch. Falling back is
+        # deliberate: the workers, and the transformers branch of the KV-bytes
+        # estimate, still resolve the hub ID themselves.
         logger.warning(
-            f"Failed to pre-fetch model: {e}. "
-            "Workers will attempt individual downloads (may cause rate limiting)."
+            "Failed to pre-fetch model: %s. "
+            "Workers will attempt individual downloads (may cause rate limiting).",
+            e,
         )
+        return model_path
 
 
 async def worker():
@@ -72,54 +81,42 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
-
     # Resolve planner-profile-data: convert profile results dir to NPZ if needed
     profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
     args.planner_profile_data = profile_data_result.npz_path
 
-    # Handle extra_engine_args: either use provided file or create from CLI args
-    if args.extra_engine_args:
-        # User provided explicit JSON file
-        extra_engine_args_path = args.extra_engine_args
-        logger.info(f"Using provided MockEngineArgs from {extra_engine_args_path}")
-    else:
-        # Create temporary JSON file from CLI arguments
-        extra_engine_args_path = create_temp_engine_args_file(args)
-        logger.info("Created MockEngineArgs from CLI arguments")
+    try:
+        # Only when something needs the local files: many workers (rate limiting)
+        # or the KV-bytes estimate below (reads config.json).
+        local_model_path = None
+        if args.model_path and (
+            args.num_workers > 1 or args.kv_bytes_per_token is None
+        ):
+            local_model_path = await prefetch_model(args.model_path)
 
-    # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
-    if args.num_workers > 1 and args.model_path:
-        await prefetch_model(args.model_path)
-
-    # Auto-compute kv_bytes_per_token from model config if not explicitly set
-    if args.kv_bytes_per_token is None and args.model_path:
-        args.kv_bytes_per_token = compute_kv_bytes_per_token(
-            args.model_path, args.kv_cache_dtype
+        engine_args = load_mocker_engine_args(args)
+        logger.info(
+            "Loaded MockEngineArgs from JSON file"
+            if args.extra_engine_args
+            else "Created MockEngineArgs from CLI arguments"
         )
 
-    # Inject kv_bytes_per_token into engine args JSON (computed after model prefetch)
-    if args.kv_bytes_per_token is not None and not args.extra_engine_args:
-        with open(extra_engine_args_path) as f:
-            engine_args = json.load(f)
-        engine_args["kv_bytes_per_token"] = args.kv_bytes_per_token
-        with open(extra_engine_args_path, "w") as f:
-            json.dump(engine_args, f, indent=2)
+        # Auto-compute kv_bytes_per_token from model config if not explicitly set
+        if args.kv_bytes_per_token is None and args.model_path:
+            args.kv_bytes_per_token = compute_kv_bytes_per_token(
+                local_model_path or args.model_path, args.kv_cache_dtype
+            )
+        engine_args = apply_worker_engine_args_overrides(
+            engine_args, kv_bytes_per_token=args.kv_bytes_per_token
+        )
 
-    try:
         logger.info(
             f"Launching {args.num_workers} mocker worker(s) with isolated DistributedRuntime instances"
         )
-        await launch_workers(args, extra_engine_args_path)
+        await launch_workers(args, engine_args)
     finally:
-        # Clean up temporary file if we created one
-        if not args.extra_engine_args and extra_engine_args_path.exists():
-            try:
-                extra_engine_args_path.unlink()
-                logger.debug(f"Cleaned up temporary file {extra_engine_args_path}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up temporary file: {e}")
-
-        del profile_data_result  # Triggers tmpdir cleanup via __del__
+        if profile_data_result is not None:
+            del profile_data_result  # Triggers tmpdir cleanup via __del__
 
 
 def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
@@ -144,47 +141,7 @@ def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
         return 0.2
 
 
-def _build_runtime_config(
-    engine_args: dict,
-) -> tuple[int, ModelRuntimeConfig]:
-    """Build a ModelRuntimeConfig from the engine args dict.
-
-    Returns (kv_cache_block_size, runtime_config). Defaults match
-    the Rust MockEngineArgsBuilder so hand-crafted JSON files that
-    omit fields behave identically.
-    """
-    is_prefill = engine_args.get("is_prefill", False)
-    is_decode = engine_args.get("is_decode", False)
-
-    rc = ModelRuntimeConfig()
-    rc.total_kv_blocks = engine_args.get("num_gpu_blocks", 16384)
-    if (v := engine_args.get("max_num_seqs")) is not None:
-        rc.max_num_seqs = v
-    if (v := engine_args.get("max_num_batched_tokens")) is not None:
-        rc.max_num_batched_tokens = v
-    rc.enable_local_indexer = (
-        engine_args.get("enable_local_indexer", False) and not is_decode
-    )
-    rc.data_parallel_size = engine_args.get("dp_size", 1)
-
-    bootstrap_port = engine_args.get("bootstrap_port")
-    if is_prefill and bootstrap_port is not None:
-        host = os.environ.get(
-            "DYN_HTTP_RPC_HOST", socket.gethostbyname(socket.gethostname())
-        )
-        rc.set_disaggregated_endpoint(
-            bootstrap_host=host, bootstrap_port=bootstrap_port
-        )
-        logger.info(
-            "Mocker prefill worker: publishing bootstrap endpoint to discovery "
-            f"(bootstrap_port={bootstrap_port})"
-        )
-
-    block_size = engine_args.get("block_size", 64)
-    return block_size, rc
-
-
-async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path):
+async def launch_workers(args: argparse.Namespace, base_engine_args):
     """Launch mocker worker(s) with isolated DistributedRuntime instances.
 
     Each worker gets its own DistributedRuntime, which means:
@@ -193,10 +150,8 @@ async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)
     - Independent service registration and stats scraping
     - But still sharing the same tokio runtime (efficient)
     """
-    loop = asyncio.get_running_loop()
     futures = []
     runtimes = []
-    per_worker_temp_files: list[Path] = []
 
     stagger_delay = compute_stagger_delay(args.num_workers, args.stagger_delay)
     batch_size = 32
@@ -213,51 +168,66 @@ async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)
             f"(estimated total: {total_time:.1f}s)"
         )
 
-    # Always load base engine args for runtime config construction
-    with open(extra_engine_args_path) as f:
-        base_engine_args = json.load(f)
-
-    needs_per_worker_args = bool(
+    needs_per_worker_overrides = bool(
         args.bootstrap_ports_list
         or args.zmq_kv_events_ports_list
         or args.zmq_replay_ports_list
+        or base_engine_args.ais_nextn is not None
     )
+
+    # An advertised router config rides in this worker set's model deployment
+    # card and overrides the frontend's global mode for this set only. Left as
+    # None, the card carries nothing and the worker inherits the frontend's mode.
+    advertised_router_config = build_router_config(args.router_advertisement)
+    if advertised_router_config is not None:
+        logger.info(
+            "Advertising router mode '%s' in the model card",
+            args.router_advertisement.router_mode,
+        )
 
     for worker_id in range(args.num_workers):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
         # Create a separate DistributedRuntime for this worker (on same event loop)
-        runtime = DistributedRuntime(
-            loop,
+
+        runtime, loop = create_runtime(
             args.discovery_backend,
             args.request_plane,
+            args.event_plane,
+            response_plane=args.response_plane,
         )
         runtimes.append(runtime)
 
-        # Determine which engine args file and dict to use
-        worker_engine_args_path: Path | str
-        if needs_per_worker_args:
-            worker_args = base_engine_args.copy()
-            if args.bootstrap_ports_list:
-                worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
-            if args.zmq_kv_events_ports_list:
-                worker_args["zmq_kv_events_port"] = args.zmq_kv_events_ports_list[
-                    worker_id
-                ]
-            if args.zmq_replay_ports_list:
-                worker_args["zmq_replay_port"] = args.zmq_replay_ports_list[worker_id]
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".json", delete=False
-            ) as tmp:
-                json.dump(worker_args, tmp)
-                worker_engine_args_path = Path(tmp.name)
-            per_worker_temp_files.append(worker_engine_args_path)
-            logger.debug(f"Worker {worker_id}: per-worker args {worker_args}")
+        if needs_per_worker_overrides:
+            worker_engine_args = apply_worker_engine_args_overrides(
+                base_engine_args,
+                bootstrap_port=(
+                    args.bootstrap_ports_list[worker_id]
+                    if args.bootstrap_ports_list
+                    else None
+                ),
+                zmq_kv_events_port=(
+                    args.zmq_kv_events_ports_list[worker_id]
+                    if args.zmq_kv_events_ports_list
+                    else None
+                ),
+                zmq_replay_port=(
+                    args.zmq_replay_ports_list[worker_id]
+                    if args.zmq_replay_ports_list
+                    else None
+                ),
+                ais_mtp_seed=(
+                    (base_engine_args.ais_mtp_seed + worker_id) % (1 << 64)
+                    if base_engine_args.ais_nextn is not None
+                    else None
+                ),
+            )
         else:
-            worker_args = base_engine_args
-            worker_engine_args_path = extra_engine_args_path
+            worker_engine_args = base_engine_args
 
-        kv_cache_block_size, runtime_config = _build_runtime_config(worker_args)
+        kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
+        if args.sglang_generate:
+            runtime_config.set_engine_specific("sglang_generate", "true")
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(
@@ -265,11 +235,13 @@ async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)
             model_path=args.model_path,
             model_name=args.model_name,
             endpoint_id=args.endpoint,
-            context_length=0,
-            extra_engine_args=str(worker_engine_args_path),
+            extra_engine_args=None,
+            mocker_engine_args=worker_engine_args,
             runtime_config=runtime_config,
             kv_cache_block_size=kv_cache_block_size,
             is_prefill=args.is_prefill_worker,
+            is_decode=args.is_decode_worker,
+            router_config=advertised_router_config,
         )
 
         # Create the engine with this worker's isolated runtime
@@ -310,17 +282,6 @@ async def launch_workers(args: argparse.Namespace, extra_engine_args_path: Path)
         for runtime in runtimes:
             runtime.shutdown()
 
-        # Clean up per-worker temp files
-        for temp_file in per_worker_temp_files:
-            try:
-                temp_file.unlink()
-            except Exception:
-                pass
-
 
 def main():
     uvloop.run(worker())
-
-
-if __name__ == "__main__":
-    main()

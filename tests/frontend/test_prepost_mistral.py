@@ -12,21 +12,23 @@ import pytest
 
 from .common import check_module_available
 
-HAS_VLLM = check_module_available("vllm")
+HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
 if HAS_VLLM:
     from mistral_common.tokens.tokenizers.base import SpecialTokens
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
         ChatCompletionToolsParam,
     )
-    from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.outputs import CompletionOutput
-    from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
+    from vllm.reasoning import ReasoningParserManager
     from vllm.sampling_params import SamplingParams
     from vllm.tokenizers.mistral import MistralTokenizer
     from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 
     from dynamo.frontend.prepost import StreamingPostProcessor
+    from dynamo.frontend.vllm_protocol import FunctionDefinition
+
+    MistralReasoningParser = ReasoningParserManager.get_reasoning_parser("mistral")
 else:
     # Fake some types so that `pre-commit` passes
     class MistralTokenizer:
@@ -39,6 +41,7 @@ else:
 
 pytestmark = [
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,  # "Hardware"
     pytest.mark.pre_merge,  # "Lifecyle"
     pytest.mark.unit,  # "Test Type"
@@ -100,6 +103,32 @@ class MockMistralTokenizer(MistralTokenizer):
     def get_vocab(self):
         return dict(self._vocab_dict)
 
+    def decode(self, ids, skip_special_tokens=False):
+        del skip_special_tokens
+        if isinstance(ids, int):
+            ids = [ids]
+        token_text = {
+            TOOL_CALLS_TOKEN_ID: "[TOOL_CALLS]",
+            EOS_TOKEN_ID: "",
+            32: "",
+            1095: "_",
+            1125: "}",
+            2811: '":',
+            4964: '"]',
+            6415: "berg",
+            8318: "uten",
+            8928: "search",
+            11898: "_g",
+            12161: ' ["',
+            12796: " books",
+            19227: '{"',
+            31872: "James",
+            32493: "books",
+            58617: " Joyce",
+            62244: "terms",
+        }
+        return "".join(token_text[token_id] for token_id in ids)
+
     @property
     def all_special_tokens(self):
         return self._special_tokens
@@ -116,191 +145,135 @@ OUTPUTS_INTERVAL_1 = [
         index=0,
         text="[TOOL_CALLS]",
         token_ids=[9],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="search",
         token_ids=[8928],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_g",
         token_ids=[11898],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="uten",
         token_ids=[8318],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="berg",
         token_ids=[6415],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_",
         token_ids=[1095],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="books",
         token_ids=[32493],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="",
         token_ids=[32],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='{"',
         token_ids=[19227],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="search",
         token_ids=[8928],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_",
         token_ids=[1095],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="terms",
         token_ids=[62244],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='":',
         token_ids=[2811],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' ["',
         token_ids=[12161],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="James",
         token_ids=[31872],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" Joyce",
         token_ids=[58617],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='"]',
         token_ids=[4964],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="}",
         token_ids=[1125],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="",
         token_ids=[2],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -315,11 +288,8 @@ OUTPUTS_INTERVAL_20 = [
         index=0,
         text="[TOOL_CALLS]",
         token_ids=[9],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -345,11 +315,9 @@ OUTPUTS_INTERVAL_20 = [
             1125,
             2,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -657,9 +625,9 @@ def test_mistral_tool_call(processor):
         "[TOOL_CALLS]" not in all_content
     ), f"Raw [TOOL_CALLS] markup leaked into content: {all_content!r}"
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: remaps "stop" → "tool_calls" per openai-openapi.
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
 
 @pytest.mark.vllm
@@ -713,6 +681,6 @@ def test_mistral_tool_call_interval_20(
         "[TOOL_CALLS]" not in all_content
     ), f"Raw [TOOL_CALLS] markup leaked into content: {all_content!r}"
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: remaps "stop" → "tool_calls" per openai-openapi.
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]

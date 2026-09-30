@@ -43,7 +43,7 @@ func TestExtraPodSpec_MarshalJSON(t *testing.T) {
 			name: "nil Containers omits containers key entirely",
 			spec: ExtraPodSpec{
 				PodSpec: &corev1.PodSpec{
-					NodeSelector: map[string]string{"gpu": "true"},
+					NodeSelector: map[string]string{"gpu": annotationTrue},
 				},
 			},
 			wantJSON: `{"nodeSelector":{"gpu":"true"}}`,
@@ -110,7 +110,7 @@ func TestExtraPodSpec_MarshalJSON_RoundTrip(t *testing.T) {
 	original := ExtraPodSpec{
 		PodSpec: &corev1.PodSpec{
 			Containers:   []corev1.Container{{Name: "main", Image: "nginx"}},
-			NodeSelector: map[string]string{"gpu": "true"},
+			NodeSelector: map[string]string{"gpu": annotationTrue},
 			Tolerations:  []corev1.Toleration{{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists}},
 		},
 		MainContainer: &corev1.Container{Name: "override", Image: "custom"},
