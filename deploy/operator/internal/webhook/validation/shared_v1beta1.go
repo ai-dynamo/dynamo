@@ -27,6 +27,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
@@ -125,7 +126,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
 			}
 		}
-		if spec.Replicas != nil && *spec.Replicas != 1 {
+		// Rust EPP supports load replication while the Go EPP does not.
+		if epp.IsLegacyGoEPP(spec.EPPConfig) && spec.Replicas != nil && *spec.Replicas != 1 {
 			allErrs = append(allErrs, field.Invalid(
 				fldPath.Child("replicas"),
 				*spec.Replicas,

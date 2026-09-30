@@ -343,7 +343,6 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     eligibility: RoutingEligibility<'_>,
     block_size: u32,
 ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-    assert!(request.isl_tokens > 0);
     eligibility.validate_pinned_worker_allowed()?;
 
     if let Some(worker) = eligibility.pinned_worker() {
