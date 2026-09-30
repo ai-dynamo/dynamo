@@ -1147,7 +1147,9 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
 #[tokio::test]
 #[serial_test::serial]
 async fn output_block_accounting_tracks_grouped_chunks() {
-    for (track_output_blocks, expected_output_blocks) in [(true, 3), (false, 0)] {
+    for (track_output_blocks, expected_output_tokens, expected_output_blocks) in
+        [(true, None, 3), (true, Some(66), 3), (false, None, 0)]
+    {
         let config = KvRouterConfig {
             skip_initial_worker_wait: true,
             use_kv_events: false,
@@ -1165,6 +1167,10 @@ async fn output_block_accounting_tracks_grouped_chunks() {
         let chunks = [1_usize, 32, 15];
         let mut input = request();
         input.token_ids = (1..=prompt_tokens as u32).collect::<Vec<_>>().into();
+        input.routing = Some(RoutingHints {
+            expected_output_tokens,
+            ..Default::default()
+        });
         let input = Context::new(input);
         let (mut selection, _) = router
             .select_with_affinity(
@@ -1207,14 +1213,6 @@ async fn output_block_accounting_tracks_grouped_chunks() {
                 }))
                 .await;
         }
-        // Output updates are enqueued without waiting for their application.
-        // This idempotent, acknowledged command on the same actor is a FIFO
-        // barrier, so the load observation cannot race the output updates.
-        router
-            .kv_router()
-            .mark_prefill_completed_if_booking(guard.booking_for_test())
-            .await
-            .unwrap();
         let loads = router
             .kv_router()
             .get_potential_loads(&[], None, None, None, None)
@@ -1227,7 +1225,14 @@ async fn output_block_accounting_tracks_grouped_chunks() {
         assert_eq!(load.active_requests, 1);
         // Keep the scheduler's existing prompt accounting unchanged;
         // this regression checks only the growth caused by output.
-        let expected_blocks = initial_blocks + expected_output_blocks;
+        // The last boundary is observed at output length 33; OSL 66 gives 0.5 decay.
+        let decay = if expected_output_tokens.is_some() {
+            0.5
+        } else {
+            1.0
+        };
+        let expected_blocks =
+            ((initial_blocks + expected_output_blocks) as f64 * decay).round() as usize;
         println!(
             "track_output_blocks={track_output_blocks} prompt_tokens={prompt_tokens} output_tokens=48 block_size=16 chunks={chunks:?} initial_blocks={initial_blocks} observed_blocks={} expected_blocks={expected_blocks}",
             load.potential_decode_blocks
@@ -1249,7 +1254,7 @@ async fn output_block_accounting_tracks_grouped_chunks() {
         runtime.shutdown();
         assert_eq!(
             observed_blocks, expected_blocks,
-            "incorrect grouped-output accounting with tracking={track_output_blocks}"
+            "incorrect grouped-output accounting with tracking={track_output_blocks}, osl={expected_output_tokens:?}"
         );
     }
 }

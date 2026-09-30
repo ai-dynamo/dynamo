@@ -1694,14 +1694,15 @@ impl KvRouter {
         (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
     }
 
-    pub(crate) async fn enqueue_output_block_if_booking(
+    pub(crate) async fn add_output_blocks_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
         self.selection
             .scheduler()
-            .enqueue_output_block_if_booking(booking, decay_fraction)
+            .add_output_blocks_if_booking(booking, num_blocks, decay_fraction)
             .await
     }
 

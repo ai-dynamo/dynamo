@@ -1156,7 +1156,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 return Err(self.stale_request_not_found(request_id, worker, "add_output_block"));
             };
             let mut seq = table.slots[idx].sequences.write();
-            let Some(_new_block_hash) = seq.add_output_block(request_id, decay_fraction) else {
+            let Some(_new_block_hash) = seq.add_output_blocks(request_id, 1, decay_fraction) else {
                 return Err(SequenceError::RequestNotFound {
                     request_id: request_id.clone(),
                 });
@@ -1171,13 +1171,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    pub(crate) fn add_output_block_if_booking(
+    pub(crate) fn add_output_blocks_if_booking(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
         attempt_id: AttemptId,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        if num_blocks == 0 {
+            return Ok(LifecycleMutationOutcome::NoChange);
+        }
         let expected = RequestBooking { worker, attempt_id };
         let load = {
             let table = self.workers.read();
@@ -1191,7 +1195,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if self.request_index.booking_for(request_id) != Some(expected) {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
-            let Some(_new_block_hash) = seq.add_output_block(request_id, decay_fraction) else {
+            let Some(_new_block_hash) =
+                seq.add_output_blocks(request_id, num_blocks, decay_fraction)
+            else {
                 return Ok(LifecycleMutationOutcome::NoChange);
             };
             let load = seq.worker_load_snapshot();
@@ -2287,7 +2293,7 @@ mod tests {
         );
         assert_eq!(
             sequences
-                .add_output_block_if_booking(&request_id, worker, first_attempt, None)
+                .add_output_blocks_if_booking(&request_id, worker, first_attempt, 3, None)
                 .unwrap(),
             LifecycleMutationOutcome::NoChange
         );
@@ -2411,17 +2417,30 @@ mod tests {
     }
 
     #[test]
-    fn output_block_observes_load_without_publishing_or_replication() {
+    fn output_blocks_observe_load_once_without_publishing_or_replication() {
         let (sequences, state) = make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "output".to_string();
 
-        sequences
-            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+        let attempt_id = sequences
+            .add_request_admitted(local_sequence_request(&request_id, worker), Instant::now())
             .unwrap();
         state.clear();
 
-        sequences.add_output_block(&request_id, None).unwrap();
+        assert_eq!(
+            sequences
+                .add_output_blocks_if_booking(&request_id, worker, attempt_id, 0, Some(0.0))
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert!(state.observations.lock().unwrap().is_empty());
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&3));
+        assert_eq!(
+            sequences
+                .add_output_blocks_if_booking(&request_id, worker, attempt_id, 5, Some(0.5))
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
 
         assert!(state.events.lock().unwrap().is_empty());
         assert!(state.single_loads.lock().unwrap().is_empty());

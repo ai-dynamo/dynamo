@@ -578,16 +578,6 @@ pub(super) struct RequestGuard {
 }
 
 impl RequestGuard {
-    #[cfg(test)]
-    pub(super) fn booking_for_test(
-        &self,
-    ) -> &dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor {
-        self.cleanup
-            .lifecycle()
-            .expect("expected a tracked booking")
-            .booking()
-    }
-
     pub(super) fn new_kv(
         chooser: Arc<KvRouter>,
         request_metrics: Arc<RouterRequestMetrics>,
@@ -818,21 +808,20 @@ impl RequestGuard {
         if let RequestCleanup::Kv(cleanup) = &self.cleanup
             && let Some(lifecycle) = cleanup.lifecycle()
             && lifecycle.is_active()
+            && let Err(error) = cleanup
+                .chooser
+                .add_output_blocks_if_booking(
+                    lifecycle.booking(),
+                    update.num_blocks,
+                    update.decay_fraction,
+                )
+                .await
         {
-            for _ in 0..update.num_blocks {
-                if let Err(error) = cleanup
-                    .chooser
-                    .enqueue_output_block_if_booking(lifecycle.booking(), update.decay_fraction)
-                    .await
-                {
-                    tracing::warn!(
-                        request_id = %cleanup.context_id,
-                        %error,
-                        "Failed to add output block"
-                    );
-                    break;
-                }
-            }
+            tracing::warn!(
+                request_id = %cleanup.context_id,
+                %error,
+                "Failed to add output blocks"
+            );
         }
 
         self.observability.observe_output_block_boundary();

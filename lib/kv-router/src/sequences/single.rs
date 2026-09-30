@@ -265,24 +265,31 @@ impl ActiveSequences {
         Some(membership_delta)
     }
 
-    /// Add an output block with a random hash and optional fractional decay weight.
+    /// Append output blocks and apply the optional decay weight once.
     ///
     /// This is used during generation to track output blocks as they are created.
-    pub(super) fn add_output_block(
+    pub(super) fn add_output_blocks(
         &mut self,
         request_id: &RequestId,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Option<SequenceHash> {
+        if num_blocks == 0 {
+            return None;
+        }
         let Some(request_state) = self.requests.get_mut(request_id) else {
-            tracing::warn!("Request {request_id} not found for add_output_block");
+            tracing::warn!("Request {request_id} not found for add_output_blocks");
             return None;
         };
 
         // TODO: Output blocks still use random hashes, so indexing them mainly simplifies
         // generic block bookkeeping and usually adds little real reuse signal.
-        let random_hash: SequenceHash = Uuid::new_v4().as_u64_pair().0;
-        self.blocks
-            .append_output(&mut request_state.blocks, random_hash);
+        let mut last_hash = None;
+        for _ in 0..num_blocks {
+            let hash = Uuid::new_v4().as_u64_pair().0;
+            self.blocks.append_output(&mut request_state.blocks, hash);
+            last_hash = Some(hash);
+        }
 
         if let Some(frac) = decay_fraction {
             self.blocks
@@ -290,7 +297,7 @@ impl ActiveSequences {
         }
 
         self.validate_state();
-        Some(random_hash)
+        last_hash
     }
 
     /// Force expiry of stale requests if the timer has elapsed.
@@ -484,7 +491,7 @@ mod tests {
         );
 
         let output_hash = seq_manager
-            .add_output_block(&"r1".to_string(), Some(0.5))
+            .add_output_blocks(&"r1".to_string(), 1, Some(0.5))
             .expect("request exists");
         assert_eq!(
             seq_manager.active_block_hashes(),
@@ -580,10 +587,16 @@ mod tests {
 
         assert!(
             seq_manager
-                .add_output_block(&"r1".to_string(), Some(0.5))
+                .add_output_blocks(&"r1".to_string(), 0, Some(0.0))
+                .is_none()
+        );
+        assert_eq!(seq_manager.active_blocks(), 3);
+        assert!(
+            seq_manager
+                .add_output_blocks(&"r1".to_string(), 3, Some(0.5))
                 .is_some()
         );
-        assert_eq!(seq_manager.active_blocks(), 2);
+        assert_eq!(seq_manager.active_blocks(), 3);
 
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
@@ -593,11 +606,11 @@ mod tests {
             tracking_hint(8),
             decay_now,
         );
-        assert_eq!(seq_manager.active_blocks(), 2);
+        assert_eq!(seq_manager.active_blocks(), 3);
 
         assert!(
             seq_manager
-                .add_output_block(&"r1".to_string(), Some(0.0))
+                .add_output_blocks(&"r1".to_string(), 2, Some(0.0))
                 .is_some()
         );
         assert_eq!(seq_manager.active_blocks(), 1);
