@@ -20,6 +20,8 @@ pub struct ToolNameMap {
 }
 
 impl ToolNameMap {
+    /// Build deterministic aliases from current tools and historical calls.
+    /// Historical identities reserve names but are not available for tool selection.
     pub fn new(tools: &[Tool], input: Option<&InputParam>) -> Self {
         let mut identities = BTreeSet::new();
         for tool in tools {
@@ -88,6 +90,7 @@ impl ToolNameMap {
         result
     }
 
+    /// Return the backend alias, preserving the bare name for unknown identities.
     pub(super) fn encode(&self, namespace: Option<&str>, name: &str) -> String {
         self.by_identity
             .get(&(namespace.map(str::to_owned), name.to_owned()))
@@ -95,6 +98,7 @@ impl ToolNameMap {
             .unwrap_or_else(|| name.to_owned())
     }
 
+    /// Restore the original namespace and name, treating unknown aliases as bare names.
     pub(super) fn decode<'a>(&'a self, alias: &'a str) -> (Option<&'a str>, &'a str) {
         self.by_alias
             .get(alias)
