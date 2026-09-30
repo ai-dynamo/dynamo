@@ -1592,13 +1592,13 @@ func generateBasePodSpecWithDefaults(
 
 	// Native-sidecar engines retain their image entrypoint and user configuration.
 	container := corev1.Container{Name: commonconsts.MainContainerName}
-	if component.DynamoSidecar == nil {
+	if GetDynamoSidecar(component) == nil {
 		container, err = componentDefaults.GetBaseContainer(componentContext)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get base container: %w", err)
 		}
 	} else if GetMainContainer(component) == nil {
-		return nil, fmt.Errorf("component %q: dynamoSidecar requires a main engine container", component.ComponentName)
+		return nil, fmt.Errorf("component %q: runtime init container requires a main engine container", component.ComponentName)
 	}
 
 	orderedEnvironment := compatibility.OrderedEnvironmentVariables.Enabled(annotations)
@@ -1660,7 +1660,7 @@ func generateBasePodSpecWithDefaults(
 
 	// Native-sidecar mode does not yet support multi-node deployments.
 	// Single-node engines are launched entirely by the user.
-	if component.DynamoSidecar == nil {
+	if GetDynamoSidecar(component) == nil {
 		if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
 			return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
 		}
@@ -1722,8 +1722,8 @@ func generateBasePodSpecWithDefaults(
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
 	// Merge runtime defaults only into the selected restartable init container.
-	if component.DynamoSidecar != nil {
-		if err := mergeDynamoSidecarDefaults(&podSpec, *component.DynamoSidecar, componentContext); err != nil {
+	if GetDynamoSidecar(component) != nil {
+		if err := mergeDynamoSidecarDefaults(&podSpec, componentContext); err != nil {
 			return nil, err
 		}
 	}
@@ -1735,7 +1735,7 @@ func generateBasePodSpecWithDefaults(
 	}
 
 	// Backend pod defaults describe the combined Python worker in standard mode.
-	if component.DynamoSidecar == nil {
+	if GetDynamoSidecar(component) == nil {
 		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
 	}
 	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
@@ -2096,8 +2096,8 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	}
 
 	// A native sidecar owns the worker runtime identity.
-	if component.DynamoSidecar != nil {
-		componentContext.RuntimeContainerName = *component.DynamoSidecar
+	if GetDynamoSidecar(component) != nil {
+		componentContext.RuntimeContainerName = commonconsts.RuntimeContainerName
 	}
 	return componentContext, nil
 }
@@ -2200,10 +2200,8 @@ func applyDGDTemplateDefaults(
 		main.Env = MergeEnvsForOrigin(dynamoDeployment.Annotations, dynamoDeployment.Spec.Env, main.Env)
 
 		// When configured, apply global env to the Dynamo sidecar as well as main.
-		if component.DynamoSidecar != nil {
-			if runtime := GetDynamoContainer(component); runtime != nil {
-				runtime.Env = MergeEnvsForOrigin(dynamoDeployment.Annotations, dynamoDeployment.Spec.Env, runtime.Env)
-			}
+		if runtime := GetDynamoSidecar(component); runtime != nil {
+			runtime.Env = MergeEnvsForOrigin(dynamoDeployment.Annotations, dynamoDeployment.Spec.Env, runtime.Env)
 		}
 	}
 
@@ -2244,7 +2242,7 @@ func applyKvTransferPolicyToWorkerComponent(
 	podTemplate := ensurePodTemplate(component)
 
 	// The runtime publishes routing topology; the engine does not consume this projection.
-	if component.DynamoSidecar == nil {
+	if GetDynamoSidecar(component) == nil {
 		ensureMainContainer(podTemplate)
 	}
 	runtime := GetDynamoContainer(component)

@@ -48,6 +48,27 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.6.0
 
+#### CRD and admission breaking changes
+
+##### Reserved runtime init container name
+
+**Change:** An init container named `runtime` activates Dynamo sidecar mode in DGD components
+and standalone DCDs, in both API versions. It must have an image and `restartPolicy: Always`.
+Dynamo defaults and runtime-version resolution target this container; `main` runs the engine.
+Only worker, prefill, and decode components support this mode. Multinode, enabled checkpoint,
+GPU memory service, and failover are rejected.
+
+**Affected:** Any deployment with an init container named `runtime`, including an unrelated
+setup container using that name.
+
+**Action:** Before upgrading, rename unrelated init containers named `runtime`. For native
+Dynamo sidecars, use `runtime` as the init-container name and specify `restartPolicy: Always`.
+If migrating from the experimental explicit selector, remove `dynamoSidecar` in the same change.
+
+**Existing deployments:** Components without a `runtime` init container retain their current
+mode. Existing components with that name adopt sidecar behavior when reconciled, which can
+change the rendered pod and trigger a rollout. Invalid combinations are rejected on updates.
+
 #### Operator behavior breaking changes
 
 ##### Environment variable order in newly created DGDs

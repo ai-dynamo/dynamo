@@ -53,17 +53,18 @@ func (d *DynamoSidecarDefaults) GetBaseContainer(context ComponentContext) (core
 	return container, nil
 }
 
-// mergeDynamoSidecarDefaults merges defaults into the named native sidecar.
+// mergeDynamoSidecarDefaults merges defaults into the runtime init container.
 // podSpec must not be nil.
-func mergeDynamoSidecarDefaults(podSpec *corev1.PodSpec, name string, context ComponentContext) error {
-	// Resolve the exact init container while preserving all other pod-template entries.
+func mergeDynamoSidecarDefaults(podSpec *corev1.PodSpec, context ComponentContext) error {
+	// Resolve the reserved init container while preserving all other pod-template entries.
+	const name = commonconsts.RuntimeContainerName
 	for i := range podSpec.InitContainers {
 		user := &podSpec.InitContainers[i]
 		if user.Name != name {
 			continue
 		}
 		if user.RestartPolicy == nil || *user.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-			return fmt.Errorf("dynamoSidecar %q requires restartPolicy Always", name)
+			return fmt.Errorf("runtime init container %q requires restartPolicy Always", name)
 		}
 
 		// User configuration overrides defaults, including entire probe handlers.
@@ -73,10 +74,10 @@ func mergeDynamoSidecarDefaults(podSpec *corev1.PodSpec, name string, context Co
 			return err
 		}
 		if err := mergeContainerByName(&base, user, context.Annotations); err != nil {
-			return fmt.Errorf("merge dynamoSidecar %q: %w", name, err)
+			return fmt.Errorf("merge runtime init container %q: %w", name, err)
 		}
 		podSpec.InitContainers[i] = base
 		return nil
 	}
-	return fmt.Errorf("dynamoSidecar %q does not match any podTemplate init container", name)
+	return fmt.Errorf("runtime init container %q does not match any podTemplate init container", name)
 }

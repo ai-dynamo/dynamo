@@ -71,7 +71,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha, &dcd.Spec)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha)...)
 
 	return validation.warnings, invalidDynamoComponentDeploymentError(dcd, allErrs)
 }
@@ -100,7 +100,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha, &newDCD.Spec)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha)...)
 
 	// Run the source-version old/new ratchet after the stateless traversal.
 	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -112,7 +112,6 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 			&newAlpha.Spec.DynamoComponentDeploymentSharedSpec,
 			&oldAlpha.Spec.DynamoComponentDeploymentSharedSpec,
 			field.NewPath("spec"),
-			newDCD.Spec.DynamoSidecar, oldDCD.Spec.DynamoSidecar,
 		)...)
 	}
 

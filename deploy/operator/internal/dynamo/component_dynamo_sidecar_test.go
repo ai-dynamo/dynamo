@@ -30,7 +30,7 @@ func TestNativeSidecarRendering(t *testing.T) {
 				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{KvTransferPolicy: &v1beta1.KvTransferPolicy{LabelKey: "topology.example/zone", Domain: "zone", Enforcement: "required"}},
 			}}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "worker", ComponentType: componentType, DynamoSidecar: ptr.To("runtime"), FrontendSidecar: ptr.To("frontend"),
+				ComponentName: "worker", ComponentType: componentType, FrontendSidecar: ptr.To("frontend"),
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
 				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"}}, Spec: corev1.PodSpec{
 					Containers: []corev1.Container{engine, {Name: "frontend", Image: "frontend:1.5.0", Env: []corev1.EnvVar{{Name: "ETCD_ENDPOINTS", Value: "frontend-etcd:2379"}}}},
@@ -113,7 +113,6 @@ func TestNativeSidecarRendering(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, children, 1)
 			for _, child := range children {
-				require.Equal(t, component.DynamoSidecar, child.Spec.DynamoSidecar)
 				childRuntime := GetDynamoContainer(&child.Spec.DynamoComponentDeploymentSharedSpec)
 				require.Equal(t, "value", envVarsToMap(childRuntime.Env)["SHARED"])
 				require.Equal(t, "required", envVarsToMap(childRuntime.Env)[commonconsts.EnvKvTransferEnforcement])
@@ -133,17 +132,63 @@ func TestMergeDynamoSidecarDefaults_ErrorPaths(t *testing.T) {
 
 	t.Run("no matching init container", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{}
-		err := mergeDynamoSidecarDefaults(podSpec, "dynamo", ctx)
-		require.ErrorContains(t, err, `"dynamo" does not match any podTemplate init container`)
+		err := mergeDynamoSidecarDefaults(podSpec, ctx)
+		require.ErrorContains(t, err, `"runtime" does not match any podTemplate init container`)
 	})
 
 	t.Run("init container missing restartPolicy Always", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{
-			InitContainers: []corev1.Container{{Name: "dynamo", Image: "runtime:1.5.0"}},
+			InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.5.0"}},
 		}
-		err := mergeDynamoSidecarDefaults(podSpec, "dynamo", ctx)
+		err := mergeDynamoSidecarDefaults(podSpec, ctx)
 		require.ErrorContains(t, err, `requires restartPolicy Always`)
 	})
+}
+
+func TestRuntimeContainerModeTransitions(t *testing.T) {
+	for _, mode := range []string{"native", "renamed", "removed", "regular"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Log("Build a native sidecar component with a versioned main image")
+			dgd := betaDGDWithRuntimeVersion(t, "runtime:1.5.0", "")
+			component := &dgd.Spec.Components[0]
+			component.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)}}
+			nativeHash := mustComputeBetaDGDWorkersSpecHash(t, dgd)
+
+			t.Log("Change the runtime location and derive mode from the resulting pod template")
+			switch mode {
+			case "renamed":
+				component.PodTemplate.Spec.InitContainers[0].Name = "setup"
+			case "removed":
+				component.PodTemplate.Spec.InitContainers = nil
+			case "regular":
+				component.PodTemplate.Spec.InitContainers = nil
+				component.PodTemplate.Spec.Containers = append(component.PodTemplate.Spec.Containers, corev1.Container{Name: "runtime", Image: "helper:latest"})
+			}
+			original := dgd.DeepCopy()
+			pod, err := GeneratePodSpecForComponent(component, BackendFrameworkVLLM, nil, dgd, RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			require.NoError(t, err)
+
+			t.Log("Check injection target, resolved version, rollout hash, and input immutability")
+			if mode == "native" {
+				require.Equal(t, "runtime", GetDynamoContainer(component).Name)
+				require.Equal(t, "1.6.0", resolvedRuntimeVersionForHash(component))
+				require.Equal(t, "true", envVarsToMap(pod.InitContainers[0].Env)["DYN_SYSTEM_ENABLED"])
+				require.NotContains(t, envVarsToMap(pod.Containers[0].Env), "DYN_SYSTEM_ENABLED")
+				require.Equal(t, nativeHash, mustComputeBetaDGDWorkersSpecHash(t, dgd))
+			} else {
+				require.Nil(t, GetDynamoSidecar(component))
+				require.Equal(t, "main", GetDynamoContainer(component).Name)
+				require.Equal(t, "1.5.0", resolvedRuntimeVersionForHash(component))
+				require.Equal(t, "true", envVarsToMap(pod.Containers[0].Env)["DYN_SYSTEM_ENABLED"])
+				require.Equal(t, component.PodTemplate.Spec.InitContainers, pod.InitContainers)
+				require.NotEqual(t, nativeHash, mustComputeBetaDGDWorkersSpecHash(t, dgd))
+				if mode == "regular" {
+					require.Equal(t, component.PodTemplate.Spec.Containers[1], pod.Containers[1])
+				}
+			}
+			require.Equal(t, original, dgd)
+		})
+	}
 }
 
 // nativeSidecarSecretsRetriever records every image lookup and only grants the runtime image a secret.

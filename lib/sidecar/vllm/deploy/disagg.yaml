@@ -19,7 +19,6 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
   - name: prefill
     type: prefill
-    dynamoSidecar: dynamo
     replicas: 1
     podTemplate:
       spec:
@@ -29,7 +28,7 @@ spec:
             medium: Memory
             sizeLimit: 10Gi
         initContainers:
-        - name: dynamo
+        - name: runtime
           image: <your-registry>/dynamo-sidecar:1.6.0
           command:
           - dynamo-vllm-sidecar
@@ -109,7 +108,6 @@ spec:
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
   - name: decode
     type: decode
-    dynamoSidecar: dynamo
     replicas: 1
     podTemplate:
       spec:
@@ -119,7 +117,7 @@ spec:
             medium: Memory
             sizeLimit: 10Gi
         initContainers:
-        - name: dynamo
+        - name: runtime
           image: <your-registry>/dynamo-sidecar:1.6.0
           command:
           - dynamo-vllm-sidecar

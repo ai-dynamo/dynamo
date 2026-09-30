@@ -166,7 +166,6 @@ func TestRuntimeVersionImageAbsenceRatcheting(t *testing.T) {
 			newSpec,
 			oldSpec,
 			field.NewPath("spec"),
-			nil, nil,
 		)
 		assertFieldPaths(t, errs, nil)
 	})
@@ -497,13 +496,13 @@ func TestValidateDynamoComponentDeploymentSharedSpecV1alpha1FrontendSidecarField
 		Envs:  []corev1.EnvVar{{Name: "TOKEN", Value: "do-not-leak-this-value"}},
 	}
 	spec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{RuntimeVersionOverride: "1.1.0", FrontendSidecar: frontendSidecar, ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}}}
-	errs := validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo", nil)
+	errs := validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo")
 	assertFieldPaths(t, errs, nil)
 	spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}, PodSpec: &corev1.PodSpec{}}
-	errs = validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo", nil)
+	errs = validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo")
 	assertFieldPaths(t, errs, nil)
 	spec.ExtraPodSpec.PodSpec.Containers = []corev1.Container{{Name: consts.FrontendSidecarContainerName}}
-	errs = validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo", nil)
+	errs = validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo")
 	assertFieldPaths(t, errs, []string{"spec.services[frontend].frontendSidecar"})
 	if errs[0].BadValue != "" {
 		t.Fatalf("error BadValue = %#v, want an empty non-sensitive scalar", errs[0].BadValue)
@@ -559,7 +558,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecV1alpha1WarningsAndErrors(t 
 	fldPath := field.NewPath("spec", "services").Key("worker")
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 
-	errs := validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "replacement", nil)
+	errs := validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "replacement")
 	if len(validation.warnings) != 2 {
 		t.Fatalf("warnings = %v, want 2 compatibility warnings", validation.warnings)
 	}
