@@ -163,6 +163,21 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     return NetworkAddress(ip_address, parsed.port).to_tcp()
 
 
+_WILDCARD_HOSTS = {"*", "0.0.0.0", "::"}
+
+
+def kv_event_connect_ip(endpoint: str) -> str:
+    """Return the address the local subscriber uses to reach SGLang's KV event publisher.
+
+    SGLang binds a wildcard endpoint without ZMQ_IPV6, so it listens on IPv4 only.
+    Loopback reaches that listener on every host, including IPv6-only hosts where the
+    host's own address is IPv6.
+    """
+    if urlparse(endpoint).hostname in _WILDCARD_HOSTS:
+        return "127.0.0.1"
+    return get_local_ip_auto()
+
+
 # Note: We use SGLang's ZmqEventPublisher.offset_endpoint_port() directly
 # to ensure perfect alignment between publisher (SGLang) and subscriber (dynamo).
 # This is the same pattern used by dynamo+vLLM.
@@ -384,7 +399,7 @@ class DynamoSglangPublisher:
                 raise ValueError(
                     "sglang kv_events_config is set but missing 'endpoint'"
                 )
-            local_ip = get_local_ip_auto()
+            connect_ip = kv_event_connect_ip(base_ep)
 
             # Determine DP attention configuration
             dp_ranks = get_local_dp_rank_range(self.server_args)
@@ -406,7 +421,7 @@ class DynamoSglangPublisher:
                     )
                     continue
 
-                zmq_ep = format_zmq_endpoint(zmq_ep, local_ip)
+                zmq_ep = format_zmq_endpoint(zmq_ep, connect_ip)
 
                 logging.info(
                     f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} "

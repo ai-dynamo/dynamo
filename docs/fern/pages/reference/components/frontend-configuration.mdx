@@ -16,7 +16,8 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 ## HTTP and networking
 
 <ParamField path="--http-host" type="string" default="0.0.0.0">
-  HTTP listen address.
+  HTTP listen address: an IPv4 or IPv6 address, with optional brackets around IPv6. `0.0.0.0`
+  accepts IPv4 connections only; on IPv6-only hosts, set `::`.
 
   Environment variable: `DYN_HTTP_HOST`
 </ParamField>
