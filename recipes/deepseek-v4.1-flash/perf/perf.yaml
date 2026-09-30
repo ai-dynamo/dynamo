@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# AIPerf 0.10.0 sequential Mooncake trace replay for the five vLLM targets.
-# Defaults to B200 aggregated, C168. Run after the deployment is ready.
+# AIPerf benchmark. Set ENDPOINT and CONCURRENCY for the selected recipe.
 apiVersion: batch/v1
 kind: Job
 metadata:

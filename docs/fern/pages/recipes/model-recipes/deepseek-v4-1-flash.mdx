@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use eight B200 or GB200 GPUs, sparse-indexer logits, and DSpark speculative decoding. H200 aggregated serving uses 16 GPUs with CUTLASS MoE, EPLB, and DSpark-3. The original SGLang targets provide deployment on GB200 without published performance measurements.
+Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use eight B200 or GB200 GPUs, sparse-indexer logits, and DSpark speculative decoding. H200 aggregated serving uses 16 GPUs with CUTLASS MoE, EPLB, and DSpark-3. SGLang recipes are also available for GB200.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -67,7 +67,7 @@ Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use ei
 <span><b>Configuration</b> CUTLASS MoE, EPLB, DSpark-3</span>
 </div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
-<span><b>Status</b> H200 disaggregated recipe is not yet available.</span>
+<span><b>Status</b> Select aggregated serving for H200.</span>
 </div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="h200" data-variant="agg disagg">
 <span><b>Status</b> No SGLang recipe for H200. Select vLLM aggregated or GB200.</span>
@@ -76,25 +76,17 @@ Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use ei
 <span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
 <span><b>GPUs</b> 8x GB200</span>
 <span><b>Layout</b> Two TP4 workers</span>
-<span><b>Configuration</b> Original day-0 deployment; no published benchmark</span>
+<span><b>Configuration</b> TP4 + EP4</span>
 </div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
 <span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
 <span><b>GPUs</b> 8x GB200</span>
 <span><b>Layout</b> One TP4 prefill worker and one TP4 decode worker</span>
-<span><b>Configuration</b> Original day-0 deployment; no published benchmark</span>
+<span><b>Configuration</b> TP4 + EP4</span>
 </div>
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="agg disagg">
 <span><b>Status</b> No SGLang recipe for B200. Select vLLM or GB200.</span>
 </div>
-</div>
-
-<div data-recipe-framework="vllm">
-
-<Warning>
-Experimental. These sources temporarily use Azure CI runtime images and require registry access. The public `1.6.0-deepseek-v4.1-flash-dev.2` image is not yet available. Qualify the rendered configuration again when changing its image.
-</Warning>
-
 </div>
 
 ## Prerequisites
@@ -112,7 +104,7 @@ Experimental. These sources temporarily use Azure CI runtime images and require 
 
 <div data-recipe-framework="vllm" data-variant="disagg">
 
-- Working RDMA devices and UCX settings qualified for the cluster. Device names, extended-resource keys, and network annotations are cluster settings.
+- RDMA devices and UCX configured for the cluster.
 
 </div>
 
@@ -132,7 +124,7 @@ export NAMESPACE=your-namespace
 
 <div data-recipe-framework="vllm">
 
-The repository contains Kustomize source files. Inspect the selected portable configuration with:
+Build the selected configuration:
 
 </div>
 <div data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
@@ -183,7 +175,7 @@ kustomize build recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic
 </div>
 <div data-recipe-framework="vllm">
 
-Point a filled private cluster Kustomization at the target's `kustomize/base/deploy.yaml`. Follow the [cluster composition guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/templates/kustomize/README.md) to validate scheduling, registry access, cache binding, and transport settings. Then inspect and apply the rendered composition:
+Use the [cluster Kustomization guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/templates/kustomize/README.md) to configure node placement, registry access, model storage, and networking. Point its resource at the target's `kustomize/base/deploy.yaml`, then apply:
 
 ```bash
 export CLUSTER_CONFIG=/path/to/your/filled-cluster-kustomization
@@ -282,17 +274,14 @@ curl -sS http://localhost:8000/v1/chat/completions \
   -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"Reply with exactly: READY"}],"temperature":0,"max_tokens":512}'
 ```
 
-Verify the response and, for disaggregated serving, a prefill-to-decode KV transfer.
+Check that the response contains an answer.
 
 ## Expected Performance
 
 <div data-recipe-framework="vllm">
 
-Measured vLLM configurations on the 64K-input / 400-output agentic workload,
-using eight GPUs per Blackwell target and 16 GPUs for H200 aggregated. Output throughput includes reasoning tokens.
-These are selected operating points, not a controlled topology-only comparison;
-Blackwell runtime qualification remains pending. H200 P0 passed on one TP4
-worker, including near-1M context; it does not qualify four-worker routing.
+Results for the agentic workload (64K input tokens, 400 output tokens), using
+eight B200/GB200 GPUs or 16 H200 GPUs. Output throughput includes reasoning tokens.
 
 | Target | Concurrency | Output tok/s/GPU | Output tok/s/user p50 |
 | --- | ---: | ---: | ---: |
@@ -302,8 +291,8 @@ worker, including near-1M context; it does not qualify four-worker routing.
 | GB200 disaggregated | 168 | 1,154.87 | 80.85 |
 | H200 aggregated | 80 | 209.18 | 51.32 |
 
-At these operating points, disaggregated configurations show higher output
-throughput and lower ITL, with longer TTFT tails. GB200 records 21% higher
+The measured disaggregated configurations have higher output throughput and
+lower inter-token latency (ITL), with longer time-to-first-token (TTFT) tails. GB200 records 21% higher
 output tok/s/GPU and 56% higher p50 output tok/s/user; TTFT p90 rises from
 3.52 s to 57.12 s.
 

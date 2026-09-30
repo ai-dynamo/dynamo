@@ -5,44 +5,36 @@ SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek-V4.1-Flash vLLM benchmark
 
-A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
-[`perf.yaml`](perf.yaml) — covers all five vLLM DGDs. It replays the trace
-at one `CONCURRENCY` value against a ready DGD frontend and
-writes raw artifacts to the shared `shared-model-cache` PVC. It uses the AIPerf
-0.10.0 container to match the recorded client version.
+Use the [AIPerf 0.10.0 Job](perf.yaml) to replay the agentic trace against a
+running deployment. Results are saved to the `shared-model-cache` volume.
 
-## Targeting a variant
+## Select a Target
 
-Edit the `env` block in [`perf.yaml`](perf.yaml). The `podAffinity` already
-lists every deployment name, so it needs no edit: only one target is deployed
-at a time and the Job lands beside whichever frontend exists.
+Set `ENDPOINT` and `CONCURRENCY` in [`perf.yaml`](perf.yaml):
 
-| Variant | `ENDPOINT` |
-| --- | --- |
-| B200 aggregated | `dsv41-flash-vllm-b200-agg-frontend:8000` |
-| B200 disaggregated | `dsv41-flash-vllm-b200-disagg-frontend:8000` |
-| GB200 aggregated | `dsv41-flash-vllm-gb200-agg-frontend:8000` |
-| GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-frontend:8000` |
-| H200 aggregated | `dsv41-flash-vllm-h200-agg-frontend:8000` |
+| Target | `ENDPOINT` | `CONCURRENCY` |
+| --- | --- | ---: |
+| B200 aggregated | `dsv41-flash-vllm-b200-agg-frontend:8000` | 168 |
+| B200 disaggregated | `dsv41-flash-vllm-b200-disagg-frontend:8000` | 184 |
+| GB200 aggregated | `dsv41-flash-vllm-gb200-agg-frontend:8000` | 168 |
+| GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-frontend:8000` | 168 |
+| H200 aggregated | `dsv41-flash-vllm-h200-agg-frontend:8000` | 80 |
 
-Set `CONCURRENCY` for the operating point being measured. The Job's default
-of 168 matches the recorded B200 aggregated point. The recorded B200
-disaggregated point uses 184; both GB200 replay points use 168; H200 aggregated uses 80. These are
-measured points, not a claim that every other concurrency was worse. Running more than one benchmark in the same namespace needs a
-distinct `metadata.name` and `labels.app` so Jobs and artifacts remain separate.
+Run one target per namespace. The benchmark Job is scheduled on the same node
+as the frontend.
 
-## SLO
+## Performance Targets
 
-Evaluate each operating point against both p50 requirements:
+The benchmark targets are:
 
-| Metric | Floor |
+| Metric (p50) | Target |
 | --- | --- |
 | Output token throughput per user | >= 50 tok/s |
 | Time to first token | < 5000 ms |
 
 > [!NOTE]
 > `total_output_tokens` counts the non-reasoning subset only. Add
-> `total_reasoning_tokens` to get what the GPU actually produced.
+> `total_reasoning_tokens` when calculating total output throughput.
 
 ## Dataset
 
@@ -51,17 +43,10 @@ The benchmark replays a
 the AIPerf 0.10.0 `mooncake_trace` dataset format with sequential sampling. Each JSONL line describes one request
 with `input_length`, `output_length`, and `hash_ids`.
 
-This is the same 64K-ISL / 400-OSL / 90%-KV-reuse agentic trace the other
-agentic recipes use, so rather than duplicate the Git LFS blob it is referenced
-from the DeepSeek-V4 family recipes through a symlink under [`traces`](traces):
-
-```text
-traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
-  -> ../../../deepseek-v4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
-```
-
-The trace contains 3,541 requests. The profiling Job saves its resolved
-`client.yaml` and trace checksum with the results.
+The [trace](traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl)
+contains 3,541 requests with approximately 64K input tokens, 400 output tokens,
+and 90% KV reuse. The Job saves its resolved `client.yaml` and trace checksum
+with the results.
 
 ## Workflow
 
@@ -75,7 +60,7 @@ See the deployment instructions in [the recipe README](../README.md).
 
 ### 2. Stage the trace on the PVC
 
-Materialize the Git LFS trace file, then copy it through a helper pod that
+Download the Git LFS trace file, then copy it through a helper pod that
 mounts `shared-model-cache`:
 
 ```bash
@@ -98,7 +83,7 @@ is done. It sleeps for 24 h so it outlives the benchmark Job.
 
 ### 3. Run the benchmark
 
-Run after the deployment is ready and the recipe smoke test passes.
+From `recipes/deepseek-v4.1-flash/perf`, run:
 
 ```bash
 kubectl apply -f perf.yaml -n ${NAMESPACE}
@@ -110,17 +95,10 @@ Results land under `/shared-model-cache/perf/<epoch>_<job-name>/trace_c<CONCURRE
 
 ## Measured Results
 
-Measured vLLM configurations on the 64K-input / 400-output agentic workload,
-using eight GPUs per Blackwell target and 16 GPUs for H200 aggregated. Output throughput includes reasoning tokens.
-These are selected operating points, not a controlled topology-only comparison;
-Blackwell runtime qualification remains pending. H200 P0 passed on one TP4
-worker, including near-1M context; it does not qualify four-worker routing.
+Results for the agentic workload (64K input tokens, 400 output tokens), using
+eight B200/GB200 GPUs or 16 H200 GPUs. Output throughput includes reasoning tokens.
 
 Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
-
-The archived H200 measurement (H20) used 350 warm-up requests followed by a KV
-reset without recreating the frontend; the generic `perf.yaml` does not
-reproduce that exact replay.
 
 | Target | Concurrency | Output tok/s/GPU | Output tok/s/user p50 |
 | --- | ---: | ---: | ---: |
@@ -144,8 +122,7 @@ Milliseconds across successful requests:
 
 ### ITL Distribution
 
-Milliseconds across **per-request average token intervals**. These are not
-percentiles of all individual token gaps pooled together.
+Milliseconds, calculated from each request's average interval between tokens.
 
 | Target | Mean | p50 | p75 | p90 | p95 | p99 | Max |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -155,7 +132,7 @@ percentiles of all individual token gaps pooled together.
 | GB200 disaggregated | 13.19 | 12.37 | 14.61 | 17.75 | 21.14 | 30.59 | 81.71 |
 | H200 aggregated | 29.33 | 19.49 | 29.90 | 54.01 | 84.55 | 183.57 | 381.82 |
 
-At these operating points, disaggregated configurations show higher output
-throughput and lower ITL, with longer TTFT tails. GB200 records 21% higher
+The measured disaggregated configurations have higher output throughput and
+lower inter-token latency (ITL), with longer time-to-first-token (TTFT) tails. GB200 records 21% higher
 output tok/s/GPU and 56% higher p50 output tok/s/user; TTFT p90 rises from
 3.52 s to 57.12 s.
