@@ -111,11 +111,25 @@ def _mock_fp32_tensor(array: np.ndarray, owner: Any = None) -> Any:
     return tensor
 
 
-def _run(handler: ClassifyWorkerHandler, request: dict) -> list[dict]:
+def _run(
+    handler: ClassifyWorkerHandler,
+    request: dict,
+    context: Any = None,
+) -> list[dict]:
     async def _collect() -> list[dict]:
-        return [response async for response in handler.generate(request)]
+        return [response async for response in handler.generate(request, context)]
 
     return asyncio.run(_collect())
+
+
+class _FakeContext:
+    """Minimal stand-in for the worker runtime context object."""
+
+    def __init__(self, request_id: str) -> None:
+        self._id = request_id
+
+    def id(self) -> str:
+        return self._id
 
 
 def _make_handler(
@@ -148,12 +162,6 @@ def _make_handler(
 
 
 class TestInitAndResolve:
-    def test_auto_resolves_single_bytes_input_and_fp32_output(self) -> None:
-        _, handler = _make_handler()
-        assert handler._input_name == "TEXT"
-        assert handler._output_name == "probs"
-        assert handler._batched is True
-
     def test_explicit_overrides_win(self) -> None:
         _, handler = _make_handler(
             inputs=[
@@ -196,10 +204,6 @@ class TestInitAndResolve:
         with pytest.raises(ValueError, match="TYPE_FP32 output tensor"):
             _make_handler(outputs=[("classes", mc.DataType.TYPE_INT32)])
 
-    def test_unbatched_model_config(self) -> None:
-        _, handler = _make_handler(max_batch_size=0)
-        assert handler._batched is False
-
 
 # ---------------------------------------------------------------------------
 # Classify happy paths
@@ -232,7 +236,6 @@ class TestClassify:
         assert entry["label"] == "positive"  # argmax(probs) == 1
         assert entry["probs"] == pytest.approx([0.1, 0.7, 0.2])
 
-        # Handler stored a BYTES tensor of shape [1, 1] on the InferRequest.
         assert model.last_request is not None
         arr = model.last_request.inputs["TEXT"]
         assert arr.shape == (1, 1)
@@ -261,7 +264,6 @@ class TestClassify:
         response = responses[0]
         assert [entry["index"] for entry in response["data"]] == [0, 1, 2]
         assert [entry["label"] for entry in response["data"]] == ["no", "yes", "no"]
-        # Batched shape [N, 1] on the request tensor.
         arr = model.last_request.inputs["TEXT"]
         assert arr.shape == (3, 1)
         assert [arr[i, 0] for i in range(3)] == [b"a", b"b", b"c"]
@@ -297,7 +299,6 @@ class TestClassify:
         assert len(responses[0]["data"]) == 1
         assert responses[0]["data"][0]["num_classes"] == 3
         assert responses[0]["data"][0]["label"] == "y"
-        # Unbatched request tensor has shape [1] rather than [1, 1].
         arr = model.last_request.inputs["TEXT"]
         assert arr.shape == (1,)
         assert arr[0] == b"single"
@@ -312,22 +313,18 @@ class TestClassify:
         responses = _run(handler, {"input": "x", "request_id": "req-42"})
         assert responses[0]["id"] == "classify-req-42"
 
-    def test_use_activation_is_accepted_but_no_op(self) -> None:
-        probs = np.array([[0.4, 0.6]], dtype=np.float32)
+    def test_context_id_is_response_id_fallback(self) -> None:
+        # When the client omits ``request_id``, the response id must fall
+        # back to the runtime context id so concurrent responses stay
+        # correlatable, matching the vLLM classify adapter.
+        probs = np.array([[0.1, 0.9]], dtype=np.float32)
         _, handler = _make_handler(
             responses=[
                 types.SimpleNamespace(outputs={"probs": _mock_fp32_tensor(probs)})
             ]
         )
-        # Passing use_activation must not fault (silent no-op is documented),
-        # and the response must still describe the argmax over the plan's
-        # already-activated probabilities.
-        responses = _run(handler, {"input": "x", "use_activation": False})
-
-        assert len(responses) == 1
-        assert len(responses[0]["data"]) == 1
-        assert responses[0]["data"][0]["probs"] == pytest.approx([0.4, 0.6])
-        assert responses[0]["data"][0]["num_classes"] == 2
+        responses = _run(handler, {"input": "x"}, context=_FakeContext("ctx-99"))
+        assert responses[0]["id"] == "classify-ctx-99"
 
     def test_row_count_mismatch_raises(self) -> None:
         # 3 inputs sent, but the model only returns 2 rows (a misconfigured
@@ -386,6 +383,46 @@ class TestValidation:
     def test_unsupported_input_type(self) -> None:
         with pytest.raises(ValueError, match="unsupported type"):
             _run(self._handler(), {"input": 42})
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("use_activation", False),
+            ("use_activation", True),
+            ("add_special_tokens", False),
+            ("add_special_tokens", True),
+            ("truncate_prompt_tokens", 128),
+            ("truncation_side", "left"),
+        ],
+    )
+    def test_unsupported_control_rejected(self, field: str, value: Any) -> None:
+        # The Triton path can neither apply nor skip these; silently ignoring
+        # them would let a client send ``truncate_prompt_tokens=128`` and get
+        # a full-length classification back. Reject explicitly with 400
+        # (ValueError → BackendError::InvalidArgument in the Rust binding).
+        with pytest.raises(ValueError, match=f"does not honor '{field}'"):
+            _run(self._handler(), {"input": "x", field: value})
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "use_activation",
+            "add_special_tokens",
+            "truncate_prompt_tokens",
+            "truncation_side",
+        ],
+    )
+    def test_unsupported_control_null_is_ignored(self, field: str) -> None:
+        # Regression: only *set* values should trip the guard. ``None`` on the
+        # wire (Option::None in classify.rs) must pass through cleanly.
+        probs = np.array([[0.5, 0.5]], dtype=np.float32)
+        _, handler = _make_handler(
+            responses=[
+                types.SimpleNamespace(outputs={"probs": _mock_fp32_tensor(probs)})
+            ]
+        )
+        responses = _run(handler, {"input": "x", field: None})
+        assert len(responses[0]["data"]) == 1
 
 
 class TestHealthProbe:

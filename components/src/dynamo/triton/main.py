@@ -115,12 +115,8 @@ async def _register_and_serve(
         "triton_model_config": triton_model_config,
     }
 
-    # Pick the model's registered surface and handler from --task. Tensor
-    # (default) keeps the KServe tensor path; classify swaps in the
-    # OpenAI /v1/classify adapter and advertises the Classify endpoint.
-    # register_model's fast path (skip HuggingFace resolve) fires for both
-    # because tensor_model_config is attached in either case; see
-    # lib/bindings/python/rust/lib.rs.
+    # Both branches take register_model's skip-HuggingFace fast path because
+    # tensor_model_config is attached; see lib/bindings/python/rust/lib.rs.
     if config.task == "classify":
         model_input = ModelInput.Text
         model_type = ModelType.Classify
@@ -162,10 +158,8 @@ def _build_handler(
 ):
     """Instantiate the request handler for the model's declared task."""
     if config.task == "classify":
-        # Re-parse the config protobuf so the classify handler can auto-detect
-        # the sole BYTES input and FP32 output tensor names. Reserializing
-        # is O(model), one call per model at startup — negligible next to
-        # server.start().
+        # Classify handler needs the parsed config to auto-detect the sole
+        # BYTES input and FP32 output tensor names.
         parsed_config = mc.ModelConfig.FromString(triton_model_config_bytes)
         return ClassifyWorkerHandler(
             server,

@@ -228,7 +228,7 @@ The response shape mirrors vLLM's `/classify`:
 
 - Text input only (`"input": "..."` or `"input": ["..."]`); token-ID variants (`Tokens` / `TokenBatch`) return HTTP 400.
 - Pooling (`/v1/pooling`) is not yet served by this worker; requests with `encoding_format` set are rejected.
-- `use_activation` is accepted for wire compatibility but silently ignored — the Triton model plan owns the classify head's activation and this worker cannot toggle it.
+- `use_activation`, `add_special_tokens`, `truncate_prompt_tokens`, and `truncation_side` are rejected with HTTP 400. The Triton model plan owns tokenization and the classify head's activation, so this worker can neither apply nor skip them; a silent no-op would let clients relying on those semantics get a different classification per backend.
 - To serve the same underlying Triton model on both `/v2/models/{name}/infer` (tensor) and `/v1/classify`, run two worker processes against the same `--model-repository` — one with the default `--task=tensor` and one with `--task=classify`.
 - Model aliases (multiple served names for one card) are not honored on this path.
 

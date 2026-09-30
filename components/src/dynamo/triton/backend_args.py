@@ -403,13 +403,6 @@ class DynamoTritonArgGroup(DynamoArgGroup):
             help="Host policy as '<name>,<setting>=<value>'. May be repeated.",
         )
 
-        # -- Dynamo Endpoint Options ---------------------------------------
-        # These pick which OpenAI surface the worker registers on the Dynamo
-        # frontend. ``tensor`` is the default: the model advertises the KServe
-        # tensor path (``POST /v2/models/{name}/infer`` on the frontend gRPC
-        # side, and the Dynamo tensor request wire). ``classify`` swaps in the
-        # ``ClassifyWorkerHandler`` and registers the model under
-        # ``ModelType.Classify`` so ``POST /v1/classify`` reaches this worker.
         endpoint_group = parser.add_argument_group("Dynamo Endpoint Options")
         add_argument(
             endpoint_group,

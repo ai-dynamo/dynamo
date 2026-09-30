@@ -145,31 +145,26 @@ class ClassifyWorkerHandler:
                 "that adds pooling support to this worker"
             )
 
-        async for response in self._generate_classify(request):
+        async for response in self._generate_classify(request, context):
             yield response
 
     # ------------------------------------------------------------------
     # Classify path
     # ------------------------------------------------------------------
 
-    async def _generate_classify(self, request: dict) -> AsyncGenerator[dict, None]:
+    async def _generate_classify(
+        self, request: dict, context: Any = None
+    ) -> AsyncGenerator[dict, None]:
         model_name = request.get("model") or self._model.name
         prompts = _extract_text_input(request.get("input"))
+        _reject_unsupported_controls(request)
 
-        # Triton bakes the activation into the model plan (the classify head's
-        # softmax/sigmoid lives inside the TensorRT / ONNX graph), so we can
-        # neither apply nor skip it from here. Rejecting the flag would break
-        # clients that send the vLLM default; silently ignoring it and logging
-        # is the pragmatic choice. Documented as a limit in the Triton overview.
-        use_activation = request.get("use_activation")
-        if use_activation is not None:
-            logger.debug(
-                "use_activation=%s ignored; the Triton model plan owns the "
-                "output activation and this handler cannot toggle it",
-                use_activation,
-            )
-
-        response_request_id = request.get("request_id") or ""
+        # Mirror vLLM's fallback so concurrent classify responses stay
+        # correlatable even when the client omits ``request_id``. Context
+        # is None on unit-test call sites that bypass the worker runtime.
+        response_request_id = request.get("request_id") or (
+            context.id() if context is not None else ""
+        )
 
         # Send the whole batch through Triton in one InferRequest so the
         # backend's dynamic batcher sees them together. Each response tensor
@@ -279,6 +274,31 @@ class ClassifyWorkerHandler:
 # ---------------------------------------------------------------------------
 # Input parsing
 # ---------------------------------------------------------------------------
+
+
+# NvCreateClassifyRequest exposes tokenization and activation controls that the
+# vLLM adapter honors during encode. The Triton path cannot: the tokenizer and
+# classify-head activation live inside the model plan and are not reachable
+# from a Python InferRequest. Rejecting the fields explicitly keeps the wire
+# contract honest: clients that rely on them get a 400 instead of a silently
+# different classification result.
+_UNSUPPORTED_CLASSIFY_CONTROLS: Final[tuple[str, ...]] = (
+    "use_activation",
+    "add_special_tokens",
+    "truncate_prompt_tokens",
+    "truncation_side",
+)
+
+
+def _reject_unsupported_controls(request: dict) -> None:
+    for field in _UNSUPPORTED_CLASSIFY_CONTROLS:
+        if request.get(field) is not None:
+            raise ValueError(
+                f"the Triton classify worker does not honor '{field}'; the "
+                "Triton model plan owns tokenization and the classify head's "
+                "activation. Send the field unset, or run the model behind a "
+                "backend that applies it (vLLM)."
+            )
 
 
 def _extract_text_input(input_field: Any) -> list[str]:
