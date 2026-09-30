@@ -302,7 +302,7 @@ spec:
             - name: UCX_TLS
               value: tcp
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 6
               httpGet:

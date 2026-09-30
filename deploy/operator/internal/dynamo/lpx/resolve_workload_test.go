@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
 
@@ -328,128 +327,6 @@ func TestResolveWorkloadPreservesAuthoredLaunch(t *testing.T) {
 	require.Equal(t, before, dgd)
 }
 
-func TestResolveWorkloadChecksConductorContainerNamesForSelectedBuild(t *testing.T) {
-	t.Log("Acquire LPU-only and hybrid builds that select different runtime container identities")
-	lpuSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
-	hybridFixture := newV2CompilerFixture()
-	hybridFixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	hybridFixture.selectedPropSyncChains = nil
-	hybridFixture.partitions = append(hybridFixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
-	hybridSnapshot := acquireTestSnapshot(t, writeCompilerFixture(t, hybridFixture))
-
-	t.Log("Cover independent serving, draft and hybrid template ownership")
-	tests := []struct {
-		name                 string
-		conductor            *v1beta1.ComponentRoleSpec
-		addDraft             bool
-		containerInDraft     bool
-		containerInConductor bool
-		hybrid               bool
-		wantForbidden        bool
-	}{
-		{
-			name: "independent conductor template",
-			conductor: &v1beta1.ComponentRoleSpec{
-				Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor"),
-			},
-		},
-		{
-			name: "explicit LPU-only conductor collision",
-			conductor: &v1beta1.ComponentRoleSpec{
-				Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor"),
-			},
-			containerInConductor: true,
-			wantForbidden:        true,
-		},
-		{
-			name:             "draft does not supply the conductor template",
-			conductor:        &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor")},
-			addDraft:         true,
-			containerInDraft: true,
-		},
-		{
-			name: "hybrid with explicit conductor template",
-			conductor: &v1beta1.ComponentRoleSpec{
-				Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("cyborg"),
-			},
-			containerInConductor: true,
-			hybrid:               true,
-		},
-	}
-
-	for _, test := range tests {
-		for _, containerList := range []string{"containers", "initContainers"} {
-			t.Run(test.name+"/"+containerList, func(t *testing.T) {
-				t.Log("Author the serving component and its optional independent draft")
-				target := testLPXComponent("target", "build",
-					v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("agent")},
-				)
-				if test.conductor != nil {
-					target.Roles = append(target.Roles, *test.conductor.DeepCopy())
-				}
-				dgd := newSelectedTestDGD(t, "selected", target)
-				if test.addDraft {
-					dgd.Spec.Components = append(dgd.Spec.Components, testLPXComponent("draft", "build",
-						v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("draft")},
-					))
-				}
-
-				t.Log("Provide GPU resources only when selecting a hybrid runtime")
-				snapshot := lpuSnapshot
-				if test.hybrid {
-					snapshot = hybridSnapshot
-					for _, role := range dgd.Spec.Components[0].Roles {
-						if role.PodTemplate != nil {
-							role.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
-								corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
-							}
-						}
-					}
-				}
-
-				t.Log("Add one conductor-named container to the selected authored role template")
-				componentIndex := 0
-				if test.containerInDraft {
-					componentIndex = 1
-				}
-				roleIndex := 0
-				if test.containerInConductor {
-					roleIndex = 1
-				}
-				podSpec := &dgd.Spec.Components[componentIndex].Roles[roleIndex].PodTemplate.Spec
-				container := corev1.Container{Name: "conductor", Image: "sidecar"}
-				containerIndex := 0
-				if containerList == "initContainers" {
-					podSpec.InitContainers = append(podSpec.InitContainers, container)
-				} else {
-					containerIndex = len(podSpec.Containers)
-					podSpec.Containers = append(podSpec.Containers, container)
-				}
-				before := dgd.DeepCopy()
-
-				t.Log("Defer conductor-name checks until the immutable build has been acquired")
-				_, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), unreachableBuildSnapshotSource{})
-				require.ErrorIs(t, err, ErrBuildSnapshotAcquisition)
-
-				t.Log("Reject only actual conductor collisions for the selected runtime")
-				selected, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticBuildSnapshotSource{"build": snapshot})
-				if test.wantForbidden {
-					namePath := field.NewPath("spec", "components").Index(componentIndex).Child("roles").Index(roleIndex).Child("podTemplate", "spec", containerList).Index(containerIndex).Child("name")
-					want := field.Forbidden(namePath, `LPX reserves "conductor" for the materialized role container`)
-					require.ErrorContains(t, err, want.Error())
-					require.NotErrorIs(t, err, ErrBuildSnapshotAcquisition)
-				} else {
-					require.NoError(t, err)
-					if test.hybrid {
-						require.Equal(t, PipelineLPX, selected.Pipeline())
-					}
-				}
-				require.Equal(t, before, dgd)
-			})
-		}
-	}
-}
-
 func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 	t.Log("Author two LPU-only workloads with different builds and replica counts")
 	dgd := newSelectedTestDGD(t, "graph", v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -480,14 +357,10 @@ func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 	}
 	require.Equal(t, before, dgd)
 
-	t.Log("Validate the second conductor and report its index in the complete graph")
+	t.Log("Require a singleton conductor independently of component replica counts")
 	conductor := dgd.GetComponentByName("second").ComponentRole(v1beta1.ComponentRoleLPXConductor)
-	conductor.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "sidecar"}}
-	_, err := ResolveWorkload(t.Context(), dgd, groups["second"], staticBuildSnapshotSource{"second-build": snapshot})
-	require.ErrorContains(t, err, "spec.components[2].roles[1].podTemplate.spec.initContainers[0].name")
-	conductor.PodTemplate.Spec.InitContainers = nil
 	conductor.Replicas = ptr.To(int32(2))
-	_, err = ResolveWorkload(t.Context(), dgd, groups["second"], staticBuildSnapshotSource{"second-build": snapshot})
+	_, err := ResolveWorkload(t.Context(), dgd, groups["second"], staticBuildSnapshotSource{"second-build": snapshot})
 	require.ErrorContains(t, err, `component "second" conductor replicas must be one`)
 }
 

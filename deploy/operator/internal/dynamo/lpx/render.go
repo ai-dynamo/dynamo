@@ -262,7 +262,6 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 		}
 		configureNodeLocalConductorRuntime(conductorPodSpec, allocation)
 	}
-	configureAgentIdentity(agentPodSpec)
 
 	return nil
 }

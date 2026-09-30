@@ -96,7 +96,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-agent:test
-            name: agent
+            name: main
             resources:
               limits:
                 lpu.nvidia.com/lpu: "8"
@@ -181,7 +181,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-conductor:test
-            name: conductor
+            name: main
             resources: {}
             volumeMounts:
             - mountPath: /models

@@ -145,6 +145,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			require.Same(t, pcs, rendered)
 			require.Equal(t, projection.Digest().String(), rendered.Spec.Template.PodCliqueScalingGroupConfigs[0].Annotations[WorkloadDigestAnnotation])
 			for _, clique := range rendered.Spec.Template.Cliques {
+				require.Equal(t, "main", clique.Spec.PodSpec.Containers[0].Name)
 				require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
 					require.Equal(t, projection.CompilerSnapshotDigest(), clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
@@ -254,13 +255,40 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
 	source := newSelectedTestDGD(t, "specdecode", draft, target)
+
+	t.Log("Keep role-named sidecars and explicit main-container references in every template")
+	for _, component := range source.Spec.Components {
+		for _, role := range component.Roles {
+			spec := &role.PodTemplate.Spec
+			spec.Containers = append(spec.Containers, corev1.Container{
+				Name: "agent", Image: "sidecar", Env: []corev1.EnvVar{{
+					Name: "MAIN_CPU", ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
+						ContainerName: "main", Resource: "limits.cpu",
+					}},
+				}},
+			})
+			spec.InitContainers = append(spec.InitContainers, corev1.Container{Name: "conductor", Image: "setup"})
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "resources", VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{
+					Path: "main-memory", ResourceFieldRef: &corev1.ResourceFieldSelector{
+						ContainerName: "main", Resource: "limits.memory",
+					},
+				}}},
+			}})
+		}
+	}
+
+	t.Log("Assign distinct runtime settings to each component and conductor")
 	stages := make(map[string]corev1.PodTemplateSpec)
 	for _, component := range source.Spec.Components {
 		template := component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
 		template.Labels = map[string]string{"owner": component.ComponentName}
 		template.Annotations = map[string]string{"owner": component.ComponentName}
 		template.Spec.Containers[0].Image = component.ComponentName + "-runtime"
-		template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "AUTHORED_STAGE", Value: component.ComponentName}}
+		template.Spec.Containers[0].Env = []corev1.EnvVar{
+			{Name: "AUTHORED_STAGE", Value: component.ComponentName},
+			{Name: "CONTAINER_NAME", Value: "main"},
+		}
 		template.Spec.Tolerations = []corev1.Toleration{{Key: "custom.example/stage", Operator: corev1.TolerationOpEqual, Value: component.ComponentName}}
 		stages[component.ComponentName] = *template.DeepCopy()
 	}
@@ -277,6 +305,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 		Requests: conductorResources.DeepCopy(), Limits: conductorResources.DeepCopy(),
 	}
 	conductorTemplate.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "CONTAINER_NAME", Value: "main"},
 		{Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}"},
 		{Name: "NOVA_PIPELINE_TYPE", Value: "SpecDecode"},
 		{Name: "NOVA_MAX_SWA_DKVC_BLOCKS_DRAFT", Value: "2"},
@@ -297,6 +326,17 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 		Stages: stages, Conductor: conductorTemplate.DeepCopy(),
 	})
 	require.NoError(t, err)
+
+	t.Log("Preserve container identity and references while materializing distinct Pod roles")
+	for _, clique := range templates.Cliques {
+		spec := &clique.Spec.PodSpec
+		require.Equal(t, "main", spec.Containers[0].Name)
+		require.Equal(t, "main", testContainerEnvValue(spec.Containers[0].Env, "CONTAINER_NAME"))
+		require.Equal(t, conductorTemplate.Spec.Containers[1:], spec.Containers[1:])
+		require.Equal(t, conductorTemplate.Spec.InitContainers, spec.InitContainers)
+		require.Contains(t, spec.Volumes, conductorTemplate.Spec.Volumes[len(conductorTemplate.Spec.Volumes)-1])
+		require.Contains(t, []string{lpxv1alpha1.PodRoleAgent, lpxv1alpha1.PodRoleConductor}, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
+	}
 
 	t.Log("Retain each authored component's image and metadata on its Agent cliques")
 	pcs.Spec.Template.Cliques = templates.Cliques

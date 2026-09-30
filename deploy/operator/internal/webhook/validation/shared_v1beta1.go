@@ -48,16 +48,15 @@ func (v *sharedValidation) validatePodTemplateSpec(template *corev1.PodTemplateS
 	return append(allErrs, v.validatePodSpec(&template.Spec, fldPath.Child("spec"), role)...)
 }
 
-// validatePodSpec protects LPX-owned container names, addressing, and placement.
+// validatePodSpec requires an LPX runtime container and protects controller-owned addressing and placement.
 // spec and fldPath are non-nil; Kubernetes schema validation runs before this method.
 func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.Path, role string) field.ErrorList {
 	var allErrs field.ErrorList
-	agent := role == nvidiacomv1beta1.ComponentRoleLPXAgent
 	if !hasContainerNamed(spec.Containers, consts.MainContainerName) {
 		allErrs = append(allErrs, field.Required(fldPath.Child("containers"), fmt.Sprintf("LPX %s component requires a %q runtime container", role, consts.MainContainerName)))
 	}
 
-	// Agent names are build-independent; conductor names depend on the compiled execution mode.
+	// Every authored container needs an image, including initialization containers.
 	for _, group := range []struct {
 		name       string
 		containers []corev1.Container
@@ -68,9 +67,6 @@ func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.
 		for index, container := range group.containers {
 			if strings.TrimSpace(container.Image) == "" {
 				allErrs = append(allErrs, field.Required(fldPath.Child(group.name).Index(index).Child("image"), "must specify a non-empty image"))
-			}
-			if agent && container.Name == nvidiacomv1beta1.ComponentRoleLPXAgent {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child(group.name).Index(index).Child("name"), fmt.Sprintf("LPX reserves %q for the materialized role container", container.Name)))
 			}
 		}
 	}
@@ -89,7 +85,7 @@ func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.
 	if len(spec.TopologySpreadConstraints) != 0 {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("topologySpreadConstraints"), "LPX owns role placement"))
 	}
-	if !agent {
+	if role != nvidiacomv1beta1.ComponentRoleLPXAgent {
 		return allErrs
 	}
 
