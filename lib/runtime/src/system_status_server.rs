@@ -67,7 +67,19 @@ impl SystemStatusServerInfo {
     /// used so IPv4 and IPv6 are never combined.
     pub fn advertised_socket_addr(&self) -> SocketAddr {
         match advertised_socket_addr(self.socket_addr, &DefaultIpResolver) {
-            Ok(address) => address,
+            Ok(address) => {
+                if self.socket_addr.ip().is_unspecified() && address.ip().is_loopback() {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        tracing::warn!(
+                            bind = %self.socket_addr,
+                            advertised = %address,
+                            "System status server found no non-loopback address in the bound family, so remote callers cannot reach the advertised address; on IPv6-only hosts, set DYN_SYSTEM_HOST=::"
+                        );
+                    });
+                }
+                address
+            }
             Err(error) => {
                 let fallback = match self.socket_addr.ip() {
                     IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
