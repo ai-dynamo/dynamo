@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Load-only selection of aggregated DGD pools from one Global View.
+//! Selection of aggregated DGD pools from one Global View.
 //!
 //! This mirrors the worker selector's eligibility, score, and pick stages at
 //! pool scope. Worker-local scheduler inputs and bookings have different
@@ -15,6 +15,7 @@ use parking_lot::Mutex;
 
 use super::PoolId;
 use super::eligibility::eligible_pools;
+use super::overlap::KvOverlapScorer;
 use super::state::{
     FreshnessPolicy, PoolRole, PoolState, PoolStateRepository, SignalState, SignalStatus,
 };
@@ -40,6 +41,8 @@ pub struct PoolDecision {
     pub normalized_by_max_concurrency: bool,
     pub cost: f64,
     pub load_status: SignalStatus,
+    /// Fresh request-specific CKF estimate, when a compatible producer exists.
+    pub matched_prefix_tokens: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +92,34 @@ impl LoadPoolSelector {
     /// capacity, compare pressure per slot; otherwise compare raw counts for
     /// the first homogeneous Mocker deployment.
     pub fn select(&self, model: &str, now_unix_ms: u64) -> Option<PoolDecision> {
+        self.select_inner(model, now_unix_ms, None)
+    }
+
+    /// Prefer the largest fresh cached prefix, then use the existing load
+    /// ranking to break ties. Missing or stale CKF is treated as no preference,
+    /// so it never makes an otherwise ready pool ineligible. This first policy
+    /// is intended for requests whose exact serving token IDs are available.
+    /// It deliberately does not price WAN latency or convert cached tokens into
+    /// time saved; those terms need measured calibration before general use.
+    pub fn select_with_overlap(
+        &self,
+        model: &str,
+        token_ids: &[u32],
+        scorer: &dyn KvOverlapScorer,
+        now_unix_ms: u64,
+    ) -> Option<PoolDecision> {
+        if token_ids.is_empty() {
+            return self.select(model, now_unix_ms);
+        }
+        self.select_inner(model, now_unix_ms, Some((scorer, token_ids)))
+    }
+
+    fn select_inner(
+        &self,
+        model: &str,
+        now_unix_ms: u64,
+        overlap: Option<(&dyn KvOverlapScorer, &[u32])>,
+    ) -> Option<PoolDecision> {
         let pools: Vec<_> = eligible_pools(
             self.repository.as_ref(),
             model,
@@ -106,6 +137,22 @@ impl LoadPoolSelector {
             .iter()
             .filter(|pool| observed_requests(pool, model).is_some())
             .all(|pool| pool.capacity.max_concurrency.is_some_and(|value| value > 0));
+        // Token hashing and CKF lookups can be expensive. Finish them before
+        // taking the assignment lock shared by concurrent Router requests.
+        let overlap_scores = overlap.map(|(scorer, token_ids)| {
+            pools
+                .iter()
+                .map(|pool| {
+                    let score = matches!(
+                        pool.signal_status.kv_overlap.state,
+                        SignalState::Complete | SignalState::Degraded
+                    )
+                    .then(|| scorer.estimate_matched_prefix_tokens(&pool.pool_id, model, token_ids))
+                    .flatten();
+                    (pool.pool_id.clone(), score)
+                })
+                .collect::<HashMap<_, _>>()
+        });
         let mut assignments = self.assignments.lock();
         let mut best: Option<PoolDecision> = None;
         for pool in &pools {
@@ -119,6 +166,9 @@ impl LoadPoolSelector {
             }
 
             let observed = observed_requests(pool, model);
+            let matched_prefix_tokens = overlap_scores
+                .as_ref()
+                .and_then(|scores| scores.get(&pool.pool_id).copied().flatten());
             let pressure = observed.unwrap_or(0).saturating_add(local.count);
             let cost = if observed.is_some() && normalize {
                 pressure as f64 / pool.capacity.max_concurrency.unwrap() as f64
@@ -139,10 +189,11 @@ impl LoadPoolSelector {
                 normalized_by_max_concurrency: observed.is_some() && normalize,
                 cost,
                 load_status: pool.signal_status.load.clone(),
+                matched_prefix_tokens,
             };
             if best
                 .as_ref()
-                .is_none_or(|current| cheaper(&decision, current))
+                .is_none_or(|current| cheaper(&decision, current, overlap.is_some()))
             {
                 best = Some(decision);
             }
@@ -176,7 +227,14 @@ fn observed_requests(pool: &PoolState, model: &str) -> Option<u64> {
         .checked_add(load.output_generation_requests?)
 }
 
-fn cheaper(candidate: &PoolDecision, current: &PoolDecision) -> bool {
+fn cheaper(candidate: &PoolDecision, current: &PoolDecision, prefer_overlap: bool) -> bool {
+    if prefer_overlap {
+        let candidate_hit = candidate.matched_prefix_tokens.unwrap_or(0);
+        let current_hit = current.matched_prefix_tokens.unwrap_or(0);
+        if candidate_hit != current_hit {
+            return candidate_hit > current_hit;
+        }
+    }
     let tier = |basis| match basis {
         LoadBasis::Observed => 0,
         LoadBasis::Fallback => 1,
@@ -190,7 +248,7 @@ fn cheaper(candidate: &PoolDecision, current: &PoolDecision) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use super::*;
     use crate::global_view::state::{
@@ -264,6 +322,7 @@ mod tests {
                 readiness: status(100),
                 capacity: status(100),
                 load: status(100),
+                kv_overlap: status(100),
                 ..Default::default()
             },
         }
@@ -374,6 +433,67 @@ mod tests {
         assert_eq!(third.pool_id, first.pool_id);
         assert_eq!(third.assignments_since_sample, 0);
         assert!(third.pool_id == a_id || third.pool_id == b_id);
+    }
+
+    struct FixedOverlap(HashMap<PoolId, Option<u64>>);
+
+    impl KvOverlapScorer for FixedOverlap {
+        fn estimate_matched_prefix_tokens(
+            &self,
+            pool_id: &PoolId,
+            _model: &str,
+            _token_ids: &[u32],
+        ) -> Option<u64> {
+            self.0.get(pool_id).copied().flatten()
+        }
+    }
+
+    #[test]
+    fn fresh_cached_prefix_can_override_load_and_missing_kv_falls_back() {
+        let repo = Arc::new(InMemoryPoolStateRepository::default());
+        let mut cached = pool("cached", Some(8), Some(0), None);
+        let quiet = pool("quiet", Some(0), Some(0), None);
+        let cached_id = cached.pool_id.clone();
+        let quiet_id = quiet.pool_id.clone();
+        repo.replace(cached.clone());
+        repo.replace(quiet);
+        let scorer = FixedOverlap(HashMap::from([
+            (cached_id.clone(), Some(32)),
+            (quiet_id.clone(), Some(0)),
+        ]));
+        let selector = LoadPoolSelector::new(repo.clone(), freshness());
+        assert_eq!(selector.select("model", 100).unwrap().pool_id, quiet_id);
+        let kv_choice = selector
+            .select_with_overlap("model", &[1, 2, 3, 4], &scorer, 100)
+            .unwrap();
+        assert_eq!(kv_choice.pool_id, cached_id);
+        assert_eq!(kv_choice.matched_prefix_tokens, Some(32));
+
+        cached.signal_status.kv_overlap = status(0);
+        repo.replace(cached);
+        let stale_choice = selector
+            .select_with_overlap("model", &[1, 2, 3, 4], &scorer, 1_001)
+            .unwrap();
+        assert_eq!(stale_choice.pool_id, quiet_id);
+        assert_eq!(stale_choice.matched_prefix_tokens, Some(0));
+    }
+
+    #[test]
+    fn unavailable_overlap_keeps_load_based_choice() {
+        let repo = Arc::new(InMemoryPoolStateRepository::default());
+        let mut cached = pool("cached", Some(8), Some(0), None);
+        let quiet = pool("quiet", Some(0), Some(0), None);
+        let cached_id = cached.pool_id.clone();
+        let quiet_id = quiet.pool_id.clone();
+        cached.signal_status.kv_overlap = SignalStatus::default();
+        repo.replace(cached);
+        repo.replace(quiet);
+        let scorer = FixedOverlap(HashMap::from([(cached_id, Some(32))]));
+        let decision = LoadPoolSelector::new(repo, freshness())
+            .select_with_overlap("model", &[1, 2, 3, 4], &scorer, 100)
+            .unwrap();
+        assert_eq!(decision.pool_id, quiet_id);
+        assert_eq!(decision.matched_prefix_tokens, None);
     }
 
     #[test]
