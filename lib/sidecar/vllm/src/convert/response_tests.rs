@@ -309,6 +309,7 @@ fn nonfinite_and_underflowing_logprobs_keep_associations() {
 
 #[test]
 fn prefill_handoff_is_required_only_for_successful_native_terminals() {
+    let request = request();
     for reason in [
         pb::finish_info::FinishReason::Stop,
         pb::finish_info::FinishReason::Length,
@@ -321,6 +322,14 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
                 false,
                 include_handoff.then(|| json_to_struct(handoff.clone()).unwrap()),
             );
+            if reason == pb::finish_info::FinishReason::Aborted {
+                response.prompt_info = prompt_logprob_response(
+                    &request.token_ids,
+                    &[0.0, -0.25, -0.5],
+                    &[vec![], vec![(23, -0.75)], vec![]],
+                )
+                .prompt_info;
+            }
             response
                 .outputs
                 .as_mut()
@@ -330,7 +339,7 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
                 .unwrap()
                 .finish_reason = reason as i32;
             let result =
-                ResponseState::new(&request(), DisaggregationMode::Prefill).convert(response);
+                ResponseState::new(&request, DisaggregationMode::Prefill).convert(response);
             if reason != pb::finish_info::FinishReason::Aborted && !include_handoff {
                 let error = result.unwrap_err();
                 assert!(error.to_string().contains("missing kv_transfer_params"));
@@ -340,6 +349,14 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
             if reason == pb::finish_info::FinishReason::Aborted {
                 assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
                 assert!(terminal.disaggregated_params.is_none());
+                assert_eq!(
+                    terminal.engine_data,
+                    Some(json!({"prompt_logprobs": [
+                        null,
+                        {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}},
+                        {"33": {"logprob": -0.5, "rank": 2}}
+                    ]}))
+                );
                 if !include_handoff {
                     assert!(terminal.token_ids.is_empty());
                     assert!(terminal.text.is_none());

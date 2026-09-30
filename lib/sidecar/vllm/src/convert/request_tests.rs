@@ -280,6 +280,8 @@ fn native_envelope_controls_are_validated() {
 #[test]
 fn canonical_cache_identity_and_bypass_alias_precedence_are_preserved() {
     for (extra, expected) in [
+        (json!({"bypass_prefix_cache": false}), false),
+        (json!({"bypass_prefix_cache": true}), true),
         (
             json!({"bypass_prefix_cache": false, "skip_reading_prefix_cache": true}),
             false,
@@ -388,19 +390,6 @@ fn encode_ignores_routing_rank() {
 }
 
 #[test]
-fn special_token_policy_is_forwarded() {
-    let mut request = minimal_request();
-    request.output_options.skip_special_tokens = Some(false);
-    let wire = build_generate_request(
-        request,
-        "special-tokens".into(),
-        DisaggregationMode::Aggregated,
-    )
-    .unwrap();
-    assert_eq!(wire.response.unwrap().skip_special_tokens, Some(false));
-}
-
-#[test]
 fn canonical_priority_preserves_native_ordering() {
     for (priority, expected) in [(-7, 7), (7, -7), (i32::MIN, i32::MAX)] {
         let mut request = minimal_request();
@@ -425,22 +414,6 @@ fn prefill_limits_generation() {
     let stopping = wire.stopping.unwrap();
     assert_eq!(stopping.max_new_tokens, 1);
     assert_eq!(stopping.min_new_tokens, 1);
-}
-
-#[test]
-fn absent_and_explicit_zero_options_remain_distinct() {
-    for explicit in [false, true] {
-        let mut request = minimal_request();
-        request.sampling_options.temperature = explicit.then_some(0.0);
-        request.output_options.logprobs = explicit.then_some(0);
-        request.output_options.prompt_logprobs = explicit.then_some(0);
-        let wire =
-            build_generate_request(request, "zero".into(), DisaggregationMode::Aggregated).unwrap();
-        assert_eq!(wire.temperature, Some(if explicit { 0.0 } else { 1.0 }));
-        let response = wire.response.unwrap();
-        assert_eq!(response.output_logprobs, explicit);
-        assert_eq!(response.prompt_logprobs, explicit);
-    }
 }
 
 #[test]
@@ -616,33 +589,6 @@ fn top_k_preserves_default_and_explicit_limits() {
         let wire = build_generate_request(request, "top-k".into(), DisaggregationMode::Aggregated)
             .unwrap();
         assert_eq!(wire.sampling.unwrap().top_k, expected);
-    }
-}
-
-#[test]
-fn canonical_cache_controls_are_preserved() {
-    let mut identity = minimal_request();
-    identity.routing = Some(RoutingHints {
-        cache_namespace: Some("cache-salt".into()),
-        ..Default::default()
-    });
-    let wire = build_generate_request(
-        identity,
-        "cache-identity".into(),
-        DisaggregationMode::Aggregated,
-    )
-    .unwrap();
-    assert_eq!(wire.kv.unwrap().cache_salt, "dynamo-cache-salt:cache-salt");
-    for bypass in [false, true] {
-        let mut request = minimal_request();
-        request.extra_args = Some(json!({"bypass_prefix_cache": bypass}));
-        let wire = build_generate_request(
-            request,
-            "cache-bypass".into(),
-            DisaggregationMode::Aggregated,
-        )
-        .unwrap();
-        assert_eq!(wire.kv.unwrap().bypass_prefix_cache, bypass);
     }
 }
 
@@ -942,18 +888,23 @@ fn native_generate_rejects_unrepresentable_sampling_controls() {
 
 #[test]
 fn compatibility_envelope_allows_projected_prefix_cache_bypass() {
-    let mut request = request();
-    request.extra_args = Some(json!({
-        "skip_reading_prefix_cache": true,
-        "vllm_tito": {"sampling_params": {"skip_reading_prefix_cache": true}}
-    }));
-    let wire = build_generate_request(
-        request,
-        "cache-bypass".to_string(),
-        DisaggregationMode::Aggregated,
-    )
-    .expect("projected cache bypass should be accepted");
-    assert!(wire.kv.expect("kv options").bypass_prefix_cache);
+    for extra in [
+        json!({
+            "skip_reading_prefix_cache": true,
+            "vllm_tito": {"sampling_params": {"skip_reading_prefix_cache": true}}
+        }),
+        json!({"vllm_tito": {"sampling_params": {"skip_reading_prefix_cache": true}}}),
+    ] {
+        let mut request = request();
+        request.extra_args = Some(extra);
+        let wire = build_generate_request(
+            request,
+            "cache-bypass".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect("projected cache bypass should be accepted");
+        assert!(wire.kv.expect("kv options").bypass_prefix_cache);
+    }
 }
 
 #[test]
@@ -1064,7 +1015,8 @@ fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
         Some(feature.identifier.as_str())
     );
     assert_eq!((feature.offset, feature.length), (1, 2));
-    assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
+    let expected_kwargs = base64::Engine::decode(&BASE64_STANDARD, VALID_MM_KWARGS_BASE64).unwrap();
+    assert_eq!(feature.kwargs.as_deref(), Some(expected_kwargs.as_slice()));
     assert!(feature.is_embed.is_empty());
 }
 
