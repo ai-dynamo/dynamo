@@ -237,7 +237,6 @@ pub struct WorkerLoadInput {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkerCapacityInput {
     total_kv_blocks: Option<NonZeroU64>,
-    max_num_batched_tokens: Option<NonZeroU64>,
 }
 
 impl WorkerCapacityInput {
@@ -245,7 +244,6 @@ impl WorkerCapacityInput {
     pub(crate) fn from_config(config: &impl WorkerConfigLike) -> Self {
         Self {
             total_kv_blocks: config.total_kv_blocks().and_then(NonZeroU64::new),
-            max_num_batched_tokens: config.max_num_batched_tokens().and_then(NonZeroU64::new),
         }
     }
 
@@ -256,11 +254,6 @@ impl WorkerCapacityInput {
     /// estimate.
     pub fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks.map(NonZeroU64::get)
-    }
-
-    /// Return the worker's per-iteration batched-token budget, or None if it was not advertised.
-    pub fn max_num_batched_tokens(&self) -> Option<u64> {
-        self.max_num_batched_tokens.map(NonZeroU64::get)
     }
 }
 
