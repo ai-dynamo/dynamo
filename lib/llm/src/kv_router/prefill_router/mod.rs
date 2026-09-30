@@ -533,6 +533,15 @@ impl
         .await;
         let (outcome, topology_constraints) = match prefill_result {
             Ok(result) => result,
+            // The cancel link stopped the prefill because the client went away,
+            // so its stream ending early is the cancellation, not a failure.
+            Err(error)
+                if prefill_ctx.is_stopped()
+                    && (engine_ctx.is_stopped() || engine_ctx.is_killed()) =>
+            {
+                tracing::debug!(error = %error, "Prefill ended after client cancellation");
+                return Err(super::cancelled_error(engine_ctx.id()));
+            }
             Err(error) => {
                 use dynamo_runtime::error::{ErrorType, match_error_chain};
                 if match_error_chain(
