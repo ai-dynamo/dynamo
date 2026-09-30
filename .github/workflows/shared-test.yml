@@ -93,7 +93,7 @@ on:
         type: boolean
         default: true
       gpu_test_markers:
-        description: 'GPU pytest markers. Selects the full GPU pool. When run_gpu_parallel_tests=true, profiled tests run in the parallel stage and are excluded from the sequential stage by appending "and not profiled_vram_gib".'
+        description: 'GPU pytest markers. Selects the full GPU pool. When run_gpu_parallel_tests=true, profiled gpu_1 tests run in the parallel stage and are excluded from the sequential stage by appending "and not (profiled_vram_gib and gpu_1)".'
         required: false
         type: string
       gpu_test_timeout_minutes:
@@ -102,7 +102,7 @@ on:
         type: number
         default: 30
       run_gpu_parallel_tests:
-        description: 'Whether to run the GPU-parallel stage (VRAM-aware concurrent subprocesses) before the sequential stage. Tests carrying @pytest.mark.profiled_vram_gib(N) within gpu_test_markers run here; the sequential stage runs the rest.'
+        description: 'Whether to run the GPU-parallel stage (VRAM-aware concurrent subprocesses) before the sequential stage. gpu_1 tests carrying @pytest.mark.profiled_vram_gib(N) within gpu_test_markers run here; the sequential stage runs the rest.'
         required: false
         type: boolean
         default: false
@@ -348,8 +348,8 @@ jobs:
         uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
-          # When the parallel stage runs, exclude profiled tests here so they don't run twice.
-          pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
+          # When the parallel stage runs, exclude profiled gpu_1 tests here so they don't run twice.
+          pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not (profiled_vram_gib and gpu_1)', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"

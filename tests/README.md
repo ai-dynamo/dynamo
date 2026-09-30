@@ -401,7 +401,7 @@ pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" 
 pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu_0" -v --tb=short
 ```
 
-> **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). GPU tests (`gpu_1`, `gpu_2`, etc.) run sequentially by default, but can run in parallel with `--max-vram-gib=N -n auto` (uses a custom VRAM-aware scheduler, not xdist). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
+> **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). GPU tests (`gpu_1`, `gpu_2`, etc.) run sequentially by default; profiled `gpu_1` tests can instead run in parallel with `--max-vram-gib=N -n auto` (uses a custom VRAM-aware scheduler, not xdist, that gives each test one GPU; other tests are deselected). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
 
 **Full E2E suite** -- launches engines for every test configuration; slowest, requires GPU and a framework container (typically <30min depending on framework and model):
 ```bash
