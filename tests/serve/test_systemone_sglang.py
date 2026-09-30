@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version
 
 import pytest
@@ -14,8 +15,9 @@ import requests
 from transformers import AutoTokenizer
 
 from tests.utils.constants import QWEN
-from tests.utils.http_checks import check_health_ready, models_available
+from tests.utils.http_checks import check_health_ready, check_http_ok, models_available
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.port_utils import reserved_ports
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -25,8 +27,8 @@ pytestmark = [
     pytest.mark.core,
     pytest.mark.model(QWEN),
     pytest.mark.timeout(600),
-    # NVML peak measured on RTX PRO 6000 with 2048 KV tokens.
-    pytest.mark.profiled_vram_gib(4.1),
+    # NVML peak includes Dynamo and standalone SGLang, each with 2048 KV tokens.
+    pytest.mark.profiled_vram_gib(6.4),
     pytest.mark.requested_sglang_kv_tokens(2048),
 ]
 
@@ -72,6 +74,11 @@ def systemone_sglang_server(
                 "1",
                 "--disable-piecewise-cuda-graph",
                 "--enable-metrics",
+                "--disable-overlap-schedule",
+                "--max-running-requests",
+                "1",
+                "--pp-size",
+                "1",
             ],
             env=env,
             health_check_urls=[
@@ -89,6 +96,45 @@ def systemone_sglang_server(
         ),
     ):
         yield base_url
+
+
+@pytest.fixture
+def native_sglang_server(request, dynamo_dynamic_ports, predownload_models):
+    with reserved_ports(1, dynamo_dynamic_ports.frontend_port) as ports:
+        base_url = f"http://localhost:{ports[0]}"
+        with ManagedProcess(
+            command=[
+                sys.executable,
+                "-m",
+                "sglang.launch_server",
+                "--model-path",
+                QWEN,
+                "--served-model-name",
+                QWEN,
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(ports[0]),
+                "--context-length",
+                "2048",
+                "--max-total-tokens",
+                "2048",
+                "--mem-fraction-static",
+                "0.2",
+                "--disable-piecewise-cuda-graph",
+                "--disable-overlap-schedule",
+                "--max-running-requests",
+                "1",
+            ],
+            env=os.environ.copy(),
+            health_check_urls=[(f"{base_url}/health", check_http_ok)],
+            timeout=360,
+            display_output=True,
+            display_name="native-sglang",
+            terminate_all_matching_process_names=False,
+            log_dir=f"{request.node.name}_native_sglang",
+        ):
+            yield base_url
 
 
 def _native_probabilities(base_url, tokenizer, content, labels):
@@ -151,7 +197,9 @@ def _native_probabilities(base_url, tokenizer, content, labels):
     )
 
 
-def test_systemone_matches_native_zero_decode_scores(systemone_sglang_server):
+def test_systemone_matches_native_zero_decode_scores(
+    systemone_sglang_server, native_sglang_server
+):
     tokenizer = AutoTokenizer.from_pretrained(QWEN, local_files_only=True)
     state = "A customer was charged twice and requests a refund today."
     payload = {
@@ -199,7 +247,7 @@ def test_systemone_matches_native_zero_decode_scores(systemone_sglang_server):
     total_input_tokens = 0
     for question_id, content, labels in references:
         probabilities, label_mass, input_tokens = _native_probabilities(
-            systemone_sglang_server, tokenizer, content, labels
+            native_sglang_server, tokenizer, content, labels
         )
         total_input_tokens += input_tokens
         answer = body["answers"][question_id]
@@ -233,3 +281,39 @@ def test_systemone_matches_native_zero_decode_scores(systemone_sglang_server):
     )
     assert chat.status_code == 200, chat.text
     assert len(chat.json()["choices"]) == 1
+
+
+def test_systemone_scoring_and_chat_overlap(systemone_sglang_server):
+    scoring = {
+        "model": QWEN,
+        "state": "A customer requests a refund today.",
+        "questions": {
+            "urgent": {"type": "noul", "instructions": "Action is needed today."}
+        },
+    }
+    chat = {
+        "model": QWEN,
+        "messages": [{"role": "user", "content": "Say hello."}],
+        "max_tokens": 16,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    def invoke(index):
+        route, payload = (
+            ("systemone", scoring) if index % 2 == 0 else ("chat/completions", chat)
+        )
+        response = requests.post(
+            f"{systemone_sglang_server}/v1/{route}", json=payload, timeout=60
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        if index % 2 == 0:
+            assert body["usage"]["output_tokens"] == 0
+            answer = body["answers"]["urgent"]
+            assert math.isfinite(answer["noul"]) and 0 <= answer["noul"] <= 1
+            assert 0 <= answer["x_label_mass"] <= 1
+        else:
+            assert len(body["choices"]) == 1
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(invoke, range(24)))
