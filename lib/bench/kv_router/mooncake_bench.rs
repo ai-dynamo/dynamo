@@ -14,13 +14,14 @@ use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer};
 use mooncake_open_loop::{
-    OpenLoopConfig, OpenLoopResult, parse_cpu_list, prepare_mooncake_corpus,
+    OpenLoopConfig, OpenLoopResult, RunProvenance, parse_cpu_list, prepare_mooncake_corpus,
     prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
 };
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeIndexerConfig, MooncakeIndexerKind, PreparedMooncakeBenchmark,
     merge_worker_traces, prepare_scaled_benchmark,
 };
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
@@ -395,6 +396,35 @@ fn write_open_loop_result(path: &str, result: &OpenLoopResult) -> anyhow::Result
     Ok(())
 }
 
+fn run_provenance(args: &Args, config: &MooncakeIndexerConfig) -> anyhow::Result<RunProvenance> {
+    let common = &args.common;
+    let trace_sha256 = common
+        .mooncake_trace_path
+        .as_deref()
+        .map(|path| anyhow::Ok(format!("{:x}", Sha256::digest(std::fs::read(path)?))))
+        .transpose()?;
+    Ok(RunProvenance {
+        argv: std::env::args().collect(),
+        binary: std::env::current_exe()
+            .ok()
+            .map(|path| path.display().to_string()),
+        trace_path: common.mooncake_trace_path.clone(),
+        trace_sha256,
+        trace_block_size: common.trace_block_size,
+        num_gpu_blocks: common.num_gpu_blocks,
+        num_unique_inference_workers: common.num_unique_inference_workers,
+        inference_worker_duplication_factor: common.inference_worker_duplication_factor,
+        trace_length_factor: common.trace_length_factor,
+        trace_duplication_factor: common.trace_duplication_factor,
+        trace_simulation_duration_ms: common.trace_simulation_duration_ms,
+        seed: common.seed,
+        jump_size: matches!(config.kind, MooncakeIndexerKind::NestedMap)
+            .then_some(config.jump_size),
+        issuer_spin_us: args.issuer_spin_us,
+        issue_lag_diagnostic_threshold_us: args.issue_lag_diagnostic_threshold_us,
+    })
+}
+
 fn benchmark_config(args: &Args, benchmark_duration_ms: u64) -> MooncakeBenchmarkConfig {
     MooncakeBenchmarkConfig {
         benchmark_duration_ms,
@@ -442,7 +472,8 @@ async fn run_open_loop_repeated_mode(args: &Args, indexer_names: &[String]) -> a
         else {
             return Ok(());
         };
-        let result = run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+        let mut result = run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+        result.provenance = Some(run_provenance(args, &config)?);
         print_open_loop_result(&result);
         let path = if indexer_names.len() == 1 {
             args.result_json_output.clone()
@@ -475,7 +506,9 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
             else {
                 return Ok(());
             };
-            let result = run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+            let mut result =
+                run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+            result.provenance = Some(run_provenance(args, &config)?);
             print_open_loop_result(&result);
             let path = open_loop_output_path(
                 &args.result_json_output,
