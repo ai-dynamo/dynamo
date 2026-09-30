@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version
 
@@ -283,6 +284,15 @@ def test_systemone_matches_native_zero_decode_scores(
     assert len(chat.json()["choices"]) == 1
 
 
+def _post_with_capacity_retry(url, payload):
+    for attempt in range(3):
+        response = requests.post(url, json=payload, timeout=60)
+        if response.status_code not in (503, 529) or attempt == 2:
+            return response
+        assert response.headers.get("retry-after") == "1", response.text
+        time.sleep(1)
+
+
 def test_systemone_scoring_and_chat_overlap(systemone_sglang_server):
     scoring = {
         "model": QWEN,
@@ -302,8 +312,8 @@ def test_systemone_scoring_and_chat_overlap(systemone_sglang_server):
         route, payload = (
             ("systemone", scoring) if index % 2 == 0 else ("chat/completions", chat)
         )
-        response = requests.post(
-            f"{systemone_sglang_server}/v1/{route}", json=payload, timeout=60
+        response = _post_with_capacity_retry(
+            f"{systemone_sglang_server}/v1/{route}", payload
         )
         assert response.status_code == 200, response.text
         body = response.json()

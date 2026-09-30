@@ -4,6 +4,7 @@
 """System One HTTP contract coverage over the SGLang mocker transport."""
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -176,3 +177,32 @@ def test_systemone_impossible_admission_and_recovery(systemone_server):
     recovered = requests.post(url, json=payload, timeout=30)
     assert recovered.status_code == 200, recovered.text
     assert list(recovered.json()["answers"]) == ["urgent"]
+
+
+def test_systemone_client_retries_only_bounded_capacity_errors(monkeypatch):
+    from tests.serve import test_systemone_sglang as client
+
+    sleeps = []
+    monkeypatch.setattr(client.time, "sleep", sleeps.append)
+    responses = iter(
+        SimpleNamespace(status_code=status, headers={"retry-after": "1"}, text="")
+        for status in [529, 503, 200]
+    )
+    monkeypatch.setattr(
+        client.requests, "post", lambda *args, **kwargs: next(responses)
+    )
+    assert client._post_with_capacity_retry("unused", {}).status_code == 200
+    assert sleeps == [1, 1]
+    overloaded = SimpleNamespace(status_code=529, headers={"retry-after": "1"}, text="")
+    responses = iter([overloaded, overloaded, overloaded])
+    monkeypatch.setattr(
+        client.requests, "post", lambda *args, **kwargs: next(responses)
+    )
+    assert client._post_with_capacity_retry("unused", {}).status_code == 529
+    assert sleeps == [1, 1, 1, 1]
+    unavailable = SimpleNamespace(
+        status_code=503, headers={}, text="worker unavailable"
+    )
+    monkeypatch.setattr(client.requests, "post", lambda *args, **kwargs: unavailable)
+    with pytest.raises(AssertionError, match="worker unavailable"):
+        client._post_with_capacity_retry("unused", {})
