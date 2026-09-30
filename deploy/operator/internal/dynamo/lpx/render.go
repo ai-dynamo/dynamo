@@ -257,7 +257,6 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 	configureAgentScheduling(agentPodSpec, workload.BuildFamily())
 	// Placement is already resolved; shape only the actual conductor's LPX-owned fields.
 	if conductorPodSpec != nil {
-		stripLPUResources(conductorPodSpec)
 		if err := withLPUConfigVolume(conductorPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
 			return err
 		}

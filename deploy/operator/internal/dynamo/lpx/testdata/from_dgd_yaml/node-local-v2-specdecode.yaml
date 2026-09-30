@@ -148,6 +148,7 @@ spec:
             resources:
               limits:
                 hugepages-2Mi: 4Gi
+                lpu.nvidia.com/devices: "1"
                 lpu.nvidia.com/lpu: "8"
               requests:
                 cpu: "62"
@@ -285,6 +286,7 @@ spec:
             resources:
               limits:
                 hugepages-2Mi: 4Gi
+                lpu.nvidia.com/devices: "1"
                 lpu.nvidia.com/lpu: "8"
               requests:
                 cpu: "62"
@@ -422,6 +424,7 @@ spec:
             resources:
               limits:
                 hugepages-2Mi: 4Gi
+                lpu.nvidia.com/devices: "1"
                 lpu.nvidia.com/lpu: "8"
               requests:
                 cpu: "62"

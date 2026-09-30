@@ -268,6 +268,14 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	conductorTemplate.Labels = map[string]string{"owner": "conductor"}
 	conductorTemplate.Annotations = map[string]string{"owner": "conductor"}
 	conductorTemplate.Spec.Containers[0].Image = "conductor-runtime"
+	conductorResources := corev1.ResourceList{
+		v2LPUResourceName: resource.MustParse("3"),
+		v3LPUResourceName: resource.MustParse("5"),
+		corev1.ResourceName("lpu.nvidia.com/devices"): resource.MustParse("1"),
+	}
+	conductorTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+		Requests: conductorResources.DeepCopy(), Limits: conductorResources.DeepCopy(),
+	}
 	conductorTemplate.Spec.Containers[0].Env = []corev1.EnvVar{
 		{Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}"},
 		{Name: "NOVA_PIPELINE_TYPE", Value: "SpecDecode"},
@@ -316,6 +324,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	require.Equal(t, conductorBefore, &conductor.Spec.PodSpec)
 
 	t.Log("Preserve runtime settings in the conductor template and share only partition data")
+	require.Equal(t, conductorTemplate.Spec.Containers[0].Resources, conductor.Spec.PodSpec.Containers[0].Resources)
 	configMap, ok := templates.Resources[0].(*corev1.ConfigMap)
 	require.True(t, ok)
 	require.NotContains(t, configMap.Data, "model_config.toml")
