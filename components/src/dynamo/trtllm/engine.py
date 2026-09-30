@@ -191,12 +191,17 @@ class TensorRTLLMEngine:
         if not self._llm:
             return
         try:
+            # Attempt to abort via the LLM object if available
             if hasattr(self._llm, "abort"):
                 self._llm.abort(request_id)
+            # Fallback: attempt to access the underlying executor if it provides abort_request
+            elif hasattr(self._llm, "_executor") and hasattr(self._llm._executor, "abort_request"):
+                self._llm._executor.abort_request(request_id)
             else:
-                logger.debug("TensorRT-LLM LLM object does not support abort()")
+                logger.debug("TensorRT-LLM engine object does not support abort()")
         except Exception as e:
-            logger.debug("TensorRT-LLM abort failed for request %s: %s", request_id, e)
+            logger.error("TensorRT-LLM abort failed for request %s: %s", request_id, e)
+            raise
 
     @staticmethod
     def _prune_engine_args_for_autodeploy(engine_args) -> None:
