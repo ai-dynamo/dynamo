@@ -4967,3 +4967,244 @@ class TestThinkingControlParity:  # FRONTEND.10
             reasoning_parser_name=None,
         )
         assert result.request.get("chat_template_kwargs", {}) == case.expected
+
+
+# Harmony's wire-format markers (GPT-OSS) are single special tokens in its own
+# vocabulary; register them so the Qwen tokenizer encodes them the same way.
+HARMONY_MARKERS = [
+    "<|start|>",
+    "<|channel|>",
+    "<|message|>",
+    "<|end|>",
+    "<|return|>",
+    "<|call|>",
+]
+
+
+@pytest.fixture(scope="module")
+def harmony_tokenizer():
+    harmony = copy.deepcopy(get_tokenizer(MODEL))
+    harmony.add_special_tokens({"additional_special_tokens": HARMONY_MARKERS})
+    return harmony
+
+
+class TestReasoningTokenUsage:
+    """usage.completion_tokens_details.reasoning_tokens on the SGLang path.
+
+    A reasoning block counts from its opening marker through its closing
+    marker.
+    """
+
+    REASONING = "Let me think about it."
+    ANALYSIS = f"<|channel|>analysis<|message|>{REASONING}<|end|>"
+    FINAL = "<|start|>assistant<|channel|>final<|message|>It is 4.<|return|>"
+
+    @staticmethod
+    def _post(tokenizer, reasoning_parser_name, force_reasoning=False):
+        _, reasoning_parser = create_parsers(
+            {},
+            tool_call_parser_name=None,
+            reasoning_parser_name=reasoning_parser_name,
+            force_reasoning=force_reasoning,
+        )
+        return SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=reasoning_parser,
+        )
+
+    @staticmethod
+    def _feed(post, token_ids, *, step=1, finish_reason="stop"):
+        for start in range(0, len(token_ids), step):
+            last = start + step >= len(token_ids)
+            post.process_output(
+                {
+                    "token_ids": token_ids[start : start + step],
+                    "finish_reason": finish_reason if last else None,
+                    "stop_terminated": False,
+                }
+            )
+
+    @staticmethod
+    def _ids(tokenizer, text):
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    def _count(self, tokenizer, parser_name, text, **feed_kwargs):
+        post = self._post(tokenizer, parser_name)
+        self._feed(post, self._ids(tokenizer, text), **feed_kwargs)
+        return post.reasoning_token_count
+
+    def test_think_block_counts_both_markers(self, tokenizer):
+        count = self._count(
+            tokenizer, "qwen3", f"<think>{self.REASONING}</think>\n\nIt is 4."
+        )
+        assert count == len(self._ids(tokenizer, f"<think>{self.REASONING}</think>"))
+
+    def test_forced_reasoning_counts_from_first_token(self, tokenizer):
+        post = self._post(tokenizer, "qwen3", force_reasoning=True)
+        self._feed(post, self._ids(tokenizer, f"{self.REASONING}</think>\n\nIt is 4."))
+        assert post.reasoning_token_count == len(
+            self._ids(tokenizer, f"{self.REASONING}</think>")
+        )
+
+    def test_generation_ending_inside_reasoning_counts_every_token(self, tokenizer):
+        ids = self._ids(tokenizer, f"<think>{self.REASONING} And more")
+        post = self._post(tokenizer, "qwen3")
+        self._feed(post, ids, step=2, finish_reason="length")
+        assert post.reasoning_token_count == len(ids)
+
+    @pytest.mark.parametrize("step", [1, 2, 3, 7])
+    def test_count_does_not_depend_on_chunking(self, harmony_tokenizer, step):
+        count = self._count(
+            harmony_tokenizer,
+            "gpt-oss",
+            self.ANALYSIS + self.FINAL,
+            step=step,
+        )
+        assert count == len(self._ids(harmony_tokenizer, self.ANALYSIS))
+
+    def test_reasoning_after_content_counts_only_the_new_block(self, harmony_tokenizer):
+        second_block = (
+            "<|start|>assistant<|channel|>analysis<|message|>Check again.<|end|>"
+        )
+        text = (
+            self.ANALYSIS
+            + "<|start|>assistant<|channel|>commentary<|message|>Checking.<|end|>"
+            + second_block
+            + self.FINAL
+        )
+        count = self._count(harmony_tokenizer, "gpt-oss", text, step=2)
+        assert count == len(self._ids(harmony_tokenizer, self.ANALYSIS)) + len(
+            self._ids(harmony_tokenizer, second_block)
+        )
+
+    COMMENTARY = "<|start|>assistant<|channel|>commentary<|message|>Checking.<|end|>"
+    SECOND = "<|start|>assistant<|channel|>analysis<|message|>Check again.<|end|>"
+    THIRD = "<|start|>assistant<|channel|>analysis<|message|>And once more.<|end|>"
+
+    @pytest.mark.parametrize(
+        "blocks",
+        [
+            (ANALYSIS, COMMENTARY, SECOND, FINAL),
+            (ANALYSIS, COMMENTARY, SECOND, THIRD, FINAL),
+        ],
+        ids=["reasoning-content-reasoning", "consecutive-reasoning-blocks"],
+    )
+    def test_count_is_identical_for_every_chunk_size(self, harmony_tokenizer, blocks):
+        # Regression: when one chunk crossed several reasoning/content
+        # boundaries, the count depended on the chunk size.
+        text = "".join(blocks)
+        expected = sum(
+            len(self._ids(harmony_tokenizer, block))
+            for block in blocks
+            if "analysis" in block
+        )
+        size = len(self._ids(harmony_tokenizer, text))
+        counts = {
+            step: self._count(harmony_tokenizer, "gpt-oss", text, step=step)
+            for step in range(1, size + 1)
+        }
+        assert set(counts.values()) == {expected}, counts
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "<|channel|>analysis<|message|><|end|>" + FINAL,
+            "<|channel|>final<|message|>It is 4.<|return|>",
+        ],
+        ids=["empty-analysis", "no-analysis"],
+    )
+    def test_harmony_without_reasoning_text_counts_zero(self, harmony_tokenizer, text):
+        assert self._count(harmony_tokenizer, "gpt-oss", text, step=2) == 0
+
+    def test_parser_failure_withdraws_the_count(self, harmony_tokenizer):
+        class FailingParser:
+            detector = types.SimpleNamespace(
+                think_start_token="<|channel|>analysis<|message|>",
+                think_end_token="<|end|>",
+            )
+
+            def parse_stream_chunk(self, text):
+                raise ValueError("malformed output")
+
+        counter = sglang_prepost_module._ReasoningTokenCounter(
+            harmony_tokenizer,
+            FailingParser(),
+            start_marker_ids=self._ids(
+                harmony_tokenizer, "<|channel|>analysis<|message|>"
+            ),
+            end_marker_ids=self._ids(harmony_tokenizer, "<|end|>"),
+        )
+        counter.observe(
+            self._ids(harmony_tokenizer, self.ANALYSIS + self.FINAL), finished=True
+        )
+        assert counter.total is None
+
+    def test_no_reasoning_parser_reports_nothing(self, tokenizer):
+        assert self._count(tokenizer, None, "It is 4.") is None
+
+    def _final_usage(self, tokenizer, backend_usage):
+        ids = self._ids(tokenizer, f"<think>{self.REASONING}</think>\n\nIt is 4.")
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {"token_ids": [token_id], "finish_reason": None}
+                for token_id in ids[:-1]
+            ]
+            + [
+                {
+                    "token_ids": ids[-1:],
+                    "finish_reason": "stop",
+                    "completion_usage": backend_usage,
+                }
+            ]
+        )
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+            eos_token_ids=None,
+            stream_interval=1,
+        )
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-reasoning",
+                    {"model": MODEL},
+                    {},
+                    [1, 2],
+                    self._post(tokenizer, "qwen3"),
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+        usage_chunks = [chunk for chunk in chunks if "usage" in chunk]
+        assert len(usage_chunks) == 1
+        return usage_chunks[0]["usage"]
+
+    @pytest.mark.parametrize(
+        "backend_details",
+        [None, {"reasoning_tokens": 0}, {"reasoning_tokens": 12}],
+        ids=["no-backend-count", "backend-zero", "backend-count"],
+    )
+    def test_final_usage_carries_frontend_count(self, tokenizer, backend_details):
+        usage = {"prompt_tokens": 2, "completion_tokens": 14, "total_tokens": 16}
+        if backend_details is not None:
+            usage["completion_tokens_details"] = backend_details
+        details = self._final_usage(tokenizer, usage)["completion_tokens_details"]
+        assert details == {
+            "reasoning_tokens": len(
+                self._ids(tokenizer, f"<think>{self.REASONING}</think>")
+            )
+        }
+
+    def test_final_usage_never_exceeds_completion_tokens(self, tokenizer):
+        usage = self._final_usage(
+            tokenizer,
+            {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        )
+        assert usage["completion_tokens"] == 3
+        assert usage["completion_tokens_details"] == {"reasoning_tokens": 3}

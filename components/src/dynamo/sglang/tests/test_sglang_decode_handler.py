@@ -1710,6 +1710,45 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reasoning_tokens", "expected_details"),
+    [
+        (7, {"reasoning_tokens": 7}),
+        (12, {"reasoning_tokens": 9}),
+        (0, None),
+        (None, None),
+    ],
+    ids=["count", "clamped-to-completion", "zero", "missing"],
+)
+async def test_process_token_stream_reports_reasoning_tokens(
+    reasoning_tokens, expected_details
+):
+    """SGLang's reasoning count becomes completion_tokens_details.
+
+    It never exceeds completion_tokens.
+    """
+    handler = _new_decode_handler()
+    meta_info = {
+        "id": "request-1",
+        "finish_reason": {"type": "stop"},
+        "prompt_tokens": 2,
+        "completion_tokens": 9,
+    }
+    if reasoning_tokens is not None:
+        meta_info["reasoning_tokens"] = reasoning_tokens
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream([{"index": 0, "output_ids": [], "meta_info": meta_info}]),
+            _Context(),
+        )
+    )
+
+    usage = chunks[-1]["completion_usage"]
+    assert usage.get("completion_tokens_details") == expected_details
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_accepts_incremental_logprob_arrays():
     handler = _new_decode_handler()
 

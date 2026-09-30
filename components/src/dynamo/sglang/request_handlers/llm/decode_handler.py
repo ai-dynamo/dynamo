@@ -1009,6 +1009,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             completion_usage[
                                 "prompt_tokens_details"
                             ] = prefill_prompt_tokens_details
+                        # SGLang counts this only for require_reasoning
+                        # requests and reports 0 otherwise, so 0 is omitted.
+                        # Consumers check it against completion_tokens.
+                        reasoning_tokens = meta_info.get("reasoning_tokens")
+                        if isinstance(reasoning_tokens, int) and reasoning_tokens > 0:
+                            completion_usage["completion_tokens_details"] = {
+                                "reasoning_tokens": min(
+                                    reasoning_tokens, completion_tokens
+                                )
+                            }
                         out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:

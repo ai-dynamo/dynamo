@@ -141,6 +141,7 @@ class _PostProcessor:
     locally_finished = False
     has_pending_stop_text = False
     local_stop_reason = None
+    reasoning_token_count = None
 
     def process_output(self, mapped_response):
         return {
