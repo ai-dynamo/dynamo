@@ -118,6 +118,10 @@ worker, including near-1M context; it does not qualify four-worker routing.
 
 Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
 
+The archived H200 measurement (H20) used 350 warm-up requests followed by a KV
+reset without recreating the frontend; the generic `perf.yaml` does not
+reproduce that exact replay.
+
 | Target | Concurrency | Output tok/s/GPU | Output tok/s/user p50 |
 | --- | ---: | ---: | ---: |
 | B200 aggregated | 168 | 990.57 | 54.69 |
