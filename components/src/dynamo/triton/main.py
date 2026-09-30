@@ -27,6 +27,7 @@ from dynamo.triton.metrics import (
     _register_triton_metrics_bridge,
     _stop_triton_server,
 )
+from dynamo.triton.pooling_handlers import ClassifyWorkerHandler
 from dynamo.triton.util import create_triton_log_callback, endpoint_slug
 
 logger = logging.getLogger(__name__)
@@ -114,11 +115,26 @@ async def _register_and_serve(
         "triton_model_config": triton_model_config,
     }
 
-    logger.info(f"Attempting to register model '{model_name}' with Dynamo runtime...")
-    # register_model for tensor-based models skips HuggingFace downloads.
+    # Pick the model's registered surface and handler from --task. Tensor
+    # (default) keeps the KServe tensor path; classify swaps in the
+    # OpenAI /v1/classify adapter and advertises the Classify endpoint.
+    # register_model's fast path (skip HuggingFace resolve) fires for both
+    # because tensor_model_config is attached in either case; see
+    # lib/bindings/python/rust/lib.rs.
+    if config.task == "classify":
+        model_input = ModelInput.Text
+        model_type = ModelType.Classify
+    else:
+        model_input = ModelInput.Tensor
+        model_type = ModelType.TensorBased
+
+    logger.info(
+        f"Attempting to register model '{model_name}' with Dynamo runtime "
+        f"(task={config.task}, model_type={model_type})..."
+    )
     await register_model(
-        ModelInput.Tensor,
-        ModelType.TensorBased,
+        model_input,
+        model_type,
         endpoint,
         model_name,  # model_path (used as display name for tensor-based models)
         worker_type=WorkerType.Aggregated,
@@ -129,13 +145,36 @@ async def _register_and_serve(
         f"{endpoint_path.replace('.', '/')}"
     )
 
-    handler = RequestHandler(server, model)
+    handler = _build_handler(config, server, model, triton_model_config)
     health_check_payload = TritonHealthCheckPayload(model_name).to_dict()
     logger.info(f"Serving endpoint for model '{model_name}'...")
     await endpoint.serve_endpoint(
         handler.generate,
         health_check_payload=health_check_payload,
     )
+
+
+def _build_handler(
+    config: DynamoTritonConfig,
+    server: TritonServer,
+    model: TritonModel,
+    triton_model_config_bytes: bytes,
+):
+    """Instantiate the request handler for the model's declared task."""
+    if config.task == "classify":
+        # Re-parse the config protobuf so the classify handler can auto-detect
+        # the sole BYTES input and FP32 output tensor names. Reserializing
+        # is O(model), one call per model at startup — negligible next to
+        # server.start().
+        parsed_config = mc.ModelConfig.FromString(triton_model_config_bytes)
+        return ClassifyWorkerHandler(
+            server,
+            model,
+            parsed_config,
+            classify_input_name=config.classify_input_name,
+            classify_output_name=config.classify_output_name,
+        )
+    return RequestHandler(server, model)
 
 
 @dataclass

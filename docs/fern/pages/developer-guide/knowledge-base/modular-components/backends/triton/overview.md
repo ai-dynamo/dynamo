@@ -18,6 +18,7 @@ That image is the build's `RUNTIME_IMAGE`, so the result is a single "Dynamo + T
 | :--------------------------------------------- | :--------------: | :-------------------------------------------------------------- |
 | Tensor (KServe gRPC) Serving                   |      Ready       | Multiple models per worker                                      |
 | Classification (`class_count` / top-K)         |      Ready       | Top-K `"<score>:<index>[:<label>]"` class strings               |
+| OpenAI `/v1/classify`                          |      Ready       | Text-in classifier (leaf or ensemble) via `--task classify`     |
 | Service Discovery / Routing                    |      Ready       | Via the Dynamo Frontend                                         |
 | Triton backends (TensorRT, ONNX, PyTorch, ...) |      Ready       | Whatever the Triton release image ships                         |
 | TensorRT Plugins                               |      Ready       | Via `--backend-config='tensorrt,plugins=...'`                   |
@@ -111,6 +112,9 @@ Common flags:
 | `--backend-config <cfg>`        | Triton backend config, repeatable, e.g. `--backend-config='tensorrt,plugins=/path/lib.so'` |
 | `--log-verbose <int>`           | Triton verbose logging level; `0` disables, `>= 1` enables (default: `0`)                  |
 | `--discovery-backend <backend>` | Service discovery backend: `kubernetes`, `etcd`, `file`, `mem` (default: `etcd`)           |
+| `--task <task>`                 | Endpoint the worker registers: `tensor` (default) or `classify` (see below)                |
+| `--classify-input-name <name>`  | Override the BYTES input tensor name for `--task classify` (auto-detected by default)      |
+| `--classify-output-name <name>` | Override the FP32 output tensor name for `--task classify` (auto-detected by default)      |
 
 ### Environment variables
 
@@ -166,6 +170,67 @@ Common flags:
      --backend-config='tensorrt,plugins=/models/plugins/libmy_plugin.so' \
      --discovery-backend=file &
    ```
+
+## Serving `/v1/classify` (OpenAI classify)
+
+Start the worker with `--task classify` to expose a Triton classifier through the OpenAI-compatible `POST /v1/classify` endpoint on the Dynamo Frontend, instead of the KServe tensor path.
+The frontend translates the classify JSON into a Dynamo tensor request, this worker forwards it to Triton as a single BYTES text input, and reads a single FP32 probability output back — no HuggingFace tokenizer or `config.json` fetch is required.
+
+**Expected model shape.**
+The worker auto-detects the input/output tensor names from `config.pbtxt`.
+Any Triton model — leaf plan or ensemble — that declares exactly one `TYPE_STRING` input and exactly one `TYPE_FP32` output serves classify unchanged.
+An ensemble that runs tokenization inside Triton (Python-backend tokenizer plus a TensorRT plan wired through `ensemble_scheduling`) is the intended shape:
+
+```protobuf
+name: "text_classifier"
+platform: "ensemble"
+max_batch_size: 64
+input  [ { name: "TEXT"  data_type: TYPE_STRING dims: [ 1 ] } ]
+output [ { name: "probs" data_type: TYPE_FP32   dims: [ -1 ] } ]
+ensemble_scheduling { ... }
+```
+
+When the model has more than one BYTES input or FP32 output, disambiguate with `--classify-input-name` / `--classify-output-name`.
+Class labels come from Triton's own `label_filename` on the output when set; when absent, response `label` fields are `null`.
+
+**Launching the worker and issuing a request.**
+
+```bash
+# Frontend (HTTP so /v1/classify is reachable)
+python3 -m dynamo.frontend --http-port=8000 --discovery-backend=file &
+
+# Worker: register as a classify model
+python3 -m dynamo.triton --task=classify --discovery-backend=file &
+
+# Client request
+curl -sX POST http://localhost:8000/v1/classify \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "text_classifier", "input": ["hello world", "another example"]}'
+```
+
+The response shape mirrors vLLM's `/classify`:
+
+```json
+{
+  "id": "classify-...",
+  "object": "list",
+  "created": 1735849200,
+  "model": "text_classifier",
+  "data": [
+    {"index": 0, "label": "positive", "probs": [0.1, 0.7, 0.2], "num_classes": 3},
+    {"index": 1, "label": "neutral",  "probs": [0.5, 0.4, 0.1], "num_classes": 3}
+  ],
+  "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+}
+```
+
+**Notes and limits.**
+
+- Text input only (`"input": "..."` or `"input": ["..."]`); token-ID variants (`Tokens` / `TokenBatch`) return HTTP 400.
+- Pooling (`/v1/pooling`) is not yet served by this worker; requests with `encoding_format` set are rejected.
+- `use_activation` is accepted for wire compatibility but silently ignored — the Triton model plan owns the classify head's activation and this worker cannot toggle it.
+- To serve the same underlying Triton model on both `/v2/models/{name}/infer` (tensor) and `/v1/classify`, run two worker processes against the same `--model-repository` — one with the default `--task=tensor` and one with `--task=classify`.
+- Model aliases (multiple served names for one card) are not honored on this path.
 
 ## Configuring the Triton version
 
@@ -225,6 +290,7 @@ The worker ([`components/src/dynamo/triton/main.py`](https://github.com/ai-dynam
 1. Starts an in-process server object
 2. Loads all models from the model repository
 3. Reads each model's configuration (`config.pbtxt`)
-4. Registers each model with the Dynamo runtime as a tensor-based model (`ModelInput.Tensor` / `ModelType.TensorBased`).
-5. Requests sent to the Dynamo Frontend hosted KServe gRPC endpoint are converted to Triton inference requests and the responses are streamed back as Dynamo tensors.
-   Each model is served on its own endpoint (`triton.<model_name>`), so a single worker can serve multiple models routed by name.
+4. Registers each model with the Dynamo runtime, keyed on `--task`:
+   - `tensor` (default): `ModelInput.Tensor` / `ModelType.TensorBased` — Dynamo Frontend hosted KServe gRPC endpoint. Requests are translated to Triton inference requests and streamed back as Dynamo tensors.
+   - `classify`: `ModelInput.Text` / `ModelType.Classify` — Dynamo Frontend hosted `POST /v1/classify`. Requests are translated to a single BYTES text input and the FP32 probability output is wrapped in the OpenAI classify response shape.
+5. Each model is served on its own endpoint (`triton.<model_name>`), so a single worker can serve multiple models routed by name.
