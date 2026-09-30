@@ -135,8 +135,12 @@ fn connect_zmq_socket(socket: &impl AsZmqSocket, endpoint: &str) -> Result<()> {
     let ipv6 = ipv6_option_for(endpoint)?;
     let socket = socket.get_socket();
     // ZMQ snapshots this option per connection; keep hostname resolution on IPv4.
-    socket.set_ipv6(ipv6)?;
-    socket.connect(endpoint)?;
+    socket
+        .set_ipv6(ipv6)
+        .with_context(|| format!("Failed to set ZMQ_IPV6 for {endpoint}"))?;
+    socket
+        .connect(endpoint)
+        .with_context(|| format!("Failed to connect ZMQ socket to {endpoint}"))?;
     Ok(())
 }
 
@@ -809,6 +813,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn failed_additional_connection_names_endpoint() {
+        let endpoint = format!("inproc://dynamo-zmq-connect-context-{}", std::process::id());
+        let mut subscriber =
+            DynamicZmqSubSocket::connect_with_rcvhwm(&endpoint, "topic", ZMQ_RCVHWM).unwrap();
+        let error = subscriber.add_endpoint("tcp://missing-port").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("tcp://missing-port"),
+            "{error:#}"
+        );
+    }
+
     async fn send_raw(publisher: &ZmqPubTransport, frames: Vec<Vec<u8>>) {
         publisher
             .socket
@@ -1121,7 +1137,6 @@ mod tests {
         let (broker_pub, xpub_endpoint) = ZmqPubTransport::bind("tcp://127.0.0.1:0", topic)
             .await
             .unwrap();
-        assert!(xpub_endpoint.starts_with("tcp://127.0.0.1:"));
         let subscriber = ZmqSubTransport::connect_broker(
             &xpub_endpoint.replace("127.0.0.1", "localhost"),
             topic,

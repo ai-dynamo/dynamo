@@ -1071,11 +1071,11 @@ impl HttpService {
         let Some(rl_router) = self.rl_router.clone() else {
             return Ok(());
         };
-        let rl_addr = format!("{}:{}", self.host, self.rl_port);
+        let rl_addr = listen_socket_addr(&self.host, self.rl_port)?;
         // Bind eagerly and fail fast: when RL discovery is enabled, a bind failure
         // should abort service startup rather than silently leave RL discovery
         // unavailable while the main HTTP service keeps running.
-        let listener = tokio::net::TcpListener::bind(&rl_addr).await.map_err(|e| {
+        let listener = tokio::net::TcpListener::bind(rl_addr).await.map_err(|e| {
             tracing::error!(
                 address = %rl_addr,
                 error = %e,
