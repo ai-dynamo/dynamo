@@ -52,7 +52,7 @@ Engine type for Dynamo workers
 from dynamo.llm import EngineType
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L3189`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3189)
+[`lib/bindings/python/src/dynamo/_core.pyi#L3188`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3188)
 </Accordion>
 
 <Accordion id="api-dynamo-core-entrypointargs" title="EntrypointArgs (class)">
@@ -66,7 +66,7 @@ from dynamo.llm import EntrypointArgs
 EntrypointArgs(engine_type: EngineType, model_path: Optional[str] = None, model_name: Optional[str] = None, endpoint_id: Optional[str] = None, template_file: Optional[str] = None, router_config: Optional[RouterConfig] = None, kv_cache_block_size: Optional[int] = None, http_host: Optional[str] = None, http_port: Optional[int] = None, http_metrics_port: Optional[int] = None, tls_cert_path: Optional[str] = None, tls_key_path: Optional[str] = None, extra_engine_args: Optional[str] = None, mocker_engine_args: Optional[MockEngineArgs] = None, runtime_config: Optional[ModelRuntimeConfig] = None, namespace: Optional[str] = None, namespace_prefix: Optional[str] = None, is_prefill: bool = False, is_decode: bool = False, migration_limit: int = 0, migration_max_seq_len: Optional[int] = None, chat_engine_factory: Optional[Callable] = None, ais_perf_config: Optional[AisPerfConfig] = None, *, tls_client_ca_cert_path: Optional[str] = None, metrics_prefix: Optional[str] = None, enable_anthropic_api: Optional[bool] = None, strip_anthropic_preamble: Optional[bool] = None, enable_streaming_tool_dispatch: Optional[bool] = None, enable_streaming_reasoning_dispatch: Optional[bool] = None, tokenizer_backend: Optional[str] = None, tokenizer_fallback: Optional[bool] = None) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L3196`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3196)
+[`lib/bindings/python/src/dynamo/_core.pyi#L3195`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3195)
 
 **Public methods**
 
@@ -174,7 +174,7 @@ Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer"
 Whether alternate tokenizer load failures fall back to HuggingFace
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3202)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3201)
 </Accordion>
 
 <Accordion id="api-dynamo-core-fpmdirectpublisher" title="FpmDirectPublisher (class)">
@@ -1376,8 +1376,7 @@ Get per-worker KV overlap by storage tier.
 List of token IDs to evaluate.
 </ParamField>
 <ParamField path="router_config_override" type="Optional[JsonLike]">
-Optional router configuration override for
-score-credit fields.
+Deprecated and ignored; this query returns raw cache hits.
 </ParamField>
 <ParamField path="block_mm_infos" type="Optional[List[Optional[Dict[str, Any]]]]">
 Optional block-level multimodal metadata aligned to
@@ -1410,7 +1409,7 @@ Dump all events from the KV router's indexer.
 
 - `str` — A JSON string containing all indexer events
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3146)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3145)
 
 <h4 id="api-dynamo-core-kvrouter-mark-prefill-complete">mark_prefill_complete</h4>
 
@@ -1435,7 +1434,7 @@ This is typically called automatically by the router when using the
 `best_worker()` with `request_id` for custom routing.
 </Note>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3155)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3154)
 
 <h4 id="api-dynamo-core-kvrouter-free">free</h4>
 
@@ -1460,7 +1459,7 @@ This is typically called automatically by the router when using the
 `best_worker()` with `request_id` for custom routing.
 </Note>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3172)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3171)
 </Accordion>
 
 <Accordion id="api-dynamo-core-kvrouterconfig" title="KvRouterConfig (class)">
@@ -1471,7 +1470,7 @@ from dynamo.llm import KvRouterConfig
 ```
 
 ```python
-KvRouterConfig(overlap_score_weight: Optional[float] = None, host_cache_hit_weight: float = 0.75, disk_cache_hit_weight: float = 0.25, router_temperature: float = 0.0, use_kv_events: bool = True, *, router_replica_sync: bool = False, router_track_active_blocks: bool = True, router_track_output_blocks: bool = False, router_assume_kv_reuse: bool = True, router_track_prefill_tokens: bool = True, router_prefill_load_model: str = 'none', router_ttl_secs: float = 120.0, router_approximate_cache_policy: Literal['ttl', 'lru'] = 'ttl', router_queue_threshold: Optional[float] = None, router_event_threads: int = 4, router_queue_policy: str = 'fcfs', use_remote_indexer: bool = False, serve_indexer: bool = False, enable_session_prefix_index: bool = False, shared_cache_multiplier: float = 0.0, shared_cache_type: str = 'none', router_predicted_ttl_secs: Optional[float] = None, conditional_disagg_enabled: bool = False, conditional_disagg_policy: str = 'isl_bounding', conditional_disagg_eff_isl_threshold: int = 2048, conditional_disagg_eff_isl_ratio_threshold: float = 0.7, conditional_disagg_prefill_busy_threshold: Optional[float] = None, conditional_disagg_decode_busy_threshold: Optional[float] = None, overlap_score_credit: float = 1.0, overlap_score_credit_decay: float = 0.0, prefill_load_scale: float = 1.0, decode_active_request_weight: float = 0.0, router_policy_config: Optional[str] = None, router_prefill_policy: Optional[str] = None, router_decode_policy: Optional[str] = None, router_tracking_hash: Literal['public-xxh3-v1', 'keyed-xxh3-v1'] = 'public-xxh3-v1', router_tracking_key_file: Optional[str | os.PathLike[str]] = None, router_tracking_key_id: Optional[str] = None) -> None
+KvRouterConfig(overlap_score_weight: Optional[float] = None, host_cache_hit_weight: float = 0.75, disk_cache_hit_weight: float = 0.25, router_temperature: float = 0.0, use_kv_events: bool = True, *, router_replica_sync: bool = False, router_track_active_blocks: bool = True, router_track_output_blocks: bool = False, router_assume_kv_reuse: bool = True, router_track_prefill_tokens: bool = True, router_prefill_load_model: str = 'none', router_ttl_secs: float = 120.0, router_approximate_cache_policy: Literal['ttl', 'lru'] = 'ttl', router_queue_threshold: Optional[float] = None, router_event_threads: int = 4, router_queue_policy: str = 'fcfs', use_remote_indexer: bool = False, serve_indexer: bool = False, enable_session_prefix_index: bool = False, shared_cache_multiplier: Optional[float] = None, shared_cache_type: str = 'none', router_predicted_ttl_secs: Optional[float] = None, conditional_disagg_enabled: bool = False, conditional_disagg_policy: str = 'isl_bounding', conditional_disagg_eff_isl_threshold: int = 2048, conditional_disagg_eff_isl_ratio_threshold: float = 0.7, conditional_disagg_prefill_busy_threshold: Optional[float] = None, conditional_disagg_decode_busy_threshold: Optional[float] = None, overlap_score_credit: float = 1.0, overlap_score_credit_decay: float = 0.0, prefill_load_scale: float = 1.0, decode_active_request_weight: float = 0.0, router_policy_config: Optional[str] = None, router_prefill_policy: Optional[str] = None, router_decode_policy: Optional[str] = None, router_tracking_hash: Literal['public-xxh3-v1', 'keyed-xxh3-v1'] = 'public-xxh3-v1', router_tracking_key_file: Optional[str | os.PathLike[str]] = None, router_tracking_key_id: Optional[str] = None) -> None
 ```
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L1801`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1801)
@@ -1481,7 +1480,7 @@ KvRouterConfig(overlap_score_weight: Optional[float] = None, host_cache_hit_weig
 <h4 id="api-dynamo-core-kvrouterconfig-init">__init__</h4>
 
 ```python
-__init__(overlap_score_weight: Optional[float] = None, host_cache_hit_weight: float = 0.75, disk_cache_hit_weight: float = 0.25, router_temperature: float = 0.0, use_kv_events: bool = True, *, router_replica_sync: bool = False, router_track_active_blocks: bool = True, router_track_output_blocks: bool = False, router_assume_kv_reuse: bool = True, router_track_prefill_tokens: bool = True, router_prefill_load_model: str = 'none', router_ttl_secs: float = 120.0, router_approximate_cache_policy: Literal['ttl', 'lru'] = 'ttl', router_queue_threshold: Optional[float] = None, router_event_threads: int = 4, router_queue_policy: str = 'fcfs', use_remote_indexer: bool = False, serve_indexer: bool = False, enable_session_prefix_index: bool = False, shared_cache_multiplier: float = 0.0, shared_cache_type: str = 'none', router_predicted_ttl_secs: Optional[float] = None, conditional_disagg_enabled: bool = False, conditional_disagg_policy: str = 'isl_bounding', conditional_disagg_eff_isl_threshold: int = 2048, conditional_disagg_eff_isl_ratio_threshold: float = 0.7, conditional_disagg_prefill_busy_threshold: Optional[float] = None, conditional_disagg_decode_busy_threshold: Optional[float] = None, overlap_score_credit: float = 1.0, overlap_score_credit_decay: float = 0.0, prefill_load_scale: float = 1.0, decode_active_request_weight: float = 0.0, router_policy_config: Optional[str] = None, router_prefill_policy: Optional[str] = None, router_decode_policy: Optional[str] = None, router_tracking_hash: Literal['public-xxh3-v1', 'keyed-xxh3-v1'] = 'public-xxh3-v1', router_tracking_key_file: Optional[str | os.PathLike[str]] = None, router_tracking_key_id: Optional[str] = None) -> None
+__init__(overlap_score_weight: Optional[float] = None, host_cache_hit_weight: float = 0.75, disk_cache_hit_weight: float = 0.25, router_temperature: float = 0.0, use_kv_events: bool = True, *, router_replica_sync: bool = False, router_track_active_blocks: bool = True, router_track_output_blocks: bool = False, router_assume_kv_reuse: bool = True, router_track_prefill_tokens: bool = True, router_prefill_load_model: str = 'none', router_ttl_secs: float = 120.0, router_approximate_cache_policy: Literal['ttl', 'lru'] = 'ttl', router_queue_threshold: Optional[float] = None, router_event_threads: int = 4, router_queue_policy: str = 'fcfs', use_remote_indexer: bool = False, serve_indexer: bool = False, enable_session_prefix_index: bool = False, shared_cache_multiplier: Optional[float] = None, shared_cache_type: str = 'none', router_predicted_ttl_secs: Optional[float] = None, conditional_disagg_enabled: bool = False, conditional_disagg_policy: str = 'isl_bounding', conditional_disagg_eff_isl_threshold: int = 2048, conditional_disagg_eff_isl_ratio_threshold: float = 0.7, conditional_disagg_prefill_busy_threshold: Optional[float] = None, conditional_disagg_decode_busy_threshold: Optional[float] = None, overlap_score_credit: float = 1.0, overlap_score_credit_decay: float = 0.0, prefill_load_scale: float = 1.0, decode_active_request_weight: float = 0.0, router_policy_config: Optional[str] = None, router_prefill_policy: Optional[str] = None, router_decode_policy: Optional[str] = None, router_tracking_hash: Literal['public-xxh3-v1', 'keyed-xxh3-v1'] = 'public-xxh3-v1', router_tracking_key_file: Optional[str | os.PathLike[str]] = None, router_tracking_key_id: Optional[str] = None) -> None
 ```
 
 Create a KV router configuration.
@@ -1598,8 +1597,8 @@ Lineage is fed from two sources: routing-lookup matches, and stored-block KV eve
 The index neither holds nor restores KV cache, so a match is a routing hint rather than a guarantee that the blocks are still resident.
 The index retains at most 16,384 least-recently-used sessions and opportunistically reclaims unreferenced logical leaves.
 </ParamField>
-<ParamField path="shared_cache_multiplier" type="float">
-Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
+<ParamField path="shared_cache_multiplier" type="Optional[float]">
+Deprecated; set this in the default policy parameters. Omitted values use the policy default (0.5 when shared cache is enabled).
 </ParamField>
 <ParamField path="shared_cache_type" type="str">
 External shared KV cache type, "none" or "hicache" (default: "none").
@@ -2517,7 +2516,7 @@ A policy-class queue cap rejected the request.
 from dynamo.llm import RouterQueueLimitExceeded
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L3342`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3342)
+[`lib/bindings/python/src/dynamo/_core.pyi#L3341`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3341)
 </Accordion>
 
 <Accordion id="api-dynamo-core-routingconstraints" title="RoutingConstraints (class)">
