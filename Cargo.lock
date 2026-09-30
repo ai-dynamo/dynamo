@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.12.0"
+version = "0.13.0-dev.202609300000000061"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d266db788afdb866421aad39f8fbc7096dba9517105ff7d770ee83ad70f82bb"
+checksum = "ed49bec0f9d606037ed2bf95b88895382f6b94c8289f479c6ed0d4b26dad1452"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -49,13 +49,17 @@ dependencies = [
  "parquet",
  "pep440_rs",
  "quick_cache",
+ "rand 0.8.6",
  "rand 0.9.4",
+ "rand_chacha 0.3.1",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_yaml",
  "sha2 0.10.9",
  "slotmap",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
@@ -2824,7 +2828,6 @@ dependencies = [
  "dashmap",
  "derive_builder",
  "dynamo-custom-policy-builtin",
- "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
@@ -3098,6 +3101,9 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "futures",
+ "prost-types 0.13.5",
+ "prost-types 0.14.3",
+ "serde_json",
  "tokio",
  "tonic 0.13.1",
  "tonic 0.14.6",
@@ -3106,10 +3112,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sidecar-testkit"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "dynamo-sglang-mocker",
+ "dynamo-sglang-sidecar",
+ "dynamo-vllm-mocker",
+ "dynamo-vllm-sidecar",
+ "futures",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic 0.14.6",
+ "tonic-health 0.14.6",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
-version = "1.9.1"
+version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd9116db4a17d4ac186a13719b1eea8b41669cec2d95c8c93363869c9163c8aa"
+checksum = "5646fb985235ddf91a188acbe4ddfb4eedc6dc0690bf1bb6737f58af1353e97d"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3158,6 +3184,8 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",

@@ -9,7 +9,8 @@ use serde_json::json;
 #[test]
 fn encode_response_enforces_terminal_contract() {
     let request = epd_image_request();
-    let ec_transfer_params = || json_to_struct(encoder_handoff()).expect("encoder handoff");
+    let ec_transfer_params =
+        || json_to_struct_v14(encoder_handoff(), EC_TRANSFER_PARAMS).expect("encoder handoff");
 
     let mut length = encode_response(Some(ec_transfer_params()));
     length
@@ -320,7 +321,8 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
             let mut response = sequence_response(
                 true,
                 false,
-                include_handoff.then(|| json_to_struct(handoff.clone()).unwrap()),
+                include_handoff
+                    .then(|| json_to_struct_v14(handoff.clone(), KV_TRANSFER_PARAMS).unwrap()),
             );
             if reason == pb::finish_info::FinishReason::Aborted {
                 response.prompt_info = prompt_logprob_response(
@@ -530,8 +532,11 @@ fn prefill_terminal_has_zero_completion_usage() {
             .as_mut()
             .unwrap()
             .kv_transfer_params = Some(
-            json_to_struct(json!({"remote_port": 5600, "nested": {"ids": [1, 2], "ok": true}}))
-                .unwrap(),
+            json_to_struct_v14(
+                json!({"remote_port": 5600, "nested": {"ids": [1, 2], "ok": true}}),
+                KV_TRANSFER_PARAMS,
+            )
+            .unwrap(),
         );
         let terminal = ResponseState::new(&minimal_request(), DisaggregationMode::Prefill)
             .convert(response)

@@ -343,7 +343,12 @@ fn native_handoff_ports_and_opaque_payloads_are_preserved() {
             )
             .unwrap();
             assert_eq!(
-                struct_to_json(wire.kv.unwrap().kv_transfer_params.unwrap()).unwrap(),
+                struct_to_json_v14(
+                    wire.kv.unwrap().kv_transfer_params.unwrap(),
+                    PEER,
+                    KV_TRANSFER_PARAMS
+                )
+                .unwrap(),
                 expected_handoff
             );
         }
@@ -372,7 +377,12 @@ fn vllm_extensions_preserve_native_fields() {
     assert!(kv.bypass_prefix_cache);
     assert_eq!(kv.cache_salt, "dynamo-cache-salt:cache-salt");
     assert_eq!(
-        struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
+        struct_to_json_v14(
+            kv.kv_transfer_params.clone().unwrap(),
+            PEER,
+            KV_TRANSFER_PARAMS
+        )
+        .unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
     );
 }
@@ -602,7 +612,12 @@ fn decode_requires_and_preserves_valid_handoff_metadata() {
     let wire =
         build_generate_request(request, "decode".into(), DisaggregationMode::Decode).unwrap();
     assert_eq!(
-        struct_to_json(wire.kv.unwrap().kv_transfer_params.unwrap()).unwrap(),
+        struct_to_json_v14(
+            wire.kv.unwrap().kv_transfer_params.unwrap(),
+            PEER,
+            KV_TRANSFER_PARAMS
+        )
+        .unwrap(),
         json!({"remote_engine_id": "prefill-0", "remote_host": "127.0.0.1", "remote_port": "20097", "remote_block_ids": [7, 8]}),
     );
     for value in [None, Some(json!([])), Some(json!("invalid"))] {

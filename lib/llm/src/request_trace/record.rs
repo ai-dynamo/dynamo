@@ -255,7 +255,7 @@ mod tests {
                 session_id: "root".to_string(),
                 parent_session_id: None,
                 session_final: None,
-                compaction: None,
+                agent_headers: Default::default(),
                 input_trigger: None,
             }),
             request: None,
