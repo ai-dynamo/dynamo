@@ -482,7 +482,8 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 60
+      # Include cold multi-arch compilation and the later test-image/compliance stages.
+      build_timeout_minutes: 90
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -862,7 +863,8 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 60
+      # Include cold multi-arch compilation and the later test-image/compliance stages.
+      build_timeout_minutes: 90
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -1130,7 +1132,7 @@ jobs:
           fi
       - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
-        run: python tests/frontend/router_aic_image_smoke.py
+        run: python tests/frontend/router_ais_image_smoke.py
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
