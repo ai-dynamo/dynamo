@@ -152,6 +152,7 @@ ignore:
   - 'lib/sidecar/**/*.rst'
 
 ci: &ci
+  - '.github/ci/**'
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'

@@ -2136,19 +2136,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-data-gen"
-version = "1.6.0"
-dependencies = [
- "anyhow",
- "blake3",
- "dynamo-kv-hashing",
- "flate2",
- "rustc-hash 2.1.2",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "dynamo-kv-hashing"
 version = "1.6.0"
 dependencies = [
@@ -2336,7 +2323,6 @@ dependencies = [
  "dashmap",
  "derive_builder",
  "dynamo-custom-policy-builtin",
- "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
