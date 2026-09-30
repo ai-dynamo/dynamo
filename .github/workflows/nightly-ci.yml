@@ -903,19 +903,23 @@ jobs:
     name: sidecar-runtime
     needs: [vllm-build, sidecar-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_count: [1, 2]
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: ${{ 'false' }}
       test_suite_name: vllm
       framework: vllm
-      test_type: Sidecar E2E Test
-      amd_runner: prod-tester-amd-gpu-v2
+      test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: sidecar and vllm and gpu_1
+      gpu_test_markers: ${{ format('sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -927,19 +931,23 @@ jobs:
     name: sidecar-runtime
     needs: [sglang-build, sidecar-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_count: [1, 2]
     uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: ${{ 'false' }}
       test_suite_name: sglang
       framework: sglang
-      test_type: Sidecar E2E Test
-      amd_runner: prod-tester-amd-gpu-v2
+      test_type: ${{ format('SGLang Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: sidecar and sglang and gpu_1
+      gpu_test_markers: ${{ format('sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -998,7 +1006,7 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: vllm and gpu_2 and not h100
+      gpu_test_markers: vllm and gpu_2 and not h100 and not sidecar
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -1102,7 +1110,7 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: sglang and gpu_2 and not h100
+      gpu_test_markers: sglang and gpu_2 and not h100 and not sidecar
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'

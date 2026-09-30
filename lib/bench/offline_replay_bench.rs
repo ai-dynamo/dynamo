@@ -278,27 +278,6 @@ fn canonical_capture_options(enabled: bool) -> ReplayCaptureOptions {
     }
 }
 
-fn canonical_aic_identity(args: &MockEngineArgs) -> Value {
-    let enabled = args.aic_backend.is_some();
-    json!({
-        "backend": args.aic_backend,
-        "system": enabled.then(|| args.aic_system.clone().unwrap_or_else(|| "h200_sxm".to_string())),
-        "backend_version": args.aic_backend_version,
-        "tp_size": enabled.then(|| args.aic_tp_size.unwrap_or(1)),
-        "model": args.aic_model_path,
-        "moe_tp_size": args.aic_moe_tp_size,
-        "moe_ep_size": args.aic_moe_ep_size,
-        "attention_dp_size": args.aic_attention_dp_size,
-        "gemm_dtype": args.aic_gemm_dtype,
-        "moe_dtype": args.aic_moe_dtype,
-        "fmha_dtype": args.aic_fmha_dtype,
-        "kv_cache_dtype": args.aic_kv_cache_dtype,
-        "comm_dtype": args.aic_comm_dtype,
-        "nextn": args.aic_nextn,
-        "nextn_accept_rates": args.aic_nextn_accept_rates,
-    })
-}
-
 fn canonical_engine_pool_metadata(args: &MockEngineArgs) -> Result<Value> {
     ensure!(
         args.planner_profile_data.is_none(),
@@ -309,8 +288,8 @@ fn canonical_engine_pool_metadata(args: &MockEngineArgs) -> Result<Value> {
         "canonical replay does not support response_replay_trace_path"
     );
     ensure!(
-        args.aic_backend.is_none() || args.aic_backend_version.is_some(),
-        "canonical AIC replay requires a resolved backend version"
+        args.ais_backend.is_none() || args.ais_backend_version.is_some(),
+        "canonical AIS replay requires a resolved backend version"
     );
     let mut metadata = serde_json::to_value(args)?;
     let metadata = metadata
@@ -319,12 +298,12 @@ fn canonical_engine_pool_metadata(args: &MockEngineArgs) -> Result<Value> {
     metadata.insert(
         "performance_model".to_string(),
         json!({
-            "kind": if args.aic_backend.is_some() {
-                "aic_callback"
+            "kind": if args.ais_backend.is_some() {
+                "ais_callback"
             } else {
                 "builtin_polynomial"
             },
-            "aic": canonical_aic_identity(args),
+            "ais": args.ais_perf_config,
         }),
     );
     Ok(Value::Object(metadata.clone()))
@@ -374,9 +353,9 @@ fn canonical_metadata(
             "replay_concurrency": Value::Null,
             "arrival_speedup_ratio": args.arrival_speedup_ratio,
             "max_sim_time_ms": Value::Null,
-            "aic_prefill_load_estimator": Value::Null,
-            "aic_performance_model_implementation": Value::Null,
-            "aic_prefill_load_estimator_implementation": Value::Null,
+            "ais_prefill_load_estimator": Value::Null,
+            "ais_performance_model_implementation": Value::Null,
+            "ais_prefill_load_estimator_implementation": Value::Null,
         },
         "engine_config": canonical_engine_config(args, engine_args)?,
         "router": {
@@ -397,7 +376,7 @@ fn canonical_metadata(
         "semantic_features": {
             "canonical_replay": true,
             "mocker_kvbm_offload": false,
-            "aic_forward_pass": false,
+            "ais_forward_pass": false,
         },
     }))
 }
