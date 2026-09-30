@@ -93,6 +93,14 @@ kubectl wait --for=condition=Complete job/dsv41-flash-vllm-bench -n ${NAMESPACE}
 
 Results land under `/shared-model-cache/perf/<epoch>_<job-name>/trace_c<CONCURRENCY>/`.
 
+To rerun, wait for the previous Job to finish and save its logs. Results remain
+on the PVC. Delete the completed Job, update `perf.yaml`, then run the commands
+above again. Do not delete an active benchmark.
+
+```bash
+kubectl delete job dsv41-flash-vllm-bench -n "${NAMESPACE}"
+```
+
 ## Measured Results
 
 Results for the agentic workload (64K input tokens, 400 output tokens), using
