@@ -210,14 +210,28 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   usable non-loopback IPv4 address first, then IPv6. On Unix, automatic selection excludes down
   interfaces. If neither family has a usable non-loopback address, Dynamo selects IPv4 loopback,
   then IPv6 loopback, and falls back to `127.0.0.1` if neither is found. Remote subscribers cannot
-  reach a loopback address.
+  reach a loopback address. Automatic selection can choose an IPv4 link-local address or a bridge
+  address. On hosts with several interfaces, set this variable to a reachable IP address or interface
+  if automatic selection chooses the wrong address.
 
   Direct ZMQ publishers bind `0.0.0.0` for an advertised IPv4 address or `[::]` for an advertised
   IPv6 address. Discovery publishes the concrete address with the port assigned to that listener.
-  An explicit override must identify an address reachable by subscribers. Event-plane PUB/SUB
-  sockets support IPv4 and IPv6, including connections to configured ZMQ brokers. This variable
-  does not affect NATS or ZMQ broker mode.
+  An explicit override must identify an address reachable by subscribers. The IPv6 wildcard can
+  also accept IPv4 connections; keep ZMQ listeners on trusted networks.
+
+  Event-plane PUB/SUB sockets support IPv4 addresses and bracketed IPv6 addresses, including
+  connections to configured ZMQ brokers. Hostnames retain IPv4 resolution. For an IPv6 broker,
+  use a bracketed address such as `tcp://[2001:db8::10]:5555`; Dynamo rejects an unbracketed IPv6
+  address. This variable does not affect NATS
+  or ZMQ broker mode.
 </ParamField>
+
+<Note>
+On IPv6-only hosts, set `DYN_HTTP_HOST=::` on the Frontend and `DYN_SYSTEM_HOST=::` on workers. Both
+listeners default to `0.0.0.0`, which accepts IPv4 connections only. The request plane and the direct
+ZMQ event plane select an IPv6 address automatically when the host has no usable non-loopback IPv4
+address.
+</Note>
 
 <ParamField path="DYN_ZMQ_IO_THREADS" type="integer" default="4">
   Number of libzmq background I/O threads in the process-wide event-plane context. All event-plane
@@ -356,6 +370,15 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies only
   when `--engine-request-limit` or `DYN_ENGINE_REQUEST_LIMIT` is set. Must be at least `2`; the
   effective per-worker cap is the engine limit plus this queue limit.
+</ParamField>
+
+<ParamField path="DYN_SYSTEM_HOST" type="string" default="0.0.0.0">
+  Listen address for the system status server on `DYN_SYSTEM_PORT`, which serves health, metrics,
+  and self-hosted model metadata. `0.0.0.0` accepts IPv4 connections only; on IPv6-only hosts, set
+  `::`. For a wildcard address, Dynamo advertises a non-loopback address from the same family; `::`
+  also accepts IPv4 connections, so it falls back to a non-loopback IPv4 address. If none exists,
+  Dynamo advertises loopback and logs a warning; remote callers such as the Frontend cannot reach
+  that address.
 </ParamField>
 
 ## Related pages
