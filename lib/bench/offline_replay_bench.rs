@@ -286,10 +286,14 @@ fn router_config(args: &Args) -> Result<Option<KvRouterConfig>> {
         args.router_mode == RouterModeArg::KvRouter,
         "--router-queue-threshold requires --router-mode kv-router"
     );
-    Ok(Some(KvRouterConfig {
+    let config = KvRouterConfig {
         router_queue_threshold: Some(threshold),
         ..KvRouterConfig::default()
-    }))
+    };
+    config
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid --router-queue-threshold: {error}"))?;
+    Ok(Some(config))
 }
 
 fn canonical_capture_options(enabled: bool) -> ReplayCaptureOptions {
