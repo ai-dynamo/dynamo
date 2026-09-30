@@ -106,15 +106,12 @@ struct Args {
 
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
-    /// radix-tree, nested-map, concurrent-radix-tree-compressed,
-    /// branch-sharded-crtc.
+    /// nested-map, concurrent-radix-tree-compressed.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
-    /// Number of OS threads for event processing in compare mode. Applies to
-    /// indexers that use a thread pool (nested-map,
-    /// concurrent-radix-tree-compressed, branch-sharded-crtc).
-    /// Ignored by radix-tree.
+    /// Number of OS threads for event processing with `--compare` or when no
+    /// subcommand is given (the default concurrent-radix-tree-compressed run).
     #[clap(long, default_value = "16")]
     num_event_workers: usize,
 
@@ -328,8 +325,10 @@ async fn run_backend<T: dynamo_kv_router::indexer::SyncIndexer>(
     let result = run_open_loop(backend_name, indexer, trial, open_config).await;
     // Restore the coordinator mask. Otherwise blocking-pool threads spawned while the
     // next sweep or compare cell generates events inherit the single query-issuer CPU.
-    pin_current_thread_to_cpus(&coordinator_cpus)?;
-    result
+    let restored = pin_current_thread_to_cpus(&coordinator_cpus);
+    let result = result?;
+    restored?;
+    Ok(result)
 }
 
 fn print_open_loop_result(result: &OpenLoopResult) {
@@ -375,16 +374,20 @@ fn write_open_loop_result(path: &str, result: &OpenLoopResult) -> anyhow::Result
 
 fn run_provenance(args: &Args, config: &MooncakeIndexerConfig) -> anyhow::Result<RunProvenance> {
     let common = &args.common;
+    let file_sha256 = |path: &std::path::Path| -> anyhow::Result<String> {
+        Ok(format!("{:x}", Sha256::digest(std::fs::read(path)?)))
+    };
     let trace_sha256 = common
         .mooncake_trace_path
         .as_deref()
-        .map(|path| anyhow::Ok(format!("{:x}", Sha256::digest(std::fs::read(path)?))))
+        .map(|path| file_sha256(std::path::Path::new(path)))
         .transpose()?;
+    let binary = std::env::current_exe().ok();
+    let binary_sha256 = binary.as_deref().map(file_sha256).transpose()?;
     Ok(RunProvenance {
         argv: std::env::args().collect(),
-        binary: std::env::current_exe()
-            .ok()
-            .map(|path| path.display().to_string()),
+        binary: binary.map(|path| path.display().to_string()),
+        binary_sha256,
         trace_path: common.mooncake_trace_path.clone(),
         trace_sha256,
         trace_block_size: common.trace_block_size,
@@ -444,13 +447,15 @@ async fn prepare_benchmark(
 async fn run_open_loop_repeated_mode(args: &Args, indexer_names: &[String]) -> anyhow::Result<()> {
     for name in indexer_names {
         let config = indexer_config(args, name)?;
+        // Record provenance before the run so it describes the inputs actually read.
+        let provenance = run_provenance(args, &config)?;
         let bench_config = benchmark_config(args, args.common.benchmark_duration_ms);
         let Some(prepared) = prepare_benchmark(args, bench_config.benchmark_duration_ms).await?
         else {
             return Ok(());
         };
         let mut result = run_open_loop_for_config(args, &config, prepared, bench_config).await?;
-        result.provenance = Some(run_provenance(args, &config)?);
+        result.provenance = Some(provenance);
         print_open_loop_result(&result);
         let path = if indexer_names.len() == 1 {
             args.result_json_output.clone()
@@ -471,6 +476,7 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
 
     for name in indexer_names {
         let config = indexer_config(args, name)?;
+        let provenance = run_provenance(args, &config)?;
         for &duration_ms in durations.iter().rev() {
             println!(
                 "\n=== Mooncake sweep: backend={} benchmark_duration_ms={} ===",
@@ -485,7 +491,7 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
             };
             let mut result =
                 run_open_loop_for_config(args, &config, prepared, bench_config).await?;
-            result.provenance = Some(run_provenance(args, &config)?);
+            result.provenance = Some(provenance.clone());
             print_open_loop_result(&result);
             let path = open_loop_output_path(
                 &args.result_json_output,

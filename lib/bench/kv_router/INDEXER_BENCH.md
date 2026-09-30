@@ -185,8 +185,8 @@ The versioned Mooncake JSON reports:
 - Queue depth at producer stop, outstanding work, maximum reconstructed depth,
   drain time, timer kind, CPU masks, exact-ID validity, and compact failure
   reasons.
-- `provenance`: the command line, binary path, trace path and SHA-256, and the
-  trace, corpus, and issuer settings that shaped the replay.
+- `provenance`: the command line, binary path and SHA-256, trace path and
+  SHA-256, and the trace, corpus, and issuer settings that shaped the replay.
 
 Do not interpret overloaded lookup latency as an iso-throughput latency result.
 At a comfortable common load, report scheduler lag, queue wait, and lookup

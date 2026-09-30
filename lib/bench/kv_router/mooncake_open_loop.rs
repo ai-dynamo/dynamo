@@ -826,6 +826,7 @@ pub struct Distribution {
 pub struct RunProvenance {
     pub argv: Vec<String>,
     pub binary: Option<String>,
+    pub binary_sha256: Option<String>,
     pub trace_path: Option<String>,
     pub trace_sha256: Option<String>,
     pub trace_block_size: u32,
@@ -1152,7 +1153,8 @@ pub async fn run_open_loop<T: SyncIndexer>(
     KvIndexerInterface::flush(indexer.as_ref()).await;
     // Timing ends at the last completed operation. Closing lanes, sealing and
     // harvesting completion buffers, and aggregating issue records are bookkeeping.
-    let end_ns = last_completion_ns(&query_results, &snapshot).unwrap_or(start_ns);
+    // A run with no completions (a failed issuer) ends at producer stop.
+    let end_ns = last_completion_ns(&query_results, &snapshot).unwrap_or(producer_stop_ns);
     let issuer_analysis =
         aggregate_issuer_outputs(issuer_outputs, operation_count, producer_stop_ns);
     let backend_timing_report = KvIndexerInterface::timing_report(indexer.as_ref());
