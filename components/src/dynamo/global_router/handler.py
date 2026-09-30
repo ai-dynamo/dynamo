@@ -16,7 +16,7 @@ Both modes support priority-based pool overrides from agent hints.
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from dynamo.common.utils.token_ids import token_ids_len
+from dynamo.common.utils.token_ids import normalize_request_token_ids, token_ids_len
 from dynamo.runtime import Client, DistributedRuntime
 
 from .pool_selection import get_priority_retry_order, load_config
@@ -92,6 +92,9 @@ class GlobalRouterHandler:
             pool_priorities=pool_priorities,
             enable_priority_retry=self.config.enable_priority_retry,
         )
+        # The egress codec is chosen per destination; a JSON destination would read
+        # a packed buffer as one id per byte, so forward a list.
+        request = normalize_request_token_ids(dict(request))
 
         for attempt_idx, pool_idx in enumerate(pool_order):
             namespace = namespaces[pool_idx]

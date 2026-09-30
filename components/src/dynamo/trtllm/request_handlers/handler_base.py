@@ -15,6 +15,7 @@
 
 import asyncio
 import dataclasses
+import functools
 import inspect
 import logging
 import os
@@ -46,6 +47,7 @@ from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
+from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
@@ -85,6 +87,22 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+
+
+@functools.lru_cache(maxsize=1)
+def _trtllm_accepts_token_id_arrays() -> bool:
+    # Only from NVIDIA/TensorRT-LLM#19658 does GenerationRequest keep an array prompt
+    # as its int32 wire buffer; earlier releases rebuild a list and assert Python ints.
+    try:
+        from tensorrt_llm.executor.request import GenerationRequest
+
+        probe = GenerationRequest(
+            prompt_token_ids=np.zeros(1, dtype=np.int32),
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+    except Exception:
+        return False
+    return probe.__dict__.get("_prompt_token_ids_i32") is not None
 
 
 class TRTLLMEnginePauseController:
@@ -1018,11 +1036,14 @@ class HandlerBase(BaseGenerativeHandler):
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
 
         # With DYN_TOKEN_IDS_AS_BYTES the ingress hands token ids over as a packed
-        # little-endian int32 buffer instead of a Python list, so no per-token
-        # Python object is built here or in TRT-LLM's IPC encode.
+        # little-endian int32 buffer instead of a Python list. Keep it as an int32
+        # array when TRT-LLM can take one, otherwise decode it to the list it expects.
         request_token_ids = request.get("token_ids")
         if isinstance(request_token_ids, (bytes, bytearray, memoryview)):
-            request_token_ids = np.frombuffer(request_token_ids, dtype="<i4")
+            if _trtllm_accepts_token_id_arrays():
+                request_token_ids = np.frombuffer(request_token_ids, dtype="<i4")
+            else:
+                request_token_ids = token_ids_to_list(request_token_ids)
             request["token_ids"] = request_token_ids
         logging.debug(
             "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",

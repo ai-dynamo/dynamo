@@ -34,9 +34,11 @@ class FakeClient:
         self.fail_before_output = fail_before_output
         self.fail_after_output = fail_after_output
         self.calls = 0
+        self.requests: list[dict[str, Any]] = []
 
     async def generate(self, request: dict[str, Any]):
         self.calls += 1
+        self.requests.append(request)
         if self.fail_on_generate:
             raise RuntimeError(f"{self.name} generate failed")
 
@@ -298,3 +300,4 @@ async def test_agg_handler_measures_packed_token_ids_by_count(tmp_path):
     )
 
     assert outputs == [{"pool": "agg-short"}]
+    assert short.requests[0]["token_ids"] == [1] * 4096

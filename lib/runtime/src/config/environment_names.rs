@@ -808,6 +808,11 @@ pub mod request_plane {
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 
+    /// Serialize `PreprocessedRequest.token_ids` as one packed little-endian int32 blob on
+    /// binary codecs instead of a sequence. Opt-in; every msgpack worker must run a release
+    /// whose readers accept the packed form.
+    pub const DYN_TOKEN_IDS_AS_BYTES: &str = "DYN_TOKEN_IDS_AS_BYTES";
+
     /// Maximum TCP request-plane message size, in bytes.
     pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
 

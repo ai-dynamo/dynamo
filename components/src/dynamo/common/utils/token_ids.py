@@ -12,9 +12,11 @@ a buffer directly leave the value alone.
 
 import array
 import sys
-from typing import Any, Optional, overload
+from collections.abc import Mapping, MutableMapping
+from typing import Any, Optional, TypeVar, cast, overload
 
 _INT32 = "i" if array.array("i").itemsize == 4 else "l"
+_RequestT = TypeVar("_RequestT", bound=Mapping[str, Any])
 
 
 @overload
@@ -55,8 +57,8 @@ def token_ids_len(value: Any) -> int:
     return len(value)
 
 
-def normalize_request_token_ids(request: dict) -> dict:
+def normalize_request_token_ids(request: _RequestT) -> _RequestT:
     ids = request.get("token_ids")
     if ids is not None and not isinstance(ids, list):
-        request["token_ids"] = token_ids_to_list(ids)
+        cast(MutableMapping[str, Any], request)["token_ids"] = token_ids_to_list(ids)
     return request

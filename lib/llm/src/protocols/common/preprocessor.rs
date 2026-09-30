@@ -521,17 +521,19 @@ pub struct PreprocessedRequest {
     pub is_probe: bool,
 }
 
-/// Enforce the object-only `encoder_result` contract at the serde boundary.
-/// The handoff payload is engine-opaque but must be a JSON object at every hop;
-/// reject arrays/scalars here so a non-conforming (e.g. cross-language)
-/// producer fails fast instead of leaking a malformed shape downstream.
 /// `DYN_TOKEN_IDS_AS_BYTES=1`: put `token_ids` on the request plane as one packed
 /// little-endian int32 blob instead of a sequence. On a binary codec (msgpack) the
 /// Python worker then receives `bytes` and never allocates one Python int per
 /// token; the TRT-LLM handler turns it into an int32 array. Human-readable codecs
 /// (JSON) keep the sequence form. Deserialization accepts both forms.
-static TOKEN_IDS_AS_BYTES: std::sync::LazyLock<bool> =
-    std::sync::LazyLock::new(|| dynamo_runtime::config::env_is_truthy("DYN_TOKEN_IDS_AS_BYTES"));
+/// Enable only when every msgpack worker runs a release with this reader: an older
+/// worker decodes the blob through rmp-serde's `deserialize_seq`, one token per
+/// byte, with no error.
+static TOKEN_IDS_AS_BYTES: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    dynamo_runtime::config::env_is_truthy(
+        dynamo_runtime::config::environment_names::request_plane::DYN_TOKEN_IDS_AS_BYTES,
+    )
+});
 
 /// Readers decode the packed form as signed int32 (the engines' token type), so
 /// ids above `i32::MAX` keep the sequence form.
@@ -618,6 +620,10 @@ where
     deserializer.deserialize_any(TokenIdsVisitor).map(Arc::new)
 }
 
+/// Enforce the object-only `encoder_result` contract at the serde boundary.
+/// The handoff payload is engine-opaque but must be a JSON object at every hop;
+/// reject arrays/scalars here so a non-conforming (e.g. cross-language)
+/// producer fails fast instead of leaking a malformed shape downstream.
 fn deserialize_optional_object<'de, D>(
     deserializer: D,
 ) -> Result<Option<serde_json::Value>, D::Error>

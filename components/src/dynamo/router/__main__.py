@@ -95,9 +95,6 @@ class StandaloneRouterHandler:
 
         preprocessed_request = dict(request)
         preprocessed_request.setdefault("model", "unknown")
-        preprocessed_request["token_ids"] = token_ids_to_list(
-            preprocessed_request["token_ids"]
-        )
         # Legacy callers send a top-level dp_rank instead of routing hints.
         dp_rank = preprocessed_request.get("dp_rank")
         if preprocessed_request.get("routing") is None and dp_rank is not None:
