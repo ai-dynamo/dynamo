@@ -4169,11 +4169,8 @@ async fn responses(
 
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
-    let response_params = ResponseParams {
-        tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
-            request.inner.tools.as_deref().unwrap_or_default(),
-            Some(&request.inner.input),
-        )),
+    let mut response_params = ResponseParams {
+        tool_names: None,
         model: request.inner.model.clone(),
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
@@ -4205,7 +4202,10 @@ async fn responses(
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
-    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+    let (unified_request, tool_names) = UnifiedRequest::from_responses_with_tool_names(
+        orig_request,
+    )
+    .map_err(|e: anyhow::Error| {
         tracing::error!(
             request_id,
             error = %e,
@@ -4215,6 +4215,7 @@ async fn responses(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    response_params.tool_names = Some(tool_names);
     // Extract the API context before consuming the UnifiedRequest — this
     // carries Responses-specific fields (previous_response_id, store, etc.)
     // that the stream converter needs for faithful response reconstruction.
