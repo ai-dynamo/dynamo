@@ -99,14 +99,19 @@ jobs:
             "${k[@]}" delete --request-timeout=0 \
               job/dsv4-bench dgd/dsv4-pro-agg computedomain/dsv4-pro-agg-compute-domain \
               --ignore-not-found --cascade=foreground --wait=true --timeout=5m
+            "${k[@]}" delete secret -l ci-workflow=deepseek-v4-pro-nightly --ignore-not-found --wait=false
           fi
           [[ "$("${k[@]}" get pvc shared-model-cache -o jsonpath='{.status.phase}')" == Bound ]]
           "${k[@]}" create --dry-run=server -f "$ARTIFACTS/deploy.yaml" > "$ARTIFACTS/deploy-dry-run.txt"
           "${k[@]}" create --dry-run=server -f "$ARTIFACTS/perf.yaml" > "$ARTIFACTS/perf-dry-run.txt"
-          "${k[@]}" create secret generic "hf-$RUN_KEY" --dry-run="$DRY_RUN" -o name \
-            --from-literal=HF_TOKEN="${HF_TOKEN:?Missing HF_TOKEN}"
-          "${k[@]}" create secret docker-registry "acr-$RUN_KEY" --dry-run="$DRY_RUN" -o name \
-            --docker-server="$ACR_HOST" --docker-username="$ACR_USER" --docker-password="$ACR_PASSWORD"
+          "${k[@]}" create secret generic "hf-$RUN_KEY" --dry-run=client -o json \
+            --from-literal=HF_TOKEN="${HF_TOKEN:?Missing HF_TOKEN}" |
+            jq '.metadata.labels = {"ci-workflow": "deepseek-v4-pro-nightly"}' |
+            "${k[@]}" create --dry-run="$DRY_RUN" -f - -o name
+          "${k[@]}" create secret docker-registry "acr-$RUN_KEY" --dry-run=client -o json \
+            --docker-server="$ACR_HOST" --docker-username="$ACR_USER" --docker-password="$ACR_PASSWORD" |
+            jq '.metadata.labels = {"ci-workflow": "deepseek-v4-pro-nightly"}' |
+            "${k[@]}" create --dry-run="$DRY_RUN" -f - -o name
       - name: Deploy and wait for readiness
         if: ${{ !inputs.preflight_only }}
         timeout-minutes: 105
