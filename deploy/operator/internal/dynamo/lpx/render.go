@@ -153,9 +153,7 @@ func RenderNodeLocal(
 			// Agent template is neither mutated nor validated.
 			if agent.Replicas == 0 {
 				if conductorSpec != nil {
-					if err := configureLPUConductorPod(conductorSpec, workload, configMap.Name, allocation); err != nil {
-						return nil, fmt.Errorf("stage %s: %w", stage, err)
-					}
+					configureLPUConductorPod(conductorSpec, configMap.Name, allocation)
 				}
 				continue
 			}
@@ -175,9 +173,7 @@ func RenderNodeLocal(
 					return nil, fmt.Errorf("stage %s must use the Conductor model-storage mount path %q", stage, modelStoragePath)
 				}
 			}
-			if err := configureLPURolePods(&template.Spec, conductorSpec, workload, configMap.Name, allocation); err != nil {
-				return nil, fmt.Errorf("stage %s: %w", stage, err)
-			}
+			configureLPURolePods(&template.Spec, conductorSpec, projection, configMap.Name, allocation)
 		}
 		if agent.Replicas == 0 {
 			continue
@@ -255,29 +251,22 @@ func RenderNodeLocal(
 }
 
 // configureLPURolePods consumes fresh, independently owned Agent and conductor
-// specs. Agent and workload are nonnil; nil conductor means no emitted launcher.
-func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, workload *Workload, configMapName, allocation string) error {
-	if err := withLPUConfigVolume(agentPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
-		return err
-	}
-	configureAgentScheduling(agentPodSpec, workload.BuildFamily())
+// specs. Agent and projection are nonnil, and projection has validated partitions;
+// nil conductor means no emitted launcher.
+func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, projection *ModelProjection, configMapName, allocation string) {
+	family := projection.configuredBuild.Family
+	ensureLPUConfigVolume(agentPodSpec, configMapName)
+	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].DevicesPerNode)
 	if conductorPodSpec != nil {
-		if err := configureLPUConductorPod(conductorPodSpec, workload, configMapName, allocation); err != nil {
-			return err
-		}
+		configureLPUConductorPod(conductorPodSpec, configMapName, allocation)
 	}
-
-	return nil
 }
 
 // configureLPUConductorPod shapes the conductor's LPX-owned fields. Placement is
 // already resolved.
-func configureLPUConductorPod(conductorPodSpec *corev1.PodSpec, workload *Workload, configMapName, allocation string) error {
-	if err := withLPUConfigVolume(conductorPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
-		return err
-	}
+func configureLPUConductorPod(conductorPodSpec *corev1.PodSpec, configMapName, allocation string) {
+	ensureLPUConfigVolume(conductorPodSpec, configMapName)
 	configureNodeLocalConductorRuntime(conductorPodSpec, allocation)
-	return nil
 }
 
 // roleAnnotations consumes base, allocating it when nil.

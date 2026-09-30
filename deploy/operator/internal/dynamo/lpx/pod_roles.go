@@ -20,17 +20,21 @@ const (
 )
 
 // configureAgentScheduling consumes a fresh, nonnil Agent PodSpec containing main.
+// devicesPerNode is the positive device count from the manifest.
 func configureAgentScheduling(
 	agent *corev1.PodSpec,
 	targetFamily BuildFamily,
+	devicesPerNode int,
 ) {
-	// Preserve authored resources while binding the selected device on Agent main.
-	container := common.FindContainerByName(agent.Containers, commonconsts.MainContainerName)
 	// Model projection has already restricted the target family to XT or HX.
-	name, amount := v2LPUResourceName, resource.MustParse("8")
+	name := v2LPUResourceName
 	if targetFamily == BuildFamilyHX {
-		name, amount = v3LPUResourceName, resource.MustParse("16")
+		name = v3LPUResourceName
 	}
+
+	// Bind the manifest's device count on main while preserving all other authored resources.
+	container := common.FindContainerByName(agent.Containers, commonconsts.MainContainerName)
+	amount := *resource.NewQuantity(int64(devicesPerNode), resource.DecimalSI)
 	if container.Resources.Requests == nil {
 		container.Resources.Requests = make(corev1.ResourceList)
 	}

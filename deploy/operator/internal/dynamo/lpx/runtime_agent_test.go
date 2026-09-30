@@ -20,14 +20,15 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 	t.Parallel()
 
 	for _, role := range []struct {
-		name      string
-		family    BuildFamily
-		conductor bool
+		name           string
+		family         BuildFamily
+		devicesPerNode int
+		conductor      bool
 	}{
 		{name: "XT conductor", family: BuildFamilyXT, conductor: true},
 		{name: "HX conductor", family: BuildFamilyHX, conductor: true},
-		{name: "XT worker", family: BuildFamilyXT},
-		{name: "HX worker", family: BuildFamilyHX},
+		{name: "XT worker", family: BuildFamilyXT, devicesPerNode: 8},
+		{name: "HX worker", family: BuildFamilyHX, devicesPerNode: 16},
 	} {
 		for _, startup := range []struct {
 			name    string
@@ -98,9 +99,10 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				before := pod.DeepCopy()
 
 				t.Log("Apply runtime bindings for the selected family and role")
-				configureAgentScheduling(&pod, role.family)
 				if role.conductor {
 					configureNodeLocalConductorRuntime(&pod, "allocation")
+				} else {
+					configureAgentScheduling(&pod, role.family, role.devicesPerNode)
 				}
 
 				t.Log("Retain the sidecar and bind only the authored main runtime")
