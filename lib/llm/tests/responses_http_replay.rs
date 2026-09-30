@@ -911,6 +911,41 @@ async fn function_call_output_image_without_detail_reaches_the_chat_engine() {
     .await;
 }
 
+#[tokio::test]
+#[serial]
+async fn invalid_image_url_returns_bad_request() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": [
+                    {"role": "user", "content": "What is in the screenshot?"},
+                    {"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": [
+                        {"type": "input_image", "image_url": "not-a-url"}
+                    ]}
+                ]
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], 400);
+        assert_eq!(body["type"], "Bad Request");
+        assert_eq!(
+            body["message"],
+            "Failed to convert responses request: Invalid image URL: relative URL without a base"
+        );
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/responses/input_tokens
 // ---------------------------------------------------------------------------

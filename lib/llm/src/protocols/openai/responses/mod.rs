@@ -26,8 +26,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
     CreateChatCompletionRequest, FinishReason, FunctionName, FunctionObject, FunctionType,
-    ImageDetail as ChatImageDetail, ImageUrl, ReasoningContent,
-    ReasoningEffort as ChatReasoningEffort, ResponseFormat, ServiceTier as ChatServiceTier,
+    ImageUrl, ReasoningContent, ReasoningEffort as ChatReasoningEffort, ResponseFormat,
+    ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -257,22 +257,6 @@ pub(crate) enum ResponsesConversionError {
     UnsupportedContent(String),
 }
 
-/// Convert a Responses API ImageDetail to the Chat Completions ImageDetail.
-/// The responses module re-exports an `ImageDetail` from the upstream async-openai
-/// crate which is distinct from `dynamo_protocols::types::ImageDetail` (chat).
-/// We bridge via serde to avoid direct cross-crate type dependencies.
-fn convert_image_detail_str(detail: &impl serde::Serialize) -> ChatImageDetail {
-    match serde_json::to_value(detail)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .as_deref()
-    {
-        Some("low") => ChatImageDetail::Low,
-        Some("high") => ChatImageDetail::High,
-        _ => ChatImageDetail::Auto,
-    }
-}
-
 fn convert_input_image_to_chat_image(
     img: &InputImageContent,
 ) -> Result<ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
@@ -298,10 +282,10 @@ fn convert_input_image_to_chat_image(
         (_, Some(url_str)) => url_str,
     };
     let url = url::Url::parse(url_str).map_err(|error| {
-        ResponsesConversionError::InvalidArgument(format!("Invalid image URL '{url_str}': {error}"))
+        ResponsesConversionError::InvalidArgument(format!("Invalid image URL: {error}"))
     })?;
     let mut image_url = ImageUrl::from(url.to_string());
-    image_url.detail = Some(convert_image_detail_str(&img.detail));
+    image_url.detail = Some(img.detail.clone());
     Ok(ChatCompletionRequestMessageContentPartImageArgs::default()
         .image_url(image_url)
         .build()?)
@@ -1407,7 +1391,7 @@ mod tests {
         InputParam, InputRole, InputTextContent, Item, MessageItem, Role as ResponseRole,
     };
     use dynamo_protocols::types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent, ImageDetail,
     };
 
     use super::*;
@@ -1785,7 +1769,7 @@ mod tests {
                             text: "What is in this image?".into(),
                         }),
                         InputContent::InputImage(InputImageContent {
-                            detail: Default::default(),
+                            detail: ImageDetail::Original,
                             file_id: None,
                             image_url: Some("https://example.com/cat.jpg".into()),
                         }),
@@ -1821,6 +1805,14 @@ mod tests {
                     });
                     assert!(has_text, "text part missing");
                     assert!(has_image, "image part dropped — regression of #9468 review");
+                    let ChatCompletionRequestUserMessageContentPart::ImageUrl(image) = &parts[1]
+                    else {
+                        panic!("expected image part after text");
+                    };
+                    assert_eq!(
+                        image.image_url.as_ref().unwrap().detail,
+                        Some(ImageDetail::Original)
+                    );
                 }
                 ChatCompletionRequestUserMessageContent::Text(t) => panic!(
                     "expected Array content with image preserved, got Text({t:?}) — images were dropped",
@@ -2027,6 +2019,7 @@ mod tests {
         let output: FunctionCallOutput = serde_json::from_value(serde_json::json!([
             {"type": "input_text", "text": "Screenshot: "},
             {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8=", "detail": "low"},
+            {"type": "input_image", "image_url": "https://example.com/original.png", "detail": "original"},
             {"type": "input_text", "text": "end"}
         ]))
         .unwrap();
@@ -2041,7 +2034,7 @@ mod tests {
         let ChatCompletionRequestToolMessageContent::Array(parts) = &message.content else {
             panic!("expected multimodal tool content");
         };
-        assert_eq!(parts.len(), 3);
+        assert_eq!(parts.len(), 4);
         assert!(matches!(
             &parts[0],
             ChatCompletionRequestToolMessageContentPart::Text(text) if text.text == "Screenshot: "
@@ -2051,9 +2044,16 @@ mod tests {
         };
         let image_url = image.image_url.as_ref().unwrap();
         assert_eq!(image_url.url.as_str(), "data:image/png;base64,aGVsbG8=");
-        assert_eq!(image_url.detail, Some(ChatImageDetail::Low));
+        assert_eq!(image_url.detail, Some(ImageDetail::Low));
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[2] else {
+            panic!("expected second image part");
+        };
+        assert_eq!(
+            image.image_url.as_ref().unwrap().detail,
+            Some(ImageDetail::Original)
+        );
         assert!(matches!(
-            &parts[2],
+            &parts[3],
             ChatCompletionRequestToolMessageContentPart::Text(text) if text.text == "end"
         ));
     }
