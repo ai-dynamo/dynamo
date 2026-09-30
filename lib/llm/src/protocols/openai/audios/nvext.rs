@@ -4,15 +4,13 @@
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use validator::{Validate, ValidationError};
 
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
 }
 
 /// NVIDIA extensions to the Audio Speech API
-#[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
-#[validate(schema(function = "validate_nv_ext"))]
+#[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone)]
 pub struct NvExt {
     /// Annotations for SSE stream events
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,10 +48,6 @@ impl NvExt {
     pub fn builder() -> NvExtBuilder {
         NvExtBuilder::default()
     }
-}
-
-fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
-    Ok(())
 }
 
 impl NvExtBuilder {
