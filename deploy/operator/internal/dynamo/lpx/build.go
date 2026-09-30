@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 )
@@ -81,7 +82,21 @@ func (p BuildPartition) effectiveNodeCount() int {
 	return max(1, p.Topology.ChipCount/p.DevicesPerNode)
 }
 
-func buildRuntimePath(buildPath string, modelStoragePath string) (string, error) {
+// buildRuntimePath resolves a snapshot reference to its runtime filesystem path.
+// A safe relative runtimeRef remaps file-URL snapshots under modelStoragePath;
+// otherwise the snapshot reference remains authoritative.
+func buildRuntimePath(buildPath, runtimeRef, modelStoragePath string) (string, error) {
+	snapshotURL, snapshotErr := url.Parse(buildPath)
+	runtimeRef = strings.TrimSpace(runtimeRef)
+	runtimeURL, runtimeErr := url.Parse(runtimeRef)
+	if snapshotErr == nil && runtimeErr == nil && snapshotURL.Scheme == BuildSchemeFile &&
+		runtimeRef != "" && runtimeURL.Scheme == "" && !filepath.IsAbs(runtimeRef) {
+		cleaned := filepath.Clean(runtimeRef)
+		if cleaned != "." && cleaned != ".." && !strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			buildPath = (&url.URL{Scheme: BuildSchemeFile, Path: filepath.Join(modelStoragePath, cleaned)}).String()
+		}
+	}
+
 	buildURL, err := parseBuildRef(buildPath)
 	if err != nil {
 		return "", fmt.Errorf("parse build path %q: %w", buildPath, err)
