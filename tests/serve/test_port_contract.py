@@ -390,7 +390,14 @@ def test_e_pd_launcher_fails_fast_on_missing_managed_port(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    "option", ["--kv-events-config", "--kv_events_config", "--kv_events_config="]
+    "option",
+    [
+        "--kv-events-config",
+        "--kv_events_config",
+        "--kv_events_config=",
+        "--kv-events-conf",
+        "--kv_events_conf=",
+    ],
 )
 @pytest.mark.timeout(180)
 def test_e_pd_launcher_refuses_managed_kv_events_override(
@@ -459,6 +466,8 @@ def test_e_pd_launcher_refuses_managed_kv_events_endpoint_decoy(
         ("--kv-events-config=", False),
         ("--kv_events_config", False),
         ("--kv_events_config=", False),
+        ("--kv-events-conf", False),
+        ("--kv_events_conf=", False),
     ],
 )
 @pytest.mark.timeout(180)
@@ -496,7 +505,7 @@ def test_e_pd_launcher_keeps_managed_kv_events_on_the_reserved_port(
     # only one of the two, so reading the flag back means the caller's copy is
     # the one that survived.
     assert "enable_kv_cache_events" in workers["pd"]["args"]
-    assert len(re.findall(r"--kv[-_]events[-_]config", workers["pd"]["args"])) == 1
+    assert len(re.findall(r"--kv[-_]events[-_]conf(?:ig)?", workers["pd"]["args"])) == 1
 
 
 @pytest.mark.parametrize(
@@ -555,6 +564,8 @@ def test_e_pd_launcher_refuses_managed_dotted_kv_events(
         "--kv_events_config",
         "--kv_events_config=",
         "--kv-events-config.endpoint",
+        "--kv-events-conf",
+        "--kv_events_conf=",
         "--kv_events_config.endpoint=",
         "--kv-events-conf.endpoint",
         "--kv_events_conf.endpoint=",
