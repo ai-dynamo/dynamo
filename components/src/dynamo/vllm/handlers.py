@@ -74,6 +74,7 @@ from dynamo.common.utils.input_params import (
 )
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
+from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -3652,6 +3653,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         ] = None
 
     async def generate(self, request, context):
+        normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
@@ -4234,6 +4236,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self._multimodal_request_processor.initialize_prefill_handoff()
 
     async def generate(self, request, context):
+        normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
         logger.debug("Prefill Request ID: %s", request_id)
