@@ -550,9 +550,11 @@ impl AnthropicStreamConverter {
                     events.push(make_sse_event("content_block_stop", &block_stop));
                 }
 
-                // Emit content_block_start on first text
-                if !self.text_block_started {
+                // Emit content_block_start on the first text, and on text after a
+                // tool call closed the previous text block.
+                if !self.text_block_started || self.text_block_closed {
                     self.text_block_started = true;
+                    self.text_block_closed = false;
                     self.text_block_index = self.next_block_index;
                     self.next_block_index += 1;
 
@@ -617,6 +619,15 @@ impl AnthropicStreamConverter {
         // `Length`/`ContentFilter` streams use the EOF fallback below. Flush only
         // after every choice and delta in the terminal chunk has been recorded.
         if self.tool_flush_requested && self.stop_reason == Some(AnthropicStopReason::ToolUse) {
+            // Text after the last tool call reopened a text block; close it
+            // before the tool blocks start.
+            if self.text_block_started && !self.text_block_closed {
+                self.text_block_closed = true;
+                let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                    index: self.text_block_index,
+                };
+                events.push(make_sse_event("content_block_stop", &block_stop));
+            }
             self.append_buffered_tool_events(events, false);
         }
     }
@@ -854,8 +865,9 @@ impl AnthropicStreamConverter {
                     events.push(make_tagged_event("content_block_stop", &ev));
                 }
 
-                if !self.text_block_started {
+                if !self.text_block_started || self.text_block_closed {
                     self.text_block_started = true;
+                    self.text_block_closed = false;
                     self.text_block_index = self.next_block_index;
                     self.next_block_index += 1;
 
@@ -914,6 +926,13 @@ impl AnthropicStreamConverter {
         // streams carry a tool-call finish reason, while interrupted streams use
         // the EOF fallback in `emit_end_events_tagged`.
         if self.tool_flush_requested && self.stop_reason == Some(AnthropicStopReason::ToolUse) {
+            if self.text_block_started && !self.text_block_closed {
+                self.text_block_closed = true;
+                let ev = AnthropicStreamEvent::ContentBlockStop {
+                    index: self.text_block_index,
+                };
+                events.push(make_tagged_event("content_block_stop", &ev));
+            }
             for (event_type, event, _usage) in self.drain_buffered_tool_events(false) {
                 events.push(make_tagged_event(event_type, &event));
             }
@@ -2171,6 +2190,82 @@ mod tests {
             nvext: None,
             llm_metrics: None,
         }
+    }
+
+    /// Asserts the Anthropic block protocol: blocks start one at a time at
+    /// consecutive indices, and deltas and stops target the open block.
+    /// Returns each block's type in order.
+    fn block_types(values: &[serde_json::Value]) -> Vec<String> {
+        let mut open = None;
+        let mut types = Vec::new();
+        for value in values {
+            let index = value["index"].as_u64();
+            match value["type"].as_str().unwrap() {
+                "content_block_start" => {
+                    assert_eq!(open, None, "block started while another is open: {value}");
+                    assert_eq!(index, Some(types.len() as u64), "non-consecutive: {value}");
+                    open = index;
+                    types.push(value["content_block"]["type"].as_str().unwrap().to_owned());
+                }
+                "content_block_delta" => {
+                    assert_eq!(index, open, "delta outside its block: {value}")
+                }
+                "content_block_stop" => {
+                    assert_eq!(index, open, "stop outside its block: {value}");
+                    open = None;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(open, None, "a block was left open");
+        types
+    }
+
+    /// Text after a tool call starts a new text block: the text block closed
+    /// when the call started. The first case is Qwen3.8 output from SGLang,
+    /// which writes text between parallel calls.
+    #[rstest::rstest]
+    #[case::between_calls(
+        vec![
+            reasoning_chunk("Run both."),
+            text_chunk("\n\n"),
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("\n"),
+            tool_call_chunk(1, Some("call-b"), Some("shell"), Some(r#"{"command":"hostname"}"#)),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["thinking", "text", "text", "tool_use", "tool_use"],
+        "\n\n\n"
+    )]
+    #[case::after_last_call(
+        vec![
+            text_chunk("Checking."),
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("\n"),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["text", "text", "tool_use"],
+        "Checking.\n"
+    )]
+    #[tokio::test]
+    async fn test_text_after_tool_call_opens_new_block(
+        #[case] chunks: Vec<NvCreateChatCompletionStreamResponse>,
+        #[case] expected: &[&str],
+        #[case] text: &str,
+    ) {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::new();
+        for chunk in &chunks {
+            conv.append_chunk_events(chunk, &mut events);
+        }
+        conv.append_end_events(&mut events);
+        let values = sse_values(events).await;
+        assert_eq!(block_types(&values), expected);
+        let streamed: String = values
+            .iter()
+            .filter_map(|value| value["delta"]["text"].as_str())
+            .collect();
+        assert_eq!(streamed, text);
     }
 
     /// Full reasoning flow: thinking → text → tool_use.
