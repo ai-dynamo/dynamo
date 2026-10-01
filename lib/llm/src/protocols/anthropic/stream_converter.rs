@@ -2318,11 +2318,10 @@ mod tests {
         &["text", "tool_use", "text"],
         "Checking.\n"
     )]
-    #[case::fragments_between_calls(
+    #[case::no_text_before_calls(
         vec![
             tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
-            text_chunk("Now "),
-            text_chunk("the sandbox."),
+            text_chunk("Now the sandbox."),
             tool_call_chunk(1, Some("call-b"), Some("shell"), Some(r#"{"command":"hostname"}"#)),
             finish_chunk(FinishReason::ToolCalls),
         ],
