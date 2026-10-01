@@ -1,0 +1,322 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+    helm.sh/resource-policy: keep
+  name: lpxgraphdeployments.nvidia.com
+spec:
+  group: nvidia.com
+  names:
+    kind: LPXGraphDeployment
+    listKind: LPXGraphDeploymentList
+    plural: lpxgraphdeployments
+    shortNames:
+      - lpxgd
+    singular: lpxgraphdeployment
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .status.conditions[?(@.type=="Ready")].status
+          name: Ready
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |-
+            LPXGraphDeployment is generated and owned by the Dynamo operator, not authored
+            by users. It owns one LPX PCS and its build/placement resources.
+            It serves only v1alpha1 and has no conversion contract.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: |-
+                LPXGraphDeploymentSpec is the operator's handoff for all LPX components in a DGD.
+                The owning DGD remains the only authored workload spec. The child reads that
+                DGD only after verifying the controller owner and effective LPX input revision.
+              properties:
+                inputRevision:
+                  description: |-
+                    inputRevision hashes only effective LPX inputs, including its selected
+                    restart token. Unrelated component edits do not create an LPX revision.
+                  pattern: ^sha256:[a-f0-9]{64}$
+                  type: string
+              required:
+                - inputRevision
+              type: object
+            status:
+              description: |-
+                LPXGraphDeploymentStatus is the LPX controller's durable lifecycle state.
+                Dynamo consumes readiness only for the current generation and input revision.
+              properties:
+                components:
+                  additionalProperties:
+                    description: LPXComponentStatus reports logical replicas and readiness for one LPX component.
+                    properties:
+                      availableReplicas:
+                        description: |-
+                          availableReplicas is the number of available replicas. Populated for
+                          `Deployment` and `PodCliqueScalingGroup`; not available for
+                          `PodClique` or `LeaderWorkerSet`.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      componentKind:
+                        description: |-
+                          componentKind is the underlying resource kind (e.g. `PodClique`,
+                          `Deployment`, `LeaderWorkerSet`).
+                        enum:
+                          - PodClique
+                          - PodCliqueScalingGroup
+                          - Deployment
+                          - LeaderWorkerSet
+                        type: string
+                      componentNames:
+                        description: |-
+                          componentNames is the list of underlying Kubernetes resource names for
+                          this Dynamo component. During normal operation this contains a single
+                          name; during rolling updates it contains both old and new resource names.
+                        items:
+                          type: string
+                        type: array
+                      conditions:
+                        description: conditions reports component readiness for the current child generation.
+                        items:
+                          description: Condition contains details for one aspect of the current state of this API Resource.
+                          properties:
+                            lastTransitionTime:
+                              description: |-
+                                lastTransitionTime is the last time the condition transitioned from one status to another.
+                                This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                              format: date-time
+                              type: string
+                            message:
+                              description: |-
+                                message is a human readable message indicating details about the transition.
+                                This may be an empty string.
+                              maxLength: 32768
+                              type: string
+                            observedGeneration:
+                              description: |-
+                                observedGeneration represents the .metadata.generation that the condition was set based upon.
+                                For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                                with respect to the current state of the instance.
+                              format: int64
+                              minimum: 0
+                              type: integer
+                            reason:
+                              description: |-
+                                reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                                Producers of specific condition types may define expected values and meanings for this field,
+                                and whether the values are considered a guaranteed API.
+                                The value should be a CamelCase string.
+                                This field may not be empty.
+                              maxLength: 1024
+                              minLength: 1
+                              pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                              type: string
+                            status:
+                              description: status of the condition, one of True, False, Unknown.
+                              enum:
+                                - "True"
+                                - "False"
+                                - Unknown
+                              type: string
+                            type:
+                              description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                              maxLength: 316
+                              pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                              type: string
+                          required:
+                            - lastTransitionTime
+                            - message
+                            - reason
+                            - status
+                            - type
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                          - type
+                        x-kubernetes-list-type: map
+                      gpusPerEngine:
+                        description: |-
+                          gpusPerEngine is the number of GPUs assigned to one inference engine in a
+                          component replica, across all of its nodes. Independent auxiliary GPU
+                          allocations are excluded. A present zero means the engine itself has no
+                          GPUs; consult gpusPerReplica for auxiliary allocations.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      gpusPerReplica:
+                        description: |-
+                          gpusPerReplica is the unique GPU allocation added when this component
+                          scales by one replica, across all nodes, application and initialization
+                          phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective
+                          Pod scheduling footprint; shared DRA claims are counted once. A present
+                          zero records a successful non-GPU resolution; omission means no current
+                          shape is available.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      readyReplicas:
+                        description: |-
+                          readyReplicas is the number of ready replicas. Populated for
+                          `PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for
+                          `PodCliqueScalingGroup`.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      replicas:
+                        description: replicas is the total number of non-terminated replicas.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      runtimeNamespace:
+                        description: |-
+                          runtimeNamespace is the effective Dynamo runtime namespace for this
+                          component. Worker components may include a generation suffix; non-workers
+                          use the base namespace. During rolling updates, worker status keeps the old
+                          active revision namespace until cutover completes.
+                        type: string
+                      scheduledReplicas:
+                        description: |-
+                          scheduledReplicas is the number of replicas the backend scheduler has
+                          scheduled, expressed strictly in Dynamo component-replica units (not
+                          raw backend pod counts). It is a diagnostic aid for distinguishing
+                          capacity/scheduling shortfalls from runtime readiness.
+
+                          It is optional and omitted (nil) when the active backend cannot derive
+                          it reliably in component-replica units — for example before the backing
+                          resource's status has been observed, or for backends that do not report
+                          a scheduling count. A nil value therefore means "not reported", never
+                          "zero scheduled"; consumers must not treat absence as a scheduling
+                          failure.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      updatedReplicas:
+                        description: updatedReplicas is the number of replicas at the current/desired revision.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                      - componentKind
+                      - replicas
+                      - updatedReplicas
+                    type: object
+                  description: components reports logical replicas by authored component name, never Agent Pods.
+                  type: object
+                conditions:
+                  description: |-
+                    conditions reports readiness and scheduling deadline failures.
+                    Ready uses reason Ready, Pending, or Failed and a diagnostic message.
+                    SchedulingFailed independently retains deadline failure and retry state.
+                  items:
+                    description: Condition contains details for one aspect of the current state of this API Resource.
+                    properties:
+                      lastTransitionTime:
+                        description: |-
+                          lastTransitionTime is the last time the condition transitioned from one status to another.
+                          This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                        format: date-time
+                        type: string
+                      message:
+                        description: |-
+                          message is a human readable message indicating details about the transition.
+                          This may be an empty string.
+                        maxLength: 32768
+                        type: string
+                      observedGeneration:
+                        description: |-
+                          observedGeneration represents the .metadata.generation that the condition was set based upon.
+                          For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                          with respect to the current state of the instance.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      reason:
+                        description: |-
+                          reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                          Producers of specific condition types may define expected values and meanings for this field,
+                          and whether the values are considered a guaranteed API.
+                          The value should be a CamelCase string.
+                          This field may not be empty.
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                        type: string
+                      status:
+                        description: status of the condition, one of True, False, Unknown.
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                        type: string
+                      type:
+                        description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                        maxLength: 316
+                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                        type: string
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
+                modelDownload:
+                  description: modelDownload retains the existing remote-build download progress.
+                  properties:
+                    builds:
+                      description: |-
+                        builds is the sorted set of resolved remote LPU build URLs whose artifacts
+                        were successfully downloaded into model-storage.
+                      items:
+                        type: string
+                      type: array
+                    lastCheckedAt:
+                      description: lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
+                      format: date-time
+                      type: string
+                  type: object
+                observedGeneration:
+                  description: |-
+                    observedGeneration is the child generation processed successfully.
+                    Every spec.inputRevision change advances the child generation.
+                  format: int64
+                  type: integer
+              type: object
+          required:
+            - spec
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

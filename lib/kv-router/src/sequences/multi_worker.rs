@@ -265,6 +265,11 @@ pub trait SequenceSubscriber: Send {
     ) -> Poll<Option<anyhow::Result<ActiveSequenceEvent>>> {
         Poll::Pending
     }
+
+    /// Called once after each drain batch is applied and flushed, with the
+    /// number of events in the batch. Implementations may sample their own
+    /// backlog here; the default records nothing.
+    fn record_drain(&mut self, _applied: usize) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -281,9 +286,9 @@ pub enum ReplicaWorkerPolicy {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SequenceTrackerOptions {
-    replica_worker_policy: ReplicaWorkerPolicy,
-    expiry_duration: Option<Duration>,
+pub(crate) struct SequenceTrackerOptions {
+    pub(crate) replica_worker_policy: ReplicaWorkerPolicy,
+    pub(crate) expiry_duration: Option<Duration>,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -443,7 +448,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Builds a tracker from resolved replica-admission and expiry policies.
-    fn new_with_options(
+    pub(crate) fn new_with_options(
         publisher: P,
         block_size: usize,
         dp_range: HashMap<u64, (u32, u32)>,
@@ -787,7 +792,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        self.add_request_impl(req, decay_now, false).map(|_| ())
+        self.add_request_if_registered_admitted(req, decay_now)
+            .map(|_| ())
+    }
+
+    pub fn add_request_if_registered_admitted(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<AttemptId, SequenceError> {
+        self.add_request_impl(req, decay_now, false)
     }
 
     fn add_request_impl(
@@ -815,8 +829,41 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(attempt_id)
     }
 
-    pub(crate) fn request_worker(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
+    pub(crate) fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
+    }
+
+    pub(crate) fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
+        self.request_index.booking_for(&booking.request_id)
+            == Some(RequestBooking {
+                worker: booking.worker,
+                attempt_id: booking.attempt_id,
+            })
+    }
+
+    /// Republish the ordered completion event for `booking` while it is still
+    /// the live booking; serialized with free/rebook through the worker's
+    /// sequence lock.
+    pub(crate) fn publish_prefill_completed_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> bool {
+        let table = self.workers.read();
+        let Some(&idx) = table.index.get(&booking.worker) else {
+            return false;
+        };
+        let _seq = table.slots[idx].sequences.write();
+        if !self.has_booking(booking) {
+            return false;
+        }
+        self.enqueue_publish_event(ActiveSequenceEvent {
+            request_id: booking.request_id.clone(),
+            worker: booking.worker,
+            data: ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: self.router_id,
+            lora_name: self.request_index.lora_for(&booking.request_id),
+        });
+        true
     }
 
     /// Free all blocks associated with a request.
@@ -1109,11 +1156,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 return Err(self.stale_request_not_found(request_id, worker, "add_output_block"));
             };
             let mut seq = table.slots[idx].sequences.write();
-            let Some(_new_block_hash) = seq.add_output_block(request_id, decay_fraction) else {
+            if !seq.add_output_blocks(request_id, 1, decay_fraction) {
                 return Err(SequenceError::RequestNotFound {
                     request_id: request_id.clone(),
                 });
-            };
+            }
             let load = seq.worker_load_snapshot();
             self.prompt_registry.replace_worker_load_state(worker, load);
             load
@@ -1124,13 +1171,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    pub(crate) fn add_output_block_if_booking(
+    pub(crate) fn add_output_blocks_if_booking(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
         attempt_id: AttemptId,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        if num_blocks == 0 {
+            return Ok(LifecycleMutationOutcome::NoChange);
+        }
         let expected = RequestBooking { worker, attempt_id };
         let load = {
             let table = self.workers.read();
@@ -1144,9 +1195,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if self.request_index.booking_for(request_id) != Some(expected) {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
-            let Some(_new_block_hash) = seq.add_output_block(request_id, decay_fraction) else {
+            if !seq.add_output_blocks(request_id, num_blocks, decay_fraction) {
                 return Ok(LifecycleMutationOutcome::NoChange);
-            };
+            }
             let load = seq.worker_load_snapshot();
             self.prompt_registry.replace_worker_load_state(worker, load);
             load
@@ -1218,15 +1269,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let mut projections = FxHashMap::default();
+        self.project_worker_loads_into(token_sequence, decay_now, &mut projections);
+        projections
+    }
+
+    pub(crate) fn project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
         #[cfg(feature = "bench")]
         let num_workers = self.workers.read().slots.len();
 
-        let result = self
-            .prompt_registry
-            .project_worker_loads(token_sequence, decay_now);
+        self.prompt_registry
+            .project_worker_loads_into(token_sequence, decay_now, projections);
 
         #[cfg(feature = "bench")]
         {
@@ -1237,8 +1298,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 "project_worker_loads completed"
             );
         }
+    }
 
-        result
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn bench_project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
+        self.project_worker_loads_into(token_sequence, decay_now, projections);
     }
 
     /// Query all workers for their current number of active blocks.
@@ -1262,7 +1332,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// for engines that batch or overlap multiple prefills.
     ///
     /// `Err(MissingExpectedDuration)` is expected for workers with any active
-    /// prefill that lacks an AIC prediction, including the default no-AIC path or
+    /// prefill that lacks an AIS prediction, including the default no-AIS path or
     /// failed predictions. Replica-synced remote values are receive-time anchored
     /// advisory reads, not producer-time truth.
     #[allow(dead_code)]
@@ -2221,7 +2291,7 @@ mod tests {
         );
         assert_eq!(
             sequences
-                .add_output_block_if_booking(&request_id, worker, first_attempt, None)
+                .add_output_blocks_if_booking(&request_id, worker, first_attempt, 3, None)
                 .unwrap(),
             LifecycleMutationOutcome::NoChange
         );
@@ -2345,17 +2415,30 @@ mod tests {
     }
 
     #[test]
-    fn output_block_observes_load_without_publishing_or_replication() {
+    fn output_blocks_observe_load_once_without_publishing_or_replication() {
         let (sequences, state) = make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "output".to_string();
 
-        sequences
-            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+        let attempt_id = sequences
+            .add_request_admitted(local_sequence_request(&request_id, worker), Instant::now())
             .unwrap();
         state.clear();
 
-        sequences.add_output_block(&request_id, None).unwrap();
+        assert_eq!(
+            sequences
+                .add_output_blocks_if_booking(&request_id, worker, attempt_id, 0, Some(0.0))
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert!(state.observations.lock().unwrap().is_empty());
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&3));
+        assert_eq!(
+            sequences
+                .add_output_blocks_if_booking(&request_id, worker, attempt_id, 5, Some(0.5))
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
 
         assert!(state.events.lock().unwrap().is_empty());
         assert!(state.single_loads.lock().unwrap().is_empty());
@@ -2364,6 +2447,20 @@ mod tests {
         assert_eq!(observations[0].0, worker);
         assert_eq!(observations[0].1, 4);
         assert_eq!(sequences.active_blocks().get(&worker), Some(&4));
+        assert!(state.load_batches.lock().unwrap().is_empty());
+        drop(observations);
+
+        state.clear();
+        sequences.add_output_block(&request_id, None).unwrap();
+
+        assert!(state.events.lock().unwrap().is_empty());
+        assert!(state.single_loads.lock().unwrap().is_empty());
+        let observations = state.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].0, worker);
+        assert_eq!(observations[0].1, 5);
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&5));
+        assert!(state.load_batches.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2449,10 +2546,7 @@ mod tests {
         );
         assert_eq!(active_request_count(&sequences, worker_a), 1);
         assert_eq!(active_request_count(&sequences, worker_b), 0);
-        assert_eq!(
-            sequences.request_worker(&"req-1".to_string()),
-            Some(worker_a)
-        );
+        assert_eq!(sequences.request_worker("req-1"), Some(worker_a));
     }
 
     #[tokio::test]
@@ -2481,10 +2575,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(active_request_count(&sequences, booked_worker), 1);
-        assert_eq!(
-            sequences.request_worker(&"req-1".to_string()),
-            Some(booked_worker)
-        );
+        assert_eq!(sequences.request_worker("req-1"), Some(booked_worker));
     }
 
     #[test]
@@ -3036,14 +3127,8 @@ mod tests {
         assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-2".to_string()),
-            Some(worker)
-        );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-2"), Some(worker));
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
         assert_eq!(
             sequences.active_request_counts().get(&worker).copied(),
             Some(1)
@@ -3070,14 +3155,8 @@ mod tests {
         assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-2".to_string()),
-            Some(worker)
-        );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-2"), Some(worker));
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
     #[test]
@@ -3140,11 +3219,11 @@ mod tests {
             "source B should apply while source A remains blocked"
         );
         assert_eq!(
-            sequences.request_index.worker_for(&"source-a".to_string()),
+            sequences.request_index.worker_for("source-a"),
             Some(worker_a)
         );
         assert_eq!(
-            sequences.request_index.worker_for(&"source-b".to_string()),
+            sequences.request_index.worker_for("source-b"),
             Some(worker_b)
         );
     }
@@ -3197,10 +3276,7 @@ mod tests {
 
         sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
 
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker_a)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker_a));
         assert_eq!(sequences.active_blocks()[&worker_a], 3);
         assert!(!sequences.active_blocks().contains_key(&worker_b));
         assert_eq!(sequences.num_workers(), 1);
@@ -3251,10 +3327,7 @@ mod tests {
             sequences.prompt_registry.cleanup_attempts(),
             cleanup_count + 1
         );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3290,10 +3363,7 @@ mod tests {
                 .copied(),
             Some(0)
         );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3372,10 +3442,7 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3397,10 +3464,7 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
     }
 
     #[tokio::test]
@@ -3661,10 +3725,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sequences.num_workers(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
         assert!(!sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
     }
@@ -3693,10 +3754,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sequences.num_workers(), 0);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
         assert!(sequences.prompt_registry.is_block_index_empty());
     }
 
@@ -3725,10 +3783,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sequences.num_workers(), 0);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
     #[test]

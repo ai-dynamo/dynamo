@@ -34,9 +34,11 @@ class FakeClient:
         self.fail_before_output = fail_before_output
         self.fail_after_output = fail_after_output
         self.calls = 0
+        self.requests: list[dict[str, Any]] = []
 
     async def generate(self, request: dict[str, Any]):
         self.calls += 1
+        self.requests.append(request)
         if self.fail_on_generate:
             raise RuntimeError(f"{self.name} generate failed")
 
@@ -269,3 +271,33 @@ async def test_agg_handler_routes_by_input_sequence_length(tmp_path):
 
     assert short_outputs == [{"pool": "agg-short"}]
     assert long_outputs == [{"pool": "agg-long"}]
+
+
+@pytest.mark.asyncio
+async def test_agg_handler_measures_packed_token_ids_by_count(tmp_path):
+    config = _agg_config()
+    config["enable_priority_retry"] = False
+    config["num_agg_pools"] = 2
+    config["agg_pool_dynamo_namespaces"] = ["agg-short", "agg-long"]
+    config["agg_pool_priorities"] = [0, 1]
+    config["agg_pool_selection_strategy"].update(
+        {
+            "isl_min": 0,
+            "isl_max": 24576,
+            "isl_resolution": 2,
+            "agg_pool_mapping": [[[0]], [[1]]],
+        }
+    )
+    handler = _handler(_write_config(tmp_path, config))
+    short = FakeClient("agg-short", outputs=[{"pool": "agg-short"}])
+    long = FakeClient("agg-long", outputs=[{"pool": "agg-long"}])
+    handler.agg_clients = {"agg-short": short, "agg-long": long}
+
+    # 4096 packed ids are 16384 bytes; counting bytes would pick the long pool.
+    packed_short = (1).to_bytes(4, "little") * 4096
+    outputs = await _collect_outputs(
+        handler.handle_generate({"token_ids": packed_short})
+    )
+
+    assert outputs == [{"pool": "agg-short"}]
+    assert short.requests[0]["token_ids"] == [1] * 4096

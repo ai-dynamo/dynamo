@@ -103,26 +103,33 @@ exceptions:
       libraries on their own breaks `import nvidia.dali` outright. The vendored
       set is all-or-nothing with the package.
 
-      The entry stays even so. trtllm_runtime.Dockerfile now pins
-      nvidia-dali-cuda130>=2.1.1, so the vendored libraries no longer register
-      those decoders -- but they are still on disk and still match the deny globs
-      above, which gate on presence rather than content. What changed is the
-      reason for the waiver: it now covers a vendored ffmpeg that carries no
-      software h264/hevc/aac, rather than one that does.
+      The entry stays even so. trtllm_runtime.Dockerfile pins
+      nvidia-dali-cuda130==2.2.0, which is the version the 1.3.0rc27 base image
+      already carries, so the pin now holds a version rather than moving one. The
+      vendored libraries do not register those decoders -- but they are still on
+      disk and still match the deny globs above, which gate on presence rather
+      than content. What changed is the reason for the waiver: it now covers a
+      vendored ffmpeg that carries no software h264/hevc/aac, rather than one
+      that does.
 
       Enforcement lives at build time, not here. Two guards in
-      trtllm_runtime.Dockerfile enumerate every bundled libavcodec -- one after
-      the upgrade, and one after the overlay COPY, which is the only stage where
-      a missed whiteout can leave the base image's older copy sitting beside the
-      upgraded one -- and tests/dependencies/test_no_software_video_codecs.py
-      repeats the check against the shipped image.
+      trtllm_runtime.Dockerfile enumerate every bundled libavcodec -- one in
+      runtime_full after the pinned install, and one after the overlay COPY,
+      which is the only stage where a missed whiteout can leave the base image's
+      older copy sitting beside the upgraded one -- and
+      tests/dependencies/test_no_software_video_codecs.py repeats the check
+      against the shipped image. Both guards fail when their glob matches
+      nothing, because a loop over an empty glob checks nothing and exits 0.
 
       Deliberately NOT expressed as a deny_components version floor:
       nvidia-dali-cuda130 appears in the base-image SBOM and is therefore
       subtracted from the generated delta, so such an entry would never match
       anything and would read as a check while doing nothing.
 
-      Re-measure when the vendored version moves.
+      Re-measure when the vendored version moves. Last measured against
+      nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27, whose base carries 2.2.0:
+      440 decoders, h264, hevc, aac, aac_fixed and aac_latm absent, vp8, vp9,
+      mjpeg and av1 present.
     owner: DALI
   # PyNvVideoCodec (added for NVDEC hardware video decode) vendors libavutil and
   # libavformat under its package dir to demux input containers before handing the
