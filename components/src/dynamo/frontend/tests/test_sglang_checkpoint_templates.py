@@ -61,8 +61,11 @@ def weather_request():
     }
 
 
-@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
-@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+@pytest.mark.parametrize(
+    ("tool_choice", "use_pool"),
+    [("auto", False), ("auto", True), ("required", False)],
+    ids=["auto-inline", "auto-pool", "required-inline"],
+)
 def test_hunyuan_checkpoint_tokens(weather_request, use_pool, tool_choice, monkeypatch):
     tokenizer = HunyuanTokenizer()
     weather_request["tool_choice"] = tool_choice

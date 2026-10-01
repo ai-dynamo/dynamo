@@ -583,7 +583,6 @@ def _call_with_optional_parallel_tool_calls(
 
 
 def _parser_tokenizer_kwargs(parser: Any, tokenizer: Any) -> dict[str, Any]:
-    """Pass checkpoint parsing metadata when the SGLang version supports it."""
     if tokenizer is not None and _callable_accepts_kwarg(parser, "tokenizer"):
         return {"tokenizer": tokenizer}
     return {}
