@@ -1239,20 +1239,18 @@ def test_structured_response_respects_legacy_constraint_precedence(
 @pytest.mark.core
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize(
-    ("use_pool", "stream", "thinking", "separate_reasoning", "legacy_regex"),
+    ("use_pool", "thinking", "separate_reasoning", "legacy_regex"),
     [
-        pytest.param(False, False, False, True, False, id="inline-json"),
-        pytest.param(False, True, False, True, False, id="inline-json-stream"),
-        pytest.param(True, False, False, True, False, id="pool-json"),
-        pytest.param(True, True, False, True, False, id="pool-json-stream"),
-        pytest.param(False, True, True, True, False, id="inline-reasoning"),
-        pytest.param(True, True, True, True, False, id="pool-reasoning"),
-        pytest.param(False, True, True, False, False, id="separation-disabled"),
-        pytest.param(False, True, True, True, True, id="legacy-regex"),
+        pytest.param(False, False, True, False, id="inline-json"),
+        pytest.param(True, False, True, False, id="pool-json"),
+        pytest.param(False, True, True, False, id="inline-reasoning"),
+        pytest.param(True, True, True, False, id="pool-reasoning"),
+        pytest.param(False, True, False, False, id="separation-disabled"),
+        pytest.param(False, True, True, True, id="legacy-regex"),
     ],
 )
 def test_structured_response_content_and_reasoning_gate(
-    tokenizer, monkeypatch, use_pool, stream, thinking, separate_reasoning, legacy_regex
+    tokenizer, monkeypatch, use_pool, thinking, separate_reasoning, legacy_regex
 ):
     response_format = {
         "type": "json_schema",
@@ -1272,7 +1270,6 @@ def test_structured_response_content_and_reasoning_gate(
         "tools": [parity_tool()],
         "chat_template_kwargs": {"enable_thinking": thinking},
         "separate_reasoning": separate_reasoning,
-        "stream": stream,
         "logprobs": True,
     }
     if legacy_regex:
@@ -1362,6 +1359,102 @@ def test_structured_response_content_and_reasoning_gate(
         assert routed_engine.requests[0]["sampling_options"]["guided_decoding"] == {
             "json": response_format["json_schema"]["schema"]
         }
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize(
+    "use_pool, response_format",
+    [
+        pytest.param(
+            False,
+            {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}},
+            },
+            id="inline-json-schema",
+        ),
+        pytest.param(True, {"type": "json_object"}, id="pool-json-object"),
+    ],
+)
+def test_gpt_oss_structured_response_preserves_harmony_reasoning(
+    tokenizer, monkeypatch, use_pool, response_format
+):
+    tokenizer = copy.deepcopy(tokenizer)
+    tokenizer.chat_template = "{{ messages[0]['content'] }}"
+    tokenizer.add_special_tokens(
+        {
+            "additional_special_tokens": [
+                "<|start|>",
+                "<|channel|>",
+                "<|message|>",
+                "<|end|>",
+                "<|return|>",
+            ]
+        }
+    )
+    answer = '{"answer":42}'
+    text = (
+        "<|start|>assistant<|channel|>analysis<|message|>Plan.<|end|>"
+        f"<|start|>assistant<|channel|>final<|message|>{answer}<|return|>"
+    )
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    routed_engine = FakeRoutedEngine(
+        items=[
+            {"token_ids": token_ids[offset : offset + 3]}
+            for offset in range(0, len(token_ids), 3)
+        ]
+        + [{"token_ids": [], "finish_reason": "stop"}]
+    )
+
+    class InlinePreprocessPool:
+        def submit(self, fn, *args):
+            future = Future()
+            future.set_result(fn(*args))
+            return future
+
+    if use_pool:
+        monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+        monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", None)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_reasoning_parser_name", "gpt-oss"
+        )
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_template_force_reasoning", False
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_default_thinking_mode", None)
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=routed_engine,
+        tool_call_parser_name=None,
+        reasoning_parser_name="gpt-oss",
+        eos_token_ids=[tokenizer.eos_token_id],
+        preprocess_pool=InlinePreprocessPool() if use_pool else None,
+    )
+    request = {
+        "model": "openai/gpt-oss-20b",
+        "messages": [{"role": "user", "content": "Return answer 42 as JSON."}],
+        "response_format": response_format,
+    }
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    items = asyncio.run(collect())
+    assert all("data" in item or item.get("event") == "llm_metrics" for item in items)
+    choices = [
+        choice for item in items if "data" in item for choice in item["data"]["choices"]
+    ]
+    deltas = [choice["delta"] for choice in choices]
+    assert "".join(delta.get("reasoning_content", "") for delta in deltas) == "Plan."
+    assert "".join(delta.get("content", "") for delta in deltas) == answer
+    assert not any(delta.get("tool_calls") for delta in deltas)
+    assert choices[-1]["finish_reason"] == "stop"
+    assert len(routed_engine.requests) == 1
+    assert routed_engine.requests[0]["require_reasoning"] is False
+    assert routed_engine.requests[0]["sampling_options"]["guided_decoding"] == {
+        "json": {"type": "object"}
+    }
 
 
 class _CapturingReasoningParser:
