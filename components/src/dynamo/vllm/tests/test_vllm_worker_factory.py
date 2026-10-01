@@ -16,6 +16,7 @@ from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.instrumented_scheduler import benchmark_content_point_key
 from dynamo.vllm.worker_factory import (
+    CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS,
     ENGINE_PROBE_TIMEOUT_SECONDS,
     EngineSetupResult,
     SnapshotEngineSetupResult,
@@ -3850,3 +3851,307 @@ def test_restore_engine_cudagraph_metrics_tolerates_a_bare_engine_client(
     )
 
     assert _cudagraph_metrics_warnings(caplog) == []
+
+
+def test_restore_engine_cudagraph_metrics_calls_the_worker_method_once(monkeypatch):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    rpc = AsyncMock(return_value=[{"cudagraph_metrics": False}])
+    client = _cudagraph_metrics_engine_client(rpc)
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )
+
+    # By name: vLLM's engine-core client refuses to carry a callable.
+    rpc.assert_awaited_once_with(
+        "fpm_disable_cudagraph_metrics",
+        timeout=CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS,
+    )
+    assert _cudagraph_logging_states(client) == [None, None, None]
+
+
+def test_restore_engine_cudagraph_metrics_worker_failure_is_logged_after_kda_and_gc(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    calls = []
+
+    def collective_rpc(method, timeout=None):
+        calls.append(method)
+        if method == "fpm_disable_cudagraph_metrics":
+            # What the engine client raises when a worker lacks the method,
+            # e.g. under a user's own --worker-extension-cls.
+            raise Exception(
+                "Call to collective_rpc method failed: Worker failed with error "
+                f"''Worker' object has no attribute '{method}''"
+            )
+        return []
+
+    client = _cudagraph_metrics_engine_client(AsyncMock(side_effect=collective_rpc))
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers(
+            {"cudagraph_metrics_auto_enabled": True, "randomize_kda_state": True},
+            client,
+        )
+    )  # must not raise
+
+    assert calls == [
+        "finish_benchmark_kda_state",
+        "fpm_gc_stop",
+        "fpm_disable_cudagraph_metrics",
+    ]
+    # The engine-client side does not depend on the workers.
+    assert _cudagraph_logging_states(client) == [None, None, None]
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert warning.exc_info is not None
+    assert "model workers" in warning.getMessage()
+
+
+@pytest.mark.timeout(5)
+def test_restore_engine_cudagraph_metrics_worker_rpc_is_time_boxed(monkeypatch, caplog):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS", 0.05
+    )
+
+    async def hangs(method, timeout=None):
+        await asyncio.sleep(2.0)
+        return []
+
+    client = _cudagraph_metrics_engine_client(hangs)
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )
+
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert issubclass(warning.exc_info[0], asyncio.TimeoutError)
+
+
+@pytest.mark.timeout(5)
+def test_restore_engine_cudagraph_metrics_worker_rpc_is_time_boxed_in_the_cleanup(
+    monkeypatch, caplog
+):
+    """The reset runs in the restore's ``finally`` chain. Once the restore's own
+    time box has fired it no longer bounds what runs there, so a worker call
+    that never answers must end at its own bound."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS", 0.05
+    )
+    rpcs = []
+
+    async def never_answers(method, timeout=None):
+        rpcs.append(method)
+        await asyncio.sleep(3600)
+
+    client = _cudagraph_metrics_engine_client(never_answers)
+    caplog.set_level(logging.WARNING)
+
+    async def restore():
+        await asyncio.wait_for(
+            _restore_benchmark_workers(
+                {"cudagraph_metrics_auto_enabled": True}, client
+            ),
+            timeout=0.05,
+        )
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(restore())
+
+    # The GC stop hung until the restore's time box fired; the worker call
+    # then ran in the cleanup and gave up at its own bound.
+    assert rpcs == ["fpm_gc_stop", "fpm_disable_cudagraph_metrics"]
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert issubclass(warning.exc_info[0], asyncio.TimeoutError)
+    assert _cudagraph_metrics_reset_done(client)
+
+
+def test_restore_engine_cudagraph_metrics_refusing_stat_logger_does_not_stop_the_rest(
+    monkeypatch, caplog
+):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    client = _cudagraph_metrics_engine_client(AsyncMock(return_value=[]))
+    # First in line, so the loop has loggers left to reach after the failure.
+    client.logger_manager.stat_loggers.insert(0, _StubbornStatLogger())
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )  # must not raise
+
+    # Every logger after the refusing one is cleared, aggregated or per-engine,
+    # and so is the config flag ...
+    _, aggregated, adapter, _ = client.logger_manager.stat_loggers
+    assert aggregated.cudagraph_logging is None
+    assert [
+        stat_logger.cudagraph_logging
+        for stat_logger in adapter.per_engine_stat_loggers.values()
+    ] == [None, None]
+    assert client.vllm_config.observability_config.cudagraph_metrics is False
+    # ... and the one that refused is named in its own WARNING.
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert warning.exc_info is not None
+    assert "_StubbornStatLogger" in warning.getMessage()
+
+
+class _UnreadableStatLoggers:
+    @property
+    def stat_loggers(self):
+        raise RuntimeError("stat loggers torn down")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(None, id="every-step-works"),
+        pytest.param("stat_logger", id="stat-logger-refuses"),
+        pytest.param("stat_loggers", id="stat-loggers-unreadable"),
+        pytest.param("config", id="config-unreadable"),
+        pytest.param("workers", id="worker-call-fails"),
+    ],
+)
+def test_restore_engine_cudagraph_metrics_success_is_logged_only_when_every_step_worked(
+    monkeypatch, caplog, failure
+):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    rpc = AsyncMock(return_value=[{"cudagraph_metrics": False}])
+    if failure == "workers":
+        rpc = AsyncMock(side_effect=Exception("worker call failed"))
+    client = _cudagraph_metrics_engine_client(rpc)
+    if failure == "stat_logger":
+        client.logger_manager.stat_loggers.append(_StubbornStatLogger())
+    if failure == "stat_loggers":
+        client.logger_manager = _UnreadableStatLoggers()
+    if failure == "config":
+        client.vllm_config = _UnreadableConfig()
+    caplog.set_level(logging.INFO, logger="dynamo.vllm.worker_factory")
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )  # must not raise
+
+    successes = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and "Turned vLLM cudagraph_metrics off" in record.getMessage()
+    ]
+    warnings = _cudagraph_metrics_warnings(caplog)
+    if failure is None:
+        (success,) = successes
+        assert "stat loggers cleared: 3" in success.getMessage()
+        assert warnings == []
+    else:
+        # The failed step has said so with its own WARNING; no success line.
+        assert successes == []
+        assert len(warnings) == 1
+    if failure != "config":
+        # A failed step never skips the config flag.
+        assert client.vllm_config.observability_config.cudagraph_metrics is False
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_restore_engine_cudagraph_metrics_calls_workers_only_with_dynamos_extension(
+    monkeypatch, caplog, installed
+):
+    """Under the user's own --worker-extension-cls the workers lack the method,
+    and calling it makes every worker and engine core log an ERROR. The restore
+    skips the call and says so once; everything else runs either way."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    calls = []
+
+    def collective_rpc(method, timeout=None):
+        calls.append(method)
+        if method == "fpm_disable_cudagraph_metrics":
+            return [{"cudagraph_metrics": False}]
+        return []
+
+    client = _cudagraph_metrics_engine_client(AsyncMock(side_effect=collective_rpc))
+    caplog.set_level(logging.WARNING)
+    bench_cfg = {
+        "cudagraph_metrics_auto_enabled": True,
+        "randomize_kda_state": True,
+        "worker_extension_installed": installed,
+        "user_worker_extension_cls": "user.Extension",
+    }
+
+    asyncio.run(_restore_benchmark_workers(bench_cfg, client))
+
+    expected = ["finish_benchmark_kda_state", "fpm_gc_stop"]
+    assert calls == expected + (["fpm_disable_cudagraph_metrics"] if installed else [])
+    # The engine-client reset does not depend on the extension.
+    assert _cudagraph_metrics_reset_done(client)
+    warnings = _cudagraph_metrics_warnings(caplog)
+    if installed:
+        assert warnings == []
+    else:
+        (warning,) = warnings
+        assert warning.exc_info is None
+        assert "user.Extension" in warning.getMessage()
+
+
+@pytest.mark.parametrize(
+    "replies",
+    [
+        pytest.param(
+            [{"cudagraph_metrics": False}, {"cudagraph_metrics": None}],
+            id="option-absent-in-one-worker",
+        ),
+        pytest.param([{"cudagraph_metrics": True}], id="option-still-on"),
+        pytest.param([None], id="reply-without-a-body"),
+        pytest.param(None, id="no-reply-list"),
+    ],
+)
+def test_restore_engine_cudagraph_metrics_unexpected_worker_reply_is_not_success(
+    monkeypatch, caplog, replies
+):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    client = _cudagraph_metrics_engine_client(AsyncMock(return_value=replies))
+    caplog.set_level(logging.INFO, logger="dynamo.vllm.worker_factory")
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )  # must not raise
+
+    # Anything but {"cudagraph_metrics": False} is not done: one WARNING (with a
+    # traceback only when the reply could not even be read), no success line.
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert "model workers" in warning.getMessage()
+    assert (warning.exc_info is not None) == (replies is None)
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and "Turned vLLM cudagraph_metrics off" in record.getMessage()
+    ]
+
+
+def test_engine_cudagraph_metrics_worker_extension_turns_the_option_off(monkeypatch):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    # Local, after the delenv: importing gc_policy starts the GC policy if it is set.
+    from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
+    from dynamo.vllm.gc_policy import FpmGcWorkerExtension
+
+    # vLLM takes one extension class; the GC one replaces the benchmark one
+    # when DYN_FPM_GC_POLICY is set, so it must carry the method too.
+    assert issubclass(FpmGcWorkerExtension, FpmBenchmarkWorkerExtension)
+
+    class Worker(FpmBenchmarkWorkerExtension):
+        """vLLM appends the extension to the worker class's bases."""
+
+        def __init__(self, observability_config):
+            self.vllm_config = SimpleNamespace(
+                observability_config=observability_config
+            )
+
+    worker = Worker(SimpleNamespace(cudagraph_metrics=True))
+    assert worker.fpm_disable_cudagraph_metrics() == {"cudagraph_metrics": False}
+    assert worker.vllm_config.observability_config.cudagraph_metrics is False
+    # No fallback reply: a worker without the config fails the call, which the
+    # launcher reports, instead of answering as if the option had been turned off.
+    with pytest.raises(AttributeError):
+        Worker(None).fpm_disable_cudagraph_metrics()

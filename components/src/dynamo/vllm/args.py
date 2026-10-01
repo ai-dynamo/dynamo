@@ -39,6 +39,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
+# The worker extension classes Dynamo installs: the launcher calls their methods
+# by name in the model workers after a self-benchmark. Class path literals, not
+# imports: importing dynamo.vllm.gc_policy auto-starts the GC policy in the
+# importing process, and this launcher process must stay untouched.
+BENCHMARK_WORKER_EXTENSION = (
+    "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension"
+)
+GC_WORKER_EXTENSION = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
+
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     component: str
@@ -410,10 +419,7 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
         if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() == "freeze":
-            # Class path as a literal, not an import: importing
-            # dynamo.vllm.gc_policy auto-starts the policy in the importing
-            # process, and this launcher process must stay untouched.
-            worker_extension_cls = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
+            worker_extension_cls = GC_WORKER_EXTENSION
             existing_ext = getattr(engine_config, "worker_extension_cls", None)
             if not existing_ext:
                 defaults["worker_extension_cls"] = worker_extension_cls
@@ -430,6 +436,19 @@ def update_engine_config_with_dynamo(
                     f"is set to '{existing_ext}'. Remove it or unset "
                     f"DYN_FPM_GC_POLICY."
                 )
+        if cudagraph_metrics_auto_enabled and not (
+            defaults.get("worker_extension_cls")
+            or getattr(engine_config, "worker_extension_cls", None)
+        ):
+            # The launcher turns cudagraph_metrics back off in the model workers
+            # by method name: vLLM's engine-core client cannot carry a callable.
+            # The GC extension above inherits the method; another user class
+            # is kept, and the model workers then keep the option on.
+            defaults["worker_extension_cls"] = BENCHMARK_WORKER_EXTENSION
+            logger.info(
+                "Benchmark mode: injecting worker_extension_cls=%s",
+                BENCHMARK_WORKER_EXTENSION,
+            )
         if dynamo_config.benchmark_randomize_kda_state:
             if engine_config.worker_cls not in ("auto", RANDOM_KDA_WORKER):
                 raise ValueError(
@@ -443,6 +462,13 @@ def update_engine_config_with_dynamo(
                     "Random KDA benchmarking does not support the GMS worker"
                 )
             defaults["worker_cls"] = RANDOM_KDA_WORKER
+        configured_extension = defaults.get("worker_extension_cls") or getattr(
+            engine_config, "worker_extension_cls", None
+        )
+        worker_extension_installed = configured_extension in (
+            BENCHMARK_WORKER_EXTENSION,
+            GC_WORKER_EXTENSION,
+        )
         benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
             "randomize_kda_state": dynamo_config.benchmark_randomize_kda_state,
@@ -450,7 +476,14 @@ def update_engine_config_with_dynamo(
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
             "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
+            # Not a BenchmarkConfig field (the scheduler drops unknown keys): it
+            # tells the launcher whether the model workers load a Dynamo
+            # extension class, the only kind it can call by name.
+            "worker_extension_installed": worker_extension_installed,
         }
+        if configured_extension and not worker_extension_installed:
+            # So the launcher can name the user's class when it skips the call.
+            benchmark_config["user_worker_extension_cls"] = configured_extension
         if cudagraph_metrics_auto_enabled:
             # Not a BenchmarkConfig field (the scheduler drops unknown keys): it
             # tells the launcher to turn the option back off before serving.
