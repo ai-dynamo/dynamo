@@ -1064,6 +1064,21 @@ impl SyncIndexer for LowerTierIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::ApproximateTtl(task) => task.apply(|event| {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event);
+                    let applied = result.is_ok();
+                    if result.is_err() {
+                        tracing::warn!(
+                            "Failed to apply approximate TTL event: {:?}",
+                            result.as_ref().err()
+                        );
+                    }
+                    if let Some(ref counters) = counters {
+                        counters.inc(kind, result);
+                    }
+                    applied
+                }),
                 WorkerTask::ApproximateLru(task) => task.complete(Err(KvRouterError::Unsupported(
                     "approximate LRU is not supported for lower-tier indexers".to_string(),
                 ))),
@@ -1096,14 +1111,26 @@ impl SyncIndexer for LowerTierIndexer {
                     }
                 }
                 WorkerTask::RemoveWorker {
-                    worker_id, resp, ..
+                    worker_id,
+                    prune_manager,
+                    resp,
+                    ..
                 } => {
+                    if let Some(manager) = prune_manager {
+                        manager.remove_worker(worker_id);
+                    }
                     self.remove_worker(&mut worker_blocks, worker_id);
                     let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
-                    worker_id, dp_rank, ..
+                    worker_id,
+                    dp_rank,
+                    prune_manager,
+                    ..
                 } => {
+                    if let Some(manager) = prune_manager {
+                        manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+                    }
                     self.remove_worker_dp_rank(&mut worker_blocks, worker_id, dp_rank);
                 }
                 WorkerTask::DumpEvents(sender) => {

@@ -612,6 +612,7 @@ pub enum WorkerTask {
         resp: oneshot::Sender<bool>,
     },
     ApproximateLru(super::ApproximateLruTask),
+    ApproximateTtl(super::pruning::ApproximateTtlTask),
     #[cfg(feature = "bench")]
     InstallObservation {
         writer: EventCompletionWriter,
@@ -633,6 +634,8 @@ pub enum WorkerTask {
     /// Permanently remove a worker from tracking.
     RemoveWorker {
         worker_id: WorkerId,
+        /// Cleared on the final lane barrier after all retired stores have applied.
+        prune_manager: Option<super::pruning::WorkerPruneManager>,
         /// True for the one shared-state backend task that owns structural cleanup.
         sweep_tree: bool,
         /// Acknowledges completion of this lane's cold-path removal phase.
@@ -642,6 +645,8 @@ pub enum WorkerTask {
     RemoveWorkerDpRank {
         worker_id: WorkerId,
         dp_rank: DpRank,
+        /// Cleared on the same FIFO lane as successful TTL stores.
+        prune_manager: Option<super::pruning::WorkerPruneManager>,
         /// True for the one shared-state backend task that owns structural cleanup.
         sweep_tree: bool,
     },
