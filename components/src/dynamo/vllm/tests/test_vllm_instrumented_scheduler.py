@@ -4514,7 +4514,8 @@ def test_save_records_only_the_steady_fpm():
     InstrumentedScheduler._bench_save_current_point(stub)
 
     assert len(stub._bench_results) == 1
-    assert stub._bench_results[0].fpms == [steady]
+    # the kept sample is marked as a recorded steady step
+    assert stub._bench_results[0].fpms == [{**steady, "kvwarm_steady_sample": True}]
     assert stub._bench_skipped_points == []
 
 
@@ -5781,7 +5782,9 @@ def test_kvwarm_live_state_shadow_forks_the_recurrent_read_slot_at_a_boundary():
 
 
 class KpoolTailManager(_FakeManager):
-    """Matches BOTH the live-state type check and the circular-table predicate."""
+    """Matches the circular-table predicate (admission cap, spec excluded from
+    prefix caching); its ``SimpleNamespace`` spec is not a Mamba spec, so the
+    live-state predicate does not match."""
 
 
 def test_kvwarm_live_state_keeps_circular_kpool_geometry():
@@ -5945,10 +5948,10 @@ def test_kvwarm_dp_filter_marks_decode_missing_when_nothing_is_covered(monkeypat
 
 
 def test_giant_fake_off_by_batch_correction_requires_a_steady_sample():
-    """The admission step also measures ``declared - batch``; only the steady-step
-    median (``kvwarm_giant_median_of``) may be accepted at the measured coordinate.
-    A giant fake point that reached its deadline with the admission FPM alone is a
-    validation skip, not a decode measurement."""
+    """The admission step also measures ``declared - batch``; only a recorded steady
+    sample (``kvwarm_steady_sample``, set by both save paths) may be accepted at the
+    measured coordinate. A giant fake point that reached its deadline with the
+    admission FPM alone is a validation skip, not a decode measurement."""
     stub = SimpleNamespace(_kvwarm_giant_threshold=lambda: 1000)
     point = BenchmarkPoint(
         point_type="decode",
@@ -5963,11 +5966,71 @@ def test_giant_fake_off_by_batch_correction_requires_a_steady_sample():
         InstrumentedScheduler._bench_fpm_validation_failure(stub, point, admission_only)
         == "measured_decode_context_mismatch"
     )
-    steady_median = {"scheduled_requests": scheduled, "kvwarm_giant_median_of": 3}
+    steady = {"scheduled_requests": scheduled, "kvwarm_steady_sample": True}
     assert (
-        InstrumentedScheduler._bench_fpm_validation_failure(stub, point, steady_median)
-        is None
+        InstrumentedScheduler._bench_fpm_validation_failure(stub, point, steady) is None
     )
+    # the median marker alone is not the steady evidence
+    median_only = {"scheduled_requests": scheduled, "kvwarm_giant_median_of": 3}
+    assert (
+        InstrumentedScheduler._bench_fpm_validation_failure(stub, point, median_only)
+        == "measured_decode_context_mismatch"
+    )
+
+
+def _giant_fake_point():
+    return BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=1,
+        batch_size=2,
+        total_kv_read_tokens=2000,
+        sample_reasons=["kvwarm_fake_fallback"],
+    )
+
+
+def test_two_fpm_save_path_records_the_steady_sample_at_the_measured_coordinate(
+    monkeypatch,
+):
+    """`DYN_BENCH_GIANT_KV_REPEATS=1` (or a pool/model-length limit) reduces a giant
+    fake point to admission plus one steady step. That path keeps the steady FPM
+    and must mark it as recorded, so the off-by-batch correction accepts it and the
+    point is saved at the measured coordinate."""
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_THRESHOLD", "1000")
+    scheduled = {"num_decode_requests": 2, "sum_decode_kv_tokens": 1998}
+    stub = _benchmark_save_stub(
+        _giant_fake_point(),
+        [
+            {"scheduled_requests": dict(scheduled), "wall_time": 0.5},
+            {"scheduled_requests": dict(scheduled), "wall_time": 0.02},
+        ],
+    )
+    stub._bench_expected_fpms = 2
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_skipped_points == []
+    (result,) = stub._bench_results
+    assert result.point.total_kv_read_tokens == 1998
+    assert "giant_fake_off_by_batch" in result.point.sample_reasons
+    (fpm,) = result.fpms
+    assert fpm["wall_time"] == 0.02, "the admission step is scaffolding"
+    assert fpm["kvwarm_steady_sample"] is True
+
+
+def test_two_fpm_save_path_skips_an_admission_only_giant_sample(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_THRESHOLD", "1000")
+    scheduled = {"num_decode_requests": 2, "sum_decode_kv_tokens": 1998}
+    stub = _benchmark_save_stub(
+        _giant_fake_point(), [{"scheduled_requests": dict(scheduled)}]
+    )
+    stub._bench_expected_fpms = 2
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert [s.reason for s in stub._bench_skipped_points] == [
+        "measured_decode_context_mismatch"
+    ]
 
 
 def test_kvwarm_shadow_registration_rejects_too_shallow_chain():

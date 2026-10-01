@@ -6401,6 +6401,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 chosen = dict(steadies[0])
                 chosen["wall_time"] = walls[len(walls) // 2]
                 chosen["kvwarm_giant_median_of"] = len(steadies)
+                chosen["kvwarm_steady_sample"] = True
                 local_fpms = [chosen]
             elif expected_fpms > 1 and len(local_fpms) >= expected_fpms:
                 # Keep only the steady-state sample; the admission step is
@@ -6408,8 +6409,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 # admission FPM alone sends it through collect_result
                 # unchanged: the shape validator rejects it
                 # (sum_decode_kv_tokens mismatch) and every rank skips the
-                # point together -- no rank ever bypasses the barrier.
-                local_fpms = local_fpms[-1:]
+                # point together -- no rank ever bypasses the barrier. Both
+                # save paths mark the sample they keep as a recorded steady
+                # step, which the giant off-by-batch correction requires.
+                chosen = dict(local_fpms[-1])
+                chosen["kvwarm_steady_sample"] = True
+                local_fpms = [chosen]
             if self._bench_synchronizer is not None:
                 group_result = self._bench_synchronizer.collect_result(
                     point,
@@ -6598,14 +6603,15 @@ class InstrumentedScheduler(AsyncScheduler):
             # a giant point; ``_bench_save_current_point`` records it at the MEASURED
             # coordinate instead of skipping the point and failing the strict
             # all-or-nothing publish gate. The admission step has the same total, so
-            # the correction requires the steady-step median sample: a point that hit
-            # its deadline with the admission FPM alone stays a validation skip.
+            # the correction requires a recorded steady sample (``kvwarm_steady_sample``,
+            # set by both save paths): a point that hit its deadline with the admission
+            # FPM alone stays a validation skip.
             measured = scheduled.get("sum_decode_kv_tokens")
             if (
                 "kvwarm_fake_fallback" in (point.sample_reasons or ())
                 and point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
                 and measured == point.total_kv_read_tokens - point.batch_size
-                and int(fpm.get("kvwarm_giant_median_of") or 0) > 0
+                and bool(fpm.get("kvwarm_steady_sample"))
             ):
                 return None
             return "measured_decode_context_mismatch"
