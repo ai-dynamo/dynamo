@@ -45,7 +45,7 @@ func TestNativeSidecarEnvironmentOrderByOrigin(t *testing.T) {
 			dgd := &v1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test"},
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm", Env: graphEnv,
+					BackendFramework: string(BackendFrameworkVLLM), Env: graphEnv,
 					Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{KvTransferPolicy: &v1beta1.KvTransferPolicy{
 						LabelKey: "topology.example/zone", Domain: "zone", Enforcement: "required",
 					}},
@@ -61,7 +61,7 @@ func TestNativeSidecarEnvironmentOrderByOrigin(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: orderedOrigin}},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
-							{Name: "main", Image: "engine:latest", Env: engineEnv},
+							{Name: commonconsts.MainContainerName, Image: "engine:latest", Env: engineEnv},
 							{Name: "frontend", Image: "frontend:1.6.0", Env: frontendEnv},
 						},
 						InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Env: runtimeEnv}},
@@ -133,7 +133,7 @@ func TestNativeSidecarRendering(t *testing.T) {
 		t.Run(string(componentType), func(t *testing.T) {
 			t.Log("Configure independent engine, native runtime, and regular frontend containers")
 			engine := corev1.Container{
-				Name: "main", Image: "vllm/vllm-openai:latest", Command: []string{"vllm-rs"}, Args: []string{"serve", "model"},
+				Name: commonconsts.MainContainerName, Image: "vllm/vllm-openai:latest", Command: []string{"vllm-rs"}, Args: []string{"serve", "model"},
 				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}},
 				Env:       []corev1.EnvVar{{Name: "GLOBAL", Value: "engine"}},
 			}
@@ -219,7 +219,7 @@ func TestNativeSidecarRendering(t *testing.T) {
 			require.Equal(t, "/certs/ca.crt", frontendEnv["NATS_TLS_CA_CERT_PATH"])
 
 			t.Log("Materialize DCDs and retain sidecar selection, global env, and topology")
-			dgd.Spec.BackendFramework = "vllm"
+			dgd.Spec.BackendFramework = string(BackendFrameworkVLLM)
 			dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{*component}
 			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
 			require.NoError(t, err)
@@ -268,7 +268,7 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "worker", ComponentType: tc.componentType, Multinode: tc.multinode,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers:     []corev1.Container{{Name: "main", Image: "engine:1.6.0"}},
+					Containers:     []corev1.Container{{Name: commonconsts.MainContainerName, Image: "engine:1.6.0"}},
 					InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: tc.restartPolicy}},
 				}},
 			}
@@ -315,7 +315,7 @@ func TestRuntimeContainerModeTransitions(t *testing.T) {
 				require.Equal(t, nativeHash, mustComputeBetaDGDWorkersSpecHash(t, dgd))
 			} else {
 				require.Nil(t, GetDynamoSidecar(component))
-				require.Equal(t, "main", GetDynamoContainer(component).Name)
+				require.Equal(t, commonconsts.MainContainerName, GetDynamoContainer(component).Name)
 				require.Equal(t, "1.5.0", resolvedRuntimeVersionForHash(component))
 				require.Equal(t, "true", envVarsToMap(pod.Containers[0].Env)["DYN_SYSTEM_ENABLED"])
 				require.Equal(t, component.PodTemplate.Spec.InitContainers, pod.InitContainers)
@@ -352,7 +352,7 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 				PodTemplate: &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{
-						Name: "main", Image: "runtime:1.6.0",
+						Name: commonconsts.MainContainerName, Image: "runtime:1.6.0",
 						Env: []corev1.EnvVar{
 							{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
 							{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
