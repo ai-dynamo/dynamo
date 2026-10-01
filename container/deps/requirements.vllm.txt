@@ -35,3 +35,6 @@ pillow>=12.3.0
 # rejects; 2.2.0 bundles only libavutil + libavformat (container demux, no codec).
 # Requires NVIDIA_DRIVER_CAPABILITIES to include "video" or it cannot import.
 PyNvVideoCodec>=2.2.0
+# Dynamo installs with --no-deps, so declare the shared image-cache client
+# explicitly instead of relying on LMCache's unbounded transitive dependency.
+redis>=6.2.0,<9.0.0

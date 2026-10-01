@@ -514,6 +514,37 @@ async def test_aggregated_fd_off_passes_media_url_strings():
 
 
 @pytest.mark.asyncio
+async def test_aggregated_forwards_grouped_mm_hashes_in_sglang_item_order():
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    handler._mm_hashes_supported = True
+    captured: Dict[str, Any] = {}
+
+    async def fake_async_generate(**kwargs):
+        captured.update(kwargs)
+        return _empty_stream()
+
+    handler.engine = SimpleNamespace(async_generate=fake_async_generate)
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": ["https://example.com/a.jpg"],
+            "video_url": ["https://example.com/a.mp4"],
+        },
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                "video": ["video-a"],
+                "image": ["image-a"],
+            }
+        },
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert captured["mm_hashes"] == ["image-a", "video-a"]
+
+
+@pytest.mark.asyncio
 async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
     """With --frontend-decoding, Decoded items are loaded via ImageLoader and
     forwarded as PIL Images (not strings) to engine.async_generate."""
@@ -542,6 +573,7 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
 
     request = {
         "token_ids": [1, 2, 3],
+        "image_cache_scope": "session-42",
         "multi_modal_data": {"image_url": [{"Decoded": decoded_metadata}]},
     }
 
@@ -549,7 +581,7 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
         pass
 
     image_loader.load_image_batch.assert_awaited_once_with(
-        [{"Decoded": decoded_metadata}]
+        [{"Decoded": decoded_metadata}], cache_scope="session-42"
     )
     assert captured["image_data"] == [pil_stub]
 

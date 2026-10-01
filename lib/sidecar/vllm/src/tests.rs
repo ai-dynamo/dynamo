@@ -36,9 +36,9 @@ use tonic_health::ServingStatus as HealthServingStatus;
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{ResponseState, build_generate_request, normalize_response_options};
 use crate::engine::VllmSidecarEngine;
-use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
+use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
 
 #[derive(Clone, Default)]
 struct FakeVllm {
@@ -196,7 +196,7 @@ impl pb::inference_server::Inference for FakeVllm {
             .kv
             .as_ref()
             .and_then(|kv| kv.kv_transfer_params.clone())
-            .map(struct_to_json)
+            .map(|value| struct_to_json_v14(value, "vLLM", "kv_transfer_params"))
             .transpose()
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let is_prefill = request_kv
@@ -274,7 +274,7 @@ impl pb::inference_server::Inference for FakeVllm {
                 }
             } else if encoder_response {
                 let ec = (!omit_encoder_metadata).then(|| {
-                    json_to_struct(encoder_handoff).expect("encoder handoff")
+                    json_to_struct_v14(encoder_handoff, "ec_transfer_params").expect("encoder handoff")
                 });
                 yield encode_response(ec);
             } else if let Some(outputs) = sequence_outputs {
@@ -286,7 +286,7 @@ impl pb::inference_server::Inference for FakeVllm {
                 }
             } else {
                 let kv = is_prefill.then(|| {
-                    json_to_struct(handoff.clone()).expect("encode handoff")
+                    json_to_struct_v14(handoff.clone(), "kv_transfer_params").expect("encode handoff")
                 });
                 yield sequence_response(true, wants_logprobs, kv);
             }
@@ -598,6 +598,16 @@ fn model_info() -> pb::ModelInfo {
     }
 }
 
+/// Multimodal model whose source is a local directory without `config.json`,
+/// so `start()` resolves no routing token and never fetches from a model hub.
+fn multimodal_model_info() -> pb::ModelInfo {
+    pb::ModelInfo {
+        model_id: env!("CARGO_MANIFEST_DIR").to_string(),
+        supports_multimodal: true,
+        ..model_info()
+    }
+}
+
 fn server_info() -> pb::ServerInfo {
     pb::ServerInfo {
         engine_version: "test-vllm".to_string(),
@@ -780,7 +790,8 @@ fn encode_response(ec_transfer_params: Option<prost_types::Struct>) -> pb::Gener
 #[test]
 fn encode_response_enforces_terminal_contract() {
     let request = epd_image_request();
-    let ec_transfer_params = || json_to_struct(encoder_handoff()).expect("encoder handoff");
+    let ec_transfer_params =
+        || json_to_struct_v14(encoder_handoff(), "ec_transfer_params").expect("encoder handoff");
 
     let mut length = encode_response(Some(ec_transfer_params()));
     length
@@ -1039,6 +1050,49 @@ fn request() -> PreprocessedRequest {
         })))
         .build()
         .expect("request")
+}
+
+#[test]
+fn frontend_router_metadata_does_not_require_engine_support() {
+    let baseline = build_generate_request(
+        request(),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    for (fields, is_supported) in [
+        (json!(["worker_id", "timing"]), true),
+        (json!(["worker_id", "engine_data"]), false),
+    ] {
+        let mut request = request();
+        request.extra_args.as_mut().unwrap()["nvext"]["extra_fields"] = fields;
+        let result = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        );
+        if is_supported {
+            assert_eq!(result.unwrap(), baseline);
+        } else {
+            assert!(result.is_err());
+        }
+    }
+}
+
+#[test]
+fn frontend_router_metadata_rejects_non_array_fields() {
+    let mut request = request();
+    request.extra_args.as_mut().unwrap()["nvext"]["extra_fields"] = json!("worker_id");
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "InvalidRequest: extra_args.nvext.extra_fields must be an array"
+    );
 }
 
 #[test]
@@ -2050,7 +2104,12 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert!(kv.bypass_prefix_cache);
     assert_eq!(kv.cache_salt, "dynamo-cache-salt:cache-salt");
     assert_eq!(
-        struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
+        struct_to_json_v14(
+            kv.kv_transfer_params.clone().unwrap(),
+            "vLLM",
+            "kv_transfer_params"
+        )
+        .unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
     );
 }
@@ -2349,8 +2408,7 @@ async fn sleep_status_remains_advertised_without_sleep_mode() {
 #[tokio::test]
 async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
     let service = FakeVllm::default();
-    let mut discovered = model_info();
-    discovered.supports_multimodal = true;
+    let discovered = multimodal_model_info();
     *service.model_info_override.lock().await = Some(discovered.clone());
     let server = FakeServer::start(service).await;
     let (aggregate, _) = engine_from_args(&server.endpoint).await;
@@ -2548,8 +2606,7 @@ fn encode_requests_reject_non_image_media() {
 async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
     let service = FakeVllm::default();
     service.encoder_response.store(true, Ordering::SeqCst);
-    let mut discovered = model_info();
-    discovered.supports_multimodal = true;
+    let discovered = multimodal_model_info();
     *service.model_info_override.lock().await = Some(discovered.clone());
     let server = FakeServer::start(service).await;
 
@@ -2635,12 +2692,14 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         assert_eq!(downstream_wire.media.len(), 2, "{topology}");
         assert_eq!(downstream_wire.media[0].uuid, "image-a", "{topology}");
         assert_eq!(downstream_wire.media[1].uuid, "image-b", "{topology}");
-        let forwarded_ec = struct_to_json(
+        let forwarded_ec = struct_to_json_v14(
             downstream_wire
                 .kv
                 .as_ref()
                 .and_then(|kv| kv.ec_transfer_params.clone())
                 .expect("forwarded EC metadata"),
+            "vLLM",
+            "ec_transfer_params",
         )
         .expect("EC metadata JSON");
         assert_eq!(forwarded_ec, encoder_handoff(), "{topology}");
@@ -2681,9 +2740,12 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
             assert_eq!(decode_wire.media[1].uuid, "image-b");
             let decode_cache = decode_wire.kv.expect("decode cache parameters");
             assert!(decode_cache.kv_transfer_params.is_some());
-            let decode_ec =
-                struct_to_json(decode_cache.ec_transfer_params.expect("decode EC metadata"))
-                    .expect("decode EC metadata JSON");
+            let decode_ec = struct_to_json_v14(
+                decode_cache.ec_transfer_params.expect("decode EC metadata"),
+                "vLLM",
+                "ec_transfer_params",
+            )
+            .expect("decode EC metadata JSON");
             assert_eq!(decode_ec, encoder_handoff());
         }
     }
@@ -2694,8 +2756,7 @@ async fn encode_terminal_without_encoder_cache_metadata_is_rejected() {
     let service = FakeVllm::default();
     service.encoder_response.store(true, Ordering::SeqCst);
     service.omit_encoder_metadata.store(true, Ordering::SeqCst);
-    let mut discovered = model_info();
-    discovered.supports_multimodal = true;
+    let discovered = multimodal_model_info();
     *service.model_info_override.lock().await = Some(discovered.clone());
     let server = FakeServer::start(service).await;
     let encoder = engine(&server.endpoint, DisaggregationMode::Encode, 1, discovered);
@@ -3429,6 +3490,72 @@ async fn request_admission_and_unload_cannot_race() {
     assert_eq!(unloading.await["status"], "success");
 }
 
+#[cfg(feature = "mm-routing")]
+#[tokio::test]
+async fn multimodal_kv_sources_carry_the_resolved_image_token() {
+    let model_dir = tempfile::tempdir().expect("temporary model directory");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        json!({
+            "model_type": "qwen2_5_vl",
+            "vision_token_id": 151654,
+            "image_token_id": 151655
+        })
+        .to_string(),
+    )
+    .expect("write model config");
+    std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}")
+        .expect("write processor config");
+
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.model_id = model_dir.path().to_string_lossy().into_owned();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered);
+    let server = FakeServer::start(service).await;
+    let (engine, _) = engine_from_args(&server.endpoint).await;
+    engine.start(0).await.expect("start");
+
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert!(!sources.is_empty());
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq {
+            image_token_id: Some(151655),
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn unresolved_multimodal_routing_token_falls_back_without_source_metadata() {
+    let model_dir = tempfile::tempdir().expect("temporary model directory");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        json!({"model_type": "qwen2_5_vl", "image_token_id": 151655}).to_string(),
+    )
+    .expect("write model config");
+
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.model_id = model_dir.path().to_string_lossy().into_owned();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered);
+    let server = FakeServer::start(service).await;
+    let (engine, _) = engine_from_args(&server.endpoint).await;
+
+    engine.start(0).await.expect("start without routing token");
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert!(!sources.is_empty());
+    assert!(sources.iter().all(|source| matches!(
+        source,
+        dynamo_backend_common::KvEventSource::Zmq {
+            image_token_id: None,
+            ..
+        }
+    )));
+}
+
 #[tokio::test]
 async fn grpc_request_errors_are_propagated() {
     let service = FakeVllm::default();
@@ -3487,7 +3614,12 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 
         let requests = server.service.requests.lock().await;
         let decode_wire = requests.last().unwrap().kv.as_ref().unwrap();
-        let decoded = struct_to_json(decode_wire.kv_transfer_params.clone().unwrap()).unwrap();
+        let decoded = struct_to_json_v14(
+            decode_wire.kv_transfer_params.clone().unwrap(),
+            "vLLM",
+            "kv_transfer_params",
+        )
+        .unwrap();
         // Every field round-trips opaquely except remote_port, which the sidecar
         // stringifies so vLLM builds a valid NIXL side-channel URL (a protobuf
         // Struct number would reach the engine as `20097.0`).
@@ -3500,8 +3632,7 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 #[tokio::test]
 async fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
     let service = FakeVllm::default();
-    let mut discovered = model_info();
-    discovered.supports_multimodal = true;
+    let discovered = multimodal_model_info();
     *service.model_info_override.lock().await = Some(discovered);
     let server = FakeServer::start(service).await;
     for (extra, expected_component, expected_route_to_encoder) in [
@@ -4071,9 +4202,10 @@ async fn preprocessed_multimodal_features_require_model_support() {
 
 #[tokio::test]
 async fn unsupported_features_fail_before_rpc_submission() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    let mut discovered = model_info();
-    discovered.supports_multimodal = true;
+    let service = FakeVllm::default();
+    let discovered = multimodal_model_info();
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
     let engine = engine(
         &server.endpoint,
         DisaggregationMode::Aggregated,

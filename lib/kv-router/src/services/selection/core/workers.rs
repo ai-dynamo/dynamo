@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
+use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 impl SelectionCore {
     pub async fn upsert_worker(
@@ -127,6 +128,13 @@ impl SelectionCore {
     }
 
     fn prepare_worker(&self, record: &mut WorkerCatalogRecord) -> Result<(), SelectionError> {
+        // Reject before any per-rank work so an oversized range cannot allocate per rank.
+        if record.dp_size() > MAX_DATA_PARALLEL_RANKS_PER_WORKER {
+            return Err(SelectionError::BadRequest(format!(
+                "data_parallel_size {} exceeds the maximum {MAX_DATA_PARALLEL_RANKS_PER_WORKER}",
+                record.dp_size()
+            )));
+        }
         let queueing_enabled = self
             .kv_router_config
             .queueing_enabled(Some(&record.model_name))

@@ -1265,15 +1265,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let mut projections = FxHashMap::default();
+        self.project_worker_loads_into(token_sequence, decay_now, &mut projections);
+        projections
+    }
+
+    pub(crate) fn project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
         #[cfg(feature = "bench")]
         let num_workers = self.workers.read().slots.len();
 
-        let result = self
-            .prompt_registry
-            .project_worker_loads(token_sequence, decay_now);
+        self.prompt_registry
+            .project_worker_loads_into(token_sequence, decay_now, projections);
 
         #[cfg(feature = "bench")]
         {
@@ -1284,8 +1294,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 "project_worker_loads completed"
             );
         }
+    }
 
-        result
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn bench_project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
+        self.project_worker_loads_into(token_sequence, decay_now, projections);
     }
 
     /// Query all workers for their current number of active blocks.
@@ -1309,7 +1328,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// for engines that batch or overlap multiple prefills.
     ///
     /// `Err(MissingExpectedDuration)` is expected for workers with any active
-    /// prefill that lacks an AIC prediction, including the default no-AIC path or
+    /// prefill that lacks an AIS prediction, including the default no-AIS path or
     /// failed predictions. Replica-synced remote values are receive-time anchored
     /// advisory reads, not producer-time truth.
     #[allow(dead_code)]
