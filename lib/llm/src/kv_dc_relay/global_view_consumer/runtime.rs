@@ -35,6 +35,9 @@ pub struct RelayDgdSource {
     pub location: PoolLocation,
     pub scope: RelayPoolScope,
     pub model: String,
+    /// Dedicated, KV-less aggregated DGD: attribute its single Frontend model
+    /// from the Relay stats stream. The Relay must serve only this DGD.
+    pub stats_only_aggregated: bool,
     pub subscriber_id: String,
     pub relay_channel: Channel,
     pub stats_channel: Channel,
@@ -121,6 +124,7 @@ impl GlobalViewRuntime {
                     source.stats_channel,
                     source.scope,
                     source.model,
+                    source.stats_only_aggregated,
                     source.subscriber_id,
                     assembler,
                     overlap,
@@ -166,6 +170,7 @@ mod tests {
                 frontend_endpoint: "mocker.frontend.generate".into(),
             },
             model: "model".into(),
+            stats_only_aggregated: false,
             subscriber_id: format!("global-router-{site}"),
             relay_channel: channel.clone(),
             stats_channel: channel,
