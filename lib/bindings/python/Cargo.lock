@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202609270000000058"
+version = "0.13.0-dev.202609300000000061"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99962e31b088bcf6c8cce4cb71a55facadafc08f6e50d6fee3f76bd7d738cbec"
+checksum = "ed49bec0f9d606037ed2bf95b88895382f6b94c8289f479c6ed0d4b26dad1452"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2449,9 +2449,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.4.0"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06464b1deb9b6e185476e2e4280cbbbc5f16d0d6fd8732ff8b5732d43ec0567b"
+checksum = "cc939c7664a55184c789a2878d0d1ac270f4df9844491c10cfe7958d90c81916"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2587,10 +2587,16 @@ dependencies = [
 name = "dynamo-sidecar-common"
 version = "1.6.0"
 dependencies = [
+ "anyhow",
  "clap",
  "dynamo-backend-common",
+ "dynamo-runtime",
  "futures",
+ "prost-types 0.13.5",
+ "prost-types 0.14.4",
+ "serde_json",
  "tokio",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tracing",
@@ -2599,9 +2605,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.9.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd9116db4a17d4ac186a13719b1eea8b41669cec2d95c8c93363869c9163c8aa"
+checksum = "cac05c279739c1c192898450ff2445e2e65e0ab99d4682ab664072efb68e45cb"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2647,6 +2653,8 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",

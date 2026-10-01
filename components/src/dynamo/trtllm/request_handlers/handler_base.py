@@ -1427,14 +1427,19 @@ class HandlerBase(BaseGenerativeHandler):
                             if prefill_prompt_tokens_details:
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                # Clamp to prompt size: image token_ids are unexpanded
-                                # placeholders, so the engine count (measured over the
-                                # expanded prompt) can exceed it.
-                                prompt_tokens_details = {
-                                    "cached_tokens": min(
-                                        num_input_tokens, int(res.cached_tokens or 0)
-                                    ),
-                                }
+                                prompt_tokens_details = _prompt_tokens_details(
+                                    res,
+                                    num_input_tokens,
+                                    getattr(disaggregated_params, "request_type", None)
+                                    == "generation_only",
+                                )
+                                engine_reported = prompt_tokens_details.pop(
+                                    "_engine_reported", None
+                                )
+                                if engine_reported is not None:
+                                    out.setdefault("engine_data", {})[
+                                        "cached_tokens_engine_reported"
+                                    ] = engine_reported
 
                             out["completion_usage"] = {
                                 "prompt_tokens": int(num_input_tokens),
@@ -1644,6 +1649,38 @@ class HandlerBase(BaseGenerativeHandler):
         # 1. it catches unsupported fields / attributes.
         # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
         return dataclasses.replace(sampling_params, **overrides)
+
+
+def _prompt_tokens_details(res, num_input_tokens: int, generation_only: bool) -> dict:
+    engine_reported = int(res.cached_tokens or 0)
+    # Clamp to prompt size: image token_ids are unexpanded placeholders, so the
+    # engine count (measured over the expanded prompt) can exceed it.
+    details: dict = {"cached_tokens": min(num_input_tokens, engine_reported)}
+    if not generation_only:
+        # On context paths the engine value is the KV manager's prepopulated
+        # prompt length, already reduced over every attention window.
+        return details
+    # A generation-only request receives its prompt KV by transfer, and the
+    # engine reports that whole sequence as cached. Only the prefix this worker
+    # reused from its own cache is a hit. num_reused_blocks / num_missed_blocks
+    # are summed over attention windows, so use their ratio (the engine's own
+    # per-request hit-rate definition) rather than a block-size multiple.
+    km = None
+    for output in getattr(res, "outputs", None) or ():
+        pm = getattr(output, "request_perf_metrics", None)
+        km = getattr(pm, "kv_cache_metrics", None) if pm is not None else None
+        if km is not None:
+            break
+    reused = getattr(km, "num_reused_blocks", None)
+    missed = getattr(km, "num_missed_blocks", None)
+    if reused is None or missed is None:
+        return details
+    total = int(reused) + int(missed)
+    from_kv = int(reused) * num_input_tokens // total if total else 0
+    # The last prompt token is never reused: it must be computed to produce logits.
+    details["cached_tokens"] = min(max(num_input_tokens - 1, 0), from_kv)
+    details["_engine_reported"] = engine_reported
+    return details
 
 
 def _call_signature_accepts_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> bool:
