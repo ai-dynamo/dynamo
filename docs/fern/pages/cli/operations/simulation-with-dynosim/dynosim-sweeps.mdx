@@ -82,6 +82,7 @@ optimizer:
 # Dynamo output configuration, consumed only by --output dgd.
 dgd:
   name: qwen
+  output_file: deployment.yaml
   namespace: default
   renderer: aic
   format: manifest
@@ -92,7 +93,8 @@ dgd:
 Each parallelism preset is a complete mapping and becomes one categorical choice. Router and
 scheduler domains add independent search dimensions. `engine.model` identifies the model that
 AISimulate evaluates and that the generated DGD serves. `dgd.name` is only the Kubernetes resource
-name; it does not select the model.
+name, while `dgd.output_file` is the output filename relative to `--output-dir`. Neither field
+selects the model. `dgd.namespace` is optional.
 
 </Step>
 <Step title="Run the recommendation" id="run-the-recommendation">
@@ -114,7 +116,7 @@ The command prints ranked candidates and produces:
 ```text
 /tmp/dynosim-recommendations/
 ├── recommendations/   # AISimulate's concrete ranked candidate configurations
-├── qwen.yaml           # DGD rendered from the selected scalar candidate
+├── deployment.yaml     # DGD rendered from the selected scalar candidate
 └── index.json          # Index of artifacts written by the DGD adapter
 ```
 
@@ -122,9 +124,10 @@ The `--stack` option selects the simulation implementation. The independent `--o
 selects DGD generation.
 
 The `dgd.renderer` field defaults to `aic`. Set it to `direct` to compare the direct Dynamo renderer.
-For a Pareto optimization, replace `dgd.name` with `dgd.name_prefix`; the adapter writes one numbered
-DGD for each selected Pareto candidate. Set `dgd.format: kustomize` to write Kustomize sources rather
-than one manifest per candidate.
+For a Pareto optimization, use explicit patterns such as `dgd.name: candidate-{index}` and
+`dgd.output_file: candidate-{index}.yaml`. The adapter substitutes a zero-padded index for each
+selected Pareto candidate. Set `dgd.format: kustomize` to add a `kustomization.yaml` that references
+the generated manifests.
 
 </Step>
 <Step title="Predict the best candidate" id="predict-the-best-candidate">
