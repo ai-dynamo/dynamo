@@ -265,38 +265,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	// The reserved runtime init container selects sidecar mode regardless of validity.
-	if runtime := dynamo.GetDynamoSidecar(spec); runtime != nil {
-		index := containerIndexByName(spec.PodTemplate.Spec.InitContainers, consts.RuntimeContainerName)
-		runtimePath := fldPath.Child("podTemplate", "spec", "initContainers").Index(index)
-		detail := fmt.Sprintf("component %q with a runtime init container", spec.ComponentName)
-		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
-			allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), "is supported only for worker, prefill, and decode components"))
-		}
-		if runtime.RestartPolicy == nil || *runtime.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-			allErrs = append(allErrs, field.Invalid(runtimePath.Child("restartPolicy"), k8sptr.Deref(runtime.RestartPolicy, ""), "must be Always for "+detail))
-		}
-		if engine := dynamo.GetMainContainer(spec); engine == nil {
-			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate", "spec", "containers"), "main engine container is required for "+detail))
-		} else if engine.Image == "" {
-			index := containerIndexByName(spec.PodTemplate.Spec.Containers, consts.MainContainerName)
-			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate", "spec", "containers").Index(index).Child("image"), "engine image is required for "+detail))
-		}
-		if spec.Multinode != nil {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "is not currently supported for "+detail+"; support is planned for a future release"))
-		}
-		if spec.Experimental != nil {
-			if spec.Experimental.Checkpoint != nil && spec.Experimental.Checkpoint.Enabled {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "enabled"), "is not currently supported for "+detail+"; support is planned for a future release"))
-			}
-			if spec.Experimental.GPUMemoryService != nil {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "gpuMemoryService"), "is not currently supported for "+detail+"; support is planned for a future release"))
-			}
-			if spec.Experimental.Failover != nil {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "is not currently supported for "+detail+"; support is planned for a future release"))
-			}
-		}
-	}
+	allErrs = append(allErrs, dynamo.ValidateDynamoSidecar(spec, fldPath)...)
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 

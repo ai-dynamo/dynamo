@@ -124,10 +124,26 @@ spec:
               path: ca.pem
 ```
 
-This example shows a single component (`Frontend`); every component that
-receives the TLS env vars needs the same volume mounts. If you are using the
-operator's auto-injection, apply these mounts in each component's
-`podTemplate`.
+This example shows a single component (`Frontend`); every container that
+receives TLS env vars needs the certificate files mounted at the configured paths.
+In the default combined mode, put these mounts on `spec.podTemplate.spec.containers[name=main]`.
+
+In [Dynamo sidecar mode](../../reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode),
+`DYN_TCP_TLS_*` and `NATS_TLS_*` are injected into
+`spec.podTemplate.spec.initContainers[name=runtime]`. Declare the certificate Secret volumes
+in `spec.podTemplate.spec.volumes` and mount them explicitly in
+`spec.podTemplate.spec.initContainers[name=runtime].volumeMounts`. Mounting them only on
+`spec.podTemplate.spec.containers[name=main]` does not make the files available to the runtime.
+When switching an existing TLS-enabled worker to sidecar mode, add these mounts in the same change.
+
+If `spec.frontendSidecar` selects a co-located frontend, explicitly add the same certificate
+mounts to `spec.podTemplate.spec.containers[name=<frontendSidecar>].volumeMounts` as well.
+The frontend inherits mounts from `spec.podTemplate.spec.containers[name=main]`, not from
+`spec.podTemplate.spec.initContainers[name=runtime]`.
+
+These paths use the standalone DCD layout. For DGD components, replace the leading
+`spec.podTemplate` with `spec.components[*].podTemplate` and use
+`spec.components[*].frontendSidecar` to select the co-located frontend.
 
 > [!NOTE]
 > For NATS TLS to work, the NATS server itself must also be

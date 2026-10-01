@@ -42,6 +42,8 @@ const (
 
 func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	const updatedSidecarImage = "runtime:1.6.0"
+	const initialSidecarImage = "runtime:1.5.0"
+	const unrelatedInitContainerName = "setup"
 
 	var (
 		oneReplica       = int32(1)
@@ -69,58 +71,58 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	}{
 		// Sidecar mode is derived from live init-container names in both API versions.
 		{name: "beta unrelated init container retains standard mode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
-			c.PodTemplate.Spec.InitContainers[0].Name = "setup"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+			c.PodTemplate.Spec.InitContainers[0].Name = unrelatedInitContainerName
 			c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
 			c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
 		})},
 		{name: "beta regular runtime container retains standard mode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 			c.PodTemplate.Spec.InitContainers = nil
 			c.PodTemplate.Spec.Containers = append(c.PodTemplate.Spec.Containers, corev1.Container{Name: "runtime", Image: "helper:latest"})
 			c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
 		})},
 		{name: "beta adding runtime activates sidecar validation", oldDeployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.InitContainers = nil
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 		}), deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 			c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
 		}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with a runtime init container`}},
 		{name: "beta removing runtime returns to main", oldDeployment: nativeDCDForAdmission(t, false, nil), deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.InitContainers = nil
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 		})},
 		{name: "beta renaming runtime returns to main", oldDeployment: nativeDCDForAdmission(t, false, nil), deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.InitContainers[0].Name = "setup"
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.InitContainers[0].Name = unrelatedInitContainerName
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 		})},
 		{name: "alpha unrelated init container retains standard mode", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
-			c.PodTemplate.Spec.InitContainers[0].Name = "setup"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+			c.PodTemplate.Spec.InitContainers[0].Name = unrelatedInitContainerName
 			c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
 			c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
 		})},
 		{name: "alpha regular runtime container retains standard mode", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 			c.PodTemplate.Spec.InitContainers = nil
 			c.PodTemplate.Spec.Containers = append(c.PodTemplate.Spec.Containers, corev1.Container{Name: "runtime", Image: "helper:latest"})
 			c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
 		})},
 		{name: "alpha adding runtime activates sidecar validation", oldDeployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.InitContainers = nil
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 		}), deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 			c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
 		}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with a runtime init container`}},
 		{name: "alpha removing runtime returns to main", oldDeployment: nativeDCDForAdmission(t, true, nil), deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.InitContainers = nil
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 		})},
 		{name: "alpha renaming runtime returns to main", oldDeployment: nativeDCDForAdmission(t, true, nil), deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.InitContainers[0].Name = "setup"
-			c.PodTemplate.Spec.Containers[0].Image = "runtime:1.5.0"
+			c.PodTemplate.Spec.InitContainers[0].Name = unrelatedInitContainerName
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
 		})},
 		{name: "native sidecar beta rejects gms create",
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {

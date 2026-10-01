@@ -372,6 +372,15 @@ init-container mounts. `compilationCache` configures the engine in
 `spec.podTemplate.spec.containers[name=main]` and creates its pod volume; it does not
 mount the cache into `spec.podTemplate.spec.initContainers[name=runtime]`.
 
+For TLS-enabled deployments, the operator injects `DYN_TCP_TLS_*` and `NATS_TLS_*` paths into
+`spec.podTemplate.spec.initContainers[name=runtime]`. Mount the certificate Secret volumes at
+those paths in `spec.podTemplate.spec.initContainers[name=runtime].volumeMounts`; mounts on
+`spec.podTemplate.spec.containers[name=main]` are not shared with the runtime. If
+`spec.frontendSidecar` selects a co-located frontend, explicitly mount the certificates in
+`spec.podTemplate.spec.containers[name=<frontendSidecar>].volumeMounts` too. The frontend does
+not inherit mounts from `spec.podTemplate.spec.initContainers[name=runtime]`.
+See [Operator TLS](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/tls.md).
+
 ### 3. Deploy
 
 ```bash
