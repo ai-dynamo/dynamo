@@ -271,7 +271,7 @@ fn default_row(
     worker: WorkerWithDpRank,
     preferred_taint_multiplier: Option<f64>,
 ) -> CandidateData {
-    input.record_candidate(worker);
+    input.track_kept_candidate(worker);
     input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,

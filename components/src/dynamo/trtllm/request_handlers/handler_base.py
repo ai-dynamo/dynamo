@@ -1461,14 +1461,16 @@ class HandlerBase(BaseGenerativeHandler):
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
                             )
-                            is_generation_only = (
-                                getattr(disaggregated_params, "request_type", None)
-                                == "generation_only"
-                            )
 
                             if prefill_prompt_tokens_details:
+                                # A decode with a prefill result: its prefill
+                                # attempt already reported cache reuse.
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
+                                is_generation_only = (
+                                    getattr(disaggregated_params, "request_type", None)
+                                    == "generation_only"
+                                )
                                 prompt_tokens_details = _prompt_tokens_details(
                                     res, num_input_tokens, is_generation_only
                                 )
@@ -1479,6 +1481,21 @@ class HandlerBase(BaseGenerativeHandler):
                                     out.setdefault("engine_data", {})[
                                         "cached_tokens_engine_reported"
                                     ] = engine_reported
+                                # A generation-only request counts its transferred
+                                # prompt KV as cached, and a multimodal count
+                                # includes expanded image tokens the unexpanded
+                                # prompt length omits, so only text context
+                                # attempts report.
+                                if not is_generation_only and not isinstance(
+                                    processed_input, dict
+                                ):
+                                    kv_cache_hit = _kv_cache_hit_engine_data(
+                                        res, num_input_tokens
+                                    )
+                                    if kv_cache_hit:
+                                        out.setdefault("engine_data", {})[
+                                            "kv_cache_hit"
+                                        ] = kv_cache_hit
 
                             out["completion_usage"] = {
                                 "prompt_tokens": int(num_input_tokens),
@@ -1488,20 +1505,6 @@ class HandlerBase(BaseGenerativeHandler):
                                 ),
                                 "prompt_tokens_details": prompt_tokens_details,
                             }
-                            # A generation-only request counts its transferred
-                            # prompt KV as cached, and a multimodal count includes
-                            # expanded image tokens the unexpanded prompt length
-                            # omits, so only text context attempts report.
-                            if not is_generation_only and not isinstance(
-                                processed_input, dict
-                            ):
-                                kv_cache_hit = _kv_cache_hit_engine_data(
-                                    res, num_input_tokens
-                                )
-                                if kv_cache_hit:
-                                    out.setdefault("engine_data", {})[
-                                        "kv_cache_hit"
-                                    ] = kv_cache_hit
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.

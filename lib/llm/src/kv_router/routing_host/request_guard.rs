@@ -3,6 +3,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use prometheus::IntCounter;
+
 use crate::{
     kv_router::{
         KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
@@ -80,8 +82,8 @@ pub(super) struct RouteObservation {
 
 struct KvHitTracking {
     prompt_tokens: u64,
-    reused_tokens: prometheus::IntCounter,
-    has_recorded: bool,
+    /// Taken by the first valid worker report, so an attempt counts at most once.
+    reused_tokens: Option<IntCounter>,
 }
 
 /// Cache-hit report the worker attaches to its final chunk (`engine_data.kv_cache_hit`).
@@ -636,19 +638,14 @@ impl RequestGuard {
         if attempt_id.is_some() {
             request_metrics.requests_started_total.inc();
         }
-        let phase = request.phase();
-        let kv_hit = kv_route.map(|route| {
-            let reused_tokens = request_metrics.observe_kv_route_estimate(
-                phase,
+        let kv_hit = kv_route.map(|route| KvHitTracking {
+            prompt_tokens: route.prompt_tokens,
+            reused_tokens: Some(request_metrics.observe_kv_route_estimate(
+                request.phase(),
                 &request.model,
                 route.best_router_tokens,
                 route.selected_router_tokens,
-            );
-            KvHitTracking {
-                prompt_tokens: route.prompt_tokens,
-                reused_tokens,
-                has_recorded: false,
-            }
+            )),
         });
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
@@ -899,18 +896,20 @@ impl RequestGuard {
         let Some(kv) = self.kv_hit.as_mut() else {
             return;
         };
-        if kv.has_recorded {
+        if kv.reused_tokens.is_none() {
             return;
         }
-        let reused = item
+        let Some(reused) = item
             .data
             .as_ref()
             .and_then(|data| data.engine_data.as_ref())
             .and_then(|data| data.get("kv_cache_hit"))
-            .and_then(|value| worker_cache_hit_tokens(kv.prompt_tokens, value));
-        if let Some(reused) = reused {
-            kv.reused_tokens.inc_by(reused);
-            kv.has_recorded = true;
+            .and_then(|value| worker_cache_hit_tokens(kv.prompt_tokens, value))
+        else {
+            return;
+        };
+        if let Some(counter) = kv.reused_tokens.take() {
+            counter.inc_by(reused);
         }
     }
 }

@@ -131,7 +131,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
-    // Track accepted candidates during collection, after policy filters.
+    // Track the maximum over the eligible ranks row() already visits; no second scan.
     max_raw_cached_tokens: Cell<Option<usize>>,
     cache_snapshot: CacheSnapshot<'a>,
 }
@@ -165,7 +165,9 @@ impl<'a> MaterializedSelectionInput<'a> {
         self.max_raw_cached_tokens.get()
     }
 
-    fn record_candidate(&self, worker: WorkerWithDpRank) {
+    /// Count a worker toward the best eligible cached prefix once every policy
+    /// filter has kept it.
+    fn track_kept_candidate(&self, worker: WorkerWithDpRank) {
         if let Some(current_max) = self.max_raw_cached_tokens.get() {
             let raw_cached_tokens = self
                 .request
@@ -573,8 +575,8 @@ mod cache_reuse_tests {
         request.overlap.tier_overlap_blocks.disk.insert(second, 2);
         let input = MaterializedSelectionInput::new(&request, 16);
 
-        input.record_candidate(first);
-        input.record_candidate(second);
+        input.track_kept_candidate(first);
+        input.track_kept_candidate(second);
 
         assert_eq!(input.max_raw_cached_tokens(), Some(96));
         let result = selection_result(&request, first, 16, input.max_raw_cached_tokens());
@@ -591,7 +593,7 @@ mod cache_reuse_tests {
         request.overlap.effective_cached_tokens.insert(worker, 96);
         let input = MaterializedSelectionInput::new(&request, 16);
 
-        input.record_candidate(worker);
+        input.track_kept_candidate(worker);
 
         assert_eq!(input.max_raw_cached_tokens(), None);
         let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens());
@@ -644,7 +646,7 @@ mod cache_reuse_tests {
         let eligibility = request.eligibility();
 
         eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
-            input.record_candidate(worker);
+            input.track_kept_candidate(worker);
         });
 
         assert!(

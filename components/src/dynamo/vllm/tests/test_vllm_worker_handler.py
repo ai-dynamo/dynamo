@@ -602,42 +602,29 @@ class TestReasoningParserForwarding:
             assert "kv_cache_hit" not in engine_data
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("coalesced", [False, True])
-    async def test_generate_tokens_omits_parallel_sample_cache_hits(self, coalesced):
-        """The shared collector can attach sample 1's cache count to sample 0."""
+    async def test_generate_tokens_omits_cache_hit_for_parallel_samples(self):
+        """No n > 1 sample's cached count reliably measures prior reuse."""
         from vllm.sampling_params import SamplingParams
 
         handler = _make_handler()
         handler._extract_logprobs = MagicMock(return_value=(None, None))
 
         async def fake_generate(*args, **kwargs):
-            responses = []
+            # Sample 1 finishes first, with a count inflated by sample 0.
             for index, cached in ((1, 2), (0, 0)):
-                responses.append(
-                    RequestOutput(
-                        request_id="req-n2",
-                        prompt=None,
-                        outputs=[
-                            CompletionOutput(
-                                index=index,
-                                text="",
-                                token_ids=[11],
-                                cumulative_logprob=None,
-                                logprobs=None,
-                                finish_reason="stop",
-                            )
-                        ],
-                        prompt_token_ids=[1, 2],
-                        prompt_logprobs=None,
-                        finished=True,
-                        num_cached_tokens=cached,
-                    )
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=index,
+                            token_ids=[11],
+                            finish_reason="stop",
+                            stop_reason=None,
+                        )
+                    ],
+                    prompt_token_ids=[1, 2],
+                    prompt_logprobs=None,
+                    num_cached_tokens=cached,
                 )
-            if coalesced:
-                responses[0].add(responses[1], aggregate=False)
-                responses = responses[:1]
-            for response in responses:
-                yield response
 
         handler.engine_client = MagicMock()
         handler.engine_client.generate = fake_generate
@@ -1382,8 +1369,8 @@ async def test_prefill_returns_structured_error_when_multimodal_is_disabled():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cached_tokens", [0, 2, None])
-async def test_prefill_emits_attempt_cache_reuse(monkeypatch, cached_tokens):
+@pytest.mark.parametrize(("cached_tokens", "n"), [(0, 1), (2, 1), (None, 1), (2, 2)])
+async def test_prefill_emits_attempt_cache_reuse(monkeypatch, cached_tokens, n):
     handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
     request = {"token_ids": [1, 2, 3]}
     response = mod.RequestOutput(
@@ -1424,7 +1411,7 @@ async def test_prefill_emits_attempt_cache_reuse(monkeypatch, cached_tokens):
     protocol.decode_request_kv_transfer_params.return_value = None
     monkeypatch.setattr(mod, "make_kv_connector_protocol", lambda _: protocol)
     monkeypatch.setattr(
-        mod, "build_sampling_params", lambda *args, **kwargs: MagicMock()
+        mod, "build_sampling_params", lambda *args, **kwargs: MagicMock(n=n)
     )
 
     chunks = [
@@ -1434,7 +1421,7 @@ async def test_prefill_emits_attempt_cache_reuse(monkeypatch, cached_tokens):
         )
     ]
 
-    if cached_tokens is None:
+    if cached_tokens is None or n > 1:
         assert "engine_data" not in chunks[0]
     else:
         assert chunks[0]["engine_data"]["kv_cache_hit"] == {

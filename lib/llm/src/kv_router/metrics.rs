@@ -1246,7 +1246,9 @@ impl RouterRequestMetrics {
             .observe(overlap_blocks_lost);
     }
 
-    /// Record router estimates and return this attempt's worker-reuse counter.
+    /// Record the router's estimates for one tracked attempt at selection time and
+    /// return its worker-reuse counter, already exported at zero for backends that
+    /// never report.
     pub fn observe_kv_route_estimate(
         &self,
         phase: RequestPhase,
@@ -1261,7 +1263,6 @@ impl RouterRequestMetrics {
         self.kv_selected_cached_prefix_tokens
             .with_label_values(labels)
             .inc_by(selected_tokens);
-        // Export zero even when this backend never sends a worker report.
         self.kv_worker_reused_tokens.with_label_values(labels)
     }
 }

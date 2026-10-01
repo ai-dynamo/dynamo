@@ -3416,9 +3416,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         want_engine_data=False,
     ):
         try:
-            # Parallel outputs share a collector whose cached-token count may
-            # belong to another sample, even when emitting sample 0.
-            report_kv_cache_hit = report_kv_cache_hit and sampling_params.n == 1
             # Log LoRA usage for this generation (debug level to avoid log spam)
             self._log_with_lora_context(
                 "Starting token generation for request {request_id}{lora_info}",
@@ -3539,9 +3536,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        # With n > 1, later samples hit the prompt blocks earlier
+                        # ones just cached, and vLLM keeps the first buffered
+                        # sample's count when it merges outputs, so no sample's
+                        # count reliably measures prior reuse.
                         kv_cache_hit = (
                             BaseWorkerHandler._kv_cache_hit_engine_data(res)
-                            if report_kv_cache_hit
+                            if report_kv_cache_hit and sampling_params.n == 1
                             else {}
                         )
                         if kv_cache_hit:
@@ -4374,7 +4375,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         request_output=res,
                     ),
                 }
-                kv_cache_hit = BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                # Parallel samples make the count unreliable; see generate_tokens.
+                kv_cache_hit = (
+                    BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                    if sampling_params.n == 1
+                    else {}
+                )
                 if kv_cache_hit:
                     output["engine_data"] = {"kv_cache_hit": kv_cache_hit}
 
