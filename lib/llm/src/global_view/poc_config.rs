@@ -11,13 +11,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use dynamo_kv_router::global_view::PoolKey;
 use dynamo_kv_router::global_view::state::{FreshnessPolicy, PoolLocation};
+use dynamo_kv_router::global_view::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use serde::Deserialize;
 use tonic::transport::{Channel, Endpoint};
 
 use super::RelayPoolScope;
 use super::http_forward::parse_private_frontend_base;
+use super::scheduler_metrics::{MetricsConfig, MetricsSource, SchedulerMetrics};
 use super::service::GlobalRouterService;
 use crate::kv_dc_relay::global_view_consumer::{GlobalViewRuntime, RelayDgdSource};
 
@@ -29,7 +30,17 @@ pub struct PocRouterConfig {
     overlap_max_age_ms: u64,
     #[serde(default)]
     kv_aware_token_id_completions: bool,
+    #[serde(default)]
+    experimental_credit_policy: Option<CreditPolicyConfig>,
     pools: Vec<PoolConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreditPolicyConfig {
+    overlap_credit: f64,
+    scrape_interval_ms: u64,
+    max_sample_age_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +71,8 @@ struct PoolConfig {
     model: String,
     #[serde(default)]
     stats_only_aggregated: bool,
+    #[serde(default)]
+    experimental_scheduler_metrics: Option<MetricsConfig>,
     private_frontend_base_url: String,
     relay_grpc_url: String,
     stats_grpc_url: String,
@@ -80,6 +93,14 @@ impl PocRouterConfig {
         if self.overlap_max_age_ms == 0 || self.pools.is_empty() {
             bail!("Global Router needs a positive overlap age and at least one pool");
         }
+        if self
+            .experimental_credit_policy
+            .as_ref()
+            .is_some_and(|p| !p.overlap_credit.is_finite() || p.overlap_credit < 0.0)
+        {
+            bail!("overlap_credit must be finite and nonnegative");
+        }
+        let mut metrics_sources = Vec::new();
         let mut sources = Vec::with_capacity(self.pools.len());
         for pool in self.pools {
             let key = PoolKey::new(&pool.site_id, &pool.namespace, &pool.dgd_name)
@@ -92,6 +113,24 @@ impl PocRouterConfig {
                     "pool {} has an invalid private Frontend base URL",
                     pool.site_id
                 );
+            }
+            match (
+                self.experimental_credit_policy.is_some(),
+                pool.experimental_scheduler_metrics,
+            ) {
+                (true, Some(config)) => {
+                    config.validate()?;
+                    metrics_sources.push(MetricsSource {
+                        pool_id: V1PoolIdDeriver.derive(&key),
+                        model: pool.model.clone(),
+                        config,
+                    });
+                }
+                (true, None) => {
+                    bail!("credit experiment requires scheduler metrics for every pool")
+                }
+                (false, Some(_)) => bail!("scheduler metrics require experimental_credit_policy"),
+                (false, None) => {}
             }
             sources.push(RelayDgdSource {
                 key,
@@ -117,14 +156,20 @@ impl PocRouterConfig {
             sources,
             Duration::from_millis(self.overlap_max_age_ms),
         )?);
-        Ok((
-            self.listen,
-            GlobalRouterService::new_with_kv_token_id_completions(
-                view,
-                freshness,
-                self.kv_aware_token_id_completions,
-            )?,
-        ))
+        let mut service = GlobalRouterService::new_with_kv_token_id_completions(
+            view,
+            freshness,
+            self.kv_aware_token_id_completions,
+        )?;
+        if let Some(policy) = self.experimental_credit_policy {
+            let metrics = SchedulerMetrics::new(
+                metrics_sources,
+                policy.scrape_interval_ms,
+                policy.max_sample_age_ms,
+            )?;
+            service = service.with_experimental_credit(metrics, policy.overlap_credit)?;
+        }
+        Ok((self.listen, service))
     }
 }
 
