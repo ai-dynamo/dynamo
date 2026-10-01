@@ -234,6 +234,14 @@ rejects custom `webhook.namespaceSelector` values.
 
 {{ template "chart.valuesSection" . }}
 
+### LPX Integration
+
+LPX is experimental and may change incompatibly. Enable it with `dynamo-operator.lpx.enabled=true`.
+It requires Grove and the externally installed `scheduling.lpu.nvidia.com/v1alpha1`
+`LpuPipelineRequest` API. The installer applies `lpxgraphdeployments.nvidia.com` only when enabled;
+with `upgradeCRD=false` or a namespace-restricted operator, install that CRD separately first.
+See the [DGD reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx) for behavior when LPX is disabled.
+
 ### NATS Configuration
 
 NATS is **not required** by the default Dynamo request and event planes, which use TCP and ZMQ,

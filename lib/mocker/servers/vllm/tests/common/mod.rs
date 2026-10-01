@@ -52,6 +52,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
         endpoint: source_endpoint,
         topic,
         dp_rank,
+        ..
     } = &sources[0]
     else {
         panic!("expected a native ZMQ source");

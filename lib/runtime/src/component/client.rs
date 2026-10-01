@@ -586,6 +586,14 @@ impl Client {
         self.instance_source.borrow().clone()
     }
 
+    pub(crate) fn instance_by_id(&self, instance_id: u64) -> Option<Instance> {
+        self.instance_source
+            .borrow()
+            .iter()
+            .find(|instance| instance.id() == instance_id)
+            .cloned()
+    }
+
     pub fn instance_ids(&self) -> Vec<u64> {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
@@ -753,6 +761,41 @@ impl Client {
             }
         }
         Ok(instances)
+    }
+
+    /// Wait for at least one discovered instance to be published as routable.
+    pub async fn wait_for_routable_instances(&self) -> Result<Vec<Instance>> {
+        tracing::trace!(
+            endpoint = %self.endpoint.id(),
+            "Waiting for routable instances"
+        );
+        let mut discovered = self.instance_source.as_ref().clone();
+        let mut available = self.instance_avail_watcher();
+        loop {
+            // Discovery and routing publish on separate tasks. Returning only
+            // after their views overlap prevents a subsequent route seeing no workers.
+            let instances: Vec<Instance> = {
+                let available = available.borrow_and_update();
+                discovered
+                    .borrow_and_update()
+                    .iter()
+                    .filter(|instance| available.contains(&instance.id()))
+                    .cloned()
+                    .collect()
+            };
+            if !instances.is_empty() {
+                tracing::debug!(
+                    endpoint = %self.endpoint.id(),
+                    instances = instances.len(),
+                    "Routable instances are ready"
+                );
+                return Ok(instances);
+            }
+            tokio::select! {
+                result = discovered.changed() => result?,
+                result = available.changed() => result?,
+            }
+        }
     }
 
     /// Mark an instance as down/unavailable
@@ -1079,6 +1122,53 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_instance_by_id_returns_owned_current_instance() {
+        use crate::component::TransportType;
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_instance_lookup".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let mut client = endpoint.client().await.unwrap();
+        let instances: Vec<_> = (1..=2)
+            .map(|instance_id| Instance {
+                namespace: "test_instance_lookup".to_string(),
+                component: "test_component".to_string(),
+                endpoint: "test_endpoint".to_string(),
+                instance_id,
+                transport: TransportType::Tcp(format!("127.0.0.1:{}", 9000 + instance_id)),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (tx, rx) = tokio::sync::watch::channel(instances.clone());
+        client.instance_source = Arc::new(rx);
+
+        assert_eq!(client.instance_by_id(1), Some(instances[0].clone()));
+        let selected = client.instance_by_id(2).unwrap();
+        assert_eq!(selected, instances[1]);
+        assert!(client.instance_by_id(3).is_none());
+
+        let mut updated = selected.clone();
+        updated.transport = TransportType::Nats("updated.subject".to_string());
+        tx.send(vec![instances[0].clone(), updated.clone()])
+            .unwrap();
+        assert_eq!(client.instance_by_id(2), Some(updated));
+
+        tx.send(vec![instances[0].clone()]).unwrap();
+        assert!(client.instance_by_id(2).is_none());
+        assert_eq!(client.instance_by_id(1), Some(instances[0].clone()));
+
+        rt.shutdown();
+    }
+
     async fn wait_for_discovery_event(
         receiver: &mut DiscoveryEventReceiver,
         predicate: impl Fn(&DiscoveryEvent) -> bool,
@@ -1132,6 +1222,58 @@ mod tests {
             inhibited_duration_from_env(|_| Some("invalid".to_string())),
             Duration::from_secs(DEFAULT_INHIBITED_DURATION_SECS)
         );
+    }
+
+    #[tokio::test]
+    async fn wait_for_routable_instances_waits_for_routing_publication() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_wait_routing".to_string())
+            .unwrap()
+            .component("backend".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let instance = Instance {
+            namespace: "test_wait_routing".into(),
+            component: "backend".into(),
+            endpoint: "generate".into(),
+            instance_id: 1,
+            transport: TransportType::Nats("test.subject".into()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let (source_tx, source_rx) = tokio::sync::watch::channel(vec![instance.clone()]);
+        let source =
+            EndpointDiscoverySource::new(source_rx.clone(), CancellationToken::new().drop_guard());
+        let (routing, available) = RoutingInstancesState::new(vec![]);
+        let client = Client {
+            endpoint,
+            endpoint_discovery_source: Arc::new(source),
+            instance_source: Arc::new(source_rx),
+            routing_instances: Arc::new(routing),
+            instance_avail_owner: Arc::new(available),
+            reconcile_interval: Duration::ZERO,
+        };
+
+        // Discovery publishes first; the routing monitor has not consumed it yet.
+        assert_eq!(
+            client.wait_for_instances().await.unwrap(),
+            vec![instance.clone()]
+        );
+        let ready = client.wait_for_routable_instances();
+        tokio::pin!(ready);
+        assert!(futures::poll!(ready.as_mut()).is_pending());
+        client.routing_instances.reconcile_discovered(vec![1]);
+        assert_eq!(ready.await.unwrap(), vec![instance]);
+        assert_eq!(client.instance_ids_avail(), vec![1]);
+
+        client.routing_instances.reconcile_discovered(vec![]);
+        drop(source_tx);
+        assert!(client.wait_for_routable_instances().await.is_err());
+        rt.shutdown();
     }
 
     #[tokio::test]

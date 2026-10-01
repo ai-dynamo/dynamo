@@ -13,7 +13,6 @@ use active_sequences_open_loop::{
 use active_sequences_shared::generate_sequence_events;
 use clap::Parser;
 use dynamo_bench::kv_router_common::args::CommonArgs;
-use dynamo_bench::kv_router_common::replay::process_mooncake_trace;
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use tracing_subscriber::EnvFilter;
 
@@ -87,14 +86,7 @@ async fn prepare_benchmark(
         eprintln!("No mooncake_trace_path provided, skipping benchmark");
         return Ok(None);
     };
-    let traces = process_mooncake_trace(
-        path,
-        args.common.block_size,
-        args.common.trace_length_factor,
-        args.common.trace_duplication_factor,
-        args.common.num_unique_inference_workers,
-        args.common.seed,
-    )?;
+    let traces = args.common.load_mooncake_trace(path)?;
     let seq_traces = generate_sequence_events(
         &traces,
         args.common.num_gpu_blocks,
@@ -182,7 +174,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             args.common.sweep_min_ms,
             args.common.sweep_max_ms,
             args.common.sweep_steps,
-        );
+        )?;
         for duration_ms in durations.into_iter().rev() {
             println!("\n=== Active Sequences sweep: benchmark_duration_ms={duration_ms} ===");
             run_cell(&args, duration_ms, Some(duration_ms)).await?;
