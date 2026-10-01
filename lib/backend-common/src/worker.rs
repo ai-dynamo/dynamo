@@ -313,6 +313,13 @@ impl EngineKind {
         }
     }
 
+    fn readiness(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        match self {
+            EngineKind::Llm(e) => e.readiness(),
+            EngineKind::Raw(_) => None,
+        }
+    }
+
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.health_check_payload().await,
@@ -1149,6 +1156,28 @@ impl Worker {
         // endpoint also covers the RL endpoint registered further down.
         let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
 
+        let mut recovery_readiness = self.engine.readiness();
+        if let Some(readiness) = recovery_readiness.as_mut() {
+            if !self.config.effective_enable_local_indexer() {
+                return Err(err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    "KV replay recovery requires a local indexer".to_string(),
+                ));
+            }
+            loop {
+                if *readiness.borrow_and_update() {
+                    break;
+                }
+                tokio::select! {
+                    _ = shutdown.cancelled() => return Ok(()),
+                    result = readiness.changed() => result.map_err(|_| err(
+                        ErrorType::Backend(BackendError::EngineShutdown),
+                        "KV recovery task stopped before readiness".to_string(),
+                    ))?,
+                }
+            }
+        }
+
         let start_fut = builder.start_with_registration();
         tokio::pin!(start_fut);
         let primary_endpoint = tokio::select! {
@@ -1234,14 +1263,59 @@ impl Worker {
         // hold taken before registration is what kept the runtime from reporting
         // ready before this point; drop it here, because the write below
         // publishes readiness through the very signal it suppresses.
-        drop(readiness_hold);
-        set_worker_health(&endpoint, HealthStatus::Ready);
+        let mut recovery_hold = Some(readiness_hold);
+        if recovery_readiness.is_none() {
+            recovery_hold.take();
+            set_worker_health(&endpoint, HealthStatus::Ready);
+        }
 
         let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
 
+        let recovery_monitor = async {
+            let Some(mut readiness) = recovery_readiness else {
+                return std::future::pending::<Result<(), DynamoError>>().await;
+            };
+            let mut hold = recovery_hold;
+            loop {
+                let _mutation = self.engine_route_mutation.lock().await;
+                let ready = *readiness.borrow_and_update();
+                if ready {
+                    endpoint.register_endpoint_instance().await.map_err(|e| {
+                        err(
+                            ErrorType::Backend(BackendError::CannotConnect),
+                            e.to_string(),
+                        )
+                    })?;
+                    if !*readiness.borrow() {
+                        continue;
+                    }
+                    hold.take();
+                    set_worker_health(&endpoint, HealthStatus::Ready);
+                } else {
+                    hold.get_or_insert_with(|| {
+                        ReadinessHold::take(endpoint.drt().system_health(), endpoint.name())
+                    });
+                    set_worker_health(&endpoint, HealthStatus::NotReady);
+                    endpoint.unregister_endpoint_instance().await.map_err(|e| {
+                        err(
+                            ErrorType::Backend(BackendError::CannotConnect),
+                            e.to_string(),
+                        )
+                    })?;
+                }
+                drop(_mutation);
+                readiness.changed().await.map_err(|_| {
+                    err(
+                        ErrorType::Backend(BackendError::EngineShutdown),
+                        "KV recovery task stopped".to_string(),
+                    )
+                })?;
+            }
+        };
         let serve_result = tokio::select! {
             biased;
+            result = recovery_monitor => result,
             result = &mut serve_fut => {
                 match result {
                     // Endpoint exited cleanly (e.g. DRT primary token
@@ -1906,6 +1980,11 @@ fn wrap_engine_control_callback(
                                 "engine control completed but the engine is not serving-ready; leaving endpoint unregistered"
                             );
                         }
+                        return Ok(response);
+                    }
+                    if engine.readiness().is_some_and(|ready| !*ready.borrow()) {
+                        // The recovery monitor will register once its gate opens.
+                        set_worker_health(&endpoint, HealthStatus::NotReady);
                         return Ok(response);
                     }
                     let register_result = tokio::select! {
@@ -4295,6 +4374,114 @@ mod handoff_and_lifecycle_tests {
         );
 
         worker.begin_engine_route_shutdown().await;
+    }
+
+    struct RecoveryGateEngine(tokio::sync::watch::Receiver<bool>);
+
+    #[async_trait]
+    impl LLMEngine for RecoveryGateEngine {
+        async fn start(&self, id: u64) -> Result<EngineConfig, DynamoError> {
+            DefaultsEngine.start(id).await
+        }
+        async fn generate(
+            &self,
+            request: PreprocessedRequest,
+            ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            DefaultsEngine.generate(request, ctx).await
+        }
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+        fn readiness(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+            Some(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn recovery_gates_initial_registration_and_later_readiness() {
+        with_each_health_route_shape(|| async {
+            let endpoint = test_local_endpoint().await;
+            let health = endpoint.drt().system_health();
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            let mut worker = Worker::new(Arc::new(RecoveryGateEngine(rx)), WorkerConfig::default());
+            let shutdown = CancellationToken::new();
+            let serve = tokio::spawn({
+                let endpoint = endpoint.clone();
+                let shutdown = shutdown.clone();
+                async move {
+                    worker
+                        .serve_with_orchestrator(
+                            &EngineConfig {
+                                model: "recovery-test".into(),
+                                ..Default::default()
+                            },
+                            endpoint,
+                            shutdown,
+                        )
+                        .await
+                }
+            });
+            // Wait until the worker observes the initial false gate.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!health.lock().get_health_status().0);
+            let id = endpoint.id();
+            let query = DiscoveryQuery::Endpoint {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+            };
+            assert!(
+                endpoint
+                    .drt()
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            tx.send_replace(true);
+            assert!(health_reaches(&health, true).await);
+            assert!(
+                !endpoint
+                    .drt()
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            tx.send_replace(false);
+            assert!(health_reaches(&health, false).await);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !endpoint
+                    .drt()
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            tx.send_replace(true);
+            assert!(health_reaches(&health, true).await);
+            shutdown.cancel();
+            tokio::time::timeout(Duration::from_secs(120), serve)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!health.lock().get_health_status().0);
+        })
+        .await;
     }
 
     /// Ensures a payload-free Rust backend publishes readiness while it is

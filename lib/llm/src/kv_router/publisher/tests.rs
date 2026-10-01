@@ -22,7 +22,7 @@ mod test_event_processing {
 
     #[test]
     fn test_publish_batch_ignores_empty_and_preserves_order() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
             source: None,
@@ -52,7 +52,7 @@ mod test_event_processing {
                 },
             ])
             .unwrap();
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].event.event_id, 8);
         assert_eq!(batch[0].event.dp_rank, 1);
@@ -62,7 +62,7 @@ mod test_event_processing {
 
     #[test]
     fn test_publish_batch_closed_channel_returns_original_events_in_order() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
             source: None,
@@ -97,7 +97,7 @@ mod test_event_processing {
 
     #[test]
     fn test_publish_wraps_events_in_batches() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
             source: None,
@@ -114,7 +114,7 @@ mod test_event_processing {
                 dp_rank: 2,
             })
             .unwrap();
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].event.event_id, 10);
         assert_eq!(batch[0].event.dp_rank, 2);
@@ -140,7 +140,7 @@ mod test_event_processing {
             ])
             .unwrap();
 
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(
             batch
                 .iter()
@@ -857,7 +857,7 @@ mod tests_startup_helpers {
 
         let cancellation_token = CancellationToken::new();
         let processor_token = cancellation_token.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let cleanup_discovery = discovery.clone();
         let processor = tokio::spawn(async move {
             let (publisher, _) = MockComponent::new();
@@ -2368,6 +2368,57 @@ mod event_processor_tests {
                 block_hashes: vec![ExternalSequenceBlockHash(block_hash)],
             }),
             dp_rank,
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_ack_waits_for_local_application_and_propagates_failure() {
+        use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
+        for fail in [false, true] {
+            let indexer = Arc::new(LocalKvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+                16,
+            ));
+            let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+            let cancel = CancellationToken::new();
+            let publisher = MockPublisher::new();
+            let task = tokio::spawn(run_event_processor_loop(
+                publisher.clone(),
+                1,
+                cancel.clone(),
+                rx,
+                Some(indexer.clone()),
+                Some(60_000),
+                DEFAULT_MAX_BATCH_BLOCKS,
+            ));
+            let (done, ack) = tokio::sync::oneshot::channel();
+            // A missing parent reaches the physical index but cannot be applied.
+            let parent = fail.then_some(999);
+            tx.send(PublisherInput::Recovery(
+                local_gpu_batch(vec![stored_event(0, parent, 10, 0)]),
+                done,
+            ))
+            .unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), ack)
+                .await
+                .unwrap()
+                .unwrap();
+            if fail {
+                assert!(result.is_err());
+            } else {
+                result.unwrap();
+                // No flush/sleep: acknowledgement means physical mutation finished,
+                // even with an otherwise long publisher batching timeout.
+                let matches = indexer
+                    .find_matches(vec![LocalBlockHash(10)])
+                    .await
+                    .unwrap();
+                assert!(!matches.scores.is_empty());
+            }
+            drop(tx);
+            task.await.unwrap();
         }
     }
 

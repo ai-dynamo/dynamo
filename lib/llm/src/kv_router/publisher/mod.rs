@@ -126,7 +126,7 @@ impl KvEventSource {
         kv_block_size: u32,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
-        tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
+        tx: mpsc::UnboundedSender<PublisherInput>,
         next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
@@ -186,6 +186,30 @@ impl KvEventSource {
     }
 }
 
+#[derive(Debug)]
+pub(super) enum PublisherInput {
+    Events(Vec<PlacementEvent>),
+    Recovery(
+        Vec<PlacementEvent>,
+        tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+    ),
+}
+
+impl From<Vec<PlacementEvent>> for PublisherInput {
+    fn from(events: Vec<PlacementEvent>) -> Self {
+        Self::Events(events)
+    }
+}
+
+impl PublisherInput {
+    fn into_events(self) -> Vec<PlacementEvent> {
+        match self {
+            Self::Events(events) => events,
+            Self::Recovery(..) => unreachable!("event send returned a recovery batch"),
+        }
+    }
+}
+
 /// A publisher of KV events.
 ///
 /// The engine-side publisher lifetime is coupled to this Dynamo publisher and its advertised
@@ -204,7 +228,7 @@ pub struct KvEventPublisher {
     /// The ID of the local worker emitting placement events.
     worker_id: WorkerId,
     /// The channel to send events to.
-    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
+    tx: mpsc::UnboundedSender<PublisherInput>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
 }
@@ -314,7 +338,7 @@ impl KvEventPublisher {
             })
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let worker_id = worker_id.unwrap_or_else(|| component.drt().connection_id());
 
         let _ = KvPublisherMetrics::from_component(&component);
@@ -506,9 +530,17 @@ impl KvEventPublisher {
             .into_iter()
             .map(|event| PlacementEvent::local_gpu(self.worker_id, event))
             .collect();
-        self.tx.send(placement_events).map_err(|err| {
-            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
-        })
+        self.tx
+            .send(PublisherInput::Events(placement_events))
+            .map_err(|err| {
+                mpsc::error::SendError(
+                    err.0
+                        .into_events()
+                        .into_iter()
+                        .map(|event| event.event)
+                        .collect(),
+                )
+            })
     }
 
     pub fn publish_with_storage_tier(
@@ -542,8 +574,14 @@ impl KvEventPublisher {
             })
             .collect();
 
-        self.tx.send(events).map_err(|err| {
-            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
+        self.tx.send(PublisherInput::Events(events)).map_err(|err| {
+            mpsc::error::SendError(
+                err.0
+                    .into_events()
+                    .into_iter()
+                    .map(|event| event.event)
+                    .collect(),
+            )
         })
     }
 
@@ -551,15 +589,31 @@ impl KvEventPublisher {
         &self,
         event: PlacementEvent,
     ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        self.tx.send(vec![event]).map_err(|err| {
-            mpsc::error::SendError(
-                err.0
-                    .into_iter()
-                    .next()
-                    .expect("singleton publish returned an empty failed batch")
-                    .event,
-            )
-        })
+        self.tx
+            .send(PublisherInput::Events(vec![event]))
+            .map_err(|err| {
+                mpsc::error::SendError(
+                    err.0
+                        .into_events()
+                        .into_iter()
+                        .next()
+                        .expect("singleton publish returned an empty failed batch")
+                        .event,
+                )
+            })
+    }
+
+    /// Apply a recovery batch to the local index before returning. This scoped
+    /// path preserves ordinary publishers' asynchronous admission contract.
+    pub async fn publish_recovery_batch(&self, events: Vec<PlacementEvent>) -> anyhow::Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(PublisherInput::Recovery(events, tx))
+            .map_err(|_| anyhow::anyhow!("KV publisher stopped"))?;
+        tokio::select! {
+            _ = self.cancellation_token.cancelled() => anyhow::bail!("KV publisher cancelled"),
+            result = rx => result.map_err(|_| anyhow::anyhow!("KV recovery batch dropped"))?,
+        }
     }
 
     pub fn next_event_id(&self) -> u64 {

@@ -46,6 +46,7 @@ struct StartedState {
     pool: Pool,
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
+    recovery: Option<Arc<crate::recovery::Recovery>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,6 +54,7 @@ struct DiscoveredKvEventSource {
     endpoint: String,
     topic: String,
     dp_rank: u32,
+    replay_endpoint: String,
 }
 
 impl SglangSidecarEngine {
@@ -242,7 +244,7 @@ impl SglangSidecarEngine {
 
 #[async_trait]
 impl LLMEngine for SglangSidecarEngine {
-    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError> {
         if self.state.initialized() {
             return Err(client::engine_shutdown("sglang sidecar already started"));
         }
@@ -296,11 +298,29 @@ impl LLMEngine for SglangSidecarEngine {
         let kv_event_sources = discover_kv_event_sources(&discovery, &config, &self.endpoint)?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
+        let recovery = (!kv_event_sources.is_empty()).then(|| {
+            crate::recovery::Recovery::new(
+                pool.control_client(),
+                kv_event_sources
+                    .iter()
+                    .map(|source| dynamo_sidecar_common::kv_replay::ReplaySource {
+                        endpoint: source.endpoint.clone(),
+                        replay_endpoint: source.replay_endpoint.clone(),
+                        topic: source.topic.clone(),
+                        dp_rank: source.dp_rank,
+                    })
+                    .collect(),
+                worker_id,
+                discovery.server_info.clone(),
+                self.cancel.clone(),
+            )
+        });
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
+                recovery,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -313,6 +333,15 @@ impl LLMEngine for SglangSidecarEngine {
         Ok(config)
     }
 
+    fn readiness(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.state.get().and_then(|s| {
+            s.recovery
+                .as_ref()
+                .filter(|r| r.is_active())
+                .map(|r| r.readiness())
+        })
+    }
+
     async fn generate(
         &self,
         request: PreprocessedRequest,
@@ -322,6 +351,15 @@ impl LLMEngine for SglangSidecarEngine {
             .state
             .get()
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
+        if state
+            .recovery
+            .as_ref()
+            .is_some_and(|r| r.is_active() && !*r.readiness().borrow())
+        {
+            return Err(client::engine_shutdown(
+                "SGLang KV index recovery is in progress",
+            ));
+        }
         if let Some(native_request) = native_http::request(
             &request,
             ctx.id(),
@@ -559,11 +597,20 @@ impl LLMEngine for SglangSidecarEngine {
         Ok(state
             .kv_event_sources
             .iter()
-            .map(|source| KvEventSource::Zmq {
-                endpoint: source.endpoint.clone(),
-                topic: source.topic.clone(),
-                dp_rank: source.dp_rank,
-                image_token_id: None,
+            .map(|source| {
+                let recovery = state
+                    .recovery
+                    .as_ref()
+                    .expect("KV sources have a recovery controller")
+                    .clone();
+                let rank = source.dp_rank;
+                KvEventSource::Push {
+                    dp_rank: rank,
+                    on_ready: Box::new(move |publisher| {
+                        recovery.attach(rank, publisher);
+                        Ok(())
+                    }),
+                }
             })
             .collect())
     }
@@ -803,6 +850,45 @@ fn discover_kv_event_sources(
         )));
     }
 
+    let raw = discovery
+        .server_info
+        .get("kv_events_config")
+        .ok_or_else(|| {
+            client::protocol_error("SGLang KV recovery requires GetServerInfo.kv_events_config")
+        })?;
+    let kv_config: Value = match raw {
+        Value::String(raw) => serde_json::from_str(raw)
+            .map_err(|e| client::protocol_error(format!("invalid kv_events_config: {e}")))?,
+        Value::Object(_) => raw.clone(),
+        _ => {
+            return Err(client::protocol_error(
+                "kv_events_config must be JSON text or an object",
+            ));
+        }
+    };
+    let buffer_steps = kv_config
+        .get("buffer_steps")
+        .map_or(Some(10_000), Value::as_u64)
+        .filter(|steps| *steps > 0)
+        .ok_or_else(|| client::protocol_error("KV recovery requires positive buffer_steps"))?;
+    let _ = buffer_steps; // Validates empty-history inference; retention remains engine-owned.
+    let replay = kv_config
+        .get("replay_endpoint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            client::protocol_error("KV recovery requires a configured replay_endpoint")
+        })?;
+    let replay = url::Url::parse(replay)
+        .map_err(|e| client::protocol_error(format!("invalid replay_endpoint: {e}")))?;
+    if replay.scheme() != "tcp" {
+        return Err(client::protocol_error(
+            "KV recovery requires a TCP replay endpoint",
+        ));
+    }
+    let replay_host = kv_event_connect_host(replay.host_str().unwrap_or(""), grpc_endpoint)?;
+    let replay_port = replay
+        .port()
+        .ok_or_else(|| client::protocol_error("replay_endpoint requires a port"))?;
     let connect_host = kv_event_connect_host(endpoint_host, grpc_endpoint)?;
     let mut sources = Vec::with_capacity(dp_size as usize);
     for dp_rank in dp_start..dp_end {
@@ -814,7 +900,14 @@ fn discover_kv_event_sources(
                     "SGLang KV-event port overflows 65535 for base port {base_port} and DP rank {dp_rank}"
                 ))
             })?;
+        let replay_rank_port = u32::from(replay_port)
+            .checked_add(dp_rank)
+            .filter(|p| *p > 0 && *p <= 65535)
+            .ok_or_else(|| {
+                client::protocol_error("KV replay port overflows per-rank port range")
+            })?;
         sources.push(DiscoveredKvEventSource {
+            replay_endpoint: format!("tcp://{replay_host}:{replay_rank_port}"),
             endpoint: format!("tcp://{connect_host}:{port}"),
             topic: topic.to_string(),
             dp_rank,
@@ -1382,6 +1475,7 @@ mod tests {
     fn kv_discovery() -> (Discovery, EngineConfig, GrpcEndpoint) {
         let discovery = discovery(json!({
             "page_size": 128, "dp_size": 2,
+            "kv_events_config": {"replay_endpoint":"tcp://*:6000", "buffer_steps":10000},
             "kv_events": {"publisher": "zmq", "endpoint_host": "*", "endpoint_port_base": 5557,
                           "topic": "kv", "block_size": 128, "dp_size": 2}
         }));
@@ -1777,6 +1871,7 @@ mod tests {
             "dcp_size": 2,
             "dp_size": 2,
             "enable_dp_attention": true,
+            "kv_events_config": "{\"replay_endpoint\":\"tcp://*:6000\",\"buffer_steps\":10000}",
             "kv_events": {
                 "publisher": "zmq",
                 "endpoint_host": "*",
@@ -1796,16 +1891,38 @@ mod tests {
             sources,
             [
                 DiscoveredKvEventSource {
+                    replay_endpoint: "tcp://worker.example:6000".to_string(),
                     endpoint: "tcp://worker.example:5557".to_string(),
                     topic: "kv".to_string(),
                     dp_rank: 0,
                 },
                 DiscoveredKvEventSource {
+                    replay_endpoint: "tcp://worker.example:6001".to_string(),
                     endpoint: "tcp://worker.example:5558".to_string(),
                     topic: "kv".to_string(),
                     dp_rank: 1,
                 },
             ]
         );
+    }
+    #[test]
+    fn recovery_requires_replay_endpoint_and_positive_retention() {
+        let endpoint = GrpcEndpoint::parse("http://worker.example:30001", "test").unwrap();
+        for config in [
+            json!(null),
+            json!({}),
+            json!({"replay_endpoint":"tcp://*:6000", "buffer_steps":0}),
+            json!({"replay_endpoint":"tcp://*:6000", "buffer_steps":-1}),
+            json!({"replay_endpoint":"ipc:///tmp/replay", "buffer_steps":100}),
+        ] {
+            let discovery = discovery(json!({
+                "page_size":16, "kv_events_config":config,
+                "kv_events":{"publisher":"zmq", "endpoint_host":"*", "endpoint_port_base":5557, "topic":"", "block_size":16, "dp_size":1}
+            }));
+            let config =
+                build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None)
+                    .unwrap();
+            assert!(discover_kv_event_sources(&discovery, &config, &endpoint).is_err());
+        }
     }
 }

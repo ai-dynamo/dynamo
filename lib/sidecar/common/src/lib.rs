@@ -7,6 +7,7 @@ mod args;
 mod endpoint;
 mod error;
 mod json;
+pub mod kv_replay;
 mod run;
 mod transport;
 

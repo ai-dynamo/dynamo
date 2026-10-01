@@ -24,3 +24,5 @@ pub mod proto;
 mod protocol;
 
 pub use engine::SglangSidecarEngine;
+
+mod recovery;

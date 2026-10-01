@@ -337,6 +337,12 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(MetricsBindings::default())
     }
 
+    /// Optional serving gate for recovery. False keeps the endpoint unready
+    /// and absent from discovery; engines without recovery keep the default.
+    fn readiness(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        None
+    }
+
     /// Canary payload registered with the runtime's `HealthCheckManager`.
     /// `Worker` calls this once after [`start`](LLMEngine::start). Returning
     /// `Ok(None)` (default) disables active probing — the endpoint then

@@ -17,11 +17,14 @@ use super::batching::BatchingState;
 use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::{RouterEventBatchSink, emit};
 
-pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
+pub(super) async fn run_event_processor_loop<
+    P: RouterEventBatchSink + 'static,
+    I: Into<super::PublisherInput> + Send,
+>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    mut rx: mpsc::UnboundedReceiver<Vec<PlacementEvent>>,
+    mut rx: mpsc::UnboundedReceiver<I>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
     max_batch_blocks: usize,
@@ -47,6 +50,19 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                     publish_output(&publisher, worker_id, &output).await;
                     break;
                 };
+                let (event_batch, recovery_done) = match event_batch.into() {
+                    super::PublisherInput::Events(events) => (events, None),
+                    super::PublisherInput::Recovery(events, done) => {
+                        // Finish any ordinary tail before entering the strict path.
+                        let mut output = Vec::new();
+                        batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                        publish_output(&publisher, worker_id, &output).await;
+                        (events, Some(done))
+                    }
+                };
+                // Recovery uses the same batching/dedup logic, then applies the
+                // resulting canonical mutations with acknowledgements below.
+                let apply_indexer = if recovery_done.is_some() { None } else { local_indexer.clone() };
                 let mut output = Vec::new();
 
                 // Process the complete source list before returning to `select!` so
@@ -89,7 +105,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                             batching_state
                                 .push(
                                     placement_event,
-                                    &local_indexer,
+                                    &apply_indexer,
                                     worker_id,
                                     &mut dedup,
                                     &mut output,
@@ -97,7 +113,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                                 .await;
                         }
                         KvCacheEventData::Cleared => {
-                            batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                            batching_state.flush(&apply_indexer, worker_id, &mut dedup, &mut output).await;
                             let event = placement_event.event;
                             dedup.clear_rank_domain(
                                 event.dp_rank,
@@ -105,7 +121,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                                 EventDedupPolicy::RefCounted,
                             );
                             let applied = emit(
-                                &local_indexer,
+                                &apply_indexer,
                                 worker_id,
                                 storage_tier,
                                 residency_domain,
@@ -144,12 +160,27 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                 // Without a timeout, flush the compatible tail at the native-list
                 // boundary. With a timeout, retain it for possible cross-list batching.
                 if batching_state.has_pending()
-                    && match timeout_ms {
+                    && (recovery_done.is_some() || match timeout_ms {
                         None => true,
                         Some(ms) => batching_state.is_timeout_elapsed(ms),
-                    }
+                    })
                 {
-                    batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
+                    batching_state.flush(&apply_indexer, worker_id, &mut dedup, &mut output).await;
+                }
+                if let Some(done) = recovery_done {
+                    let result = async {
+                        let indexer = local_indexer.as_ref().ok_or_else(|| anyhow::anyhow!("KV recovery requires a local indexer"))?;
+                        for event in &output {
+                            indexer.apply_recovery_event_with_buffer(event.clone()).await?;
+                        }
+                        Ok(())
+                    }.await;
+                    let failed = result.is_err();
+                    let _ = done.send(result);
+                    if failed {
+                        cancellation_token.cancel();
+                        break;
+                    }
                 }
                 publish_output(&publisher, worker_id, &output).await;
             }
@@ -184,11 +215,14 @@ async fn publish_output<P: RouterEventBatchSink>(
     }
 }
 
-pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
+pub(super) async fn start_event_processor<
+    P: RouterEventBatchSink + 'static,
+    I: Into<super::PublisherInput> + Send,
+>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<Vec<PlacementEvent>>,
+    rx: mpsc::UnboundedReceiver<I>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
 ) {

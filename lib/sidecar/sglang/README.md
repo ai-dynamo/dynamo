@@ -40,6 +40,46 @@ The sidecar opens eight gRPC connections by default. Override the pool size with
 
 Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a 30-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
+## KV index recovery
+
+KV-event sources require `replay_endpoint` and positive `buffer_steps` in
+SGLang's `--kv-events-config`, for example:
+
+```json
+{"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:6000","buffer_steps":10000,"topic":""}
+```
+
+The sidecar stays unready until every registered DP rank has replayed from
+sequence zero and applied the result to its local index. It subscribes before
+replay, merges overlapping batches in sequence order, and periodically requests
+retained history to repair a final dropped live batch even on an idle stream.
+An empty completed replay is accepted only with positive retention: SGLang's
+publisher starts at zero, retains its latest batches, and does not otherwise
+clear the buffer within an engine lifetime. A timeout is uncertainty and keeps
+the sidecar unready; it does not itself trigger shutdown.
+
+A replay that skips a required sequence triggers `Shutdown`, respecting
+SGLang's configured SIGTERM procedure. Dynamo does not wait for engine
+termination or require a successful acknowledgement. It retries failed delivery
+while observing the same engine and remains unready until recovery succeeds.
+Kubernetes must restart the engine container; Dynamo does not call Kubernetes.
+Because the upstream request has no instance precondition, a replacement racing
+shutdown delivery can receive it and incur an additional restart.
+
+Recovery watches the engine instance, disables automatic reconnect on each KV
+socket session, and verifies the instance again after bootstrap. Connection
+loss discards the session; tasks are stopped before clearing each rank's index.
+Replacement metadata must match the registered model and KV source topology;
+changed metadata requires relaunching the sidecar. KV publisher processes must
+share the engine lifetime (independent publisher resets are unsupported).
+
+**Rollout dependency:** KV recovery requires `WatchEngineState` and the SGLang
+[`Shutdown` change](https://github.com/sgl-project/sglang/pull/41582). Keep this
+Dynamo change unmerged until the engine image includes both. The existing
+v0.5.19 example image is not a validation of those capabilities; use a build
+containing the dependencies. Unsupported engines fail closed for KV recovery.
+Deployments without KV events retain their existing startup path.
+
 ## SGLang-managed module contract
 
 SGLang can load the Python entry point and supply the gRPC endpoint arguments:
