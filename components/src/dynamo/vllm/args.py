@@ -380,8 +380,16 @@ def update_engine_config_with_dynamo(
 
     if dynamo_config.benchmark_mode is not None:
         # vLLM attaches the observed dispatch to ModelRunnerOutput without GPU
-        # timing or synchronization. Enable it before model workers are created.
-        defaults["cudagraph_metrics"] = True
+        # timing or synchronization. Enable it before model workers are created,
+        # unless the user already did: the launcher turns only an option Dynamo
+        # enabled back off before serving (worker_factory._restore_cudagraph_metrics).
+        # A vLLM without the option has nothing to enable or restore.
+        cudagraph_metrics_auto_enabled = (
+            hasattr(engine_config, "cudagraph_metrics")
+            and not engine_config.cudagraph_metrics
+        )
+        if cudagraph_metrics_auto_enabled:
+            defaults["cudagraph_metrics"] = True
         if dynamo_config.enable_multimodal:
             logger.warning(
                 "--benchmark-mode is not supported for multimodal workers. "
@@ -443,6 +451,10 @@ def update_engine_config_with_dynamo(
             "timeout": dynamo_config.benchmark_timeout,
             "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
         }
+        if cudagraph_metrics_auto_enabled:
+            # Not a BenchmarkConfig field (the scheduler drops unknown keys): it
+            # tells the launcher to turn the option back off before serving.
+            benchmark_config["cudagraph_metrics_auto_enabled"] = True
         explicit_points = dynamo_config._benchmark_points
         if explicit_points is not None:
             # exclude_none so a v1 manifest round-trips as itself: the v3

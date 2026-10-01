@@ -27,6 +27,7 @@ from dynamo.vllm.worker_factory import (
     _DecodeWorkerLifecycle,
     _make_engine_probe,
     _merge_benchmark_rank_results,
+    _restore_benchmark_workers,
     _stop_worker_gc_policy,
     _wait_and_load_benchmark,
 )
@@ -3612,3 +3613,240 @@ def test_engine_probe_sidecar_pointer_is_written_and_a_stale_sidecar_removed(
     # This run's probe has not run yet; an earlier run's sidecar is gone.
     assert not sidecar_path.exists()
     assert on_disk["engine"]["resolution"] == "pending_worker_probe"
+
+
+# --------------------------------------------------------------------------
+# cudagraph_metrics restore before serving
+# --------------------------------------------------------------------------
+
+
+def _cudagraph_metrics_engine_client(collective_rpc):
+    """An engine client with both stat-logger shapes vLLM builds: an
+    aggregated logger, and a per-engine adapter with one logger per engine."""
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            observability_config=SimpleNamespace(cudagraph_metrics=True)
+        ),
+        logger_manager=SimpleNamespace(
+            stat_loggers=[
+                SimpleNamespace(cudagraph_logging=object()),
+                SimpleNamespace(
+                    per_engine_stat_loggers={
+                        0: SimpleNamespace(cudagraph_logging=object()),
+                        1: SimpleNamespace(cudagraph_logging=object()),
+                    }
+                ),
+                SimpleNamespace(),  # a logger without graph logging (Prometheus)
+            ]
+        ),
+        collective_rpc=collective_rpc,
+    )
+
+
+def _cudagraph_logging_states(engine_client) -> list:
+    aggregated, adapter, _ = engine_client.logger_manager.stat_loggers
+    return [
+        aggregated.cudagraph_logging,
+        *(
+            stat_logger.cudagraph_logging
+            for stat_logger in adapter.per_engine_stat_loggers.values()
+        ),
+    ]
+
+
+def _cudagraph_metrics_reset_done(engine_client) -> bool:
+    return (
+        engine_client.vllm_config.observability_config.cudagraph_metrics is False
+        and all(state is None for state in _cudagraph_logging_states(engine_client))
+    )
+
+
+def _cudagraph_metrics_warnings(caplog) -> list:
+    return [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "cudagraph_metrics" in record.getMessage()
+    ]
+
+
+def test_restore_engine_cudagraph_metrics_turns_stat_loggers_off(monkeypatch):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    client = _cudagraph_metrics_engine_client(AsyncMock(return_value=[]))
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )
+
+    assert client.vllm_config.observability_config.cudagraph_metrics is False
+    assert _cudagraph_logging_states(client) == [None, None, None]
+    assert not hasattr(client.logger_manager.stat_loggers[2], "cudagraph_logging")
+
+
+def test_restore_engine_cudagraph_metrics_leaves_a_user_enabled_option_on(
+    monkeypatch,
+):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    rpc = AsyncMock()
+    client = _cudagraph_metrics_engine_client(rpc)
+
+    # args.py records nothing when the user enabled the option.
+    asyncio.run(_restore_benchmark_workers({}, client))
+
+    rpc.assert_not_awaited()
+    assert client.vllm_config.observability_config.cudagraph_metrics is True
+    assert all(state is not None for state in _cudagraph_logging_states(client))
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        pytest.param(None, None, id="no-failure"),
+        pytest.param("kda", RuntimeError, id="kda-restore-raises"),
+        pytest.param("gc", RuntimeError, id="gc-stop-raises"),
+        pytest.param("gc-hangs", asyncio.TimeoutError, id="gc-stop-cancelled"),
+    ],
+)
+def test_restore_engine_cudagraph_metrics_runs_last_after_a_failed_or_cancelled_step(
+    monkeypatch, failure, expected_error
+):
+    """The engine-client reset is the last restore step, and it still runs
+    when the KDA restore or the GC stop raises, or when the failure path's
+    time box cancels the GC stop."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    rpcs = []
+
+    async def collective_rpc(method, timeout=None):
+        # Note whether the reset had already run when this RPC went out.
+        rpcs.append((method, _cudagraph_metrics_reset_done(client)))
+        if failure == "kda" and method == "finish_benchmark_kda_state":
+            raise RuntimeError("kda restore failed")
+        if method == "fpm_gc_stop":
+            if failure == "gc":
+                raise RuntimeError("gc stop failed")
+            if failure == "gc-hangs":
+                await asyncio.sleep(3600)
+        return []
+
+    client = _cudagraph_metrics_engine_client(collective_rpc)
+    bench_cfg = {"cudagraph_metrics_auto_enabled": True, "randomize_kda_state": True}
+
+    async def restore():
+        await asyncio.wait_for(
+            _restore_benchmark_workers(bench_cfg, client),
+            timeout=0.05 if failure == "gc-hangs" else None,
+        )
+
+    if expected_error is None:
+        asyncio.run(restore())
+    else:
+        with pytest.raises(expected_error):
+            asyncio.run(restore())
+
+    # The KDA restore and the GC stop (which always runs) both go out before
+    # the reset ...
+    assert rpcs[:2] == [
+        ("finish_benchmark_kda_state", False),
+        ("fpm_gc_stop", False),
+    ]
+    # ... and the reset has run by the time the restore is over.
+    assert _cudagraph_metrics_reset_done(client)
+
+
+class _UnreadableConfig:
+    @property
+    def observability_config(self):
+        raise RuntimeError("config torn down")
+
+
+def test_restore_engine_cudagraph_metrics_client_failure_is_logged_after_kda_and_gc(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    calls = []
+
+    def collective_rpc(method, timeout=None):
+        calls.append(method)
+        return []
+
+    client = _cudagraph_metrics_engine_client(AsyncMock(side_effect=collective_rpc))
+    client.vllm_config = _UnreadableConfig()
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers(
+            {"cudagraph_metrics_auto_enabled": True, "randomize_kda_state": True},
+            client,
+        )
+    )  # must not raise
+
+    # The KDA and GC restores run first and are unaffected.
+    assert calls[:2] == ["finish_benchmark_kda_state", "fpm_gc_stop"]
+    (warning,) = _cudagraph_metrics_warnings(caplog)
+    assert warning.exc_info is not None
+    assert "engine client" in warning.getMessage()
+    # The stat loggers, which stop the collection, do not depend on the config.
+    assert _cudagraph_logging_states(client) == [None, None, None]
+
+
+class _StubbornStatLogger:
+    """A stat logger whose graph logging cannot be dropped."""
+
+    @property
+    def cudagraph_logging(self):
+        return object()
+
+
+@pytest.mark.parametrize(
+    ("config_unreadable", "failed_steps"),
+    [
+        pytest.param(False, ["stat loggers of the engine client"], id="loggers"),
+        pytest.param(
+            True,
+            ["stat loggers of the engine client", "config of the engine client"],
+            id="loggers-and-config",
+        ),
+    ],
+)
+def test_restore_engine_cudagraph_metrics_each_client_step_logs_its_own_failure(
+    monkeypatch, caplog, config_unreadable, failed_steps
+):
+    """The stat loggers and then the config flag are reset independently: a
+    failure in one is logged on its own and never skips the other."""
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    client = _cudagraph_metrics_engine_client(AsyncMock(return_value=[]))
+    client.logger_manager = SimpleNamespace(stat_loggers=[_StubbornStatLogger()])
+    if config_unreadable:
+        client.vllm_config = _UnreadableConfig()
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers({"cudagraph_metrics_auto_enabled": True}, client)
+    )  # must not raise
+
+    # One WARNING with a traceback per failed step, naming it, in step order.
+    warnings = _cudagraph_metrics_warnings(caplog)
+    assert len(warnings) == len(failed_steps)
+    for step, warning in zip(failed_steps, warnings):
+        assert step in warning.getMessage()
+        assert warning.exc_info is not None
+    if not config_unreadable:
+        assert client.vllm_config.observability_config.cudagraph_metrics is False
+
+
+def test_restore_engine_cudagraph_metrics_tolerates_a_bare_engine_client(
+    monkeypatch, caplog
+):
+    """An engine client without vLLM's config or stat loggers is left as it
+    is, and nothing raises or warns."""
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _restore_benchmark_workers(
+            {"cudagraph_metrics_auto_enabled": True},
+            SimpleNamespace(collective_rpc=AsyncMock(return_value=[])),
+        )
+    )
+
+    assert _cudagraph_metrics_warnings(caplog) == []

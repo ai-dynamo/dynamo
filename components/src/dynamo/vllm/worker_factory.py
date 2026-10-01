@@ -1461,12 +1461,93 @@ async def _stop_worker_gc_policy(engine_client: AsyncLLM) -> None:
     logger.info("FPM GC policy stopped in all model workers")
 
 
+def _disable_engine_client_cudagraph_metrics(engine_client: Any) -> int:
+    """Turn cudagraph_metrics off in the engine client's process.
+
+    Two independent steps, each logging its own WARNING when it fails, so a
+    failure in one never skips the other. First drops the graph-dispatch
+    logging vLLM's stat loggers built at startup, which is what stops the
+    collection. Then clears the flag on the client's own config so a stat
+    logger vLLM builds later (it rebuilds them on an elastic-EP scale-up)
+    builds none. Returns the number of stat loggers whose graph logging was
+    dropped.
+    """
+    cleared = 0
+    try:
+        logger_manager = getattr(engine_client, "logger_manager", None)
+        stat_loggers = list(getattr(logger_manager, "stat_loggers", None) or [])
+        for stat_logger in list(stat_loggers):
+            # A per-engine adapter holds one LoggingStatLogger per DP engine.
+            per_engine = getattr(stat_logger, "per_engine_stat_loggers", None)
+            if isinstance(per_engine, dict):
+                stat_loggers.extend(per_engine.values())
+        for stat_logger in stat_loggers:
+            if getattr(stat_logger, "cudagraph_logging", None) is not None:
+                stat_logger.cudagraph_logging = None
+                cleared += 1
+    except Exception:
+        logger.warning(
+            "Could not turn vLLM cudagraph_metrics off in the stat loggers of "
+            "the engine client after the self-benchmark; they may keep "
+            "collecting CUDA graph dispatch statistics while serving",
+            exc_info=True,
+        )
+    try:
+        vllm_config = getattr(engine_client, "vllm_config", None)
+        observability_config = getattr(vllm_config, "observability_config", None)
+        if observability_config is not None and hasattr(
+            observability_config, "cudagraph_metrics"
+        ):
+            observability_config.cudagraph_metrics = False
+    except Exception:
+        logger.warning(
+            "Could not turn vLLM cudagraph_metrics off in the config of the "
+            "engine client after the self-benchmark; stat loggers vLLM builds "
+            "later may collect CUDA graph dispatch statistics",
+            exc_info=True,
+        )
+    return cleared
+
+
+def _restore_cudagraph_metrics(bench_cfg: dict, engine_client: AsyncLLM) -> None:
+    """Turn cudagraph_metrics back off before serving if Dynamo turned it on.
+
+    Benchmark mode enables the option so each benchmark sample records its
+    CUDA graph dispatch (``update_engine_config_with_dynamo``). Left on,
+    vLLM's default stat logger keeps collecting the per-step dispatch
+    statistics, without bound when periodic stat logging is off, and logs
+    them. An option the user enabled is left alone. Fail-soft: serving does
+    not depend on this.
+    """
+    if not bench_cfg.get("cudagraph_metrics_auto_enabled", False):
+        return
+    try:
+        cleared = _disable_engine_client_cudagraph_metrics(engine_client)
+    except Exception:
+        logger.warning(
+            "Could not turn vLLM cudagraph_metrics off in the engine client "
+            "after the self-benchmark; its stat loggers may keep collecting "
+            "CUDA graph dispatch statistics while serving",
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "Turned vLLM cudagraph_metrics off in the engine client after the "
+        "self-benchmark (stat loggers cleared: %d)",
+        cleared,
+    )
+
+
 async def _restore_benchmark_workers(bench_cfg: dict, engine_client: AsyncLLM) -> None:
     try:
         if bench_cfg.get("randomize_kda_state", False):
             await engine_client.collective_rpc("finish_benchmark_kda_state")
     finally:
-        await _stop_worker_gc_policy(engine_client)
+        try:
+            await _stop_worker_gc_policy(engine_client)
+        finally:
+            # Last, so the GC stop never waits behind it; it never raises.
+            _restore_cudagraph_metrics(bench_cfg, engine_client)
 
 
 async def _await_benchmark_then_restore_workers(

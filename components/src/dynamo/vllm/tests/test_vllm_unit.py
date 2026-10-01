@@ -960,6 +960,7 @@ class TestBenchmarkConfig:
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
             "collect_imbalanced": False,
+            "cudagraph_metrics_auto_enabled": True,
         }
 
     def test_random_kda_config_selects_worker_and_reaches_scheduler(
@@ -1988,6 +1989,44 @@ def test_cuda_graph_dispatch_metrics_enabled_only_for_benchmark(
     assert engine_cfg.cudagraph_metrics is (
         True if benchmark_mode is not None else initial_metrics
     )
+
+
+def test_benchmark_cudagraph_metrics_auto_enabled_is_recorded_for_restore():
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=False
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.cudagraph_metrics is True
+    bench = dynamo_cfg._benchmark_additional_config
+    assert bench["cudagraph_metrics_auto_enabled"] is True
+
+
+def test_benchmark_cudagraph_metrics_user_enabled_is_left_alone_and_not_recorded():
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=True
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.cudagraph_metrics is True
+    bench = dynamo_cfg._benchmark_additional_config
+    assert "cudagraph_metrics_auto_enabled" not in bench
+
+
+def test_benchmark_cudagraph_metrics_absent_option_is_not_recorded():
+    """A vLLM without the option: nothing is enabled, so nothing is restored."""
+    dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+    engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert not hasattr(engine_cfg, "cudagraph_metrics")
+    bench = dynamo_cfg._benchmark_additional_config
+    assert "cudagraph_metrics_auto_enabled" not in bench
 
 
 class TestEmbeddingWorkerFlag:
