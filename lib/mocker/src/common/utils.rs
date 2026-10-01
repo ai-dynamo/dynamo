@@ -225,11 +225,10 @@ impl ReusablePreciseTimer {
 }
 
 async fn sleep_until_tokio(deadline: Instant) {
-    let deadline = tokio::time::Instant::from_std(deadline);
-    if deadline <= tokio::time::Instant::now() {
+    if deadline <= Instant::now() {
         tokio::task::yield_now().await;
     } else {
-        tokio::time::sleep_until(deadline).await;
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
     }
 }
 
