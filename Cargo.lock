@@ -2641,6 +2641,7 @@ dependencies = [
  "chrono",
  "criterion",
  "crossbeam-queue",
+ "crossbeam-utils",
  "dashmap",
  "derive_builder",
  "dynamo-kv-hashing",

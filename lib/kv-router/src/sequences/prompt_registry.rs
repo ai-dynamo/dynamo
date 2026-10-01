@@ -3,7 +3,6 @@
 
 use dynamo_tokens::SequenceHash;
 use indexmap::IndexMap;
-use parking_lot::RwLock;
 #[cfg(test)]
 use rustc_hash::FxHashSet;
 use rustc_hash::{FxBuildHasher, FxHashMap};
@@ -16,6 +15,7 @@ use tokio::time::Instant;
 use super::PrefillTokenDeltas;
 use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
 use super::prompt_membership_trie::PromptMembershipTrie;
+use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
 use crate::protocols::WorkerWithDpRank;
@@ -168,7 +168,7 @@ pub(super) struct PromptRegistry {
     // after the write finishes, but reads can still observe a mixed membership/load state that
     // never existed atomically and make a suboptimal routing choice.
     membership: PromptMembershipTrie,
-    loads: RwLock<WorkerLoadTable>,
+    loads: ShardedRwLock<WorkerLoadTable>,
     #[cfg(test)]
     cleanup_attempts: AtomicUsize,
 }
@@ -305,24 +305,41 @@ impl PromptRegistry {
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     ) {
-        projections.clear();
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         let loads = self.loads.read();
-        projections.reserve(loads.len());
-
-        for (worker, load) in loads.iter() {
+        let project = |worker: WorkerWithDpRank, load: WorkerLoadSnapshot| {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
-            projections.insert(
-                worker,
-                WorkerLoadProjection {
-                    active_prefill_tokens: load.active_tokens(decay_now),
-                    active_decode_blocks: load.active_blocks,
-                    active_requests: load.active_requests,
-                    additional_active_blocks: query_len.saturating_sub(overlap_depth),
-                },
-            );
+            WorkerLoadProjection {
+                active_prefill_tokens: load.active_tokens(decay_now),
+                active_decode_blocks: load.active_blocks,
+                active_requests: load.active_requests,
+                additional_active_blocks: query_len.saturating_sub(overlap_depth),
+            }
+        };
+
+        // A reused map usually still holds the previous request's projection over the same
+        // workers. Overwriting values in place avoids re-inserting every worker; any key-set
+        // mismatch falls back to a rebuild. Equal lengths plus every worker found means the
+        // key sets are equal because worker keys are unique.
+        if projections.len() == loads.len()
+            && loads.iter().all(|(worker, load)| {
+                projections
+                    .get_mut(&worker)
+                    .map(|projection| *projection = project(worker, load))
+                    .is_some()
+            })
+        {
+            return;
         }
+
+        projections.clear();
+        projections.reserve(loads.len());
+        projections.extend(
+            loads
+                .iter()
+                .map(|(worker, load)| (worker, project(worker, load))),
+        );
     }
 
     pub(super) fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
@@ -623,6 +640,46 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(actual.0.get(&worker_b).copied(), Some(3));
+    }
+
+    #[test]
+    fn reused_projection_map_tracks_load_and_worker_set_changes() {
+        let worker_a = worker(1, 0);
+        let worker_b = worker(2, 0);
+        let worker_c = worker(3, 0);
+        let registry = PromptRegistry::new([worker_a, worker_b]);
+        let decay_now = Instant::now();
+        let query = [1, 2, 3];
+        registry.apply_membership_delta_and_load(
+            worker_a,
+            store(&[1, 2], 0),
+            worker_load_snapshot(2),
+        );
+        registry.apply_membership_delta_and_load(worker_b, store(&[1], 0), worker_load_snapshot(1));
+
+        let fresh_projection = || {
+            let mut projections = FxHashMap::default();
+            registry.project_worker_loads_into(Some(&query), decay_now, &mut projections);
+            projections
+        };
+        let mut reused = FxHashMap::default();
+        registry.project_worker_loads_into(Some(&query), decay_now, &mut reused);
+        assert_eq!(reused, fresh_projection());
+
+        // Same worker set: values are refreshed in place.
+        registry.replace_worker_load_state(worker_b, worker_load_snapshot(7));
+        registry.project_worker_loads_into(Some(&query), decay_now, &mut reused);
+        assert_eq!(reused[&worker_b].active_decode_blocks, 7);
+        assert_eq!(reused, fresh_projection());
+
+        // Same size but a different worker set: the stale worker must not survive.
+        registry.apply_topology_change_without_cleanup(&WorkerTopologyChange {
+            added: vec![worker_c],
+            removed: vec![RemovedWorkerState { worker: worker_a }],
+        });
+        registry.project_worker_loads_into(Some(&query), decay_now, &mut reused);
+        assert!(!reused.contains_key(&worker_a));
+        assert_eq!(reused, fresh_projection());
     }
 
     #[test]
