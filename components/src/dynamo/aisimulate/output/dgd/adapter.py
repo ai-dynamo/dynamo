@@ -151,6 +151,10 @@ class DGDOutputAdapter:
     name = "dgd"
     api_version = OUTPUT_ADAPTER_API_VERSION
 
+    def subscribe(self, config: Mapping[str, Any]) -> None:
+        """Validate result-independent output configuration before search starts."""
+        DGDOutputConfig.model_validate(dict(config)).generation_options()
+
     def write(
         self,
         config: Mapping[str, Any],

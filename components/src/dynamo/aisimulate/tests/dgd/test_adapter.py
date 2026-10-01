@@ -72,6 +72,18 @@ def test_adapter_matches_aisimulate_contract_and_defaults() -> None:
     assert config.output_format == "dgd"
 
 
+def test_adapter_subscription_validates_config_before_search() -> None:
+    adapter = create_adapter()
+
+    assert adapter.subscribe(_config()) is None
+    with pytest.raises(ValidationError, match="num_gpus_per_node"):
+        adapter.subscribe(_config(num_gpus_per_node=0))
+    with pytest.raises(ValueError, match="canonical MAJOR.MINOR.PATCH"):
+        adapter.subscribe(
+            _config(runtime_image="nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest")
+        )
+
+
 def test_adapter_rejects_unknown_dgd_fields() -> None:
     with pytest.raises(ValidationError, match="unknown"):
         DGDOutputConfig.model_validate(_config(unknown=True))
