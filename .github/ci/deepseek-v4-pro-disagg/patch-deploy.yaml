@@ -49,8 +49,6 @@ spec:
       envs: &workerEnvs
       - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
         value: "1200"
-      - name: NIXL_TELEMETRY_ENABLE
-        value: "1"
       volumeMounts: *modelVolumeMounts
       extraPodSpec:
         priorityClassName: ci-nightly-high-priority
