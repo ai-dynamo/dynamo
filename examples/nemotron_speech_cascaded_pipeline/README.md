@@ -352,8 +352,9 @@ Running the adapter workers or unit tests outside the container requires Python
 The example's unit tests cover connection configuration and endpoint resolution
 without installing the Riva client. Model-registration regressions are covered
 by `lib/bindings/python/tests/test_runtime_data_discovery.py` in the regular
-Dynamo binding suite. These tests do not cover the Riva adapters' streaming or
-cancellation behavior; use the deployed smoke test for functional validation.
+Dynamo binding suite. The Riva-dependent adapter, worker, and connection modules
+have no automated test coverage. Run the deployed smoke test manually for
+functional validation.
 
 ```bash
 python3 -m pip install pytest
