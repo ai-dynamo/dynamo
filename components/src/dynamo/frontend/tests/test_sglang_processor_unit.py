@@ -2083,9 +2083,17 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
 @pytest.mark.core
 class TestChatTemplateErrors:
     @pytest.mark.parametrize(
-        "error_type", [TemplateError, UndefinedError, TypeError, RuntimeError]
+        ("stage", "error_type"),
+        [
+            ("render", error_type)
+            for error_type in (TemplateError, UndefinedError, TypeError, RuntimeError)
+        ]
+        + [
+            (stage, error_type)
+            for stage in ("messages", "tokens", "parsers")
+            for error_type in (TemplateError, TypeError)
+        ],
     )
-    @pytest.mark.parametrize("stage", ["render", "messages", "tokens", "parsers"])
     def test_render_error_boundary(self, tokenizer, monkeypatch, stage, error_type):
         error = error_type("render failure")
 

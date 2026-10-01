@@ -853,9 +853,7 @@ def preprocess_chat_request(
                 template_messages, **template_kwargs
             )
         except (TemplateError, TypeError) as exc:
-            # Match SGLang's Jinja request-error convention, including template
-            # subclasses and TypeError from filters such as tojson. Keep this
-            # boundary limited to rendering/tokenization; other failures propagate.
+            # Jinja filters such as tojson can raise TypeError for invalid inputs.
             raise PreprocessError(str(exc)) from exc
         prompt_token_ids = _normalize_prompt_token_ids(rendered)
 
