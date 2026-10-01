@@ -15,6 +15,7 @@ import logging
 import os
 from typing import Any, Dict, Generator, Optional, Tuple
 
+import pynvml
 import pytest
 import requests
 
@@ -72,44 +73,30 @@ SYSTEM_HEALTH_TOOL = {
 }
 
 
-# Used when the card cannot be queried, so a host without pynvml keeps the
-# behaviour it had before rather than failing on a missing dependency.
-FALLBACK_GPU_MEMORY_UTILIZATION = "0.01"
-
 # vLLM needs --gpu-memory-utilization below 1.0, so the startup guard can never
 # be asked to hold back more than this share of a card.
 MAX_GPU_MEMORY_UTILIZATION = 0.95
 
 
-def _visible_gpu_total_memory_gib() -> Optional[float]:
-    """Return the total memory in GiB of the GPU this worker will run on.
-
-    Returns ``None`` when the card cannot be identified or queried, so callers
-    can fall back instead of turning a missing dependency into a test failure.
-    """
-    try:
-        import pynvml
-    except ImportError:
-        return None
-
+def _visible_gpu_total_memory_gib() -> float:
+    """Query the assigned GPU's capacity, failing if its guard cannot be sized."""
     # The parallel scheduler sizes each test's VRAM budget against an NVML
     # index and writes that same index into CUDA_VISIBLE_DEVICES, so read it
     # back as an NVML index to stay on the card the budget describes; serial
     # runs leave it unset and land on GPU 0.
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip() or "0"
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip()
     if not visible.isdigit():
-        # A GPU UUID or MIG token, which NVML cannot look up by index.
-        return None
+        raise ValueError(
+            f"Cannot size the startup VRAM guard for CUDA_VISIBLE_DEVICES={visible!r}; "
+            "expected a numeric GPU index"
+        )
 
+    pynvml.nvmlInit()
     try:
-        pynvml.nvmlInit()
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(int(visible))
-            return pynvml.nvmlDeviceGetMemoryInfo(handle).total / (1024**3)
-        finally:
-            pynvml.nvmlShutdown()
-    except pynvml.NVMLError:
-        return None
+        handle = pynvml.nvmlDeviceGetHandleByIndex(int(visible))
+        return pynvml.nvmlDeviceGetMemoryInfo(handle).total / (1024**3)
+    finally:
+        pynvml.nvmlShutdown()
 
 
 class WorkerProcess(ManagedProcess):
@@ -199,9 +186,11 @@ class WorkerProcess(ManagedProcess):
         through loading weights it was never going to fit, holding on to GiBs
         that co-scheduled tests on the same card still need.
         """
+        if self.required_vram_gib is None:
+            raise ValueError(
+                "profiled_vram_gib is required to size the startup VRAM guard"
+            )
         total_gib = _visible_gpu_total_memory_gib()
-        if self.required_vram_gib is None or total_gib is None:
-            return FALLBACK_GPU_MEMORY_UTILIZATION
         guardable_gib = total_gib * MAX_GPU_MEMORY_UTILIZATION
         if self.required_vram_gib > guardable_gib:
             # Clamping here would hand vLLM a guard weaker than the budget, the
