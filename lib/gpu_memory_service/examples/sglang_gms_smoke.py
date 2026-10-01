@@ -10,7 +10,11 @@ exercised against a bare SGLang install.
 
 Start the GMS server first:
 
-    python -m gpu_memory_service --device 0 --device-type xpu --tag weights
+    python -m gpu_memory_service --device 0 --device-type xpu
+
+Omit --tag so the server serves every production tag: the integration opens a
+client for both "weights" and "kv_cache", so restricting it to one leaves the
+other socket missing.
 
 Then WRITE mode, which populates the server and holds the weights open:
 
@@ -37,27 +41,20 @@ logger = logging.getLogger("gms.smoke")
 def _resolve_declare():
     """Return SGLang's launcher-stage config override helper.
 
-    Mirrors the ordering in gpu_memory_service.integrations.sglang: prefer
-    declare_late_resolution() where it exists (0.5.18-0.5.20), because the
-    plain declare_resolution() there targets __post_init__ resolvers and skips
-    the published-config guard. 0.5.21 removed the late variant after folding
-    that guard into declare_resolution().
+    Mirrors gpu_memory_service.integrations.sglang, which requires 0.5.21+:
+    that release folded the published-config guard into declare_resolution()
+    and dropped the declare_late_resolution() variant that carried it in
+    0.5.18-0.5.20. Imported lazily so --help works without SGLang installed.
     """
     try:
-        from sglang.srt.arg_groups.overrides import declare_late_resolution
-
-        return declare_late_resolution
-    except ImportError:
-        pass
-    try:
         from sglang.srt.arg_groups.overrides import declare_resolution
-
-        return declare_resolution
     except ImportError as exc:
         raise RuntimeError(
-            "This SGLang build exposes neither declare_late_resolution() nor "
-            "declare_resolution(); GMS cannot inject its loader."
+            "This SGLang build does not expose declare_resolution(); GMS "
+            "cannot inject its loader. Upgrade to SGLang 0.5.21 or newer."
         ) from exc
+
+    return declare_resolution
 
 
 def parse_args(argv=None):

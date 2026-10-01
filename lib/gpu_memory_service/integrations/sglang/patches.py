@@ -5,6 +5,7 @@
 
 - patch_torch_memory_saver: Routes weights and kv_cache to GMS
 - patch_model_runner: Fixes memory accounting with pre-loaded weights
+- patch_kv_cache_sizing_for_gms: Makes the XPU KV sizing probe see GMS weights
 - patch_static_state_for_gms: No-ops named-buffer export/import (GMS preserves them)
 """
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _torch_memory_saver_patched = False
 _model_runner_patched = False
+_kv_cache_sizing_patched = False
 _static_state_patched = False
 
 
@@ -163,7 +165,7 @@ def patch_model_runner() -> None:
     the snapshot there, so upstream's formula already subtracts them correctly.
 
     Only needed on SGLang builds that predate native preloaded-weight
-    accounting. SGLang >=0.5.21 ships ModelRunner.account_preloaded_weights(),
+    accounting. v0.5.19 and later ships ModelRunner.account_preloaded_weights(),
     which Scheduler.init_target_memory_pool() calls with the value read from
     GMSModelLoader.preloaded_weights_bytes. Applying both would add the weight
     bytes to the baseline twice and oversize the KV cache, so skip the patch
@@ -218,6 +220,123 @@ def patch_model_runner() -> None:
     ModelRunner._gms_patched = True
     _model_runner_patched = True
     logger.info("[GMS] Patched ModelRunner.alloc_memory_pool")
+
+
+def patch_kv_cache_sizing_for_gms() -> None:
+    """Make the XPU KV sizing probe account for GMS-resident weights.
+
+    On CUDA sglang's ``get_available_gpu_memory()`` calls ``torch.cuda.mem_get_info()``,
+    which is device-wide, so GMS-resident weights are visible to writer and reader
+    alike and no adjustment is needed.
+
+    On XPU it returns ``total_memory - torch.xpu.memory_allocated(gpu_id)``,
+    which only sees allocations made through this process's torch caching
+    allocator.  A writer allocates weights through the GMS mempool and is
+    therefore charged for them; a reader materialises them as VMM mappings
+    outside the allocator and is not.  memory_allocated() also cannot see
+    another process's allocations at all, so once the writer exits the GMS
+    server still holds W bytes resident on the card.
+
+    GMSModelLoader reports preloaded_weights_bytes = 0 on XPU: sglang's
+    add-back exists to undo a depressed *pre-load* reading,
+    and on XPU that reading was never depressed in the first place.
+
+    Three modules bind the helper with a from-import, so each name is rebound
+    separately: kv_cache_configurator (sizes the pool), model_runner
+    (weight_load_mem_usage) and scheduler (startup_available_gpu_memory_gb).
+    distributed.bootstrap is left alone -- it samples the pre-load baseline
+    before the loader has connected, and that baseline should exclude W.
+    """
+    global _kv_cache_sizing_patched
+
+    if _kv_cache_sizing_patched:
+        return
+
+    from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
+
+    if get_vmm_device_type() != VMMDeviceType.XPU:
+        # CUDA's probe is device-wide; nothing to correct.
+        _kv_cache_sizing_patched = True
+        return
+
+    def make_gms_aware_probe(original):
+        def patched_get_available_gpu_memory(*args, **kwargs):
+            available_gb = original(*args, **kwargs)
+
+            impl = get_gms_memory_saver_impl()
+            if impl is None:
+                return available_gb
+
+            # Non-zero only on the import path: _finalize_pending_write()
+            # resets this to 0 after a writer commits, so a writer (which
+            # reconnects as RO and is already charged for its weights) is
+            # never adjusted.
+            preloaded_bytes = getattr(impl, "preloaded_weights_bytes", 0)
+            if preloaded_bytes <= 0:
+                return available_gb
+
+            adjusted_gb = available_gb - preloaded_bytes / (1 << 30)
+            logger.info(
+                "[GMS] Adjusted avail-mem probe for GMS-resident weights: "
+                "%.2f GiB - %.2f GiB = %.2f GiB",
+                available_gb,
+                preloaded_bytes / (1 << 30),
+                adjusted_gb,
+            )
+            return adjusted_gb
+
+        return patched_get_available_gpu_memory
+
+    modules = []
+
+    try:
+        from sglang.srt.mem_cache import kv_cache_configurator
+
+        modules.append(kv_cache_configurator)
+    except ImportError:
+        logger.warning(
+            "[GMS] Could not import kv_cache_configurator, KV pool sizing "
+            "will not account for GMS-resident weights"
+        )
+
+    try:
+        from sglang.srt.model_executor import model_runner
+
+        modules.append(model_runner)
+    except ImportError:
+        logger.warning(
+            "[GMS] Could not import model_runner, its avail-mem logs will "
+            "not account for GMS-resident weights"
+        )
+
+    try:
+        from sglang.srt.managers import scheduler
+
+        modules.append(scheduler)
+    except ImportError:
+        logger.warning(
+            "[GMS] Could not import scheduler, startup_available_gpu_memory_gb "
+            "will not account for GMS-resident weights"
+        )
+
+    if not modules:
+        return
+
+    for module in modules:
+        original = getattr(module, "get_available_gpu_memory", None)
+        if original is None:
+            # Partially initialised module (circular import) or an upstream
+            # rename; leave it alone rather than guess.
+            logger.warning(
+                "[GMS] %s has no get_available_gpu_memory, not patching it",
+                module.__name__,
+            )
+            continue
+
+        module.get_available_gpu_memory = make_gms_aware_probe(original)
+        logger.info("[GMS] Patched %s.get_available_gpu_memory", module.__name__)
+
+    _kv_cache_sizing_patched = True
 
 
 def patch_static_state_for_gms() -> None:
