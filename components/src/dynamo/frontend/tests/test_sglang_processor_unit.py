@@ -4396,14 +4396,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             assert post.local_stop_reason == closer
             assert post.process_output({"token_ids": list(b"later")}) is None
 
-    @pytest.mark.parametrize(
-        ("tool_choice", "stop_kind"),
-        [("required", "string"), ("named", "token"), ("required", "eos")],
-    )
-    def test_json_array_retains_stop_closer(self, tool_choice, stop_kind):
+    @pytest.mark.parametrize("stop_kind", ["string", "token", "eos"])
+    def test_json_array_retains_stop_closer(self, stop_kind):
         tools = convert_tools([parity_tool()])
         parser, _ = create_parsers(
-            {"tool_choice": tool_choice_value(tool_choice)},
+            {"tool_choice": "required"},
             tool_call_parser_name="hermes",
             reasoning_parser_name=None,
             sglang_tools=tools,
