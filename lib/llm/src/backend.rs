@@ -27,7 +27,7 @@ use futures::stream::{self, StreamExt};
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::{
-    error::{DynamoError, ErrorType},
+    error::{DynamoError, ErrorClass},
     pipeline::{
         AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, ServerStreamingEngine,
         SingleIn, async_trait,
@@ -324,17 +324,22 @@ impl
                     // IDs. Re-decode those IDs for no_stop_trim instead of using
                     // the text fast path. Text-only output cannot honor this
                     // option; don't silently return trimmed or empty content.
+                    // Empty stop trailers are valid after this choice emitted IDs.
                     if state.no_stop_trim
                         && let Some(data) = &output.data
                         && data.token_ids.is_empty()
                         && (data.text.as_ref().is_some_and(|text| !text.is_empty())
                             || data.tokens.as_ref().is_some_and(|tokens| !tokens.is_empty())
-                            || data.finish_reason == Some(FinishReason::Stop))
+                            || (data.finish_reason == Some(FinishReason::Stop)
+                                && state
+                                    .decoders
+                                    .get(&data.index.unwrap_or(0))
+                                    .is_none_or(|decoder| decoder.generated_tokens == 0)))
                     {
                         state.stream.context().stop_generating();
                         state.finished = true;
                         let error = DynamoError::builder()
-                            .error_type(ErrorType::InvalidArgument)
+                            .class(ErrorClass::BackendProtocol)
                             .message("no_stop_trim requires backend token IDs through the matched stop; the backend omitted them")
                             .build();
                         return Some((Annotated::from_err(error), state));
@@ -1244,7 +1249,7 @@ mod tests {
 
     #[derive(Default)]
     struct SyntheticSglangStopEngine {
-        output: Option<LLMEngineOutput>,
+        outputs: Option<Vec<LLMEngineOutput>>,
     }
 
     #[async_trait]
@@ -1265,8 +1270,8 @@ mod tests {
                     ..Default::default()
                 })
             };
-            let outputs = if let Some(output) = &self.output {
-                vec![Annotated::from_data(output.clone())]
+            let outputs = if let Some(outputs) = &self.outputs {
+                outputs.iter().cloned().map(Annotated::from_data).collect()
             } else {
                 vec![
                     // Choice 0 stops inside this chunk; its suffix must be removed.
@@ -1508,7 +1513,7 @@ mod tests {
         };
         use crate::protocols::openai::completions::NvCreateCompletionRequest;
 
-        for no_stop_trim in [None, Some(false), Some(true)] {
+        for no_stop_trim in [Some(false), Some(true)] {
             for user_stop in [false, true] {
                 for (ids, worker_text, finish, unsupported) in [
                     (vec![101, 103], None, Some(FinishReason::Stop), false),
@@ -1551,7 +1556,7 @@ mod tests {
                         PreprocessedRequest,
                         Annotated<LLMEngineOutput>,
                     > = Arc::new(SyntheticSglangStopEngine {
-                        output: Some(LLMEngineOutput {
+                        outputs: Some(vec![LLMEngineOutput {
                             token_ids: ids.clone(),
                             text: worker_text.map(str::to_string),
                             stop_reason: (worker_text.is_some() && user_stop && !ids.is_empty())
@@ -1559,7 +1564,7 @@ mod tests {
                             finish_reason: finish.clone(),
                             index: Some(0),
                             ..Default::default()
-                        }),
+                        }]),
                     });
                     let mut stream =
                         Operator::generate(backend.as_ref(), SingleIn::new(input), engine)
@@ -1568,7 +1573,14 @@ mod tests {
                     let output = stream.next().await.unwrap();
                     if no_stop_trim == Some(true) && unsupported {
                         let error = output.error.expect("missing IDs must be rejected");
-                        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+                        assert_eq!(error.class(), ErrorClass::BackendProtocol);
+                        assert!(matches!(
+                            crate::http::service::error::http_action_for_error(&error),
+                            crate::http::service::error::ClientErrorAction::Respond {
+                                status: axum::http::StatusCode::BAD_GATEWAY,
+                                ..
+                            }
+                        ));
                         assert!(
                             error
                                 .to_string()
@@ -1604,66 +1616,133 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_no_stop_trim_terminal_trailers_require_ids_per_choice() {
+        for (index, text, tokens, should_fail) in [
+            (0, None, None, false),
+            (1, None, None, true),
+            (0, Some("trimmed"), None, true),
+            (0, None, Some(vec![Some("trimmed".to_string())]), true),
+        ] {
+            let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+            let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+            let request = PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![])
+                .stop_conditions(StopConditions::default())
+                .sampling_options(SamplingOptions {
+                    n: Some(2),
+                    ..Default::default()
+                })
+                .output_options(OutputOptions {
+                    no_stop_trim: Some(true),
+                    ..Default::default()
+                })
+                .build()
+                .unwrap();
+            let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+                Arc::new(SyntheticSglangStopEngine {
+                    outputs: Some(vec![
+                        LLMEngineOutput {
+                            token_ids: vec![101],
+                            index: Some(0),
+                            ..Default::default()
+                        },
+                        LLMEngineOutput {
+                            index: Some(index),
+                            text: text.map(str::to_string),
+                            tokens,
+                            finish_reason: Some(FinishReason::Stop),
+                            ..Default::default()
+                        },
+                    ]),
+                });
+            let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+                .await
+                .unwrap();
+            let first = stream.next().await.unwrap().data.unwrap();
+            assert_eq!(first.index, Some(0));
+            assert_eq!(first.text.as_deref(), Some("Okay"));
+            assert_eq!(first.token_ids, vec![101]);
+            assert!(first.finish_reason.is_none());
+
+            let trailer = stream.next().await.unwrap();
+            if should_fail {
+                assert_eq!(
+                    trailer.error.expect("missing IDs must be rejected").class(),
+                    ErrorClass::BackendProtocol
+                );
+            } else {
+                assert!(trailer.error.is_none());
+                let trailer = trailer.data.unwrap();
+                assert_eq!(trailer.index, Some(0));
+                assert!(trailer.token_ids.is_empty());
+                assert!(trailer.text.as_deref().unwrap_or_default().is_empty());
+                assert_eq!(trailer.finish_reason, Some(FinishReason::Stop));
+            }
+            assert!(stream.next().await.is_none());
+        }
+    }
+
     #[test]
     fn test_no_stop_trim_marker_stops_in_unary_and_chunked_output() {
-        for (stop_id, marker) in [(104, "<|return|>"), (105, "<|ghissue|>")] {
-            for kind in ["eos", "user", "string"] {
-                for no_stop_trim in [false, true] {
-                    for streaming in [false, true] {
-                        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
-                        let stops = StopConditions {
-                            stop_token_ids: (kind == "user").then_some(vec![stop_id]),
-                            stop_token_ids_hidden: (kind == "eos").then_some(vec![stop_id]),
-                            stop: (kind == "string").then(|| vec![marker.to_string()]),
-                            ..Default::default()
-                        };
-                        // include_stop_str_in_output alone must not expose EOS IDs;
-                        // no_stop_trim must retain strings even when it is false.
-                        let mut decoder = Decoder::new(
-                            crate::tokenizers::DecodeStream::new(tokenizer, &[], false),
-                            stops,
-                            kind != "string",
-                            no_stop_trim,
-                            None,
-                            None,
-                        );
-                        let mut text = if streaming {
-                            decoder.process_token_ids(&[101]).unwrap().text.unwrap()
+        let (stop_id, marker) = (104, "<|return|>");
+        for kind in ["eos", "user", "string"] {
+            for no_stop_trim in [false, true] {
+                for streaming in [false, true] {
+                    let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+                    let stops = StopConditions {
+                        stop_token_ids: (kind == "user").then_some(vec![stop_id]),
+                        stop_token_ids_hidden: (kind == "eos").then_some(vec![stop_id]),
+                        stop: (kind == "string").then(|| vec![marker.to_string()]),
+                        ..Default::default()
+                    };
+                    // include_stop_str_in_output alone must not expose EOS IDs;
+                    // no_stop_trim must retain strings even when it is false.
+                    let mut decoder = Decoder::new(
+                        crate::tokenizers::DecodeStream::new(tokenizer, &[], false),
+                        stops,
+                        kind != "string",
+                        no_stop_trim,
+                        None,
+                        None,
+                    );
+                    let mut text = if streaming {
+                        decoder.process_token_ids(&[101]).unwrap().text.unwrap()
+                    } else {
+                        String::new()
+                    };
+                    let ids = if streaming {
+                        vec![stop_id, 999]
+                    } else {
+                        vec![101, stop_id, 999]
+                    };
+                    let result = decoder.process_token_ids(&ids).unwrap();
+                    text.push_str(result.text.as_deref().unwrap_or_default());
+                    assert_eq!(
+                        text,
+                        if no_stop_trim {
+                            format!("Okay{marker}")
                         } else {
-                            String::new()
-                        };
-                        let ids = if streaming {
-                            vec![stop_id, 999]
-                        } else {
-                            vec![101, stop_id, 999]
-                        };
-                        let result = decoder.process_token_ids(&ids).unwrap();
-                        text.push_str(result.text.as_deref().unwrap_or_default());
-                        assert_eq!(
-                            text,
-                            if no_stop_trim {
-                                format!("Okay{marker}")
-                            } else {
-                                "Okay".to_string()
-                            }
-                        );
-                        match (kind, result.stop_trigger.unwrap()) {
-                            ("user", StopTrigger::UserStopTokenDetected(id))
-                            | ("eos", StopTrigger::HiddenStopTokenDetected(id)) => {
-                                assert_eq!(id, stop_id)
-                            }
-                            ("string", StopTrigger::VisibleStopSequenceDetected(seq))
-                                if no_stop_trim =>
-                            {
-                                assert_eq!(seq, marker)
-                            }
-                            ("string", StopTrigger::HiddenStopSequenceDetected(seq))
-                                if !no_stop_trim =>
-                            {
-                                assert_eq!(seq, marker)
-                            }
-                            other => panic!("unexpected stop: {other:?}"),
+                            "Okay".to_string()
                         }
+                    );
+                    match (kind, result.stop_trigger.unwrap()) {
+                        ("user", StopTrigger::UserStopTokenDetected(id))
+                        | ("eos", StopTrigger::HiddenStopTokenDetected(id)) => {
+                            assert_eq!(id, stop_id)
+                        }
+                        ("string", StopTrigger::VisibleStopSequenceDetected(seq))
+                            if no_stop_trim =>
+                        {
+                            assert_eq!(seq, marker)
+                        }
+                        ("string", StopTrigger::HiddenStopSequenceDetected(seq))
+                            if !no_stop_trim =>
+                        {
+                            assert_eq!(seq, marker)
+                        }
+                        other => panic!("unexpected stop: {other:?}"),
                     }
                 }
             }

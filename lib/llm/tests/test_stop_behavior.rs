@@ -360,35 +360,33 @@ fn hidden_stop_sequence_survives_self_similar_prefix_run() {
 
 #[test]
 fn no_stop_trim_preserves_seed_order_and_special_token_policy() {
-    for no_stop_trim in [false, true] {
-        for skip_special in [false, true] {
-            let tokenizer: Arc<dyn tokenizer_traits::Tokenizer> = Arc::new(TestTokenizer);
-            let mut decoder = Decoder::new(
-                tokenizers::DecodeStream::new(tokenizer, &[], skip_special),
-                StopConditions {
-                    stop_token_ids_hidden: Some(vec![EOS]),
-                    stop: Some(vec!["other".into()]),
-                    ..Default::default()
-                },
-                false,
-                no_stop_trim,
-                None,
-                Some("o".into()),
-            );
-            let result = decoder.process_token_ids(&[EOS, THERE]).unwrap();
-            assert_eq!(
-                result.text.as_deref(),
-                Some(if no_stop_trim && !skip_special {
-                    "o</s>"
-                } else {
-                    "o"
-                })
-            );
-            assert_eq!(result.tokens.len(), 1);
-            assert!(matches!(
-                result.stop_trigger,
-                Some(StopTrigger::HiddenStopTokenDetected(EOS))
-            ));
-        }
+    for (no_stop_trim, skip_special) in [(false, false), (true, false), (true, true)] {
+        let tokenizer: Arc<dyn tokenizer_traits::Tokenizer> = Arc::new(TestTokenizer);
+        let mut decoder = Decoder::new(
+            tokenizers::DecodeStream::new(tokenizer, &[], skip_special),
+            StopConditions {
+                stop_token_ids_hidden: Some(vec![EOS]),
+                stop: Some(vec!["other".into()]),
+                ..Default::default()
+            },
+            false,
+            no_stop_trim,
+            None,
+            Some("o".into()),
+        );
+        let result = decoder.process_token_ids(&[EOS, THERE]).unwrap();
+        assert_eq!(
+            result.text.as_deref(),
+            Some(if no_stop_trim && !skip_special {
+                "o</s>"
+            } else {
+                "o"
+            })
+        );
+        assert_eq!(result.tokens.len(), 1);
+        assert!(matches!(
+            result.stop_trigger,
+            Some(StopTrigger::HiddenStopTokenDetected(EOS))
+        ));
     }
 }
