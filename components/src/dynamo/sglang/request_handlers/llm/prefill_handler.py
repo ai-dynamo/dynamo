@@ -216,8 +216,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 supported=getattr(self, "_supports_ordered_cancellation", False),
                 batched=False,
             )
+            output_options = inner_request.get("output_options", {}) or {}
+            # Prompt logprobs are discarded until the handoff carries their metadata.
             logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
-                inner_request.get("output_options", {}) or {},
+                {"logprobs": output_options.get("logprobs")},
                 allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
             )
             results = await self.engine.async_generate(

@@ -132,17 +132,38 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("wrapped", [False, True])
-@pytest.mark.parametrize("allow_top", [False, True])
 @pytest.mark.parametrize(
-    "options, expected",
+    "options, allow_top, wrapped, expected",
     [
-        ({}, {}),
-        ({"logprobs": 0}, {"return_logprob": True, "top_logprobs_num": 0}),
-        ({"logprobs": 3}, {"return_logprob": True, "top_logprobs_num": 3}),
-        (
+        pytest.param({}, False, False, {}, id="default"),
+        pytest.param(
+            {"logprobs": 0},
+            False,
+            False,
+            {"return_logprob": True, "top_logprobs_num": 0},
+            id="chosen-token",
+        ),
+        pytest.param(
             {"prompt_logprobs": 0},
-            {"return_logprob": True, "top_logprobs_num": 0, "logprob_start_len": 0},
+            False,
+            False,
+            {},
+            id="prompt-only-excluded",
+        ),
+        pytest.param({"logprobs": 3}, False, False, None, id="top-rejected"),
+        pytest.param(
+            {"logprobs": 3},
+            True,
+            False,
+            {"return_logprob": True, "top_logprobs_num": 3},
+            id="top-allowed",
+        ),
+        pytest.param(
+            {"logprobs": 0, "prompt_logprobs": 5},
+            True,
+            True,
+            {"return_logprob": True, "top_logprobs_num": 0},
+            id="wrapped-mixed-excludes-prompt",
         ),
     ],
 )
@@ -175,7 +196,7 @@ async def test_prefill_forwards_first_token_logprob_options(
 
     context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
     async with aclosing(handler.generate(request, context)) as stream:
-        if options.get("logprobs", 0) > 0 and not allow_top:
+        if expected is None:
             with pytest.raises(ValueError, match="DYN_SGL_ALLOW_TOP_LOGPROBS"):
                 await anext(stream)
             assert not calls
