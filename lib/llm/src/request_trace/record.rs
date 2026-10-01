@@ -206,8 +206,6 @@ mod tests {
                 input_length: 3,
                 input_sequence_hashes: vec![11, 22],
                 output_sequence_hashes: Vec::new(),
-                hash_algorithm: None,
-                hash_key_id: None,
             },
         );
 

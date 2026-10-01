@@ -127,10 +127,6 @@ pub struct RequestReplayMetrics {
     /// ends mid-block, the first hash replaces its trailing input hash.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_sequence_hashes: Vec<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hash_algorithm: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hash_key_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -346,8 +342,6 @@ mod tests {
                     input_length: 4,
                     input_sequence_hashes: vec![11, 22],
                     output_sequence_hashes: Vec::new(),
-                    hash_algorithm: None,
-                    hash_key_id: None,
                 }),
                 finish_reason_metadata: None,
             }),

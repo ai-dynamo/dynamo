@@ -64,8 +64,6 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
 
     config::mark_capture_inactive();
 
-    replay::init_hash_key()?;
-
     if policy.tool_events_zmq_endpoint.is_some()
         && policy.emit_tool_records()
         && policy.sinks.is_empty()

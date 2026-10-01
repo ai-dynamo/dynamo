@@ -305,8 +305,6 @@ mod tests {
                         input_length: 2,
                         input_sequence_hashes: vec![11],
                         output_sequence_hashes: Vec::new(),
-                        hash_algorithm: None,
-                        hash_key_id: None,
                     }),
                     output_sequence_hash_capture: None,
                 }),
@@ -401,6 +399,47 @@ mod tests {
             request_only.input_sequence_hashes,
             repeated.input_sequence_hashes
         );
+    }
+
+    #[test]
+    fn output_hashes_are_emitted_on_completion_and_cancellation() {
+        BUS.init(64);
+        let mut receiver = BUS.subscribe();
+        for cancelled in [false, true] {
+            let request = preprocessed_request(SamplingOptions::default());
+            let tracker = Some(Arc::new(RequestTracker::new()));
+            let context = Context::new(());
+            let request_id = context.id().to_string();
+            let mut state = Some(
+                build_request_end_trace_state_for_policy(&request, &tracker, &context, 2, true)
+                    .unwrap(),
+            );
+            let capture = output_sequence_hash_capture_handle(&state).unwrap();
+            capture.lock().unwrap().record(&[4, 5]);
+            if cancelled {
+                context.context().kill();
+            } else {
+                state.as_mut().unwrap().emit();
+            }
+            drop(state);
+            let records = drain_request_records(&mut receiver, &request_id);
+            assert_eq!(records.len(), 1);
+            let replay = records[0]
+                .request
+                .as_ref()
+                .unwrap()
+                .replay
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                replay.input_sequence_hashes,
+                super::super::replay::input_sequence_hashes(&[1, 2, 3], 2)
+            );
+            assert_eq!(
+                replay.output_sequence_hashes,
+                super::super::replay::input_sequence_hashes(&[1, 2, 3, 4, 5], 2)[1..]
+            );
+        }
     }
 
     #[test]
