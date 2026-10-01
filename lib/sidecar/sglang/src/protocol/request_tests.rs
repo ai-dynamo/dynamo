@@ -191,6 +191,7 @@ fn room_above_signed_int64_is_rejected() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn sampling_and_stopping_fields_preserve_native_values() {
     let mut request = request();
     request.sampling_options = SamplingOptions {
@@ -237,8 +238,10 @@ fn sampling_and_stopping_fields_preserve_native_values() {
             stop_token_ids: vec![19, 20, 21],
             ignore_eos: Some(true),
             n: Some(1),
+            seed: None,
             json_schema: None,
             regex: None,
+            guided_decoding: None,
         })
     );
     assert_eq!(mapped.stream, Some(true));
@@ -479,7 +482,8 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
 }
 
 #[test]
-fn json_and_regex_guides_preserve_native_payloads() {
+#[allow(deprecated)]
+fn json_and_regex_guides_use_typed_constraints() {
     for schema in [json!({"type": "string"}), json!(r#"{"type":"string"}"#)] {
         let mut request = request();
         request.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
@@ -491,8 +495,14 @@ fn json_and_regex_guides_preserve_native_payloads() {
                 .unwrap()
                 .sampling_params
                 .unwrap();
-        assert_eq!(mapped.json_schema.as_deref(), Some(r#"{"type":"string"}"#));
+        assert_eq!(mapped.json_schema, None);
         assert!(mapped.regex.is_none());
+        assert_eq!(
+            mapped.guided_decoding.unwrap().constraint,
+            Some(pb::guided_decoding::Constraint::JsonSchema(
+                r#"{"type":"string"}"#.to_string()
+            ))
+        );
     }
     let mut request = request();
     request.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
@@ -509,8 +519,12 @@ fn json_and_regex_guides_preserve_native_payloads() {
     .unwrap()
     .sampling_params
     .unwrap();
-    assert_eq!(mapped.regex.as_deref(), Some("[a-z]+"));
+    assert_eq!(mapped.regex, None);
     assert!(mapped.json_schema.is_none());
+    assert_eq!(
+        mapped.guided_decoding.unwrap().constraint,
+        Some(pb::guided_decoding::Constraint::Regex("[a-z]+".to_string()))
+    );
 
     request
         .sampling_options
@@ -518,18 +532,17 @@ fn json_and_regex_guides_preserve_native_payloads() {
         .as_mut()
         .unwrap()
         .json = Some(json!({"type": "string"}));
-    let mapped = build_generate_request(
-        &request,
-        "both-guides",
-        DisaggregationMode::Aggregated,
-        None,
-        None,
-    )
-    .unwrap()
-    .sampling_params
-    .unwrap();
-    assert_eq!(mapped.regex.as_deref(), Some("[a-z]+"));
-    assert_eq!(mapped.json_schema.as_deref(), Some(r#"{"type":"string"}"#));
+    assert_invalid(
+        build_generate_request(
+            &request,
+            "both-guides",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap_err(),
+        "only one of JSON-schema or regex",
+    );
 }
 
 #[test]
@@ -567,7 +580,7 @@ fn unsupported_guides_and_modifiers_are_rejected() {
                 None,
             )
             .unwrap_err(),
-            "only JSON-schema and regex",
+            "only one of JSON-schema or regex",
         );
     }
 }
