@@ -12,7 +12,12 @@ use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_
 use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::client;
-use crate::json::{json_to_struct, struct_to_json};
+use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
+
+/// Payload names and peer, used only to name the source in codec errors.
+const PEER: &str = "vLLM";
+const KV_TRANSFER_PARAMS: &str = "kv_transfer_params";
+const EC_TRANSFER_PARAMS: &str = "ec_transfer_params";
 use crate::proto as pb;
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
@@ -1116,8 +1121,12 @@ fn build_kv_parameters(
         cache_salt: cache_salt
             .map(|cache_salt| format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"))
             .unwrap_or_default(),
-        kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
-        ec_transfer_params: ec_transfer_params.map(json_to_struct).transpose()?,
+        kv_transfer_params: kv_transfer_params
+            .map(|value| json_to_struct_v14(value, KV_TRANSFER_PARAMS))
+            .transpose()?,
+        ec_transfer_params: ec_transfer_params
+            .map(|value| json_to_struct_v14(value, EC_TRANSFER_PARAMS))
+            .transpose()?,
     })
 }
 
@@ -1262,6 +1271,8 @@ pub(crate) struct ResponseState {
     output_logprobs: Option<u32>,
     expect_prompt_logprobs: bool,
     prompt_info: Option<pb::PromptInfo>,
+    user_stop_token_ids: Vec<u32>,
+    hidden_stop_token_ids: Vec<u32>,
 }
 
 impl ResponseState {
@@ -1278,6 +1289,16 @@ impl ResponseState {
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
+            user_stop_token_ids: request
+                .stop_conditions
+                .stop_token_ids
+                .clone()
+                .unwrap_or_default(),
+            hidden_stop_token_ids: request
+                .stop_conditions
+                .stop_token_ids_hidden
+                .clone()
+                .unwrap_or_default(),
         }
     }
 
@@ -1392,10 +1413,17 @@ impl ResponseState {
                 ));
             }
         });
-        mapped.stop_reason = finish.stop_reason.map(|reason| match reason {
-            pb::finish_info::StopReason::StopTokenId(id)
-            | pb::finish_info::StopReason::EosTokenId(id) => StopReason::Int(i64::from(id)),
-            pb::finish_info::StopReason::StopString(value) => StopReason::String(value),
+        mapped.stop_reason = finish.stop_reason.and_then(|reason| match reason {
+            pb::finish_info::StopReason::StopTokenId(id) => {
+                (!self.hidden_stop_token_ids.contains(&id)
+                    || self.user_stop_token_ids.contains(&id))
+                .then_some(StopReason::Int(i64::from(id)))
+            }
+            pb::finish_info::StopReason::EosTokenId(id) => self
+                .user_stop_token_ids
+                .contains(&id)
+                .then_some(StopReason::Int(i64::from(id))),
+            pb::finish_info::StopReason::StopString(value) => Some(StopReason::String(value)),
         });
         mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
         if self.mode.is_encode() {
@@ -1416,7 +1444,7 @@ impl ResponseState {
             }
             let params = finish
                 .ec_transfer_params
-                .map(struct_to_json)
+                .map(|value| struct_to_json_v14(value, PEER, EC_TRANSFER_PARAMS))
                 .transpose()?
                 .and_then(|value| value.as_object().cloned())
                 .ok_or_else(|| {
@@ -1424,7 +1452,14 @@ impl ResponseState {
                 })?;
             return Ok(Some(LLMEngineOutput::encode_terminal(params)));
         }
-        mapped.disaggregated_params = finish.kv_transfer_params.map(struct_to_json).transpose()?;
+        if self.mode.is_prefill() && reason == pb::finish_info::FinishReason::Aborted {
+            self.attach_prompt_data(&mut mapped);
+            return Ok(Some(mapped));
+        }
+        mapped.disaggregated_params = finish
+            .kv_transfer_params
+            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
+            .transpose()?;
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",
@@ -1623,15 +1658,7 @@ fn normalize_logprob(logprob: f32) -> f64 {
 }
 
 #[cfg(test)]
-mod candidate_tests {
-    use super::{pb, top_n_candidates};
+mod request_tests;
 
-    #[test]
-    fn full_vocabulary_logprobs_select_all_candidates() {
-        let candidates = top_n_candidates(u32::MAX).expect("map full vocabulary");
-        assert_eq!(
-            candidates.select,
-            Some(pb::candidate_tokens::Select::All(true))
-        );
-    }
-}
+#[cfg(test)]
+mod response_tests;
