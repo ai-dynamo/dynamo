@@ -52,7 +52,7 @@ lib/sidecar/
     ├── tests/
     │   ├── conformance.rs     # Direct sidecar-to-Mocker scenarios over real gRPC
     │   ├── cross_process.rs   # Sidecar children, discovery, routing and shutdown
-    │   ├── native_engine.rs   # Real vLLM compatibility, cancellation and KV transfer
+    │   ├── native_engine.rs   # Real vLLM/SGLang compatibility, cancellation and KV transfer
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
     │       ├── vllm.rs        # vLLM protocol, Mocker and child-command adapter
@@ -163,8 +163,8 @@ Each suite exercises a different request path:
   sends requests to them over TCP. Each sidecar calls a CPU Mocker over native
   gRPC. Handoff scenarios also use the production PrefillRouter.
 - `native_engine.rs` calls the production sidecar engine library against real
-  vLLM engines over native gRPC. The pytest launcher starts those engines and
-  the Rust test executable. Model inference and NIXL KV transfer use one GPU.
+  vLLM or SGLang engines over native gRPC. The pytest launcher starts those engines
+  and the Rust test executable. Model inference and NIXL KV transfer use one GPU.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -189,12 +189,15 @@ A generic scenario is reusable code, not evidence that every backend runs it.
 Both vLLM and SGLang register the shared wire and process scenarios.
 TensorRT-LLM is not enrolled here.
 
-The native tests retain their own purpose: a Mocker cannot prove that real vLLM
+The native tests retain their own purpose: a Mocker cannot prove that a real engine
 accepts the serialized request, executes a structured-output constraint, releases
-its real scheduler work, or transfers GPU KV cache through NIXL. CPU handoff checks
+its real scheduler work, or transfers GPU KV cache. CPU handoff checks
 opaque vLLM metadata and SGLang concurrent bootstrap coordination. Native handoff
 separately requires completed transfer bytes and checks decode output length and token usage.
-Neither check establishes migration or cancellation during an actual transfer.
+SGLang uses its native transfer metrics; vLLM uses the NIXL probe.
+SGLang also cancels decode while its native transfer queue has work, then
+requires that queue to drain before a following handoff succeeds. This does not
+establish migration or cancellation while transfer packets are in flight.
 CPU handoff cancellation holds the peers before Mocker admission; it proves
 transport cleanup and recovery, not native scheduler or transfer cleanup.
 
@@ -283,13 +286,13 @@ cargo test --locked -p dynamo-sidecar-testkit --test cross_process
 
 ### Running native GPU integration tests
 
-The GPU suite runs after sidecar E2E in the same one-GPU vLLM sidecar test
-container, in post-merge and nightly. The two suites have separate pytest steps,
-timeouts and results, and share the image, GPU assignment and pytest setup.
+The GPU suite runs after sidecar E2E in the same one-GPU sidecar test container
+for each backend, in post-merge and nightly. The two suites have separate pytest
+steps, timeouts and results, and share the image, GPU assignment and pytest setup.
 Legacy backend jobs remain separate. The suite uses the `predownload_models`
 fixture to prepare `Qwen/Qwen3-0.6B` before starting an engine. The launcher checks
-that the Python vLLM package and bundled `vllm-rs` versions agree. All three cases
-use one GPU.
+that the Python vLLM package and bundled `vllm-rs` versions agree, or that SGLang
+matches its pinned version. All three cases for each backend use one GPU.
 Handoff starts two independent engines on the same assigned GPU, with separate
 caches and dynamically allocated ports. It verifies transfer between engines,
 not cross-GPU transport. Each case has a profiled VRAM marker. CI runs the cases
@@ -303,12 +306,13 @@ cargo test --locked -p dynamo-sidecar-testkit --features native-tests \
 export DYNAMO_SIDECAR_NATIVE_TEST="$(jq -r \
   'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "native_engine") | .executable // empty' \
   /tmp/sidecar-native-build.jsonl)"
-python3 -m pytest tests/sidecar/test_native_integration.py -v
+python3 -m pytest tests/sidecar/test_native_integration.py -m sglang -v
 ```
 
-Set `CUDA_VISIBLE_DEVICES` to select the GPU; the launcher uses the first visible
-device for both handoff engines. Set `SIDECAR_NATIVE_MODEL_PATH` to an existing
-local model directory when needed. For offline runs, also pass
+Select `-m vllm` in the vLLM image. Set `CUDA_VISIBLE_DEVICES` to select the GPU;
+the launcher uses the first visible device for both handoff engines. Set
+`SIDECAR_NATIVE_MODEL_PATH` to an existing local model directory when needed.
+For offline runs, also pass
 `--models-dir /path/to/hf_cache` with a populated cache to skip downloads.
 CI builds/uploads the executable in `shared-build-sidecar-tests.yml`, and the
 one-GPU sidecar job downloads it alongside the production sidecar binary.
@@ -319,8 +323,9 @@ post-merge and nightly execute it against real engines. A pre-merge CPU pass
 does not establish native GPU behavior.
 
 Both `post-merge-ci.yml` and `nightly-ci.yml` run the native step through
-`shared-test.yml` in the existing one-GPU vLLM sidecar job. The E2E selection
-excludes `sidecar_native`; the following native step selects only those tests
+`shared-test.yml` in the existing one-GPU vLLM and SGLang sidecar jobs. Each
+backend depends on its own image build. The E2E selection excludes `sidecar_native`;
+the following native step selects only those tests
 and runs them sequentially with retries disabled. Both steps contribute to the
 job's final result. The two-GPU sidecar job does not receive the native artifact.
 
