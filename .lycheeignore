@@ -69,3 +69,8 @@
 # catalog yet, so their Security Scanning tab URLs 404 from CI. Remove once
 # the enterprise containers are live.
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/[a-z-]+-enterprise/security$
+
+# Motif-3 recipe files land on the release/1.5.0-motif-3-post.1 branch, so their
+# canonical blob/main and tree/main links 404 from CI until they reach main.
+# Remove this entry once the recipe is on main.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/(recipes/motif-3|docs/fern/pages/recipes/model-recipes/motif-3\.mdx)

@@ -770,6 +770,9 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - page: Motif-3 NVFP4
+            path: pages/recipes/model-recipes/motif-3.mdx
+            slug: motif-3
           - page: GLM-5.3-Flash
             path: pages/recipes/model-recipes/glm-5-3-flash.mdx
             slug: glm-5-3-flash
