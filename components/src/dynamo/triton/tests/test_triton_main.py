@@ -109,16 +109,11 @@ def test_register_and_serve_registers_and_serves(patched_worker, tmp_path):
 
 
 def test_register_and_serve_classify_task_wires_classify_handler(monkeypatch, tmp_path):
-    """--task classify registers ModelType.Classify with ModelInput.Text and
-    serves the ClassifyWorkerHandler bound to a model whose config.pbtxt
-    exposes the expected BYTES-in / FP32-out shape."""
     from dynamo.triton.pooling_handlers import ClassifyWorkerHandler
 
     register_model = AsyncMock(name="register_model")
     monkeypatch.setattr(main, "register_model", register_model)
 
-    # Real config.pbtxt so ClassifyWorkerHandler can auto-resolve the input
-    # (BYTES) and output (FP32) tensor names.
     model_name = "clf"
     (tmp_path / model_name).mkdir()
     (tmp_path / model_name / "config.pbtxt").write_text(
@@ -135,11 +130,7 @@ def test_register_and_serve_classify_task_wires_classify_handler(monkeypatch, tm
     config = _make_config(task="classify")
 
     loaded_model = MagicMock(name="model")
-    # Force _read_model_config to fall through to reading the pbtxt off disk;
-    # the real inputs/outputs live there and ClassifyWorkerHandler auto-resolves
-    # against them. Returning a non-empty dict would take the json_format branch
-    # and drop everything but the top-level fields, leaving the handler unable
-    # to find the BYTES input / FP32 output tensor names.
+    # Empty runtime config forces _read_model_config to the disk-pbtxt path.
     loaded_model.config.return_value = {}
     loaded_model.name = model_name
     server = MagicMock(name="server")
@@ -149,22 +140,18 @@ def test_register_and_serve_classify_task_wires_classify_handler(monkeypatch, tm
         main._register_and_serve(runtime, config, server, str(tmp_path), model_name)
     )
 
-    # The classify branch flips the registered surface to Text + Classify.
     register_model.assert_awaited_once()
     reg_args, reg_kwargs = register_model.call_args
     assert reg_args[0] == main.ModelInput.Text
     assert reg_args[1] == main.ModelType.Classify
     assert reg_args[3] == model_name
     assert reg_kwargs["worker_type"] == main.WorkerType.Aggregated
-    # tensor_model_config is still populated so lib.rs's skip-HF fast path
-    # fires for Classify (see the guard in lib/bindings/python/rust/lib.rs).
     assert "triton_model_config" in reg_kwargs["tensor_model_config"]
 
     endpoint.serve_endpoint.assert_awaited_once()
     served = endpoint.serve_endpoint.call_args.args[0]
     assert served.__name__ == "generate"
     assert isinstance(served.__self__, ClassifyWorkerHandler)
-    # Auto-resolved from the real config.pbtxt.
     assert served.__self__._input_name == "TEXT"
     assert served.__self__._output_name == "probs"
 

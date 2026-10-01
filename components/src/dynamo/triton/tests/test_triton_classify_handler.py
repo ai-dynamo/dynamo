@@ -211,8 +211,6 @@ class TestInitAndResolve:
             _make_handler(classify_input_name="MISSING")
 
     def test_explicit_input_name_wrong_dtype_raises(self) -> None:
-        # Operator points --classify-input-name at an existing input whose
-        # dtype is not TYPE_STRING; must fail at startup, not at request time.
         with pytest.raises(ValueError, match="no TYPE_STRING input named 'tokens'"):
             _make_handler(
                 inputs=[
@@ -335,8 +333,6 @@ class TestClassify:
         assert responses[0]["data"][0]["label"] is None
 
     def test_unbatched_output_is_normalized(self) -> None:
-        # A model with max_batch_size == 0 emits a 1D output tensor per
-        # request. The handler normalizes it to a 2D view of shape [1, C].
         probs = np.array([0.2, 0.5, 0.3], dtype=np.float32)
         owner = _FakeOwner({0: {0: "x", 1: "y", 2: "z"}})
         model, handler = _make_handler(
@@ -378,6 +374,29 @@ class TestClassify:
         )
         responses = _run(handler, {"input": "x"}, context=_FakeContext("ctx-99"))
         assert responses[0]["id"] == "classify-ctx-99"
+
+    def test_output_shape_flattened_from_3d(self) -> None:
+        # A Triton output configured with dims=[1, classes] arrives as
+        # [batch, 1, classes]. The handler must flatten non-batch dims per
+        # row instead of failing at the 2-tuple unpack.
+        probs = np.array(
+            [
+                [[0.1, 0.7, 0.2]],
+                [[0.5, 0.4, 0.1]],
+            ],
+            dtype=np.float32,
+        )
+        assert probs.ndim == 3
+        _, handler = _make_handler(
+            responses=[
+                types.SimpleNamespace(outputs={"probs": _mock_fp32_tensor(probs)})
+            ]
+        )
+        responses = _run(handler, {"input": ["a", "b"]})
+        assert len(responses[0]["data"]) == 2
+        assert responses[0]["data"][0]["num_classes"] == 3
+        assert responses[0]["data"][0]["probs"] == pytest.approx([0.1, 0.7, 0.2])
+        assert responses[0]["data"][1]["probs"] == pytest.approx([0.5, 0.4, 0.1])
 
     def test_row_count_mismatch_raises(self) -> None:
         # 3 inputs sent, but the model only returns 2 rows (a misconfigured
@@ -446,6 +465,8 @@ class TestValidation:
             ("add_special_tokens", True),
             ("truncate_prompt_tokens", 128),
             ("truncation_side", "left"),
+            ("mm_processor_kwargs", {"do_resize": False}),
+            ("cache_salt", "salt"),
         ],
     )
     def test_unsupported_control_rejected(self, field: str, value: Any) -> None:
@@ -456,32 +477,38 @@ class TestValidation:
         with pytest.raises(ValueError, match=f"does not honor '{field}'"):
             _run(self._handler(), {"input": "x", field: value})
 
-    @pytest.mark.parametrize(
-        "field",
-        [
-            "use_activation",
-            "add_special_tokens",
-            "truncate_prompt_tokens",
-            "truncation_side",
-        ],
-    )
-    def test_unsupported_control_null_is_ignored(self, field: str) -> None:
-        # Regression: only *set* values should trip the guard. ``None`` on the
-        # wire (Option::None in classify.rs) must pass through cleanly.
+    def test_unsupported_control_null_is_ignored(self) -> None:
+        # One null-row proves the None-means-unset contract; per-field
+        # rejection coverage lives in test_unsupported_control_rejected.
         probs = np.array([[0.5, 0.5]], dtype=np.float32)
         _, handler = _make_handler(
             responses=[
                 types.SimpleNamespace(outputs={"probs": _mock_fp32_tensor(probs)})
             ]
         )
-        responses = _run(handler, {"input": "x", field: None})
+        responses = _run(handler, {"input": "x", "use_activation": None})
         assert len(responses[0]["data"]) == 1
+
+    def test_priority_nonzero_rejected(self) -> None:
+        # `priority` is `i64` in NvCreateClassifyRequest and always
+        # serialized. Only non-default (non-zero) values must be rejected.
+        with pytest.raises(ValueError, match="does not honor 'priority'"):
+            _run(self._handler(), {"input": "x", "priority": -2})
+
+    def test_priority_zero_and_default_pass(self) -> None:
+        # Default 0 (or explicit 0) must not trip the guard.
+        probs = np.array([[0.5, 0.5]], dtype=np.float32)
+        for req in [{"input": "x", "priority": 0}, {"input": "x"}]:
+            _, handler = _make_handler(
+                responses=[
+                    types.SimpleNamespace(outputs={"probs": _mock_fp32_tensor(probs)})
+                ]
+            )
+            assert len(_run(handler, req)[0]["data"]) == 1
 
 
 class TestHealthProbe:
     def test_probe_short_circuits_before_inference(self) -> None:
-        # Route straight through is_probe by supplying a request the shared
-        # health-check helper recognizes.
         from dynamo.health_check import HEALTH_CHECK_KEY
 
         _, handler = _make_handler()

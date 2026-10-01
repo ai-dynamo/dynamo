@@ -391,7 +391,6 @@ def test_metrics_flags_flow_through_to_server_options(
 
 
 def test_task_defaults_to_tensor(mock_triton_cli):
-    """No --task flag → the worker keeps the KServe tensor path (current behavior)."""
     mock_triton_cli("--model-repository", "/models")
     config = backend_args.parse_args()
 
@@ -401,7 +400,6 @@ def test_task_defaults_to_tensor(mock_triton_cli):
 
 
 def test_task_classify_parses(mock_triton_cli):
-    """--task classify switches the endpoint selection; overrides tag along."""
     mock_triton_cli(
         "--model-repository",
         "/models",
@@ -420,7 +418,6 @@ def test_task_classify_parses(mock_triton_cli):
 
 
 def test_task_rejects_unknown_value(mock_triton_cli):
-    """argparse's own choices check rejects tasks the worker does not implement."""
     mock_triton_cli("--model-repository", "/models", "--task", "embed")
 
     with pytest.raises(SystemExit):
@@ -428,8 +425,6 @@ def test_task_rejects_unknown_value(mock_triton_cli):
 
 
 def test_classify_name_overrides_require_classify_task(mock_triton_cli):
-    """The classify name overrides are ignored on the tensor path and rejected
-    up front so a typo of --task doesn't silently discard them."""
     mock_triton_cli(
         "--model-repository",
         "/models",

@@ -810,9 +810,6 @@ fn register_model<'p>(
         // These model types handle model loading internally. External adapters can
         // opt into the same minimal card without resolving local or HF assets.
         // Ordinary audio registrations retain the builder's metadata and checksum.
-        // Classify / Pooling models with `tensor_model_config` attached take the
-        // same path; see the `is_classify_tensor` / `is_pooling_tensor` definitions
-        // above for why.
         if is_tensor_based
             || is_images
             || is_videos

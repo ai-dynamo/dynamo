@@ -3,22 +3,9 @@
 
 """Triton worker handling for the ``/v1/classify`` API.
 
-Sits alongside the tensor ``RequestHandler`` in ``handlers.py`` and is selected
-at worker startup by ``--task classify``. The Rust classify PushRouter ships a
-serialized ``NvCreateClassifyRequest`` onto the endpoint as a dict; this module
-turns it into a Triton ``InferRequest`` (single BYTES text tensor), invokes
-the model, reads the FP32 probability output, and returns the OpenAI-style
-classify response dict shape the frontend aggregator expects.
-
-The wire matches vLLM's ``/classify`` (`vllm/entrypoints/pooling/classify/protocol.py`)
-via `lib/llm/src/protocols/openai/classify.rs`. ``/v1/pooling`` support will
-land alongside; today the worker registers ``ModelType.Classify`` only.
-
-Scope: text input (``Single`` / ``Batch`` variants of
-``ClassificationInput``). Token-ID input (``Tokens`` / ``TokenBatch``) is
-rejected with a clear error. A Triton token-input ensemble uses per-model
-tensor names (``input_ids`` / ``attention_mask`` / ``token_type_ids``), so
-supporting it needs per-model wiring that is out of scope here.
+Token-ID input is rejected because a Triton token-input ensemble uses
+per-model tensor names (``input_ids`` / ``attention_mask`` / etc.) that
+are not carried on the OpenAI request.
 """
 
 from __future__ import annotations
@@ -41,8 +28,6 @@ from dynamo.triton.classification import classification_label
 logger = logging.getLogger(__name__)
 
 
-# Triton protobuf ``DataType`` enum values. Cached at module import so the
-# hot path doesn't re-hit the protobuf descriptor on every request.
 _TYPE_STRING: Final[int] = mc.DataType.TYPE_STRING
 _TYPE_FP32: Final[int] = mc.DataType.TYPE_FP32
 
@@ -95,15 +80,6 @@ class ClassifyWorkerHandler:
     # ------------------------------------------------------------------
 
     def _resolve_input_name(self, override: Optional[str] = None) -> str:
-        """Find the sole BYTES input in the model's ``config.pbtxt``, or
-        validate the operator-supplied ``--classify-input-name`` override.
-
-        A classify-shaped Triton model — leaf or ensemble — accepts one
-        BYTES tensor of text and produces one FP32 tensor of probabilities.
-        Anything else needs the operator to disambiguate with the override,
-        which is validated here so an unknown or wrong-dtype name fails at
-        startup instead of on the first request.
-        """
         string_inputs = [
             i.name for i in self._config.input if i.data_type == _TYPE_STRING
         ]
@@ -124,8 +100,6 @@ class ClassifyWorkerHandler:
         return string_inputs[0]
 
     def _resolve_output_name(self, override: Optional[str] = None) -> str:
-        """Find the sole FP32 output in the model's ``config.pbtxt``, or
-        validate the operator-supplied ``--classify-output-name`` override."""
         fp32_outputs = [
             o.name for o in self._config.output if o.data_type == _TYPE_FP32
         ]
@@ -154,7 +128,6 @@ class ClassifyWorkerHandler:
     ) -> AsyncGenerator[dict, None]:
         logger.debug("Received classify request for model %s", self._model.name)
 
-        # Health probes short-circuit before inference to match RequestHandler.
         if is_probe(request):
             yield self._probe()
             return
@@ -210,20 +183,24 @@ class ClassifyWorkerHandler:
         async for inference_response in inference_responses:
             output_tensor = inference_response.outputs[self._output_name]
 
-            # FP32 outputs are DLPack-compatible; move GPU tensors to host
-            # first so numpy can consume them.
+            # Move GPU tensors to host so numpy can consume them.
             if (
                 isinstance(output_tensor, TritonTensor)
                 and output_tensor.memory_type != TritonMemoryType.CPU
             ):
                 output_tensor = output_tensor.to_host()
-            probs_arr = np.from_dlpack(output_tensor).astype(np.float32)
+            # copy=False makes astype a no-op on FP32 (the resolved output
+            # is FP32 by construction), avoiding a payload-sized copy.
+            probs_arr = np.from_dlpack(output_tensor).astype(np.float32, copy=False)
 
-            # Batched output shape is [N, num_classes]; unbatched is
-            # [num_classes]. Normalize to a 2D view so per-batch slicing is
-            # uniform.
+            # Normalize to (batch, features). Triton outputs come in three
+            # shapes: 1D unbatched, 2D flat batched, or >=3D batched with
+            # configured extra dims (e.g. dims=[1, classes] yields
+            # [batch, 1, classes]). Flatten non-batch dims per row.
             if probs_arr.ndim == 1:
                 probs_arr = probs_arr.reshape(1, -1)
+            elif probs_arr.ndim > 2:
+                probs_arr = probs_arr.reshape(probs_arr.shape[0], -1)
             batch_size, num_classes = probs_arr.shape
 
             for idx in range(batch_size):
@@ -278,7 +255,6 @@ class ClassifyWorkerHandler:
     # ------------------------------------------------------------------
 
     def _probe(self) -> dict:
-        """Report readiness without invoking Triton inference."""
         try:
             if not self._server.ready():
                 raise RuntimeError("server not ready")
@@ -301,17 +277,21 @@ class ClassifyWorkerHandler:
 # ---------------------------------------------------------------------------
 
 
-# NvCreateClassifyRequest exposes tokenization and activation controls that the
-# vLLM adapter honors during encode. The Triton path cannot: the tokenizer and
-# classify-head activation live inside the model plan and are not reachable
-# from a Python InferRequest. Rejecting the fields explicitly keeps the wire
-# contract honest: clients that rely on them get a 400 instead of a silently
+# NvCreateClassifyRequest carries controls the vLLM adapter honors during
+# encode. The Triton path cannot: tokenization, classify-head activation,
+# HF processor kwargs, prefix caching, and scheduling priority are handled
+# by the model plan or Triton internals, not the Python InferRequest.
+# Reject the Optional-typed fields explicitly (priority is handled below
+# because it is not Optional in the wire schema). This keeps the wire
+# contract honest: clients relying on them get a 400 instead of a silently
 # different classification result.
 _UNSUPPORTED_CLASSIFY_CONTROLS: Final[tuple[str, ...]] = (
     "use_activation",
     "add_special_tokens",
     "truncate_prompt_tokens",
     "truncation_side",
+    "mm_processor_kwargs",
+    "cache_salt",
 )
 
 
@@ -319,11 +299,23 @@ def _reject_unsupported_controls(request: dict) -> None:
     for field in _UNSUPPORTED_CLASSIFY_CONTROLS:
         if request.get(field) is not None:
             raise ValueError(
-                f"the Triton classify worker does not honor '{field}'; the "
-                "Triton model plan owns tokenization and the classify head's "
-                "activation. Send the field unset, or run the model behind a "
-                "backend that applies it (vLLM)."
+                f"the Triton classify worker does not honor '{field}'; this "
+                "control is not applicable to Triton's classify path "
+                "(tokenization, activation, processor kwargs, and prefix "
+                "cache are owned by the model plan or Triton internals). "
+                "Send the field unset, or run the model behind a backend "
+                "that honors it (vLLM)."
             )
+    # priority is declared as `i64` with `#[serde(default)]` and no
+    # `skip_serializing_if`, so serde always emits it (default 0). Reject
+    # only non-default values so the always-on-wire default passes through.
+    if request.get("priority", 0) != 0:
+        raise ValueError(
+            "the Triton classify worker does not honor 'priority'; Triton's "
+            "scheduling queue is not exposed to the Python worker. Send "
+            "priority unset (0), or run the model behind a backend that "
+            "honors it (vLLM)."
+        )
 
 
 def _extract_text_input(input_field: Any) -> list[str]:

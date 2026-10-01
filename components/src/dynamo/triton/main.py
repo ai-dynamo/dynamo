@@ -115,8 +115,6 @@ async def _register_and_serve(
         "triton_model_config": triton_model_config,
     }
 
-    # Both branches take register_model's skip-HuggingFace fast path because
-    # tensor_model_config is attached; see lib/bindings/python/rust/lib.rs.
     if config.task == "classify":
         model_input = ModelInput.Text
         model_type = ModelType.Classify
@@ -156,10 +154,7 @@ def _build_handler(
     model: TritonModel,
     triton_model_config_bytes: bytes,
 ):
-    """Instantiate the request handler for the model's declared task."""
-    # Parsed once so both handlers read max_batch_size (and, for classify,
-    # tensor names) from the same source of truth even on the disk-fallback
-    # path in _read_model_config where model.config() comes back empty.
+    # Parsed once so both handlers share the same source of truth.
     parsed_config = mc.ModelConfig.FromString(triton_model_config_bytes)
     if config.task == "classify":
         return ClassifyWorkerHandler(
