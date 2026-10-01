@@ -1205,7 +1205,7 @@ async fn resolve_routing_image_token_id(
         source_path
     } else {
         let fetch_deadline = routing_config_fetch_deadline(Instant::now(), startup_deadline);
-        let fetched = timeout_at(fetch_deadline, LocalModel::fetch(&model.source, true))
+        let fetched = timeout_at(fetch_deadline, LocalModel::fetch(&model.source, None, true))
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("model configuration fetch timed out")));
         match fetched {
