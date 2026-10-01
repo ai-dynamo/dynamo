@@ -33,6 +33,7 @@ permissions:
 concurrency:
   group: deepseek-v4-pro-nightly
   cancel-in-progress: false
+  queue: max
 
 jobs:
   perf:
