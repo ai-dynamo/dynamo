@@ -355,6 +355,34 @@ spec:
     assert calls[0][1:] == ("trtllm", "Qwen/Qwen3-32B")
 
 
+@pytest.mark.parametrize("namespace", [None, ""])
+def test_patch_manifest_omits_empty_or_unset_namespace(monkeypatch, namespace) -> None:
+    monkeypatch.setattr(base_module, "_materialize_dgd", lambda dgd, **_kwargs: dgd)
+    monkeypatch.setitem(
+        sys.modules,
+        "dynamo.profiler.utils.dgd_materialization",
+        SimpleNamespace(
+            DGDMaterializationPurpose=SimpleNamespace(FINAL_OUTPUT=object())
+        ),
+    )
+    patched = base_module.patch_dgd_manifest(
+        """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+  namespace: default
+spec:
+  components: []
+""",
+        _candidate(),
+        _options(namespace=namespace),
+        dgd_name="sweeper-dgd",
+    )
+
+    assert "namespace" not in yaml.safe_load(patched)["metadata"]
+
+
 def test_runtime_version_override_is_only_written_when_explicit() -> None:
     rendered = """
 apiVersion: nvidia.com/v1beta1
