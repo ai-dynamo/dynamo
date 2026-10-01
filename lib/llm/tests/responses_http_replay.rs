@@ -9,7 +9,8 @@ use std::time::Duration;
 use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
+    ChatCompletionToolChoiceOption, ImageDetail,
 };
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
@@ -226,6 +227,100 @@ fn event_position(events: &[http_harness::JsonSseEvent], event_type: &str) -> us
         .iter()
         .position(|event| event.event == event_type)
         .unwrap_or_else(|| panic!("missing {event_type} event"))
+}
+
+fn assert_streamed_response_metadata(events: &[http_harness::JsonSseEvent], expected: &Value) {
+    let response_events: Vec<_> = events
+        .iter()
+        .filter_map(|event| {
+            event
+                .data
+                .get("response")
+                .map(|response| (event.event.as_str(), response))
+        })
+        .collect();
+    assert!(
+        !response_events.is_empty(),
+        "stream did not contain any response objects"
+    );
+    for (event_type, response) in response_events {
+        assert_eq!(
+            &response["metadata"], expected,
+            "unexpected metadata in {event_type}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn request_metadata_is_preserved_for_unary_and_streaming_responses() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 6]).await;
+        let metadata_cases = [
+            (
+                "populated",
+                Some(json!({
+                    "trace_id": "synthetic-123",
+                    "tenant": "test"
+                })),
+            ),
+            ("explicitly empty", Some(json!({}))),
+            ("absent", None),
+        ];
+
+        for (case, request_metadata) in &metadata_cases {
+            for stream in [false, true] {
+                let mut body = json!({
+                    "model": MODEL,
+                    "input": "Say hi.",
+                    "stream": stream,
+                    "max_output_tokens": 20,
+                });
+                if let Some(metadata) = request_metadata {
+                    body["metadata"] = metadata.clone();
+                }
+
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::OK,
+                    "unexpected status for {case} metadata with stream={stream}"
+                );
+                let expected_response_metadata =
+                    request_metadata.clone().unwrap_or_else(|| json!({}));
+                if stream {
+                    let events = parse_json_sse(&response.text().await.unwrap())
+                        .await
+                        .unwrap();
+                    assert_streamed_response_metadata(&events, &expected_response_metadata);
+                } else {
+                    let response_body: Value = response.json().await.unwrap();
+                    assert_eq!(
+                        response_body["metadata"], expected_response_metadata,
+                        "unexpected metadata for {case} unary response"
+                    );
+                }
+            }
+        }
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 6);
+        for (request, (_, expected_metadata)) in requests.iter().zip(
+            metadata_cases
+                .iter()
+                .flat_map(|metadata_case| [metadata_case, metadata_case]),
+        ) {
+            assert_eq!(
+                request.inner.metadata.as_ref(),
+                expected_metadata.as_ref(),
+                "translated request did not preserve metadata presence"
+            );
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -755,6 +850,97 @@ async fn function_call_output_round_trip_reaches_the_chat_engine() {
             other => panic!("unexpected translated round-trip messages: {other:#?}"),
         }
 
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn function_call_output_image_without_detail_reaches_the_chat_engine() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_output_tokens": 64,
+                "input": [
+                    {"role": "user", "content": "What is the dominant color?"},
+                    {"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": [
+                        {"type": "input_image", "image_url": image_url}
+                    ]}
+                ],
+                "tools": [tool("screenshot")]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let _ = response.bytes().await.unwrap();
+
+        let requests = svc.engine.take_requests().await;
+        let [request] = &requests[..] else {
+            panic!("expected one chat-engine request, got {}", requests.len());
+        };
+        let [
+            ChatCompletionRequestMessage::User(_),
+            ChatCompletionRequestMessage::Assistant(_),
+            ChatCompletionRequestMessage::Tool(tool_result),
+        ] = &request.inner.messages[..]
+        else {
+            panic!("unexpected translated messages: {:#?}", request.inner.messages);
+        };
+        assert_eq!(tool_result.tool_call_id, "call_1");
+        let ChatCompletionRequestToolMessageContent::Array(parts) = &tool_result.content else {
+            panic!("expected multimodal tool content");
+        };
+        assert_eq!(parts.len(), 1);
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[0] else {
+            panic!("expected image part");
+        };
+        let image = image.image_url.as_ref().unwrap();
+        assert_eq!(image.url.as_str(), image_url);
+        assert_eq!(image.detail, Some(ImageDetail::Auto));
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn invalid_image_url_returns_bad_request() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": [
+                    {"role": "user", "content": "What is in the screenshot?"},
+                    {"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": [
+                        {"type": "input_image", "image_url": "not-a-url"}
+                    ]}
+                ]
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], 400);
+        assert_eq!(body["type"], "Bad Request");
+        assert_eq!(
+            body["message"],
+            "Failed to convert responses request: Invalid image URL: relative URL without a base"
+        );
+        assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;
     })
     .await;

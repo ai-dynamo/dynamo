@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import gzip
 import itertools
-import json
 import math
 import warnings
 from collections.abc import Mapping, Sequence
@@ -562,34 +560,6 @@ def _plain(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
 
 
-def _dynamo_trace_is_agentic(traffic: Mapping[str, JSONValue]) -> bool:
-    source = traffic.get("source")
-    if not isinstance(source, Mapping):
-        return False
-    paths = source.get("paths")
-    if not isinstance(paths, list):
-        return False
-    for raw_path in paths:
-        path = str(raw_path)
-        opener = gzip.open if path.endswith(".gz") else open
-        with opener(path, "rt", encoding="utf-8") as trace_file:
-            for line in trace_file:
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                if not isinstance(record, Mapping):
-                    continue
-                event = record.get("event", record)
-                if not isinstance(event, Mapping):
-                    continue
-                event_type = event.get("event_type", record.get("event_type"))
-                if event_type != "request_end":
-                    continue
-                if event.get("agent_context") is not None:
-                    return True
-    return False
-
-
 def _planner_optimization_target(goal: Mapping[str, JSONValue]) -> str:
     target = str(_plain(goal.get("target", "throughput")))
     if target == "pareto":
@@ -684,12 +654,6 @@ class DynamoPlannerSweepConfigProvider:
                 raise ValueError(
                     "planner.policy=enabled requires at least one scaling mode"
                 )
-            source = context.traffic.get("source")
-            trace_format = source.get("format") if isinstance(source, Mapping) else None
-            if trace_format in {"mooncake-delta", "agentic_mooncake"} or (
-                trace_format == "dynamo" and _dynamo_trace_is_agentic(context.traffic)
-            ):
-                raise ValueError(f"{trace_format} requires planner.policy=disabled")
             if public.enable_throughput_scaling:
                 raw_sla = context.evaluation.get("sla")
                 if (
@@ -781,13 +745,6 @@ class DynamoPlannerSweepConfigProvider:
                 ),
                 state={"forced_disabled": True},
             )
-        source = context.traffic.get("source")
-        trace_format = source.get("format") if isinstance(source, Mapping) else None
-        if "enabled" in policies and (
-            trace_format in {"mooncake-delta", "agentic_mooncake"}
-            or (trace_format == "dynamo" and _dynamo_trace_is_agentic(context.traffic))
-        ):
-            raise ValueError(f"{trace_format} requires planner.policy=disabled")
         normalized = public.model_dump(mode="python", exclude_none=True)
         normalized_space = PlannerSearchSpace.model_validate(normalized)
         plan = self.generate_search_space(normalized, context.sweep)

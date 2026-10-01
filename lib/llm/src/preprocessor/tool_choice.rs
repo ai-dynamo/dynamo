@@ -3,15 +3,19 @@
 
 //! Tool-choice guided decoding policy for OpenAI chat requests.
 
+use std::borrow::Cow;
+
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
-use crate::protocols::openai::GuidedToolConstraint;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::tools::{
     ToolChoiceGuidance, get_tool_choice_guidance_from_tools, validate_openai_tool_choice,
 };
+use crate::protocols::openai::{GuidedToolConstraint, validate};
 
 use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
-use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption, ResponseFormat};
+use dynamo_protocols::types::{
+    ChatCompletionTool, ChatCompletionToolChoiceOption, CreateChatCompletionRequest, ResponseFormat,
+};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
 /// Tool names and parser diagnostics can contain request data, so this helper does not mark its message public.
@@ -27,11 +31,13 @@ impl OpenAIPreprocessor {
     ///
     /// A configured parser describes the model's wire format; it does not grant
     /// every request permission to return tool calls. Permission depends only on
-    /// whether the request supplies tools and whether `tool_choice` forbids them.
+    /// whether the request supplies effective tools and whether `tool_choice`
+    /// forbids them. Effective tools include both the OpenAI top-level list and
+    /// Kimi-style dynamic declarations carried by system messages.
     /// Assistant-output constraints apply to assistant content and do not revoke
     /// an `auto` request's ability to choose a tool call.
     pub(crate) fn tool_call_parsing_enabled(request: &NvCreateChatCompletionRequest) -> bool {
-        if request.inner.tools.as_ref().is_none_or(Vec::is_empty) {
+        if !request.inner.has_effective_tools() {
             return false;
         }
 
@@ -68,7 +74,7 @@ impl OpenAIPreprocessor {
             .tool_choice
             .as_ref()
             .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
-        let tools = request.inner.tools.as_deref().unwrap_or(&[]);
+        let tools = effective_tools(&request.inner)?;
         let is_forced_tool_choice = matches!(
             tool_choice,
             ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
@@ -101,7 +107,7 @@ impl OpenAIPreprocessor {
 
         if self.apply_tool_choice_structural_tag(
             &convert_tool_choice(tool_choice),
-            &convert_tools(tools),
+            &convert_tools(tools.as_ref()),
             request.inner.parallel_tool_calls,
             prompt_injected_reasoning,
             common_request,
@@ -130,7 +136,7 @@ impl OpenAIPreprocessor {
 
         match get_tool_choice_guidance_from_tools(
             Some(tool_choice),
-            Some(tools),
+            Some(tools.as_ref()),
             request.inner.parallel_tool_calls,
         ) {
             Ok(Some(guidance)) => {
@@ -201,6 +207,26 @@ pub(crate) fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition>
         .collect()
 }
 
+/// Normalize and validate all tools visible to the model without rewriting the request.
+///
+/// Top-level OpenAI tools remain first. Kimi-style tools declared on system
+/// messages follow in message order and may use either the wrapped OpenAI form
+/// or Kimi's bare function-schema form. This view is used only by validation,
+/// parser, and guided-decoding policy; dynamic declarations stay at their
+/// original message positions for prompt rendering and KV-cache correctness.
+pub(crate) fn effective_tools(
+    request: &CreateChatCompletionRequest,
+) -> Result<Cow<'_, [ChatCompletionTool]>, DynamoError> {
+    validate::validated_effective_tools(request)
+        .map_err(|error| invalid_argument(error.to_string()))
+}
+
+pub(crate) fn effective_tool_definitions(
+    request: &CreateChatCompletionRequest,
+) -> Result<Vec<ToolDefinition>, DynamoError> {
+    effective_tools(request).map(|tools| convert_tools(tools.as_ref()))
+}
+
 /// The guided-tool constraint a request implies, given what the structural-tag stage
 /// already decided.
 ///
@@ -218,12 +244,34 @@ pub(crate) fn guided_tool_constraint(
     if uses_structural_tag {
         return Ok(GuidedToolConstraint::StructuralTag);
     }
+    let tools = effective_tools(&request.inner)?;
+    guided_tool_constraint_with_effective_tools(
+        request,
+        tool_call_parser,
+        reasoning_parser,
+        false,
+        tools.as_ref(),
+    )
+}
+
+/// Derive the guided-tool constraint from an effective tool set the caller has
+/// already normalized and validated through [`effective_tools`].
+pub(crate) fn guided_tool_constraint_with_effective_tools(
+    request: &NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    uses_structural_tag: bool,
+    tools: &[ChatCompletionTool],
+) -> Result<GuidedToolConstraint, DynamoError> {
+    if uses_structural_tag {
+        return Ok(GuidedToolConstraint::StructuralTag);
+    }
     let tool_choice = request
         .inner
         .tool_choice
         .as_ref()
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
-    validate_openai_tool_choice(Some(tool_choice), request.inner.tools.as_deref())
+    validate_openai_tool_choice(Some(tool_choice), Some(tools))
         .map_err(|error| invalid_argument(error.to_string()))?;
     let is_forced_tool_choice = matches!(
         tool_choice,
@@ -247,7 +295,6 @@ pub(crate) fn guided_tool_constraint(
     // `apply_tool_choice_guided_decoding` does, instead of blindly installing a
     // constraint for a `tool_choice` that names a tool absent from `tools` (or an
     // empty `tools` list under `tool_choice: "required"`).
-    let tools = request.inner.tools.as_deref().unwrap_or(&[]);
     match get_tool_choice_guidance_from_tools(
         Some(tool_choice),
         Some(tools),
@@ -348,6 +395,128 @@ mod tests {
                 expected,
             );
         }
+    }
+
+    #[test]
+    fn effective_tools_borrows_top_level_tools_without_dynamic_declarations() {
+        let request = request(json!({"tools": tools()}));
+        let top_level = request.inner.tools.as_deref().unwrap();
+
+        let effective = effective_tools(&request.inner).expect("top-level tools must validate");
+
+        assert!(matches!(&effective, Cow::Borrowed(_)));
+        assert!(std::ptr::eq(effective.as_ptr(), top_level.as_ptr()));
+    }
+
+    #[test]
+    fn dynamic_system_tools_enable_parsing_and_honor_tool_choice_none() {
+        for (tool_choice, expected) in [(None, true), (Some(json!("none")), false)] {
+            let mut extra = json!({
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "",
+                        "tools": [{"name": "lookup", "parameters": {"type": "object"}}]
+                    },
+                    {"role": "user", "content": "look it up"}
+                ]
+            });
+            if let Some(tool_choice) = tool_choice {
+                extra["tool_choice"] = tool_choice;
+            }
+            assert_eq!(
+                OpenAIPreprocessor::tool_call_parsing_enabled(&request(extra)),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn effective_tools_preserve_order_and_normalize_wrapped_and_bare_shapes() {
+        let request = request(json!({
+            "tools": [{
+                "type": "function",
+                "function": {"name": "static_tool", "parameters": {"type": "object"}}
+            }],
+            "messages": [
+                {"role": "user", "content": "start"},
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "wrapped_dynamic",
+                            "parameters": {"type": "object", "properties": {"x": {"type": "integer"}}},
+                            "strict": true
+                        }
+                    }]
+                },
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{
+                        "name": "bare_dynamic",
+                        "description": "bare form",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": false,
+                        "vendor_hint": "kept only in the original message"
+                    }]
+                },
+                {"role": "user", "content": "continue"}
+            ]
+        }));
+
+        let normalized = effective_tools(&request.inner).expect("dynamic tools must normalize");
+        assert!(matches!(&normalized, Cow::Owned(_)));
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|tool| tool.function.name.as_str())
+                .collect::<Vec<_>>(),
+            ["static_tool", "wrapped_dynamic", "bare_dynamic"]
+        );
+        assert_eq!(normalized[1].function.strict, Some(true));
+        assert_eq!(normalized[2].function.strict, Some(false));
+        assert_eq!(
+            normalized[2].function.description.as_deref(),
+            Some("bare form")
+        );
+        let original = serde_json::to_value(&request.inner.messages).unwrap();
+        assert_eq!(
+            original[2]["tools"][0]["vendor_hint"], "kept only in the original message",
+            "normalization must not rewrite dynamic message declarations"
+        );
+    }
+
+    #[test]
+    fn effective_tools_reject_invalid_dynamic_metadata() {
+        for (field, value) in [
+            ("strict", json!("yes")),
+            ("parameters", json!([])),
+            ("description", json!(7)),
+        ] {
+            let mut tool = json!({"name": "lookup"});
+            tool[field] = value;
+            let request = request(json!({
+                "messages": [
+                    {"role": "system", "content": "", "tools": [tool]},
+                    {"role": "user", "content": "go"}
+                ]
+            }));
+            let error = effective_tools(&request.inner).expect_err("invalid field must fail");
+            assert!(error.to_string().contains(field), "{field}: {error}");
+        }
+
+        let request = request(json!({
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "bad name"}]},
+                {"role": "user", "content": "go"}
+            ]
+        }));
+        let error = effective_tools(&request.inner).expect_err("invalid name must fail");
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert!(error.to_string().contains("has an invalid name"));
     }
 
     #[test]
@@ -506,6 +675,32 @@ mod tests {
             assert!(
                 result.is_err(),
                 "Kimi K3 required must reject both missing and empty tools"
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_k3_forced_choices_accept_dynamic_system_tools() {
+        for tool_choice in [
+            json!("required"),
+            json!({"type": "function", "function": {"name": "lookup"}}),
+        ] {
+            let request = request(json!({
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "",
+                        "tools": [{"name": "lookup", "parameters": {"type": "object"}}]
+                    },
+                    {"role": "user", "content": "go"}
+                ],
+                "tool_choice": tool_choice
+            }));
+            assert_eq!(
+                guided_tool_constraint(&request, Some("kimi_k3"), None, false)
+                    .expect("dynamic forced choice must validate"),
+                GuidedToolConstraint::None,
+                "K3 forced choices use native XTML rather than guided JSON"
             );
         }
     }

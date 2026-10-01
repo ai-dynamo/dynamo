@@ -33,10 +33,8 @@ pub struct Discovery {
     pub server_info: Value,
 }
 
-/// `bootstrap`: true when called before `dynamo_backend_common::run` installs
-/// the global tracing subscriber (the `bootstrap_discover` path during
-/// `from_args()`), false once running inside `LLMEngine::start` (via
-/// `Pool::connect`) where the subscriber is live.
+/// `bootstrap`: true for synchronous constructors before logging setup;
+/// false for deferred launcher discovery and `LLMEngine::start`.
 pub async fn connect(
     uri: &GrpcEndpoint,
     cfg: &GrpcTransportConfig,
@@ -64,13 +62,8 @@ pub async fn connect(
                 let now = Instant::now();
                 if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
                 {
-                    // eprintln! on the bootstrap path: tracing events emitted before
-                    // dynamo_backend_common::run() installs the global subscriber are
-                    // silently dropped, which would make this warning exactly as
-                    // invisible as the debug! it replaced. On the post-init path
-                    // (Pool::connect, called from LLMEngine::start), route through
-                    // tracing like everything else so the line gets levels,
-                    // timestamps, and filtering.
+                    // Synchronous constructors may precede logging setup;
+                    // deferred launcher discovery already has a subscriber.
                     if bootstrap {
                         eprintln!(
                             "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",
@@ -229,6 +222,19 @@ fn parse_discovery(
 ) -> Result<Discovery, DynamoError> {
     let model_info = parse_json_object("GetModelInfo.json_info", &model.json_info)?;
     let server_info = parse_json_object("GetServerInfo.json_info", &server.json_info)?;
+    // Generate responses are forwarded as token deltas. Accepting cumulative
+    // output here would duplicate tokens and inflate completion usage.
+    if server_info
+        .get("incremental_streaming_output")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(invalid_arg(
+            "SGLang sidecar requires incremental streaming output; restart the SGLang server \
+             with --incremental-streaming-output to prevent duplicated tokens and inflated \
+             completion-token counts",
+        ));
+    }
     let model_path = if model.model_path.trim().is_empty() {
         model_info
             .get("model_path")
@@ -314,6 +320,15 @@ pub fn invalid_arg(message: impl Into<String>) -> DynamoError {
     backend(BackendError::InvalidArgument, message)
 }
 
+/// The frontend returns `message` to the client, so it takes only fixed request-validation text.
+pub(crate) fn invalid_request(message: &'static str) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+        .message(message)
+        .public_message(message)
+        .build()
+}
+
 pub fn engine_shutdown(message: impl Into<String>) -> DynamoError {
     backend(BackendError::EngineShutdown, message)
 }
@@ -378,13 +393,30 @@ mod tests {
                 json_info: json!({"tokenizer_path": "tokenizer-repo"}).to_string(),
             },
             pb::GetServerInfoResponse {
-                json_info: json!({}).to_string(),
+                json_info: json!({"incremental_streaming_output": true}).to_string(),
             },
             Vec::new(),
         )
         .unwrap();
         assert_eq!(discovery.model_path, "model-repo");
         assert_eq!(discovery.tokenizer_path, "tokenizer-repo");
+    }
+
+    #[test]
+    fn discovery_requires_incremental_streaming() {
+        let error = parse_discovery(
+            pb::GetModelInfoResponse {
+                model_path: "model-repo".to_string(),
+                json_info: "{}".to_string(),
+            },
+            pb::GetServerInfoResponse {
+                json_info: json!({"incremental_streaming_output": false}).to_string(),
+            },
+            Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--incremental-streaming-output"), "{error}");
     }
 
     #[tokio::test]

@@ -153,9 +153,16 @@ targets. The perf model is bootstrapped from the first available source:
 3. `profile_results_dir` NPZ/JSON fallback data
 4. live FPM regression warmup when no pre-deployment data is available
 
-The Planner calls `aiconfigurator_core.sdk.RustForwardPassPerfModel` through the compatibility
-namespace in the AISimulate wheel for native AIC estimates, online correction, and regression
-fallback. A Planner-owned engine-query layer derives queue drain, TTFT, ITL, and capacity.
+The Planner constructs all estimators through
+`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` using the
+role-indexed canonical configurations in `ais_perf_model.roles`. AISimulate owns
+schema validation, selection, tuning, and prediction. Dynamo binds immutable
+worker identity and runtime limits, and derives queue drain, TTFT, ITL, and capacity.
+New configurations default to `auto` selection with `deny` fallback. Auto still
+searches op-level, FPM interpolation, then FPM regression. Without a native-model
+configuration, the Planner explicitly constructs a cold regression model for its
+worker role. Configuration changes rebuild that model and replay its retained
+observations; training state is local to the consumer.
 Runtime metadata such as KV hit rate and speculative accept length are applied
 as input features, not as persistent correction-factor flags.
 

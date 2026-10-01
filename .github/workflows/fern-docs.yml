@@ -903,7 +903,16 @@ jobs:
             echo "::error::$SHARED not found — the shared-reference exclusion would be a no-op and $TAG would freeze its own reference copy. If reference/general/ was renamed, update the path key in this workflow and in docs/fern/scripts/simulate_docs_website.sh."
             exit 1
           fi
-          rm -rf "$SHARED"
+          # A page removed or moved on main after this tag was cut has no shared
+          # copy in pages-dev, so the tag keeps its own frozen copy of it.
+          while IFS= read -r f; do
+            rel="${f#docs-checkout/fern/pages-$TAG/}"
+            if [ -e "docs-checkout/fern/pages-dev/$rel" ]; then
+              rm -f "$f"
+            else
+              echo "::warning::$rel has no shared copy in pages-dev; $TAG keeps its own."
+            fi
+          done < <(find "$SHARED" -type f)
           find "docs-checkout/fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
 
       - name: Snapshot translation mirrors
@@ -1033,6 +1042,14 @@ jobs:
           # injected an empty `variants: []` once #12410 removed the variants,
           # which invalidates the whole navigation against Fern's schema.
           perl -pi -e "s|path: \.\./pages-$TAG/reference/general/|path: ../pages-dev/reference/general/|g" "$VERSION_FILE"
+
+          # Pages the snapshot kept (no shared copy) stay on the frozen snapshot.
+          if [ -d "docs-checkout/fern/pages-$TAG/reference/general" ]; then
+            while IFS= read -r f; do
+              rel="${f#docs-checkout/fern/pages-$TAG/}"
+              perl -pi -e "s|path: \.\./pages-dev/\Q$rel\E|path: ../pages-$TAG/$rel|g" "$VERSION_FILE"
+            done < <(find "docs-checkout/fern/pages-$TAG/reference/general" -type f)
+          fi
 
           if ! grep -q "path: \.\./pages-dev/reference/general/" "$VERSION_FILE"; then
             echo "::error::$VERSION_FILE has no shared reference/general/ paths after the revert; $TAG would freeze its own reference copy."

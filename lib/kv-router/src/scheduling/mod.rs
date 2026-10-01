@@ -16,8 +16,6 @@ mod queue_admission;
 pub mod request_classifier;
 pub mod selector;
 
-mod worker_selection_config;
-
 mod types;
 pub use filter::*;
 pub use local::LocalScheduler;
@@ -33,7 +31,6 @@ pub use overlap_refresh::{
 };
 pub use policy_config::{
     PolicyClassConfig, PolicyProfile, RouterPolicyConfig, RouterPolicyConfigError,
-    WorkerSelectionConfig, WorkerSelectionInstance,
 };
 pub use policy_queue::{
     PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueRejection, QueueSnapshot,
@@ -42,9 +39,16 @@ pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
-pub use queue_admission::{RequestProgress, RequestProgressUpdater, WorkerPlacement};
-pub use request_classifier::{
+pub use queue_admission::WorkerPlacement;
+pub use request_classifier::RequestLifecycle;
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use crate::plugins::request_classifier::{
     AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestClassifierContext, RequestClassifierWorker, RequestLifecycle,
+    RequestClassifierConfig, RequestClassifierContext, RequestClassifierFactory,
+    RequestClassifierParameters, RequestClassifierProvider, RequestClassifierProviderError,
+    RequestClassifierRegistryError, RequestClassifierWorker, RequestProgress,
+    RequestProgressUpdater,
 };
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance};
 pub use types::*;
