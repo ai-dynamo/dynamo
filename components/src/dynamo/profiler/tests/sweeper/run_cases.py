@@ -26,7 +26,6 @@ import yaml
 
 from dynamo.profiler.sweeper.output.atomic import replace_text
 from dynamo.profiler.sweeper.renderers import DGDGenerationOptions, render_dgd
-from dynamo.profiler.sweeper.runner import load_sweep_config, run_sweep
 
 _ROOT = Path(__file__).parent
 _REPOSITORY_ROOT = _ROOT.parents[5]
@@ -142,6 +141,34 @@ class ComparisonCase:
     @property
     def composed_sweeper_path(self) -> Path:
         return self.generated_dir / "sweeper-composed.yaml"
+
+
+@dataclass(frozen=True)
+class SweepSelection:
+    """Native AISimulate config and its selected comparison candidates."""
+
+    config: Any
+    candidates: list[Any]
+
+
+def load_sweep_config(config_path: str | Path) -> Any:
+    """Load one native SmartSearchConfig for the comparison harness."""
+    from aisimulate.sweeper import SmartSearchConfig
+
+    return SmartSearchConfig.from_yaml(str(config_path))
+
+
+def run_sweep(config: Any) -> SweepSelection:
+    """Run one comparison search through AISimulate's public Sweeper API."""
+    from aisimulate.sweeper import Sweeper
+
+    from dynamo.replay.simulation import DynamoReplayRunnerFactory
+
+    result = Sweeper(
+        runner_factory=DynamoReplayRunnerFactory(),
+        show_progress=True,
+    ).run(config, top_n=1)
+    return SweepSelection(config=config, candidates=result.selected_candidates)
 
 
 def _read_mapping(path: Path) -> dict[str, Any]:

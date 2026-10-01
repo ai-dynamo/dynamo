@@ -5,9 +5,8 @@
 
 The direct renderer consumes the plain ``Candidate.config`` mapping and reuses
 the existing ``CONFIG_MODIFIERS`` implementation without invoking AIC's
-generator. Keeping this adapter independent of Sweeper orchestration makes it
-usable by the standalone CLI and straightforward to compare with the AIC
-renderer.
+generator. Keeping this renderer independent of recommendation orchestration
+makes it straightforward to compare with the AIC renderer.
 """
 
 from __future__ import annotations

@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.6.0",
-    "aisimulate==0.13.0.dev202609300000000061 ; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate==0.13.0.dev202610010000000062 ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
@@ -127,6 +127,9 @@ dynamo = "dynamo.replay.simulation:DynamoReplayRunnerFactory"
 [project.entry-points."aisimulate.config_adapters"]
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
+
+[project.entry-points."aisimulate.output_adapters"]
+dgd = "dynamo.profiler.sweeper:create_dgd_output_adapter"
 
 [dependency-groups]
 docs = [
