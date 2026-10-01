@@ -1072,6 +1072,8 @@ struct HostPool {
     before_publish_barrier: parking_lot::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     #[cfg(test)]
     after_prune_barrier: parking_lot::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    before_connect_wait_barrier: parking_lot::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl HostPool {
@@ -1093,6 +1095,8 @@ impl HostPool {
             before_publish_barrier: parking_lot::Mutex::new(None),
             #[cfg(test)]
             after_prune_barrier: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            before_connect_wait_barrier: parking_lot::Mutex::new(None),
         }
     }
 
@@ -1215,6 +1219,9 @@ impl HostPool {
         // --- Phase B: connect (no locks held, CAS gate prevents stampede) ---
         // Bounded retry loop instead of recursion
         for retry in 0..MAX_CONNECT_RETRIES {
+            // Capture completion broadcasts before checking the gate. A winner
+            // can publish and notify before a losing caller starts waiting.
+            let notified = self.connect_notify.notified();
             if self
                 .connecting
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
@@ -1281,9 +1288,17 @@ impl HostPool {
                 }
             }
 
+            #[cfg(test)]
+            {
+                let barrier = self.before_connect_wait_barrier.lock().take();
+                if let Some(barrier) = barrier {
+                    barrier.wait().await;
+                    barrier.wait().await;
+                }
+            }
+
             // Another task is connecting. Wait for it to finish (or timeout).
-            let _ =
-                tokio::time::timeout(self.connect_timeout, self.connect_notify.notified()).await;
+            let _ = tokio::time::timeout(self.connect_timeout, notified).await;
 
             // Try hot path again after yield
             let guard = self.snapshot.load();
@@ -2911,6 +2926,57 @@ mod tests {
         assert_eq!(pool.snapshot.load().len(), 1);
         assert!(!pool.connecting.load(Ordering::Acquire));
         assert_eq!(limiter.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn connect_completion_before_wait_is_not_lost() {
+        let (addr, _) = spawn_echo_server().await;
+        let config = TcpRequestConfig {
+            pool_size: 1,
+            connect_timeout: Duration::from_secs(5),
+            ..TcpRequestConfig::default()
+        };
+        let pool = Arc::new(HostPool::new(addr, &config));
+        let limiter = Arc::new(tokio::sync::Semaphore::new(2));
+        let publication = Arc::new(tokio::sync::Barrier::new(2));
+        *pool.before_publish_barrier.lock() = Some(publication.clone());
+        let first = {
+            let pool = pool.clone();
+            let limiter = limiter.clone();
+            tokio::spawn(async move { pool.get_connection(&limiter).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), publication.wait())
+            .await
+            .expect("first connector should reach publication");
+
+        let before_wait = Arc::new(tokio::sync::Barrier::new(2));
+        *pool.before_connect_wait_barrier.lock() = Some(before_wait.clone());
+        let mut second = {
+            let pool = pool.clone();
+            let limiter = limiter.clone();
+            tokio::spawn(async move { pool.get_connection(&limiter).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), before_wait.wait())
+            .await
+            .expect("second caller should lose the connect gate");
+        publication.wait().await;
+        let first = tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first caller should publish and notify")
+            .unwrap()
+            .unwrap();
+        before_wait.wait().await;
+        let second_result = tokio::time::timeout(Duration::from_secs(1), &mut second).await;
+        if second_result.is_err() {
+            second.abort();
+            let _ = second.await;
+        }
+        let second = second_result
+            .expect("completed connect must wake a caller that has not polled its waiter")
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(pool.snapshot.load().len(), 1);
     }
 
     #[tokio::test]
