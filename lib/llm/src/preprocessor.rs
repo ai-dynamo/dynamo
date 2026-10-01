@@ -1666,8 +1666,8 @@ pub struct OpenAIPreprocessor {
     /// variants are initialized independently on demand.
     embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
-    /// Exclusive bound for client token ids (`nvext.token_data` and token
-    /// prompts), from `token_id_bound`.
+    /// Exclusive bound for client token ids (`nvext.token_data`, token
+    /// prompts, and embedding token input), from `token_id_bound`.
     token_id_bound: Option<usize>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
@@ -4792,10 +4792,15 @@ impl OpenAIPreprocessor {
                     .map(|encoding| encoding.token_ids().to_vec())
                     .collect()
             }
+            // Token input skips the tokenizer, so bound its ids here.
             dynamo_protocols::types::EmbeddingInput::IntegerArray(token_ids) => {
+                ensure_token_ids_in_vocab("input", token_ids, self.token_id_bound)?;
                 vec![token_ids.clone()]
             }
             dynamo_protocols::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
+                for token_ids in token_arrays {
+                    ensure_token_ids_in_vocab("input", token_ids, self.token_id_bound)?;
+                }
                 token_arrays.clone()
             }
         };
@@ -7724,6 +7729,89 @@ mod token_data_tests {
                 .unwrap();
             assert_eq!(preprocessed.token_ids.as_slice(), in_range);
         }
+    }
+
+    /// Records the token ids of each request that reaches the backend.
+    #[derive(Default)]
+    struct RecordingEmbeddingBackend(Mutex<Vec<Vec<Vec<u32>>>>);
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedEmbeddingRequest>,
+            ManyOut<Annotated<EmbeddingsEngineOutput>>,
+            Error,
+        > for RecordingEmbeddingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedEmbeddingRequest>,
+        ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>, Error> {
+            let (request, context) = request.transfer(());
+            self.0.lock().unwrap().push(request.token_ids);
+            Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                context.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn embedding_token_input_is_bounded_by_model_vocab() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        mdc.model_type = crate::model_type::ModelType::Embedding;
+        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+        let backend = Arc::new(RecordingEmbeddingBackend::default());
+        let next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
+        > = backend.clone();
+        let embed = |input: serde_json::Value| {
+            let request: NvCreateEmbeddingRequest =
+                serde_json::from_value(serde_json::json!({"model": "test-model", "input": input}))
+                    .unwrap();
+            PipelineContext::new(request)
+        };
+
+        // A single token array, a batch, and the largest u32.
+        for input in [
+            serde_json::json!([1, 128256]),
+            serde_json::json!([[1, 2], [1, 128256]]),
+            serde_json::json!([u32::MAX]),
+        ] {
+            let Err(error) =
+                Operator::generate(preprocessor.as_ref(), embed(input), next.clone()).await
+            else {
+                panic!("an out-of-range token input must fail");
+            };
+            assert_eq!(
+                error
+                    .downcast_ref::<DynamoError>()
+                    .map(DynamoError::error_type),
+                Some(ErrorType::InvalidArgument),
+                "{error:#}"
+            );
+        }
+        assert!(
+            backend.0.lock().unwrap().is_empty(),
+            "no request reached the backend"
+        );
+
+        for input in [
+            serde_json::json!([1, 128255]),
+            serde_json::json!([[1, 2], [3, 128255]]),
+        ] {
+            Operator::generate(preprocessor.as_ref(), embed(input), next.clone())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *backend.0.lock().unwrap(),
+            vec![vec![vec![1, 128255]], vec![vec![1, 2], vec![3, 128255]]]
+        );
     }
 
     #[test]
