@@ -9,6 +9,7 @@
 
 pub mod http_forward;
 pub mod poc_config;
+pub mod scheduler_metrics;
 pub mod service;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
