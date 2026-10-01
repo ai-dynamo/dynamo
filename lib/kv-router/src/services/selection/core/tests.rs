@@ -862,15 +862,27 @@ async fn session_context_reaches_worker_selection() {
     let core = core_with_host_and_policy(SelectionHost::default(), Some(factory));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
 
-    let mut request = select_request();
-    request.session_id = Some("ignored-legacy".to_string());
-    request.session_context = Some(SelectionSessionContext {
+    let agent_headers = Arc::new(std::collections::BTreeMap::from([(
+        "x-claude-code-request-class".to_string(),
+        vec!["subagent".to_string(), "future-class".to_string()],
+    )]));
+    let session_context = SelectionSessionContext {
         session_id: "child-session".to_string(),
         parent_session_id: Some("root-session".to_string()),
         session_final: Some(true),
         input_trigger: Some(super::super::types::SelectionInputTrigger::ToolResult),
-    });
+        agent_headers: Some(Arc::clone(&agent_headers)),
+    };
+    let mut request = select_request();
+    request.session_id = Some("ignored-legacy".to_string());
+    request.session_context = Some(session_context.clone());
     core.select(request).await.expect("select");
+
+    let mut request = reserve_request("structured-session-reservation");
+    request.session_context = Some(session_context);
+    core.select_and_reserve(request)
+        .await
+        .expect("select and reserve with headers");
 
     let mut request = reserve_request("legacy-session-reservation");
     request.session_id = Some("legacy-only".to_string());
@@ -879,24 +891,31 @@ async fn session_context_reaches_worker_selection() {
         .expect("select and reserve");
 
     let observations = observed.lock();
-    let context = observations[0]
-        .session_context
-        .as_ref()
-        .expect("structured session context");
-    assert_eq!(context.session_id(), "child-session");
-    assert_eq!(context.parent_session_id(), Some("root-session"));
-    assert_eq!(context.session_final(), Some(true));
-    assert_eq!(
-        context.input_trigger(),
-        Some(crate::scheduling::WorkerSelectionInputTrigger::ToolResult)
-    );
+    for observation in &observations[..2] {
+        let context = observation
+            .session_context
+            .as_ref()
+            .expect("structured session context");
+        assert_eq!(context.session_id(), "child-session");
+        assert_eq!(context.parent_session_id(), Some("root-session"));
+        assert_eq!(context.session_final(), Some(true));
+        assert_eq!(
+            context.input_trigger(),
+            Some(crate::scheduling::WorkerSelectionInputTrigger::ToolResult)
+        );
+        assert!(std::ptr::eq(
+            context.agent_headers(),
+            agent_headers.as_ref()
+        ));
+    }
 
-    let legacy = observations[1]
+    let legacy = observations[2]
         .session_context
         .as_ref()
         .expect("legacy session context");
     assert_eq!(legacy.session_id(), "legacy-only");
     assert_eq!(legacy.parent_session_id(), None);
+    assert!(legacy.agent_headers().is_empty());
 }
 
 #[tokio::test]
@@ -2770,7 +2789,7 @@ async fn failed_replay_preserves_a_newer_cached_selection() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancelled_free_releases_reservation_and_affinity() {
+async fn free_releases_reservation_and_affinity_without_actor_progress() {
     let mut config = test_config(false);
     config.router_queue_threshold = Some(0.0);
     let core = core_with(
@@ -2793,9 +2812,12 @@ async fn cancelled_free_releases_reservation_and_affinity() {
 
     let mut freeing = Box::pin(core.free_reservation("r1"));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    assert!(freeing.as_mut().poll(&mut context).is_pending());
+    assert!(matches!(
+        freeing.as_mut().poll(&mut context),
+        std::task::Poll::Ready(Ok(()))
+    ));
     assert!(!entry.scheduler.has_request("r1"));
-    // The queue actor has not acknowledged the release yet.
+    // No actor poll was needed to release state and its owner metadata.
     drop(freeing);
     assert!(!core.reservation_index.read().contains_key("r1"));
     assert_eq!(lease_count(&core, "s"), Some(0));
@@ -2804,7 +2826,7 @@ async fn cancelled_free_releases_reservation_and_affinity() {
     assert_eq!(bound_worker(&core, "s"), None);
     core.select_and_reserve(session_reservation("r1", "s"))
         .await
-        .expect("cancelled cleanup must not prevent ID reuse");
+        .expect("completed cleanup must not prevent ID reuse");
 }
 
 #[tokio::test]
