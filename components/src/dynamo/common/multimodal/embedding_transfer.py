@@ -241,6 +241,35 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
                 self._remove_unclaimed_file(path_to_remove)
             raise
 
+    async def send_embeddings_batch(
+        self, embeddings: list[torch.Tensor], stage_embeddings: bool = False
+    ) -> list[tuple[TransferRequest, Awaitable[None]]]:
+        """Keep local files owned until every transfer in this response is ready."""
+        tasks = [
+            asyncio.create_task(self.send_embeddings(tensor, stage_embeddings))
+            for tensor in embeddings
+        ]
+        try:
+            return await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                # A second cancellation may interrupt the drain. Completed
+                # results still belong to this batch; cancelled writers retain
+                # the per-send cleanup ownership above.
+                for task in tasks:
+                    if (
+                        task.done()
+                        and not task.cancelled()
+                        and task.exception() is None
+                    ):
+                        request, _ = task.result()
+                        self._remove_unclaimed_file(request.serialized_request)
+            raise
+
 
 class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
     """

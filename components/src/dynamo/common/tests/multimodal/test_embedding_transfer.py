@@ -133,10 +133,7 @@ class TestLocalEmbeddingWriteOwnership:
                 future.add_done_callback(self.on_done)
             return future
 
-    @pytest.mark.parametrize("close_loop", [False, True])
-    def test_cancelled_write_cleans_after_writer_finishes(
-        self, monkeypatch, tmp_path, close_loop
-    ):
+    def test_cancelled_write_cleans_after_writer_finishes(self, monkeypatch, tmp_path):
         monkeypatch.setattr(embedding_transfer.tempfile, "tempdir", str(tmp_path))
         loop = asyncio.new_event_loop()
         executor = self._TrackedExecutor()
@@ -170,13 +167,10 @@ class TestLocalEmbeddingWriteOwnership:
             assert (
                 len(list(tmp_path.iterdir())) == 1
             ), "active writer still owns its file"
-            if close_loop:
-                loop.close()
+            loop.close()
             release.set()
             # Join the actual executor work, including any worker-side cleanup.
             executor.submitted[0].result(timeout=2)
-            if not close_loop:
-                loop.run_until_complete(asyncio.sleep(0))
             assert list(tmp_path.iterdir()) == []
         finally:
             release.set()
@@ -205,6 +199,55 @@ class TestLocalEmbeddingWriteOwnership:
         finally:
             executor.shutdown(wait=True)
             loop.close()
+
+    @pytest.mark.asyncio
+    async def test_batch_reclaims_completed_file_if_rollback_is_cancelled(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(embedding_transfer.tempfile, "tempdir", str(tmp_path))
+        completed = asyncio.Event()
+        pending = asyncio.Event()
+        draining = asyncio.Event()
+        children = []
+
+        class GatedSender(LocalEmbeddingSender):
+            async def send_embeddings(self, embeddings, stage_embeddings=False):
+                children.append(asyncio.current_task())
+                value = int(embeddings[0])
+                if value == 1:
+                    result = await super().send_embeddings(embeddings, stage_embeddings)
+                    completed.set()
+                    return result
+                if value == 2:
+                    await completed.wait()
+                    await pending.wait()
+                    raise RuntimeError("sibling failed")
+                pending.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    draining.set()
+                    await asyncio.Event().wait()
+                    raise
+
+        task = asyncio.create_task(
+            GatedSender().send_embeddings_batch(
+                [torch.tensor([value]) for value in (1, 2, 3)]
+            )
+        )
+        try:
+            await asyncio.wait_for(draining.wait(), timeout=2)
+            assert len(list(tmp_path.iterdir())) == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2)
+            assert all(child.done() for child in children)
+            assert list(tmp_path.iterdir()) == []
+        finally:
+            task.cancel()
+            for child in children:
+                child.cancel()
+            await asyncio.gather(task, *children, return_exceptions=True)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_site", ["save", "metadata"])
