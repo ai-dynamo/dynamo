@@ -65,8 +65,7 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
         # builds that resolve config separately from raw ServerArgs, which would
         # leave GMS regions inert -- fail loudly instead.
         raise RuntimeError(
-            "GMS requires an SGLang build exposing declare_resolution(); "
-            "none found."
+            "GMS requires an SGLang build exposing declare_resolution(); " "none found."
         )
 
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
