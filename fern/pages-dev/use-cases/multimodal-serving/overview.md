@@ -44,6 +44,7 @@ These features currently support image and video inputs only. Support for audio 
 
 Reference implementations for deploying multimodal models for each backend:
 
+- [Voice Pipelines](voice.md): streaming speech endpoints and cascaded voice agents
 - [SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md)
 - [TensorRT-LLM Multimodal](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md)
 - [vLLM Multimodal](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md)
