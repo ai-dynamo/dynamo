@@ -182,14 +182,16 @@ pub async fn apply_cr(
     // in practice the CR will only have one writer (the pod owner)
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    api.patch(cr_name, &params, &Patch::Apply(cr))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to apply DynamoWorkerMetadata CR: {}", e))?;
+    let patch = Patch::Apply(cr);
+    let applied = api.patch(cr_name, &params, &patch).await.map_err(|e| {
+        anyhow::anyhow!("Failed to apply DynamoWorkerMetadata {namespace}/{cr_name}: {e}")
+    })?;
 
-    tracing::debug!(
-        "Applied DynamoWorkerMetadata CR: name={}, namespace={}",
+    tracing::info!(
+        namespace,
         cr_name,
-        namespace
+        resource_version = ?applied.metadata.resource_version,
+        "Applied DynamoWorkerMetadata CR"
     );
 
     Ok(())
