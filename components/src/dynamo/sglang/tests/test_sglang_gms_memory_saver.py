@@ -59,12 +59,12 @@ def test_setup_gms_declares_memory_saver(monkeypatch, fake_gms_model_loader):
             raise AssertionError(f"unexpected direct assignment: {name}={value!r}")
 
     server_args = ReadOnlyServerArgs()
-    declare_late_resolution = Mock()
-    monkeypatch.setattr(gms_sglang, "declare_late_resolution", declare_late_resolution)
+    declare_resolution = Mock()
+    monkeypatch.setattr(gms_sglang, "declare_resolution", declare_resolution)
 
     loader = gms_sglang.setup_gms(server_args)
 
-    declare_late_resolution.assert_called_once_with(
+    declare_resolution.assert_called_once_with(
         server_args,
         "dynamo.gms",
         enable_memory_saver=True,
@@ -78,7 +78,7 @@ def test_setup_gms_assigns_memory_saver_for_legacy_args(
     fake_gms_model_loader,
 ):
     server_args = SimpleNamespace(enable_memory_saver=False)
-    monkeypatch.setattr(gms_sglang, "declare_late_resolution", None)
+    monkeypatch.setattr(gms_sglang, "declare_resolution", None)
 
     gms_sglang.setup_gms(server_args)
 

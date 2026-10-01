@@ -26,7 +26,7 @@ import inspect
 import logging
 import uuid
 from collections.abc import Mapping
-from functools import lru_cache, wraps
+from functools import lru_cache
 from types import ModuleType
 from typing import Any
 
@@ -120,19 +120,11 @@ def publish_server_args(server_args: Any, *, role: str) -> None:
 
 
 try:
-    # Prefer the guarded launcher API on SGLang 0.5.19; its declare_resolution
-    # does not yet reject updates after publication. Remove when the minimum
-    # supported SGLang version is 0.5.20+.
-    from sglang.srt.arg_groups.overrides import declare_late_resolution
+    from sglang.srt.arg_groups.overrides import declare_resolution
 except ImportError:
-    try:
-        from sglang.srt.arg_groups.overrides import (
-            declare_resolution as declare_late_resolution,
-        )
-    except ImportError:
-        # The separately pinned XPU SGLang 0.5.11 predates declarations.
-        # Remove when that pin is upgraded to 0.5.19+.
-        declare_late_resolution = None
+    # The separately pinned XPU SGLang 0.5.11 predates declarations.
+    # Remove when that pin is upgraded to 0.5.19+.
+    declare_resolution = None
 
 try:
     from sglang.srt.arg_groups.model_override_base import (
@@ -245,50 +237,6 @@ def _warn_require_reasoning_unsupported() -> None:
     )
 
 
-def ensure_sglang_tensor_image_size() -> None:
-    """Allow SGLang's image-token resolver to handle decoded image tensors.
-
-    SGLang 0.5.13 through the 0.5.19 release branch assume every decoded image
-    exposes the PIL ``height``/``width`` attributes. Its CUDA JPEG decoder
-    instead returns a CHW tensor, causing multimodal requests to fall back to
-    retokenization.
-
-    Remove this compatibility override when the minimum supported SGLang
-    release is 0.5.20+, which handles tensor image dimensions itself.
-    """
-    import torch
-    from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
-
-    original = getattr(BaseMultimodalProcessor, "resolve_image_token_counts", None)
-    if original is None or getattr(
-        original, "_dynamo_tensor_image_size_support", False
-    ):
-        return
-
-    @wraps(original)
-    def resolve_image_token_counts(self: Any, images: list[Any]) -> list[int]:
-        if not any(isinstance(image, torch.Tensor) for image in images):
-            return original(self, images)
-
-        image_sizes: list[tuple[int, int]] = []
-        for image in images:
-            if isinstance(image, torch.Tensor):
-                if image.ndim < 2:
-                    raise ValueError(f"Invalid image tensor shape: {image.shape}")
-                height, width = image.shape[-2:]
-            else:
-                height, width = image.height, image.width
-            image_sizes.append((int(height), int(width)))
-
-        token_counts = self._processor._get_num_multimodal_tokens(
-            image_sizes=image_sizes
-        ).num_image_tokens
-        return [int(count) for count in token_counts]
-
-    resolve_image_token_counts._dynamo_tensor_image_size_support = True  # type: ignore[attr-defined]
-    BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
-
-
 def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
     """Declare launcher-stage SGLang configuration fields.
 
@@ -298,8 +246,8 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
     XPU image still uses SGLang 0.5.11, which predates that API; preserve its
     legacy assignment behavior until its engine pin is upgraded.
     """
-    if declare_late_resolution is not None:
-        declare_late_resolution(server_args, source, **fields)
+    if declare_resolution is not None:
+        declare_resolution(server_args, source, **fields)
         return
 
     # XPU compatibility for SGLang 0.5.11. Remove when the XPU SGLang pin is
@@ -311,7 +259,7 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 def resolved_server_args(server_args: Any) -> Any:
     """Return SGLang's effective configuration for one initialized engine.
 
-    SGLang 0.5.19 and 0.5.20 keep ``ServerArgs`` raw and expose the effective
+    SGLang 0.5.20 and 0.5.21 keep ``ServerArgs`` raw and expose the effective
     projection through ``resolved_view()``. The separately pinned XPU release
     and Dynamo's non-LLM argument stubs retain effective values on the object
     itself.
@@ -421,7 +369,6 @@ __all__ = [
     "ConfigArgumentMerger",
     "add_sglang_cli_compat",
     "cache_salt_kwargs",
-    "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
     "get_encoder_preprocessor_modules",
     "get_mm_encoder_class",

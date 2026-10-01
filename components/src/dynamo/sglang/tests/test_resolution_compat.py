@@ -67,29 +67,23 @@ def load_launcher(request, monkeypatch):
     return load
 
 
-@pytest.mark.parametrize("release", ["0.5.19", "0.5.20"])
-def test_launcher_selects_guarded_declaration_api(load_launcher, release):
+@pytest.mark.parametrize("release", ["0.5.20", "0.5.21"])
+def test_launcher_selects_declaration_api(load_launcher, release):
     api = ModuleType("sglang.srt.arg_groups.overrides")
-    guarded = Mock()
-    if release == "0.5.19":
-        api.declare_late_resolution = guarded
-        api.declare_resolution = Mock(
-            side_effect=AssertionError("unguarded 0.5.19 API selected")
-        )
-    else:
-        api.declare_resolution = guarded
+    declaration = Mock(name=f"declare_resolution_{release}")
+    api.declare_resolution = declaration
     launch = load_launcher(api)
     args = SimpleNamespace(enable_memory_saver=False)
 
     launch(args)
 
     assert args.enable_memory_saver is False
-    guarded.assert_called_once()
-    assert guarded.call_args.args[0] is args
-    assert guarded.call_args.kwargs == {"enable_memory_saver": True}
+    declaration.assert_called_once()
+    assert declaration.call_args.args[0] is args
+    assert declaration.call_args.kwargs == {"enable_memory_saver": True}
 
     # A published config must fail rather than silently updating the raw record.
-    guarded.side_effect = ValueError("config already published")
+    declaration.side_effect = ValueError("config already published")
     with pytest.raises(ValueError, match="config already published"):
         launch(args)
     assert args.enable_memory_saver is False
