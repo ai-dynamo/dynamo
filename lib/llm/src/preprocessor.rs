@@ -1666,7 +1666,8 @@ pub struct OpenAIPreprocessor {
     /// variants are initialized independently on demand.
     embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
-    /// Exclusive bound for `nvext.token_data` ids, from `token_id_bound`.
+    /// Exclusive bound for client token ids (`nvext.token_data` and token
+    /// prompts), from `token_id_bound`.
     token_id_bound: Option<usize>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
@@ -1740,7 +1741,9 @@ fn token_id_bound(model_vocab: Option<usize>, tokenizer_vocab: Option<usize>) ->
 }
 
 /// Reject token ids `>= bound` (client 400). `None` means no check.
+/// `field` names the request field in the error.
 fn ensure_token_ids_in_vocab(
+    field: &str,
     tokens: &[crate::protocols::TokenIdType],
     bound: Option<usize>,
 ) -> anyhow::Result<()> {
@@ -1748,7 +1751,7 @@ fn ensure_token_ids_in_vocab(
         && let Some(&bad) = tokens.iter().find(|&&t| t as usize >= bound)
     {
         return Err(invalid_argument_error(format!(
-            "nvext.token_data token id {bad} is out of range (must be < {bound})"
+            "{field} token id {bad} is out of range (must be < {bound})"
         )));
     }
     Ok(())
@@ -4537,6 +4540,8 @@ impl OpenAIPreprocessor {
                             }
                         }
                     }
+                    // A token prompt skips the tokenizer, so bound its ids here.
+                    ensure_token_ids_in_vocab("prompt", &tokens_out, self.token_id_bound)?;
                 }
             }
             PromptInput::Text(_) => {
@@ -4575,7 +4580,11 @@ impl OpenAIPreprocessor {
                                 token_data
                             {
                                 // token_data skips the tokenizer, so bound its ids here.
-                                ensure_token_ids_in_vocab(tokens, self.token_id_bound)?;
+                                ensure_token_ids_in_vocab(
+                                    "nvext.token_data",
+                                    tokens,
+                                    self.token_id_bound,
+                                )?;
                                 tracing::info!(
                                     token_count = tokens.len(),
                                     first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
@@ -7680,6 +7689,43 @@ mod token_data_tests {
         assert_rejected(&preprocessor, &[1, 32000]).await;
     }
 
+    fn completion(prompt: serde_json::Value) -> NvCreateCompletionRequest {
+        serde_json::from_value(serde_json::json!({"model": "test-model", "prompt": prompt}))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn token_prompt_is_bounded_by_model_vocab() {
+        let mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        // A single token array, a batch of one, and the largest u32.
+        for prompt in [
+            serde_json::json!([1, 128256]),
+            serde_json::json!([[1, 128256]]),
+            serde_json::json!([u32::MAX]),
+        ] {
+            let error = preprocessor
+                .preprocess_request(&completion(prompt), None)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<DynamoError>()
+                    .map(DynamoError::error_type),
+                Some(ErrorType::InvalidArgument),
+                "{error:#}"
+            );
+        }
+        let in_range: [u32; 2] = [1, 128255];
+        for prompt in [serde_json::json!(in_range), serde_json::json!([in_range])] {
+            let (preprocessed, _, _) = preprocessor
+                .preprocess_request(&completion(prompt), None)
+                .await
+                .unwrap();
+            assert_eq!(preprocessed.token_ids.as_slice(), in_range);
+        }
+    }
+
     #[test]
     fn token_id_bound_ignores_unknown_and_zero_sizes() {
         assert_eq!(token_id_bound(Some(151936), Some(151669)), Some(151936));
@@ -7687,7 +7733,7 @@ mod token_data_tests {
         assert_eq!(token_id_bound(None, Some(32000)), Some(32000));
         assert_eq!(token_id_bound(Some(0), Some(0)), None);
         assert_eq!(token_id_bound(None, None), None);
-        assert!(ensure_token_ids_in_vocab(&[u32::MAX], None).is_ok());
+        assert!(ensure_token_ids_in_vocab("prompt", &[u32::MAX], None).is_ok());
     }
 }
 
@@ -11098,6 +11144,35 @@ mod tests {
             Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
         let Err(err) = result else {
             panic!("over-budget completion should fail admission");
+        };
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should preserve the DynamoError type");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_completion_operator_rejects_out_of_range_token_prompt() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        // The card's vocab_size is 128256.
+        let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "prompt": [1, 128256]
+        }))
+        .unwrap();
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(UnreachableBackend);
+
+        let result =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
+        let Err(err) = result else {
+            panic!("an out-of-range token prompt should fail before dispatch");
         };
         let dynamo_err = err
             .downcast_ref::<DynamoError>()
