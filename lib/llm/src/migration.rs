@@ -357,17 +357,6 @@ where
         metrics: Arc<Metrics>,
         session_affinity: Option<SessionAffinityId>,
     ) -> Result<Self> {
-        // prompt_embeds take precedence over replayed token_ids. Until a retry can
-        // represent an embedding-based continuation, propagate worker failures.
-        if preprocessed_request.prompt_embeds.is_some() {
-            if retries_left > 0 {
-                tracing::warn!(
-                    "Prompt-embeddings request: migration disabled - embedding continuation is not supported"
-                );
-            }
-            retries_left = 0;
-        }
-
         // TODO: Define a replay-capability contract for attempt-local decoder and sampler state.
         // A withheld hidden-stop-sequence prefix is now checkpointed across workers (see
         // `jail_seed` / `track_response`), but generated-token penalties and thinking-token
@@ -730,6 +719,16 @@ where
         // attempt. Once no retry can happen there is nothing to replay onto,
         // so leave the request untouched.
         if self.retries_left == 0 {
+            return;
+        }
+        // Original embeddings can be retried before any generated tokens arrive.
+        // After that, prompt_embeds would override replayed token_ids, so a retry
+        // cannot continue the partial response.
+        if self.request.prompt_embeds.is_some() && !token_ids.is_empty() {
+            tracing::warn!(
+                "Prompt-embeddings request: migration disabled after output - embedding continuation is not supported"
+            );
+            self.retries_left = 0;
             return;
         }
         // Capture the worker's engine.generate span pointer so a future
@@ -2310,57 +2309,66 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case::dispatch_failure(MockBehavior::FailThenSuccess, None)]
+    #[case::stream_failure_before_output(MockBehavior::MidStreamFail { fail_after: 0 }, None)]
+    #[case::stream_failure_after_output(MockBehavior::MidStreamFail { fail_after: 3 }, Some(3))]
     #[tokio::test]
-    async fn test_retry_manager_prompt_embeds_does_not_replay_tokens() {
-        // Embeddings take precedence over token_ids in the worker. Appending output
-        // tokens to token_ids therefore cannot resume an embedding-based prompt.
-        for has_prompt_embeds in [false, true] {
-            for fail_after in [0, 3] {
-                let context_id = uuid::Uuid::new_v4().to_string();
-                let mut request = create_mock_request(10);
-                request.prompt_embeds = has_prompt_embeds.then(|| "mock embeddings".to_string());
-                let original_tokens = request.token_ids.clone();
-                let mock_engine = Arc::new(MockEngine::new(
-                    MockBehavior::MidStreamFail { fail_after },
-                    10,
-                    100,
-                    context_id.clone(),
-                ));
-                let mut retry_manager = RetryManager::build(
-                    Arc::new(Controller::new(context_id)),
-                    BTreeMap::new(),
-                    request,
-                    mock_engine.clone(),
-                    3,
-                    None,
-                    Arc::new(TEST_MODEL.to_string()),
-                    Arc::new(Metrics::new()),
-                    None,
-                )
-                .await
-                .unwrap();
+    async fn test_retry_manager_prompt_embeds_does_not_replay_tokens(
+        #[case] behavior: MockBehavior,
+        #[case] failure_after: Option<usize>,
+    ) {
+        // Before generation starts, the original embeddings can be retried unchanged.
+        // Once output arrives, token_ids cannot resume an embedding-based prompt.
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mut request = create_mock_request(10);
+        request.prompt_embeds = Some("mock embeddings".to_string());
+        let original_tokens = request.token_ids.clone();
+        let mock_engine = Arc::new(MockEngine::new(behavior, 10, 100, context_id.clone()));
+        let mut retry_manager = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            request,
+            mock_engine.clone(),
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .unwrap();
 
-                let mut responses = Vec::new();
-                while let Some(response) = retry_manager.next().await {
-                    responses.push(response);
-                }
+        // Metadata-only chunks must not disable a safe retry either.
+        let mut empty_chunk = create_mock_output(0);
+        empty_chunk.data.as_mut().unwrap().token_ids.clear();
+        empty_chunk.data.as_mut().unwrap().text = None;
+        retry_manager.track_response(&empty_chunk);
 
-                if has_prompt_embeds {
-                    assert_eq!(mock_engine.call_count.load(Ordering::SeqCst), 1);
-                    assert_eq!(responses.len(), fail_after + 1);
-                    assert!(responses[..fail_after].iter().all(|r| r.err().is_none()));
-                    assert_eq!(
-                        responses.last().unwrap().err().unwrap().error_type(),
-                        ErrorType::Disconnected
-                    );
-                    assert_eq!(retry_manager.request.token_ids, original_tokens);
-                } else {
-                    assert_eq!(mock_engine.call_count.load(Ordering::SeqCst), 2);
-                    assert_eq!(responses.len(), 10);
-                    assert!(responses.iter().all(|r| r.err().is_none()));
-                }
-            }
+        let mut responses = Vec::new();
+        while let Some(response) = retry_manager.next().await {
+            responses.push(response);
         }
+
+        if let Some(fail_after) = failure_after {
+            assert_eq!(mock_engine.call_count.load(Ordering::SeqCst), 1);
+            assert_eq!(responses.len(), fail_after + 1);
+            assert!(responses[..fail_after].iter().all(|r| r.err().is_none()));
+            assert_eq!(
+                responses.last().unwrap().err().unwrap().error_type(),
+                ErrorType::Disconnected
+            );
+        } else {
+            assert_eq!(mock_engine.call_count.load(Ordering::SeqCst), 2);
+            assert_eq!(responses.len(), 10);
+            assert!(responses.iter().all(|r| r.err().is_none()));
+        }
+        assert_eq!(retry_manager.request.token_ids, original_tokens);
+        assert_eq!(
+            retry_manager.request.prompt_embeds.as_deref(),
+            Some("mock embeddings")
+        );
+        assert_eq!(retry_manager.request.stop_conditions.max_tokens, Some(10));
     }
 
     /// Test case 9: max_seq_len exceeded limit + 1 disables migration
