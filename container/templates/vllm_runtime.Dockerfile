@@ -191,11 +191,15 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
 # Omni is layered against the installed Transformers version, so install the
 # compatible release first and its dependency solve sees the final Transformers
-# invariant instead of resolving against 5.15.1.
+# invariant instead of resolving against 5.15.1. When Omni is disabled, preserve
+# the base image's Transformers/tokenizers pairing instead of downgrading only
+# Transformers with --no-deps.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}"
+    if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
+        uv pip install {{ pip_target }} --no-deps \
+            "transformers==${TRANSFORMERS_VERSION}"; \
+    fi
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -575,6 +579,10 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 RUN {{ python_executable }} - "${ENABLE_VLLM_OMNI}" "${TRANSFORMERS_VERSION}" <<'PY'
 import importlib.metadata as md
 import sys
+
+# Importing Transformers enforces its supported tokenizers range, including
+# when Omni is disabled and we retain the nightly's dependency pairing.
+import transformers
 
 if sys.argv[1] == "true":
     actual = md.version("transformers")
