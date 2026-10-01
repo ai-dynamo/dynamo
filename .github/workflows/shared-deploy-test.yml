@@ -33,7 +33,7 @@ on:
 
 jobs:
   deploy-test:
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     timeout-minutes: 25
     permissions:
       contents: read
