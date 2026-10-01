@@ -151,6 +151,12 @@ for i in "${!EXTRA_PD_ARGS[@]}"; do
     # Normalize only the option name; JSON values must reach vLLM unchanged.
     KV_EVENTS_PD_OPTION="${EXTRA_PD_ARGS[$i]%%=*}"
     KV_EVENTS_PD_OPTION="${KV_EVENTS_PD_OPTION//_/-}"
+    # vLLM rewrites dotted fields into a trailing JSON option, then argparse
+    # expands abbreviated option names. Detect every prefix of this option.
+    KV_EVENTS_PD_BASE="${KV_EVENTS_PD_OPTION%%.*}"
+    if [[ "$KV_EVENTS_PD_OPTION" == --*.* && "--kv-events-config" == "$KV_EVENTS_PD_BASE"* ]]; then
+        KV_EVENTS_PD_OPTION="--kv-events-config.${KV_EVENTS_PD_OPTION#*.}"
+    fi
     case "$KV_EVENTS_PD_OPTION" in
         --kv-events-config)
             if [[ "${EXTRA_PD_ARGS[$i]}" == *=* ]]; then

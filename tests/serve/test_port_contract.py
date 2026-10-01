@@ -506,6 +506,10 @@ def test_e_pd_launcher_keeps_managed_kv_events_on_the_reserved_port(
         ("--kv_events_config.endpoint=", False),
         ("--kv-events-config.endpoint=", True),
         ("--kv_events_config.enable_kv_cache_events", True),
+        ("--kv-events-conf.endpoint", False),
+        ("--kv_events_conf.endpoint=", True),
+        ("--kv-e.endpoint=", False),
+        ("--kv_events_c.enable_kv_cache_events", True),
     ],
 )
 @pytest.mark.timeout(180)
@@ -552,6 +556,8 @@ def test_e_pd_launcher_refuses_managed_dotted_kv_events(
         "--kv_events_config=",
         "--kv-events-config.endpoint",
         "--kv_events_config.endpoint=",
+        "--kv-events-conf.endpoint",
+        "--kv_events_conf.endpoint=",
     ],
 )
 @pytest.mark.timeout(180)
@@ -577,7 +583,7 @@ def test_e_pd_launcher_keeps_standalone_kv_events_passthrough(
 
     assert result.returncode == 0, result.stderr
     assert workers["pd"]["kv"] == str(allocated[0])
-    assert len(re.findall(r"--kv[-_]events[-_]config", workers["pd"]["args"])) == 1
+    assert len(re.findall(r"--kv[-_]events[-_]conf(?:ig)?", workers["pd"]["args"])) == 1
 
 
 def test_dyn_port_accepts_high_non_system_port() -> None:
