@@ -933,7 +933,11 @@ mod tests {
         request.mode = crate::scheduling::ScheduleMode::Tracked {
             request_id: "test".into(),
         };
-        request.overlap.tier_overlap_blocks.device.insert(rejected, 6);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(rejected, 6);
         request.overlap.tier_overlap_blocks.device.insert(kept, 1);
         let policy = WorkerSelectionPolicy::new_with_filters(
             KvRouterConfig::default(),
