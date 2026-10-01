@@ -5,7 +5,7 @@
 //!
 //! This module centralizes all router-side Prometheus metric definitions:
 //!
-//! - [`WorkerLoadMetrics`]: Per-worker active decode, prefill, and remote-KV-wait gauges.
+//! - [`WorkerLoadMetrics`]: Per-worker active decode blocks and prefill tokens gauges.
 //!   Registered on the frontend's own `prometheus::Registry` (default port 8000).
 //!   Populated by `KvWorkerMonitor` in the frontend when receiving ActiveLoad events.
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
@@ -490,12 +490,10 @@ impl RouterWorkerStatusMetrics {
 // ---------------------------------------------------------------------------
 
 /// Per-worker active load gauges, published by `ActiveSequencesMultiWorker`
-/// and `KvWorkerMonitor`, then cleaned up by the monitor when workers disappear.
+/// and cleaned up by `KvWorkerMonitor` when workers disappear.
 pub struct WorkerLoadMetrics {
     pub active_decode_blocks: IntGaugeVec,
     pub active_prefill_tokens: IntGaugeVec,
-    pub remote_kv_waiting_requests: IntGaugeVec,
-    pub remote_kv_waiting_tokens: IntGaugeVec,
 }
 
 impl WorkerLoadMetrics {
@@ -516,29 +514,6 @@ impl WorkerLoadMetrics {
         self.active_prefill_tokens
             .with_label_values(labels)
             .set(active_tokens as i64);
-    }
-
-    pub fn observe_remote_kv_wait(
-        &self,
-        worker_id: u64,
-        dp_rank: u32,
-        worker_type: &str,
-        waiting_requests: Option<u64>,
-        waiting_tokens: Option<u64>,
-    ) {
-        let worker_id_str = worker_id.to_string();
-        let dp_rank_str = dp_rank.to_string();
-        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
-        if let Some(waiting_requests) = waiting_requests {
-            self.remote_kv_waiting_requests
-                .with_label_values(labels)
-                .set(waiting_requests as i64);
-        }
-        if let Some(waiting_tokens) = waiting_tokens {
-            self.remote_kv_waiting_tokens
-                .with_label_values(labels)
-                .set(waiting_tokens as i64);
-        }
     }
 }
 
@@ -567,30 +542,6 @@ pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(|| W
         &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
     )
     .expect("Failed to create worker_active_prefill_tokens gauge"),
-    remote_kv_waiting_requests: IntGaugeVec::new(
-        Opts::new(
-            format!(
-                "{}_{}",
-                name_prefix::FRONTEND,
-                frontend_service::WORKER_REMOTE_KV_WAITING_REQUESTS
-            ),
-            "Requests waiting for an external KV transfer per worker",
-        ),
-        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-    )
-    .expect("Failed to create worker_remote_kv_waiting_requests gauge"),
-    remote_kv_waiting_tokens: IntGaugeVec::new(
-        Opts::new(
-            format!(
-                "{}_{}",
-                name_prefix::FRONTEND,
-                frontend_service::WORKER_REMOTE_KV_WAITING_TOKENS
-            ),
-            "KV context tokens waiting for an external transfer per worker",
-        ),
-        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-    )
-    .expect("Failed to create worker_remote_kv_waiting_tokens gauge"),
 });
 
 /// Register the worker load gauges with the given Prometheus registry.
@@ -601,8 +552,6 @@ pub fn register_worker_load_metrics(
     let m = &*WORKER_LOAD_METRICS;
     registry.register(Box::new(m.active_decode_blocks.clone()))?;
     registry.register(Box::new(m.active_prefill_tokens.clone()))?;
-    registry.register(Box::new(m.remote_kv_waiting_requests.clone()))?;
-    registry.register(Box::new(m.remote_kv_waiting_tokens.clone()))?;
     Ok(())
 }
 
@@ -1340,22 +1289,6 @@ mod tests {
                 &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
             )
             .unwrap(),
-            remote_kv_waiting_requests: IntGaugeVec::new(
-                Opts::new(
-                    "dynamo_frontend_worker_remote_kv_waiting_requests",
-                    "Requests waiting for an external KV transfer per worker",
-                ),
-                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-            )
-            .unwrap(),
-            remote_kv_waiting_tokens: IntGaugeVec::new(
-                Opts::new(
-                    "dynamo_frontend_worker_remote_kv_waiting_tokens",
-                    "KV context tokens waiting for an external transfer per worker",
-                ),
-                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
-            )
-            .unwrap(),
         };
         registry
             .register(Box::new(metrics.active_decode_blocks.clone()))
@@ -1363,15 +1296,8 @@ mod tests {
         registry
             .register(Box::new(metrics.active_prefill_tokens.clone()))
             .unwrap();
-        registry
-            .register(Box::new(metrics.remote_kv_waiting_requests.clone()))
-            .unwrap();
-        registry
-            .register(Box::new(metrics.remote_kv_waiting_tokens.clone()))
-            .unwrap();
 
         metrics.observe(123, 0, "decode", 42, 100);
-        metrics.observe_remote_kv_wait(123, 0, "decode", Some(3), Some(24_576));
 
         let output = gather_pef(&registry);
         let expected = "\
@@ -1381,12 +1307,6 @@ dynamo_frontend_worker_active_decode_blocks{dp_rank=\"0\",worker_id=\"123\",work
 # HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens queued per worker
 # TYPE dynamo_frontend_worker_active_prefill_tokens gauge
 dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 100
-# HELP dynamo_frontend_worker_remote_kv_waiting_requests Requests waiting for an external KV transfer per worker
-# TYPE dynamo_frontend_worker_remote_kv_waiting_requests gauge
-dynamo_frontend_worker_remote_kv_waiting_requests{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 3
-# HELP dynamo_frontend_worker_remote_kv_waiting_tokens KV context tokens waiting for an external transfer per worker
-# TYPE dynamo_frontend_worker_remote_kv_waiting_tokens gauge
-dynamo_frontend_worker_remote_kv_waiting_tokens{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 24576
 ";
         assert_eq!(
             output, expected,

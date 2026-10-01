@@ -68,8 +68,6 @@ pub struct BusyThresholdRequest {
     pub active_prefill_tokens_threshold: Option<u64>,
     /// The active prefill tokens threshold as fraction of max_num_batched_tokens, or null to just get the current value
     pub active_prefill_tokens_threshold_frac: Option<f64>,
-    /// External-KV transfer backlog token threshold, or null to just get the current value
-    pub remote_kv_waiting_tokens_threshold: Option<u64>,
 }
 
 /// Response for a threshold operation
@@ -83,8 +81,6 @@ pub struct BusyThresholdResponse {
     pub active_prefill_tokens_threshold: Option<u64>,
     /// The active prefill tokens threshold as fraction of max_num_batched_tokens
     pub active_prefill_tokens_threshold_frac: Option<f64>,
-    /// External-KV transfer backlog token threshold
-    pub remote_kv_waiting_tokens_threshold: Option<u64>,
 }
 
 /// Response for listing all thresholds
@@ -151,7 +147,6 @@ async fn busy_threshold_handler(
         active_decode_blocks_threshold: request.active_decode_blocks_threshold,
         active_prefill_tokens_threshold: request.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac: request.active_prefill_tokens_threshold_frac,
-        remote_kv_waiting_tokens_threshold: request.remote_kv_waiting_tokens_threshold,
     };
     if let Err(error) = requested_config.validate() {
         return (
@@ -194,13 +189,11 @@ async fn busy_threshold_handler(
         active_decode_blocks_threshold,
         active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac,
-        remote_kv_waiting_tokens_threshold,
-    ) = config.map_or((None, None, None, None), |c| {
+    ) = config.map_or((None, None, None), |c| {
         (
             c.active_decode_blocks_threshold,
             c.active_prefill_tokens_threshold,
             c.active_prefill_tokens_threshold_frac,
-            c.remote_kv_waiting_tokens_threshold,
         )
     });
 
@@ -211,7 +204,6 @@ async fn busy_threshold_handler(
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            remote_kv_waiting_tokens_threshold,
         })),
     )
 }
@@ -230,7 +222,6 @@ async fn list_busy_thresholds_handler(
                 active_decode_blocks_threshold: config.active_decode_blocks_threshold,
                 active_prefill_tokens_threshold: config.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: config.active_prefill_tokens_threshold_frac,
-                remote_kv_waiting_tokens_threshold: config.remote_kv_waiting_tokens_threshold,
             })
             .collect(),
     };

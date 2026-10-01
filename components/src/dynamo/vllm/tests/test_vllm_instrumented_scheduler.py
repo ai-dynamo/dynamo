@@ -389,28 +389,25 @@ def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
     # Classified as decode with KV = num_computed_tokens.
     assert q.num_decode_requests == 2
     assert q.sum_decode_kv_tokens == 1500
-    assert q.num_remote_kv_waiting_requests == 2
-    assert q.sum_remote_kv_waiting_tokens == 1500
 
 
-def test_main_waiting_queue_remote_kvs_uses_same_transfer_classification():
-    """Be robust to vLLM queue-placement changes and transient states."""
+def test_main_waiting_queue_remote_kvs_counts_as_queued_decode():
+    """A transient remote-KV wait in the main queue is not prefill work."""
 
     q = _run_compute_queued(
         waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
-                num_tokens=1000,
+                num_tokens=1024,
                 num_computed_tokens=768,
-            )
+            ),
         ],
         skipped_waiting=[],
     )
-
     assert q.num_prefill_requests == 0
+    assert q.sum_prefill_tokens == 0
     assert q.num_decode_requests == 1
-    assert q.num_remote_kv_waiting_requests == 1
-    assert q.sum_remote_kv_waiting_tokens == 768
+    assert q.sum_decode_kv_tokens == 768
 
 
 def test_skipped_waiting_for_structured_output_counts_as_queued_prefill():
@@ -480,10 +477,6 @@ def test_mixed_disagg_decode_engine_snapshot():
     # 1 preempted (local decode evicted) + 3 remote-KV-waiting.
     assert q.num_decode_requests == 4
     assert q.sum_decode_kv_tokens == 780 + 1024 + 2048 + 512
-    # Only remote-KV waits contribute to transfer pressure; a local preemption
-    # remains decode backlog but is not a transfer.
-    assert q.num_remote_kv_waiting_requests == 3
-    assert q.sum_remote_kv_waiting_tokens == 1024 + 2048 + 512
 
 
 def test_mixed_prefill_engine_snapshot():

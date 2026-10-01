@@ -480,7 +480,6 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
-    remote_kv_waiting_tokens_threshold: Option<u64>,
     session_affinity_ttl_secs: Option<u64>,
     session_affinity_mode: RsSessionAffinityMode,
 }
@@ -489,7 +488,7 @@ pub struct RouterConfig {
 impl RouterConfig {
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard", remote_kv_waiting_tokens_threshold=None))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -499,7 +498,6 @@ impl RouterConfig {
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: &str,
-        remote_kv_waiting_tokens_threshold: Option<u64>,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -518,7 +516,6 @@ impl RouterConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            remote_kv_waiting_tokens_threshold,
         }
         .validate()
         .map_err(PyValueError::new_err)?;
@@ -531,7 +528,6 @@ impl RouterConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            remote_kv_waiting_tokens_threshold,
             session_affinity_ttl_secs,
             session_affinity_mode,
         })
@@ -547,7 +543,6 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
                 active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
-                remote_kv_waiting_tokens_threshold: rc.remote_kv_waiting_tokens_threshold,
             },
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
