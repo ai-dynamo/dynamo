@@ -32,6 +32,7 @@ class _Candidate:
 def _config(**overrides):
     config = {
         "name": "qwen",
+        "output_file": "deployment.yaml",
         "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
         "num_gpus_per_node": 8,
     }
@@ -74,13 +75,37 @@ def test_adapter_rejects_unknown_dgd_fields() -> None:
         DGDOutputConfig.model_validate(_config(unknown=True))
 
 
+def test_adapter_requires_output_file() -> None:
+    config = _config()
+    del config["output_file"]
+    with pytest.raises(ValidationError, match="output_file"):
+        DGDOutputConfig.model_validate(config)
+
+
+def test_adapter_requires_name() -> None:
+    config = _config()
+    del config["name"]
+    with pytest.raises(ValidationError, match="name"):
+        DGDOutputConfig.model_validate(config)
+
+
+@pytest.mark.parametrize(
+    "output_file", ["deployment", "../deployment.yaml", "{name}.yaml"]
+)
+def test_adapter_rejects_invalid_output_file(output_file) -> None:
+    with pytest.raises(ValidationError, match="YAML filename"):
+        DGDOutputConfig.model_validate(_config(output_file=output_file))
+
+
 @pytest.mark.parametrize(
     ("pareto", "config", "message"),
     [
-        (False, _config(name=None), "dgd.name"),
-        (False, _config(name=None, name_prefix="qwen"), "only valid for Pareto"),
-        (True, _config(), "only valid for scalar"),
-        (True, _config(name=None), "dgd.name_prefix"),
+        (False, _config(name="qwen-{index}"), "only valid for Pareto"),
+        (
+            True,
+            _config(output_file="candidate-{index}.yaml"),
+            r"require \{index\} in dgd.name",
+        ),
     ],
 )
 def test_name_form_must_match_result_view(
@@ -115,11 +140,33 @@ def test_scalar_writes_only_the_selected_winner(monkeypatch, tmp_path) -> None:
         output_dir=tmp_path,
     )
 
-    assert artifacts == [Path("qwen.yaml"), Path("index.json")]
+    assert artifacts == [Path("deployment.yaml"), Path("index.json")]
     assert rendered_scores == [2.0]
-    assert yaml.safe_load((tmp_path / "qwen.yaml").read_text())["kind"] == (
+    assert yaml.safe_load((tmp_path / "deployment.yaml").read_text())["kind"] == (
         "DynamoGraphDeployment"
     )
+
+
+@pytest.mark.parametrize(
+    ("pareto", "output_file", "message"),
+    [
+        (False, "candidate-{index}.yaml", "only valid for Pareto"),
+        (True, "candidate.yaml", r"require \{index\} in dgd.output_file"),
+    ],
+)
+def test_output_file_form_must_match_result_view(
+    monkeypatch, tmp_path, pareto, output_file, message
+) -> None:
+    monkeypatch.setattr(adapter_module, "_workload", lambda _result: object())
+    config = _config(output_file=output_file)
+    if pareto:
+        config["name"] = "qwen-{index}"
+    with pytest.raises(ValueError, match=message):
+        create_adapter().write(
+            config,
+            result=_result([_Candidate(1.0)], pareto=pareto),
+            output_dir=tmp_path,
+        )
 
 
 def test_pareto_writes_every_selected_candidate(monkeypatch, tmp_path) -> None:
@@ -134,21 +181,30 @@ def test_pareto_writes_every_selected_candidate(monkeypatch, tmp_path) -> None:
     )
 
     artifacts = create_adapter().write(
-        _config(name=None, name_prefix="qwen-pareto", format="kustomize"),
+        _config(
+            name="qwen-pareto-{index}",
+            output_file="candidate-{index}.yaml",
+            format="kustomize",
+        ),
         result=_result(candidates, pareto=True),
         output_dir=tmp_path,
     )
 
     assert artifacts == [
-        Path("qwen-pareto-000"),
-        Path("qwen-pareto-001"),
+        Path("candidate-000.yaml"),
+        Path("candidate-001.yaml"),
+        Path("kustomization.yaml"),
         Path("index.json"),
     ]
     for index in range(2):
-        source = tmp_path / f"qwen-pareto-{index:03d}"
-        assert yaml.safe_load((source / "deploy.yaml").read_text())["kind"] == (
-            "DynamoGraphDeployment"
-        )
+        source = tmp_path / f"candidate-{index:03d}.yaml"
+        assert yaml.safe_load(source.read_text())["kind"] == ("DynamoGraphDeployment")
+    assert yaml.safe_load((tmp_path / "kustomization.yaml").read_text())[
+        "resources"
+    ] == [
+        "candidate-000.yaml",
+        "candidate-001.yaml",
+    ]
 
 
 def test_adapter_rejects_empty_selection(tmp_path) -> None:
