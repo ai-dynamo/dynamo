@@ -70,7 +70,7 @@ impl ActiveSequencesTotals {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct PreparedRequest {
     request_id: String,
     hash_start: u32,
@@ -89,7 +89,7 @@ pub(crate) struct ActiveLogicalOperation {
     request_index: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct PreparedActiveSequencesCorpus {
     pub(crate) operations: Vec<ActiveLogicalOperation>,
     hashes: Box<[SequenceHash]>,
@@ -419,7 +419,7 @@ impl PreparedActiveSequencesTrial {
 }
 
 pub(crate) fn prepare_active_sequences_trial(
-    corpus: PreparedActiveSequencesCorpus,
+    corpus: &PreparedActiveSequencesCorpus,
     operation_lanes: usize,
     modeled_prefill_tokens_per_sec: Option<u64>,
 ) -> anyhow::Result<PreparedActiveSequencesTrial> {
@@ -441,7 +441,7 @@ pub(crate) fn prepare_active_sequences_trial(
         total_workers,
     } = corpus;
     let mut lane_capacities = vec![0usize; operation_lanes];
-    for operation in &operations {
+    for operation in operations {
         lane_capacities[operation.worker_id as usize % operation_lanes] += 1;
     }
     let mut lane_payloads = lane_capacities
@@ -466,7 +466,7 @@ pub(crate) fn prepare_active_sequences_trial(
     let mut operation_workers = Vec::with_capacity(operations.len());
     let mut operation_kinds = Vec::with_capacity(operations.len());
 
-    for operation in operations {
+    for &operation in operations {
         let request = requests
             .get(operation.request_index as usize)
             .ok_or_else(|| anyhow::anyhow!("operation {} has an invalid request", operation.id))?;
@@ -554,11 +554,11 @@ pub(crate) fn prepare_active_sequences_trial(
         lane_capacities,
         operation_workers: operation_workers.into_boxed_slice(),
         operation_kinds: operation_kinds.into_boxed_slice(),
-        expected_operations_by_worker,
-        totals,
-        benchmark_duration_ns,
-        block_size,
-        total_workers,
+        expected_operations_by_worker: expected_operations_by_worker.clone(),
+        totals: *totals,
+        benchmark_duration_ns: *benchmark_duration_ns,
+        block_size: *block_size,
+        total_workers: *total_workers,
     })
 }
 
@@ -1071,14 +1071,16 @@ pub(crate) async fn run_active_sequences_benchmark(
     config: ActiveSequencesRunConfig,
 ) -> anyhow::Result<ActiveSequencesResult> {
     let trial = prepare_active_sequences_trial(
-        corpus,
+        &corpus,
         config.operation_lanes,
         config.modeled_prefill_tokens_per_sec,
     )?;
+    // Release the source corpus before the timed run.
+    drop(corpus);
     run_active_sequences_trial(trial, config).await
 }
 
-async fn run_active_sequences_trial(
+pub(crate) async fn run_active_sequences_trial(
     trial: PreparedActiveSequencesTrial,
     config: ActiveSequencesRunConfig,
 ) -> anyhow::Result<ActiveSequencesResult> {

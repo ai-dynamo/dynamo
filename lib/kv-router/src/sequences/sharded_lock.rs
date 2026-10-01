@@ -9,11 +9,12 @@ use crossbeam_utils::sync::{ShardedLock, ShardedLockReadGuard, ShardedLockWriteG
 ///
 /// Each request operation read-locks the worker table and the derived load
 /// table, while writes happen only on topology changes. With a single reader
-/// count, every read acquisition bounces one cache line between cores.
-/// Sharding keeps read acquisition core-local; the rare writer locks every
-/// shard and still waits for all in-flight readers, so the exclusion
-/// guarantees match `RwLock`. Poisoning is ignored to match
-/// `parking_lot::RwLock`.
+/// count, every read acquisition writes the same cache line from every core.
+/// `ShardedLock` spreads readers across eight per-thread shards, chosen by
+/// thread index rather than CPU, which reduces reader contention; threads can
+/// still share a shard. The rare writer locks every shard and still waits for
+/// all in-flight readers, so the exclusion guarantees match `RwLock`.
+/// Poisoning is ignored to match `parking_lot::RwLock`.
 #[derive(Default)]
 pub(super) struct ShardedRwLock<T>(ShardedLock<T>);
 

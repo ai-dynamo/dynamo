@@ -8,7 +8,8 @@ mod active_sequences_shared;
 
 use active_sequences_open_loop::{
     ActiveSequencesResult, ActiveSequencesRunConfig, PreparedActiveSequencesCorpus,
-    prepare_active_sequences_corpus, run_active_sequences_benchmark,
+    prepare_active_sequences_corpus, prepare_active_sequences_trial,
+    run_active_sequences_benchmark, run_active_sequences_trial,
 };
 use active_sequences_shared::generate_sequence_events;
 use clap::Parser;
@@ -202,22 +203,19 @@ async fn run_cell(
         return Ok(());
     };
     let path = result_path(&args.result_json_output, output_duration);
+    // Earlier trials prepare from the shared corpus; the last consumes it so its
+    // storage is released before that timed run.
     for trial in 0..args.trials - 1 {
-        run_trial(
-            args,
-            backend_cpus,
-            corpus.clone(),
-            trial_path(args, &path, trial),
-        )
-        .await?;
+        let prepared = prepare_active_sequences_trial(
+            &corpus,
+            args.operation_lanes,
+            args.modeled_prefill_tokens_per_sec,
+        )?;
+        let result = run_active_sequences_trial(prepared, run_config(args, backend_cpus)).await?;
+        report_trial(&result, &trial_path(args, &path, trial))?;
     }
-    run_trial(
-        args,
-        backend_cpus,
-        corpus,
-        trial_path(args, &path, args.trials - 1),
-    )
-    .await
+    let result = run_active_sequences_benchmark(corpus, run_config(args, backend_cpus)).await?;
+    report_trial(&result, &trial_path(args, &path, args.trials - 1))
 }
 
 fn trial_path(args: &Args, path: &str, trial: usize) -> String {
@@ -227,15 +225,9 @@ fn trial_path(args: &Args, path: &str, trial: usize) -> String {
     format!("{}_trial{trial}.json", path.trim_end_matches(".json"))
 }
 
-async fn run_trial(
-    args: &Args,
-    backend_cpus: &[usize],
-    corpus: PreparedActiveSequencesCorpus,
-    path: String,
-) -> anyhow::Result<()> {
-    let result = run_active_sequences_benchmark(corpus, run_config(args, backend_cpus)).await?;
-    print_result(&result);
-    write_result(&path, &result)?;
+fn report_trial(result: &ActiveSequencesResult, path: &str) -> anyhow::Result<()> {
+    print_result(result);
+    write_result(path, result)?;
     if !result.kept_up {
         eprintln!(
             "WARNING: Active Sequences replay did not keep up; inspect issue, queue, and drain metrics"

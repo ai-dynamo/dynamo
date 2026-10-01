@@ -80,8 +80,9 @@ pub async fn generate_sequence_events(
             })
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
-        // (timestamp, lifecycle phase, entry); the phase orders a request's own
-        // events when they share a timestamp.
+        // Each request's events are pushed in lifecycle order with non-decreasing
+        // timestamps, so a stable timestamp sort keeps that order and leaves
+        // cross-request ties in emission order.
         let mut timed_entries = Vec::new();
         let mut seen = HashMap::new();
 
@@ -99,7 +100,6 @@ pub async fn generate_sequence_events(
                 }
                 timed_entries.push((
                     meta.arrival_us,
-                    0u8,
                     SequenceTraceEntry::Add {
                         request_id: request_id.clone(),
                         block_hashes: meta.block_hashes,
@@ -109,7 +109,6 @@ pub async fn generate_sequence_events(
                 ));
                 timed_entries.push((
                     timed_signal.timestamp_us,
-                    1,
                     SequenceTraceEntry::PrefillComplete {
                         request_id: request_id.clone(),
                     },
@@ -119,17 +118,16 @@ pub async fn generate_sequence_events(
             if signal.completed {
                 timed_entries.push((
                     timed_signal.timestamp_us,
-                    2,
                     SequenceTraceEntry::Free { request_id },
                 ));
             }
         }
 
-        timed_entries.sort_by_key(|&(timestamp_us, phase, _)| (timestamp_us, phase));
+        timed_entries.sort_by_key(|&(timestamp_us, _)| timestamp_us);
         all_traces.push(
             timed_entries
                 .into_iter()
-                .map(|(timestamp_us, _, entry)| SequenceTrace {
+                .map(|(timestamp_us, entry)| SequenceTrace {
                     entry,
                     timestamp_us,
                 })
