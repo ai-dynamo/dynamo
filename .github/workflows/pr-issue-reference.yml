@@ -31,11 +31,8 @@ jobs:
           sparse-checkout: .github/scripts
 
       - name: Verify GitHub and Linear issues
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           # Personal API key with read access to the referenced Linear teams.
           LINEAR_ACCESS_KEY: ${{ secrets.LINEAR_ACCESS_KEY }}
-        with:
-          script: |
-            const { verify } = require('./.github/scripts/verify-pr-issues.cjs');
-            await verify({ github, context, core });
+        run: python3 .github/scripts/verify_pr_issues.py
