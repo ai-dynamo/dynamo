@@ -49,9 +49,10 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 
-# Whole-request budget for one embedding download. A file at the default
-# --max-file-size-mb (50) finishes in time at about 171 KiB/s or faster.
-_EMBEDDING_FETCH_TIMEOUT_S = 300.0
+# Shortest whole-request budget for one embedding download, in seconds.
+_EMBEDDING_FETCH_MIN_TIMEOUT_S = 300.0
+# Above the floor, the budget is the size cap divided by this rate (bytes/s).
+_EMBEDDING_FETCH_MIN_RATE = 64 * 1024
 
 
 def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
@@ -256,13 +257,19 @@ class MultimodalRequestProcessor:
         if self.is_url(path):
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
+            # One budget for the whole download: at least 300 s, and 800 s at
+            # the default 50 MiB cap.
+            timeout = max(
+                _EMBEDDING_FETCH_MIN_TIMEOUT_S,
+                self.max_file_size_bytes / _EMBEDDING_FETCH_MIN_RATE,
+            )
             try:
                 # The shared client checks self._url_policy on the URL and on
                 # each redirect hop, filters blocked addresses again when it
                 # connects, and stops reading past the size cap.
                 content = await fetch_bytes(
                     path,
-                    _EMBEDDING_FETCH_TIMEOUT_S,
+                    timeout,
                     policy=self._url_policy,
                     max_bytes=self.max_file_size_bytes,
                 )

@@ -952,6 +952,27 @@ async def test_embedding_url_to_a_public_address_loads(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_file_size_mb", "budget_s"),
+    # 300 s up to an 18.75 MiB cap. Above it, the cap at 64 KiB/s.
+    [(1, 300.0), (18, 300.0), (19, 304.0), (50, 800.0)],
+)
+async def test_embedding_fetch_budget_scales_with_the_size_cap(
+    monkeypatch, clean_egress_env, max_file_size_mb, budget_s
+) -> None:
+    body = safetensors_save({"mm_embeddings": _EMBEDDING})
+    client = _ScriptedClient({_PUBLIC_URL: (body, None)})
+    monkeypatch.setattr(dynamo_http, "_default", client)
+
+    await _embedding_processor(max_file_size_mb).load_tensor_from_path_or_url(
+        _PUBLIC_URL
+    )
+
+    cap = max_file_size_mb * 1024 * 1024
+    assert client.calls == [(_PUBLIC_URL, budget_s, cap)]
+
+
+@pytest.mark.asyncio
 async def test_embedding_redirect_to_a_public_address_is_followed(
     monkeypatch, clean_egress_env
 ) -> None:
