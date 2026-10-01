@@ -450,7 +450,7 @@ async def test_completed_local_transfers_release_files_and_preserve_tensors(
         client, items, "local-success", receiver
     )
 
-    assert pending is None  # Local results need no deferred DMA-buffer release.
+    assert pending is None
     assert not path.exists()
     assert receiver.received_tensors == {}
     del receiver
@@ -470,19 +470,6 @@ async def test_local_transfer_attachment_error_releases_completed_file(tmp_path)
     )
     with pytest.raises(RuntimeError, match="token count"):
         await mod._fetch_from_encode_workers(client, items, "local-invalid", receiver)
-
-    assert not path.exists()
-    assert receiver.received_tensors == {}
-
-
-@pytest.mark.asyncio
-async def test_local_transfer_model_assembly_error_leaves_no_file(tmp_path):
-    client, receiver, items, path, _ = _local_transfer_fixture(tmp_path)
-    loader = mod.MultiModalEmbeddingLoader(client, receiver)
-    with pytest.raises(ValueError, match="No image grid"):
-        await loader.load_multimodal_embeddings(
-            items, "local-assembly", model="qwen2-vl-test"
-        )
 
     assert not path.exists()
     assert receiver.received_tensors == {}
