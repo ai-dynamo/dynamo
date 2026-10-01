@@ -76,6 +76,10 @@ WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
 # wait means the engine is gone and provenance must not hold up teardown.
 ENGINE_PROBE_TIMEOUT_SECONDS = 30.0
 
+# Schema name of the sidecar the post-benchmark probe writes next to the
+# merged artifact; the rank and merged artifacts keep their startup engine block.
+WORKER_PROBE_SIDECAR_SCHEMA = "dynamo.fpm.benchmark_worker_probe"
+
 # (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
@@ -95,6 +99,12 @@ def _benchmark_merged_path(base_path: Path, dp_start: int) -> Path:
     stem, ext = os.path.splitext(str(base_path))
     rank_suffix = "" if dp_start == 0 else f"_dp{dp_start}"
     return Path(f"{stem}{rank_suffix}_merged{ext}")
+
+
+def _benchmark_worker_probe_path(merged_path: Path) -> Path:
+    """Sidecar next to the merged artifact that holds the post-run worker probe."""
+    stem, ext = os.path.splitext(str(merged_path))
+    return Path(f"{stem}_worker_probe{ext}")
 
 
 def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
@@ -861,6 +871,12 @@ def _merge_benchmark_rank_results(
     }
     merged["rank_files"] = [str(path) for _, path, _ in rank_data]
     merged["merged_output_path"] = str(merged_path)
+    if isinstance(merged.get("engine"), dict):
+        # The post-run worker probe (_attach_engine_resolved) writes its replies
+        # to a sidecar instead of rewriting the artifacts. Its path sits next to
+        # merged_output_path, outside the engine block, which stays free of
+        # per-run paths.
+        merged["worker_probe_path"] = str(_benchmark_worker_probe_path(merged_path))
     merged["results"] = flattened_results
     merged["iteration_groups"] = copy.deepcopy(reference_groups)
     if has_execution_evidence:
@@ -1216,6 +1232,73 @@ def _apply_engine_resolved(
     attention["resolution"] = "worker_probe_mixed" if len(names) > 1 else resolution
 
 
+def _engine_probe_view(engine: dict) -> dict:
+    """The fields ``_apply_engine_resolved`` sets on one ``engine`` block."""
+    view = {
+        field: engine.get(field)
+        for field in ("resolved", "resolved_scope", "resolution", "worker_probe")
+    }
+    attention = engine.get("attention")
+    if isinstance(attention, dict):
+        view["attention"] = {
+            field: attention.get(field)
+            for field in (
+                "backend_resolved",
+                "mla_prefill_backend_resolved",
+                "resolution",
+            )
+        }
+    return view
+
+
+def _worker_probe_sidecar(
+    merged: dict, responses: list[dict], failure: str | None
+) -> dict:
+    """Probe evidence for the merged artifact and for each contributing rank.
+
+    A rank's view is what ``_apply_engine_resolved`` would record for that
+    rank, built without reading its artifact. The merge verified that the
+    non-degraded ranks' startup ``engine`` blocks match except for the DP
+    rank, so the merged block with that rank's DP rank stands in for each of
+    them. A rank listed in ``engine.capture_errors`` uses the merged block's
+    TP/PP/PCP sizes, which every DP rank of one launcher shares; the
+    per-reply topology check rejects replies that contradict them. A rank's
+    view never claims another DP rank's observation.
+    """
+    engine = merged["engine"]
+    parallel = engine.get("parallel")
+    source_ranks = (merged.get("dp") or {}).get("source_ranks") or []
+    ranks: dict[str, dict] = {}
+    for dp_rank, rank_file in zip(source_ranks, merged.get("rank_files") or []):
+        rank_engine: dict = {
+            "parallel": {
+                **(parallel if isinstance(parallel, dict) else {}),
+                "data_parallel_rank": dp_rank,
+            }
+        }
+        if isinstance(engine.get("attention"), dict):
+            rank_engine["attention"] = {}
+        # "ranks" keeps the DP filter on this rank even if dp_rank is not an int.
+        _apply_engine_resolved(
+            {"engine": rank_engine, "dp": {"rank": dp_rank, "ranks": [dp_rank]}},
+            responses,
+            failure,
+        )
+        ranks[str(dp_rank)] = {
+            "rank_file": rank_file,
+            **_engine_probe_view(rank_engine),
+        }
+    return {
+        "schema": WORKER_PROBE_SIDECAR_SCHEMA,
+        "schema_version": 1,
+        "run_id": merged.get("run_id"),
+        "merged_output_path": merged.get("merged_output_path"),
+        "rank_files": list(merged.get("rank_files") or []),
+        "merged": _engine_probe_view(engine),
+        "ranks": ranks,
+    }
+
+
 def _warn_provenance_write_failed(path: object) -> None:
     logger.warning("Could not record engine provenance in %s", path, exc_info=True)
 
@@ -1224,29 +1307,31 @@ async def _attach_engine_resolved(merged: dict, engine_client: AsyncLLM) -> None
     """Keep all answers to one bounded, post-collection worker probe.
 
     The RPC may cover only one DP engine. Missing workers are unobserved,
-    never inferred from another worker's configuration. Probe/write errors
-    must not discard the valid measurements already on disk.
+    never inferred from another worker's configuration. The answers update
+    the in-memory merged document (served by ``get_perf_metrics``) and are
+    written to one sidecar next to the merged artifact; the rank and merged
+    artifacts on disk are neither read nor rewritten. Probe, sidecar, and
+    recording errors are logged, never raised: they must not discard the
+    valid measurements already on disk or keep the launcher from restoring
+    the workers.
     """
     if not isinstance(merged.get("engine"), dict):
         return
 
-    def write_all(responses: list[dict], failure: str | None) -> None:
+    def record(responses: list[dict], failure: str | None) -> None:
         _apply_engine_resolved(merged, responses, failure)
-        for rank_file in merged.get("rank_files") or []:
-            try:
-                rank_path = Path(rank_file)
-                with open(rank_path) as f:
-                    rank_document = json.load(f)
-                _apply_engine_resolved(rank_document, responses, failure)
-                _write_json_atomic(rank_path, rank_document)
-            except Exception:
-                _warn_provenance_write_failed(rank_file)
         merged_output_path = merged.get("merged_output_path")
-        if merged_output_path:
-            try:
-                _write_json_atomic(Path(merged_output_path), merged)
-            except Exception:
-                _warn_provenance_write_failed(merged_output_path)
+        if not merged_output_path:
+            return
+        sidecar_path: Path | None = None
+        try:
+            sidecar_path = _benchmark_worker_probe_path(Path(merged_output_path))
+            _write_json_atomic(
+                sidecar_path, _worker_probe_sidecar(merged, responses, failure)
+            )
+        except Exception:
+            # Name the sidecar once its path is known, else the value that broke it.
+            _warn_provenance_write_failed(sidecar_path or merged_output_path)
 
     try:
         results = await asyncio.wait_for(
@@ -1259,14 +1344,20 @@ async def _attach_engine_resolved(merged: dict, engine_client: AsyncLLM) -> None
         failure = None
         if not responses or all(entry["issues"] for entry in responses):
             failure = "probe_failed: no valid worker probe responses"
-        write_all(responses, failure)
+        record(responses, failure)
     except Exception as error:
         # A bare TimeoutError's str() is empty, and it is the single most
         # likely production failure (a dead or wedged engine) -- the
         # exception type name keeps the recorded reason from being useless.
         resolution = f"probe_failed: {type(error).__name__}: {error}"
         logger.warning("Engine provenance probe failed: %s", resolution, exc_info=True)
-        write_all([], resolution)
+        try:
+            record([], resolution)
+        except Exception:
+            # Best effort: the launcher must still get to restore the workers.
+            logger.warning(
+                "Could not record the engine provenance probe failure", exc_info=True
+            )
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
@@ -1281,10 +1372,13 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     dp_ranks = list(range(dp_start, dp_start + dp_size))
     rank_paths = [_benchmark_rank_path(base_path, dp_rank) for dp_rank in dp_ranks]
     merged_path = _benchmark_merged_path(base_path, dp_start)
-    try:
-        merged_path.unlink()
-    except FileNotFoundError:
-        pass
+    # The merged artifact written below names the probe sidecar's path, so a
+    # sidecar left by an earlier run must not survive to pass for this run's.
+    for stale_path in (merged_path, _benchmark_worker_probe_path(merged_path)):
+        try:
+            stale_path.unlink()
+        except FileNotFoundError:
+            pass
 
     logger.info(
         "Waiting for benchmark to complete (files: %s, timeout: %ds)...",

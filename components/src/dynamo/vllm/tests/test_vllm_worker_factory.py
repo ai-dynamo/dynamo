@@ -23,6 +23,7 @@ from dynamo.vllm.worker_factory import (
     _attach_engine_resolved,
     _await_benchmark_then_restore_workers,
     _benchmark_engine_identity,
+    _benchmark_worker_probe_path,
     _DecodeWorkerLifecycle,
     _make_engine_probe,
     _merge_benchmark_rank_results,
@@ -2112,8 +2113,8 @@ def test_merge_carries_engine_provenance_missing_on_one_rank_only(tmp_path, capl
 
 
 def test_merge_ignores_probe_filled_engine_fields(tmp_path):
-    """resolved/resolution are written after the merge by the worker probe;
-    a rank that already carries one must not fail the merge."""
+    """Rank artifacts rewritten by earlier builds carry probe fields; they
+    must not fail the merge."""
     probed = _engine_block(1)
     probed["resolved"] = {"attention_backends": {"layer.0": "FLASHINFER_MLA"}}
     probed["resolution"] = "worker_probe"
@@ -2746,10 +2747,15 @@ def _merged_with_engine(
         rank_files.append(str(path))
     merged_path = tmp_path / "merged.json"
     merged = {
+        "run_id": "run-1",
         "engine": _engine_block(0),
         "rank_files": rank_files,
         "merged_output_path": str(merged_path),
-        "dp": {"ranks": list(range(rank_count)), "global_size": rank_count},
+        "dp": {
+            "ranks": list(range(rank_count)),
+            "source_ranks": list(range(rank_count)),
+            "global_size": rank_count,
+        },
     }
     merged["engine"]["parallel"]["data_parallel_rank"] = None
     merged["engine"]["parallel"].update(
@@ -2757,8 +2763,19 @@ def _merged_with_engine(
         pipeline_parallel_size=pipeline_parallel_size,
         prefill_context_parallel_size=prefill_context_parallel_size,
     )
+    merged["worker_probe_path"] = str(_benchmark_worker_probe_path(merged_path))
     merged_path.write_text(json.dumps(merged))
     return merged
+
+
+def _read_probe_sidecar(tmp_path) -> dict:
+    return json.loads((tmp_path / "merged_worker_probe.json").read_text())
+
+
+def _worker_factory_warnings(caplog) -> list[logging.LogRecord]:
+    """WARNING records of the launcher's own logger, oldest first."""
+    launcher = [r for r in caplog.records if r.name == "dynamo.vllm.worker_factory"]
+    return [r for r in launcher if r.levelno >= logging.WARNING]
 
 
 class _ExplodingAttentionLayer:
@@ -2915,7 +2932,7 @@ def _worker_probe_response(
     }
 
 
-def test_attach_engine_resolved_updates_merged_and_rank_files(tmp_path):
+def test_attach_engine_resolved_updates_merged_in_memory_and_probe_sidecar(tmp_path):
     merged = _merged_with_engine(tmp_path, rank_count=2)
     # Worker ranks are local to their DP engines, not globally unique.
     replies = [_worker_probe_response(dp_rank=rank) for rank in (0, 1)]
@@ -2928,6 +2945,7 @@ def test_attach_engine_resolved_updates_merged_and_rank_files(tmp_path):
         engine_client.collective_rpc.call_args.kwargs["timeout"]
         == ENGINE_PROBE_TIMEOUT_SECONDS
     )
+    # The in-memory document is what get_perf_metrics serves.
     assert merged["engine"]["resolved"] == replies[0]
     assert merged["engine"]["resolved_scope"] == "representative_worker"
     assert merged["engine"]["resolution"] == "worker_probe"
@@ -2937,18 +2955,28 @@ def test_attach_engine_resolved_updates_merged_and_rank_files(tmp_path):
         == "TrtllmRaggedMLAPrefill"
     )
     assert merged["engine"]["attention"]["resolution"] == "worker_probe"
-    on_disk = json.loads((tmp_path / "merged.json").read_text())
-    assert on_disk["engine"]["resolved"] == replies[0]
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["merged"]["resolved"] == replies[0]
+    assert sidecar["merged"]["resolved_scope"] == "representative_worker"
+    assert sidecar["merged"]["resolution"] == "worker_probe"
+    assert sidecar["merged"]["attention"] == {
+        "backend_resolved": "FLASHINFER_MLA",
+        "mla_prefill_backend_resolved": "TrtllmRaggedMLAPrefill",
+        "resolution": "worker_probe",
+    }
     assert [
-        entry["response"] for entry in on_disk["engine"]["worker_probe"]["responses"]
+        entry["response"] for entry in sidecar["merged"]["worker_probe"]["responses"]
     ] == replies
-    assert on_disk["engine"]["worker_probe"]["coverage"]["complete"] is True
+    assert sidecar["merged"]["worker_probe"]["coverage"]["complete"] is True
     for dp_rank in (0, 1):
+        view = sidecar["ranks"][str(dp_rank)]
+        assert view["rank_file"] == str(tmp_path / f"rank{dp_rank}.json")
+        assert view["resolved"] == replies[dp_rank]
+        assert view["resolution"] == "worker_probe"
+        assert view["worker_probe"]["coverage"]["expected_dp_ranks"] == [dp_rank]
+        # The artifact itself keeps its startup placeholders.
         rank_doc = json.loads((tmp_path / f"rank{dp_rank}.json").read_text())
-        assert rank_doc["engine"]["resolved"] == replies[dp_rank]
-        assert rank_doc["engine"]["resolution"] == "worker_probe"
-        # The rank's own provenance is untouched.
-        assert rank_doc["engine"]["parallel"]["data_parallel_rank"] == dp_rank
+        assert rank_doc["engine"]["resolution"] == "pending_worker_probe"
 
 
 def test_attach_engine_resolved_marks_mixed_backends(tmp_path):
@@ -2990,11 +3018,13 @@ def test_attach_engine_probe_does_not_copy_local_rpc_response_to_remote_rank(tmp
     assert coverage["expected_dp_ranks"] == [0, 1]
     assert coverage["missing_dp_ranks"] == [0]
     assert coverage["complete"] is False
-    unobserved = json.loads((tmp_path / "rank0.json").read_text())["engine"]
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["merged"]["resolution"] == "worker_probe_partial"
+    unobserved = sidecar["ranks"]["0"]
     assert unobserved["resolved"] is None
     assert unobserved["resolution"] == "worker_probe_unobserved"
     assert unobserved["attention"]["backend_resolved"] is None
-    observed = json.loads((tmp_path / "rank1.json").read_text())["engine"]
+    observed = sidecar["ranks"]["1"]
     assert observed["resolved"] == reply
     assert observed["resolution"] == "worker_probe"
 
@@ -3020,8 +3050,9 @@ def test_attach_engine_probe_reports_disagreements_without_losing_replies(tmp_pa
         "cudagraph_capture_sizes_resolved",
     ]
     assert engine["attention"]["backend_resolved"] is None
+    sidecar = _read_probe_sidecar(tmp_path)
     for rank, response in enumerate(replies):
-        local = json.loads((tmp_path / f"rank{rank}.json").read_text())["engine"]
+        local = sidecar["ranks"][str(rank)]
         assert local["resolved"] == response
         assert (
             local["attention"]["backend_resolved"]
@@ -3075,10 +3106,7 @@ def test_attach_engine_probe_counts_pcp_workers_and_preserves_pp_layer_sets(
 
     expected_workers = 2 * pp_size
     complete = response_count == expected_workers
-    for engine in (
-        merged["engine"],
-        json.loads((tmp_path / "rank0.json").read_text())["engine"],
-    ):
+    for engine in (merged["engine"], _read_probe_sidecar(tmp_path)["ranks"]["0"]):
         snapshot = engine["worker_probe"]
         assert snapshot["coverage"]["expected_workers_per_dp"] == expected_workers
         assert snapshot["coverage"]["complete"] is complete
@@ -3131,7 +3159,7 @@ def test_attach_engine_probe_keeps_good_reply_when_another_is_malformed(
     assert snapshot["responses"][0]["issues"]
     assert snapshot["responses"][1]["response"] == good
     assert snapshot["coverage"]["complete"] is False
-    assert json.loads((tmp_path / "merged.json").read_text())["engine"] == engine
+    assert _read_probe_sidecar(tmp_path)["merged"]["worker_probe"] == snapshot
 
 
 def test_attach_engine_probe_marks_duplicate_identities_instead_of_counting_them(
@@ -3214,8 +3242,12 @@ def test_attach_engine_resolved_records_probe_failure(tmp_path):
     assert merged["engine"]["resolved"] is None
     assert merged["engine"]["resolution"] == "probe_failed: RuntimeError: worker died"
     assert merged["engine"]["attention"]["backend_resolved"] is None
-    rank_doc = json.loads((tmp_path / "rank0.json").read_text())
-    assert rank_doc["engine"]["resolution"] == "probe_failed: RuntimeError: worker died"
+    sidecar = _read_probe_sidecar(tmp_path)
+    for view in (sidecar["merged"], sidecar["ranks"]["0"]):
+        assert view["resolved"] is None
+        assert view["resolution"] == "probe_failed: RuntimeError: worker died"
+        assert view["worker_probe"]["responses"] == []
+        assert view["worker_probe"]["error"] == view["resolution"]
 
 
 def test_attach_engine_resolved_handles_an_empty_rpc_result(tmp_path):
@@ -3270,10 +3302,9 @@ def test_attach_engine_resolved_survives_a_malformed_dict_shaped_result(tmp_path
         in merged["engine"]["worker_probe"]["responses"][0]["issues"]
     )
     assert merged["engine"]["attention"]["backend_resolved"] is None
-    on_disk = json.loads((tmp_path / "merged.json").read_text())
-    assert on_disk["engine"]["resolution"] == merged["engine"]["resolution"]
-    rank_doc = json.loads((tmp_path / "rank0.json").read_text())
-    assert rank_doc["engine"]["resolution"] == merged["engine"]["resolution"]
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["merged"]["resolution"] == merged["engine"]["resolution"]
+    assert sidecar["ranks"]["0"]["resolution"] == merged["engine"]["resolution"]
 
 
 @pytest.mark.timeout(5)
@@ -3299,50 +3330,31 @@ def test_attach_engine_resolved_records_the_exception_type_on_a_timeout(
     assert merged["engine"]["resolution"] == "probe_failed: TimeoutError: "
 
 
-def test_attach_engine_resolved_preserves_non_engine_rank_file_content(tmp_path):
-    """Only the ``engine`` block changes; everything else in a rank file --
-    results, timing, coverage, key order, exact floats -- must round-trip
-    the rewrite unchanged."""
-    rank_path = tmp_path / "rank0.json"
-    original = {
-        "schema_version": 2,
-        "artifact_type": "rank",
-        "engine": _engine_block(0),
-        "results": [
-            {
-                "point": {"benchmark_id": 1, "point_type": "prefill"},
-                "fpms": [{"counter_id": 1, "wall_time": 0.123456789012345}],
-            }
-        ],
-        "timing": {"benchmark_elapsed_seconds": 12.5},
-        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
-    }
-    rank_path.write_text(json.dumps(original))
-    merged_path = tmp_path / "merged.json"
-    merged = {
-        "engine": _engine_block(0),
-        "rank_files": [str(rank_path)],
-        "merged_output_path": str(merged_path),
-    }
-    merged_path.write_text(json.dumps(merged))
-    engine_client = SimpleNamespace(
-        collective_rpc=AsyncMock(
-            return_value=[
-                {
-                    **_worker_probe_response(),
-                    "attention_backends": {"layer.0": "FLASH_ATTN"},
-                    "mla_prefill_backend": None,
-                }
-            ]
-        )
-    )
+def test_engine_probe_sidecar_is_the_only_file_the_probe_writes(tmp_path):
+    """The probe must leave the measured artifacts alone: the rank and merged
+    files stay byte-identical, and the sidecar is the one new file."""
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    replies = [_worker_probe_response(dp_rank=rank) for rank in (0, 1)]
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
 
     asyncio.run(_attach_engine_resolved(merged, engine_client))
 
-    rewritten = json.loads(rank_path.read_text())
-    assert rewritten["engine"]["resolution"] == "worker_probe_partial"
-    for key in ("schema_version", "artifact_type", "results", "timing", "coverage"):
-        assert rewritten[key] == original[key]
+    after = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    assert sorted(after) == sorted([*before, "merged_worker_probe.json"])
+    for name, content in before.items():
+        assert after[name] == content, name
+    sidecar = json.loads(after["merged_worker_probe.json"])
+    assert sidecar["schema"] == "dynamo.fpm.benchmark_worker_probe"
+    assert sidecar["schema_version"] == 1
+    assert sidecar["run_id"] == "run-1"
+    assert sidecar["merged_output_path"] == str(tmp_path / "merged.json")
+    assert sidecar["rank_files"] == [
+        str(tmp_path / "rank0.json"),
+        str(tmp_path / "rank1.json"),
+    ]
+    assert sorted(sidecar["ranks"]) == ["0", "1"]
+    assert merged["worker_probe_path"] == str(tmp_path / "merged_worker_probe.json")
 
 
 def test_attach_engine_resolved_is_a_noop_without_an_engine_block():
@@ -3378,3 +3390,225 @@ def test_benchmark_wait_probes_the_engine_before_restoring_workers(monkeypatch):
 
     assert results == {"status": "complete"}
     assert calls == ["wait", "probe", "stop"]
+
+
+def test_engine_probe_sidecar_does_not_read_the_artifacts(tmp_path, caplog):
+    """Per-rank views come from the merged document in memory: the probe
+    works, and recreates nothing, even when every artifact is gone."""
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    for name in ("rank0.json", "rank1.json", "merged.json"):
+        (tmp_path / name).unlink()
+    replies = [_worker_probe_response(dp_rank=rank) for rank in (0, 1)]
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert [path.name for path in tmp_path.iterdir()] == ["merged_worker_probe.json"]
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["ranks"]["1"]["resolved"] == replies[1]
+    assert "Could not record engine provenance" not in caplog.text
+
+
+def test_engine_probe_sidecar_write_failure_is_logged_not_raised(
+    tmp_path, monkeypatch, caplog
+):
+    merged = _merged_with_engine(tmp_path)
+
+    def refuse(path, data):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr("dynamo.vllm.worker_factory._write_json_atomic", refuse)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(return_value=[_worker_probe_response()])
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    # The served in-memory document still carries the probe result.
+    assert merged["engine"]["resolution"] == "worker_probe"
+    assert not (tmp_path / "merged_worker_probe.json").exists()
+    warning = next(
+        record
+        for record in caplog.records
+        if "Could not record engine provenance" in record.getMessage()
+    )
+    assert warning.levelno == logging.WARNING
+    assert warning.exc_info is not None
+    assert "merged_worker_probe.json" in warning.getMessage()
+
+
+def test_engine_probe_sidecar_path_failure_is_logged_not_raised(tmp_path, caplog):
+    """A ``merged_output_path`` that is not a path costs only the sidecar:
+    nothing escapes into the launcher, which still has to restore the
+    workers (``_await_benchmark_then_restore_workers``)."""
+    merged = _merged_with_engine(tmp_path)
+    merged["merged_output_path"] = 12345  # truthy, but not a path
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(return_value=[_worker_probe_response()])
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    assert merged["engine"]["resolution"] == "worker_probe"
+    (warning,) = _worker_factory_warnings(caplog)
+    assert warning.exc_info is not None
+    assert "Could not record engine provenance" in warning.getMessage()
+    assert "12345" in warning.getMessage()
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "merged.json",
+        "rank0.json",
+    ]
+
+
+def test_engine_probe_sidecar_path_failure_is_logged_not_raised_after_a_probe_failure(
+    tmp_path, caplog
+):
+    merged = _merged_with_engine(tmp_path)
+    merged["merged_output_path"] = 12345  # truthy, but not a path
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(side_effect=RuntimeError("worker died"))
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    assert merged["engine"]["resolution"] == "probe_failed: RuntimeError: worker died"
+    probe_failed, not_recorded = (
+        record.getMessage() for record in _worker_factory_warnings(caplog)
+    )
+    assert "Engine provenance probe failed" in probe_failed
+    assert "Could not record engine provenance" in not_recorded
+    assert "12345" in not_recorded
+
+
+def test_attach_engine_resolved_never_raises_when_recording_the_failure_fails(
+    tmp_path, caplog
+):
+    """Whatever breaks while the probe result is recorded, the failure is
+    logged and the launcher still gets to restore the workers."""
+    merged = _merged_with_engine(tmp_path)
+    merged["engine"]["parallel"] = "not-a-mapping"  # _apply_engine_resolved raises
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(return_value=[_worker_probe_response()])
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    probe_failed, not_recorded = (
+        record.getMessage() for record in _worker_factory_warnings(caplog)
+    )
+    assert "Engine provenance probe failed" in probe_failed
+    assert "Could not record the engine provenance probe failure" in not_recorded
+    assert not (tmp_path / "merged_worker_probe.json").exists()
+
+
+def test_engine_probe_sidecar_view_never_claims_another_dp_ranks_replies(tmp_path):
+    """A rank view stays scoped to its own DP rank even for a rank label the
+    probe cannot compare: it observes nothing, instead of losing the filter
+    and adopting every DP rank's replies."""
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    merged["dp"]["source_ranks"] = [0, None]
+    replies = [_worker_probe_response(dp_rank=rank) for rank in (0, 1)]
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    sidecar = _read_probe_sidecar(tmp_path)
+    assert sidecar["ranks"]["0"]["resolved"] == replies[0]
+    unlabelled = sidecar["ranks"]["None"]
+    assert unlabelled["resolved"] is None
+    assert unlabelled["resolution"] == "worker_probe_unobserved"
+    assert unlabelled["worker_probe"]["coverage"]["observed_workers"] == []
+
+
+def test_engine_probe_sidecar_path_is_a_top_level_merged_field(tmp_path):
+    payloads = [_engine_rank_payload(rank, _engine_block(rank)) for rank in (0, 1)]
+    merged_path = tmp_path / "bench_merged.json"
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", payload)
+            for rank, payload in enumerate(payloads)
+        ],
+        merged_path,
+    )
+
+    sidecar_path = tmp_path / "bench_merged_worker_probe.json"
+    assert _benchmark_worker_probe_path(merged_path) == sidecar_path
+    # Path bookkeeping sits next to merged_output_path, never in the engine block.
+    assert merged["merged_output_path"] == str(merged_path)
+    assert merged["worker_probe_path"] == str(sidecar_path)
+    expected_engine = copy.deepcopy(payloads[0]["engine"])
+    expected_engine["parallel"]["data_parallel_rank"] = None
+    assert merged["engine"] == expected_engine
+    # Rank documents never carry it either, so the cross-rank identity check
+    # (which just passed for these two ranks) cannot see it.
+    assert all("worker_probe_path" not in payload for payload in payloads)
+    assert all("worker_probe_path" not in payload["engine"] for payload in payloads)
+
+
+@pytest.mark.parametrize(
+    "rank_engines, pointer_expected",
+    [
+        pytest.param(
+            [{"capture_error": "boom"}, _engine_block(1)],
+            True,
+            id="reference_degraded_and_reseeded",
+        ),
+        pytest.param([{"capture_error": "boom"}, None], True, id="every_rank_degraded"),
+        pytest.param([None, None], False, id="no_engine_block"),
+    ],
+)
+def test_engine_probe_sidecar_path_follows_the_merged_engine_block(
+    tmp_path, rank_engines, pointer_expected
+):
+    """The pointer exists exactly when a probe sidecar can be written: the
+    merged document has an ``engine`` block, degraded or not."""
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", _engine_rank_payload(rank, engine))
+            for rank, engine in enumerate(rank_engines)
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert isinstance(merged.get("engine"), dict) is pointer_expected
+    assert ("worker_probe_path" in merged) is pointer_expected
+    if pointer_expected:
+        assert merged["worker_probe_path"] == str(tmp_path / "merged_worker_probe.json")
+        assert "worker_probe_path" not in merged["engine"]
+
+
+def test_engine_probe_sidecar_pointer_is_written_and_a_stale_sidecar_removed(
+    monkeypatch, tmp_path
+):
+    from dynamo.vllm.instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH
+
+    monkeypatch.delenv(ENV_FPM_BENCHMARK_OUTPUT_PATH, raising=False)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    output_path = tmp_path / "benchmark.json"
+    payload = _single_rank_benchmark_payload()
+    payload["engine"] = _engine_block(0)
+    output_path.write_text(json.dumps(payload))
+    sidecar_path = tmp_path / "benchmark_merged_worker_probe.json"
+    sidecar_path.write_text(json.dumps({"run_id": "an-earlier-run"}))
+
+    merged = asyncio.run(
+        _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+    )
+
+    on_disk = json.loads((tmp_path / "benchmark_merged.json").read_text())
+    assert on_disk["worker_probe_path"] == str(sidecar_path)
+    assert merged["worker_probe_path"] == str(sidecar_path)
+    assert "worker_probe_path" not in on_disk["engine"]
+    # This run's probe has not run yet; an earlier run's sidecar is gone.
+    assert not sidecar_path.exists()
+    assert on_disk["engine"]["resolution"] == "pending_worker_probe"

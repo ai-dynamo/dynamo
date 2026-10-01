@@ -227,7 +227,8 @@ def _bench_engine_attention(attention_config: Any, hf_config: Any) -> dict[str, 
 
     Only *requested* values exist here: vLLM resolves the attention backend
     inside the model workers and never writes it back into the config, so the
-    ``*_resolved`` fields stay None until the worker probe fills them.
+    ``*_resolved`` fields stay None in the artifact; the launcher's worker
+    probe records the resolved values in a sidecar file instead.
     """
     indexer = {
         name: _json_safe(getattr(hf_config, name, None))
@@ -3008,9 +3009,10 @@ class InstrumentedScheduler(AsyncScheduler):
             )
 
         # Engine provenance: one snapshot of what this engine was configured
-        # with. Worker-resolved facts (engine["resolved"]) are filled in
-        # later, out of process, by the launcher's one-shot worker probe:
-        # worker_factory._attach_engine_resolved.
+        # with. Worker-resolved facts are recorded later, out of process, by
+        # the launcher's one-shot worker probe in a sidecar next to the merged
+        # artifact (worker_factory._attach_engine_resolved); this block keeps
+        # its placeholders.
         self._bench_engine = _bench_capture_engine(
             vllm_config,
             getattr(self, "kv_cache_config", None),
