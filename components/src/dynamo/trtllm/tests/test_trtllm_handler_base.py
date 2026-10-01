@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from dynamo.llm.exceptions import InvalidArgument
+
 if not torch.cuda.is_available():
     pytest.skip(
         "Skipping to avoid errors during collection with '-m gpu_0'. "
@@ -209,6 +211,31 @@ class TestOverrideSamplingParams:
             HandlerBase._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
+
+
+class TestNormalizeRequestFormat:
+    def test_moves_openai_stop_fields_without_overwriting_internal_values(self):
+        request = {
+            "max_tokens": 64,
+            "min_tokens": 32,
+            "ignore_eos": True,
+            "temperature": 0.5,
+            "stop_conditions": {"min_tokens": 16},
+            "sampling_options": {"temperature": 0.25},
+        }
+
+        HandlerBase._normalize_request_format(request)
+
+        assert request["stop_conditions"] == {
+            "max_tokens": 64,
+            "min_tokens": 16,
+            "ignore_eos": True,
+        }
+        assert "max_tokens" not in request
+        assert "min_tokens" not in request
+        assert "ignore_eos" not in request
+        assert request["sampling_options"] == {"temperature": 0.25}
+        assert "temperature" not in request
 
 
 class TestGuidedDecodingFromToolChoice:
@@ -572,7 +599,9 @@ class TestMultimodalGuard:
         handler = self._make_handler(multimodal_processor=None)
         request = request_factory(self.IMAGE_MESSAGE)
 
-        with pytest.raises(RuntimeError, match="--modality multimodal"):
+        # InvalidArgument, not RuntimeError: the type is what makes the
+        # frontend answer 4xx instead of 500.
+        with pytest.raises(InvalidArgument, match="--modality multimodal"):
             await self._prepare(handler, request)
 
     @pytest.mark.asyncio

@@ -37,7 +37,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
             readOnly: true
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     replicas: 4
     podTemplate:
@@ -155,7 +155,7 @@ spec:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 3
     podTemplate:

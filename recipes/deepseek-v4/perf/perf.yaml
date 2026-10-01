@@ -118,7 +118,7 @@ spec:
         - name: REQUEST_TIMEOUT_SECONDS
           value: "1200"
         - name: AIPERF_VERSION
-          value: "0.10.0"
+          value: "0.12.0"
         - name: AIPERF_API_PORT
           value: "18090"
         - name: JOB_NAME

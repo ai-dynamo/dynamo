@@ -35,7 +35,7 @@ spec:
               port: 8000
             periodSeconds: 15
             failureThreshold: 200
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     replicas: 1
     podTemplate:
@@ -104,7 +104,7 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 16Gi
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 1
     podTemplate:
