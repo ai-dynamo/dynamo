@@ -137,6 +137,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// operator merges Dynamo defaults into main. An init container named "runtime"
 	// activates Dynamo sidecar mode: main runs the user-configured engine, and
 	// runtime receives Dynamo env, identity, system port, and probe defaults.
+	// Users must declare the runtime init container in this podTemplate; the
+	// operator merges defaults into it but does not create it.
 	// The runtime init container must have a non-empty image and restartPolicy: Always.
 	// This mode supports worker, prefill, and decode components only; multinode,
 	// enabled checkpoint, GPU memory service, and failover are not yet supported.
