@@ -27,6 +27,8 @@ pub struct PocRouterConfig {
     listen: SocketAddr,
     freshness: FreshnessConfig,
     overlap_max_age_ms: u64,
+    #[serde(default)]
+    kv_aware_token_id_completions: bool,
     pools: Vec<PoolConfig>,
 }
 
@@ -115,7 +117,14 @@ impl PocRouterConfig {
             sources,
             Duration::from_millis(self.overlap_max_age_ms),
         )?);
-        Ok((self.listen, GlobalRouterService::new(view, freshness)?))
+        Ok((
+            self.listen,
+            GlobalRouterService::new_with_kv_token_id_completions(
+                view,
+                freshness,
+                self.kv_aware_token_id_completions,
+            )?,
+        ))
     }
 }
 

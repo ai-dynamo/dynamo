@@ -15,16 +15,19 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use dynamo_kv_router::global_view::overlap::KvOverlapScorer;
 use dynamo_kv_router::global_view::selection::LoadPoolSelector;
 use dynamo_kv_router::global_view::state::{FreshnessPolicy, PoolStateRepository};
 use serde_json::{Value, json};
 
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const MAX_OVERLAP_TOKEN_IDS: usize = 32 * 1024;
 const ROUTER_HOP_HEADER: &str = "x-dynamo-global-router-hop";
 
 /// Load-based aggregated routing from a regional ingress to private Frontends.
 pub struct GlobalRouterHttp {
     selector: LoadPoolSelector,
+    overlap: Option<Arc<dyn KvOverlapScorer>>,
     client: reqwest::Client,
 }
 
@@ -33,12 +36,31 @@ impl GlobalRouterHttp {
         repository: Arc<dyn PoolStateRepository>,
         freshness: FreshnessPolicy,
     ) -> Result<Self, reqwest::Error> {
+        Self::new_with_optional_overlap(repository, freshness, None)
+    }
+
+    /// Enable the first KV experiment for single token-ID completion prompts.
+    /// All other request shapes continue to use the load policy.
+    pub fn new_with_overlap(
+        repository: Arc<dyn PoolStateRepository>,
+        freshness: FreshnessPolicy,
+        overlap: Arc<dyn KvOverlapScorer>,
+    ) -> Result<Self, reqwest::Error> {
+        Self::new_with_optional_overlap(repository, freshness, Some(overlap))
+    }
+
+    fn new_with_optional_overlap(
+        repository: Arc<dyn PoolStateRepository>,
+        freshness: FreshnessPolicy,
+        overlap: Option<Arc<dyn KvOverlapScorer>>,
+    ) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
             selector: LoadPoolSelector::new(repository, freshness),
+            overlap,
             client,
         })
     }
@@ -77,7 +99,17 @@ impl GlobalRouterHttp {
             Ok(elapsed) => u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "system clock is invalid"),
         };
-        let Some(decision) = self.selector.select(model, now_unix_ms) else {
+        let token_ids = (path == "/v1/completions")
+            .then(|| parsed.get("prompt").and_then(single_token_id_prompt))
+            .flatten();
+        let decision = match (self.overlap.as_ref(), token_ids.as_deref()) {
+            (Some(scorer), Some(token_ids)) => {
+                self.selector
+                    .select_with_overlap(model, token_ids, scorer.as_ref(), now_unix_ms)
+            }
+            _ => self.selector.select(model, now_unix_ms),
+        };
+        let Some(decision) = decision else {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "no ready pool serves the requested model",
@@ -97,6 +129,7 @@ impl GlobalRouterHttp {
             model,
             cost = decision.cost,
             basis = ?decision.basis,
+            matched_prefix_tokens = ?decision.matched_prefix_tokens,
             "forwarding to selected pool"
         );
         let mut request = self
@@ -159,6 +192,19 @@ async fn completions(
     router.forward("/v1/completions", headers, body).await
 }
 
+/// OpenAI completions can carry the exact token IDs that the Frontend serves.
+/// Text, batched, malformed, or oversized prompts use the existing load path.
+fn single_token_id_prompt(value: &Value) -> Option<Vec<u32>> {
+    let values = value.as_array()?;
+    if values.is_empty() || values.len() > MAX_OVERLAP_TOKEN_IDS {
+        return None;
+    }
+    values
+        .iter()
+        .map(|value| u32::try_from(value.as_u64()?).ok())
+        .collect()
+}
+
 /// Validate the configured local Frontend base URL before a request is sent.
 /// Private reachability is enforced by deployment networking, not by DNS text.
 pub(crate) fn parse_private_frontend_base(raw: &str) -> Option<reqwest::Url> {
@@ -183,7 +229,7 @@ fn error(status: StatusCode, message: &'static str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use super::*;
     use dynamo_kv_router::global_view::state::{
@@ -191,7 +237,7 @@ mod tests {
         PoolLocation, PoolRole, PoolSignalStatus, PoolState, PoolStateSink, ServingReadiness,
         SignalState, SignalStatus,
     };
-    use dynamo_kv_router::global_view::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
+    use dynamo_kv_router::global_view::{PoolId, PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 
     fn freshness() -> FreshnessPolicy {
         FreshnessPolicy {
@@ -374,6 +420,110 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "west");
+        task.abort();
+        ohio_task.abort();
+        west_task.abort();
+    }
+
+    struct FixedOverlap(HashMap<PoolId, u64>);
+
+    impl KvOverlapScorer for FixedOverlap {
+        fn estimate_matched_prefix_tokens(
+            &self,
+            pool_id: &PoolId,
+            _model: &str,
+            _token_ids: &[u32],
+        ) -> Option<u64> {
+            self.0.get(pool_id).copied()
+        }
+    }
+
+    #[tokio::test]
+    async fn token_id_completion_uses_kv_while_text_completion_uses_load() {
+        let ohio_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ohio_address = ohio_listener.local_addr().unwrap();
+        let ohio_task = tokio::spawn(async move {
+            axum::serve(
+                ohio_listener,
+                Router::new().route("/v1/completions", post(|| async { "ohio" })),
+            )
+            .await
+            .unwrap();
+        });
+        let west_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let west_address = west_listener.local_addr().unwrap();
+        let west_task = tokio::spawn(async move {
+            axum::serve(
+                west_listener,
+                Router::new().route("/v1/completions", post(|| async { "west" })),
+            )
+            .await
+            .unwrap();
+        });
+        let repo = repository(format!("http://{ohio_address}"));
+        let now = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let mut ohio = repo.list(now, &freshness()).pop().unwrap();
+        let mut west = ohio.clone();
+        west.pool_id = V1PoolIdDeriver.derive(&PoolKey::new("west", "dynamo", "mocker").unwrap());
+        west.descriptors.site_id = "west".into();
+        west.descriptors.location.region = "us-west-2".into();
+        west.descriptors.frontend_endpoint = Some(format!("http://{west_address}"));
+        let ohio_id = ohio.pool_id.clone();
+        let west_id = west.pool_id.clone();
+        for (pool, requests) in [(&mut ohio, 20), (&mut west, 0)] {
+            pool.load.request_plane.insert(
+                "model".into(),
+                ModelRequestLoad {
+                    pending_first_output_requests: Some(requests),
+                    output_generation_requests: Some(0),
+                    ..Default::default()
+                },
+            );
+            pool.signal_status.load = SignalStatus {
+                state: SignalState::Complete,
+                received_at_unix_ms: Some(now),
+                ..Default::default()
+            };
+            pool.signal_status.kv_overlap = SignalStatus {
+                state: SignalState::Complete,
+                received_at_unix_ms: Some(now),
+                ..Default::default()
+            };
+        }
+        repo.replace(ohio);
+        repo.replace(west);
+        let scorer: Arc<dyn KvOverlapScorer> =
+            Arc::new(FixedOverlap(HashMap::from([(ohio_id, 64), (west_id, 0)])));
+        let router =
+            Arc::new(GlobalRouterHttp::new_with_overlap(repo, freshness(), scorer).unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router.router()).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let kv_response = client
+            .post(format!("http://{address}/v1/completions"))
+            .body(r#"{"model":"model","prompt":[1,2,3,4]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(kv_response.status(), StatusCode::OK);
+        assert_eq!(kv_response.text().await.unwrap(), "ohio");
+        let text_response = client
+            .post(format!("http://{address}/v1/completions"))
+            .body(r#"{"model":"model","prompt":"hello"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(text_response.status(), StatusCode::OK);
+        assert_eq!(text_response.text().await.unwrap(), "west");
         task.abort();
         ohio_task.abort();
         west_task.abort();

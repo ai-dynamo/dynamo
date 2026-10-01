@@ -47,9 +47,25 @@ pub struct GlobalRouterService {
 
 impl GlobalRouterService {
     pub fn new(view: Arc<GlobalViewRuntime>, freshness: FreshnessPolicy) -> Result<Self> {
+        Self::new_with_kv_token_id_completions(view, freshness, false)
+    }
+
+    pub fn new_with_kv_token_id_completions(
+        view: Arc<GlobalViewRuntime>,
+        freshness: FreshnessPolicy,
+        enabled: bool,
+    ) -> Result<Self> {
         let forwarder = Arc::new(
-            GlobalRouterHttp::new(view.repository(), freshness)
-                .context("create private Frontend HTTP client")?,
+            if enabled {
+                GlobalRouterHttp::new_with_overlap(
+                    view.repository(),
+                    freshness,
+                    view.overlap_scorer(),
+                )
+            } else {
+                GlobalRouterHttp::new(view.repository(), freshness)
+            }
+            .context("create private Frontend HTTP client")?,
         );
         Ok(Self {
             view,
