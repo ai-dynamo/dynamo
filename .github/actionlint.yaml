@@ -14,4 +14,3 @@ paths:
 self-hosted-runner:
   labels:
     - prod-builder-v3
-    - prod-deploy-tester-v1
