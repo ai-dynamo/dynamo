@@ -230,8 +230,15 @@ SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 3 8083)
 # --enforce-eager. The V1 runner keeps vLLM's encoder-only vision tower (no full
 # model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
 # once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
+#
+# The encode worker serves `generate` without a health-check payload. With
+# canaries off (the default), its /health then falls back to a process status
+# that starts NotReady and is never set, so it answers 503 forever. The operator
+# sets DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS on every worker; mirror it here so
+# readiness follows the endpoint's registration.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
 DYN_SYSTEM_PORT=$SYSTEM_PORT_ENCODE \
+DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]' \
 VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \

@@ -58,12 +58,13 @@ def is_local_media_url(url: str) -> bool:
     return urlparse(url).scheme in LOCAL_MEDIA_SCHEMES
 
 
-def decode_data_uri(url: str) -> bytes:
+def decode_data_uri(url: str, max_bytes: int | None = None) -> bytes:
     """Decode a ``data:`` URI body to bytes.
 
     Only base64 payloads are accepted: a percent-encoded body would have to be
     re-encoded to bytes by guessing a charset, and media data URIs are base64
-    in practice.
+    in practice. ``max_bytes`` bounds the decoded size before anything is
+    decoded, as ``fetch_bytes`` bounds a download.
     """
     _, _, remainder = url.partition(":")
     meta, sep, payload = remainder.partition(",")
@@ -71,8 +72,29 @@ def decode_data_uri(url: str) -> bytes:
         raise UrlValidationError("Malformed data URI: missing ',' separator")
     if "base64" not in meta.split(";"):
         raise UrlValidationError("Unsupported data URI: expected base64 payload")
+    if max_bytes is not None:
+        # unquote() below copies its whole input, so a client can defeat the
+        # size guard just by percent-escaping a huge payload: the guard would
+        # only fire after that copy already ran. Percent-unescaping a string
+        # never grows it (each `%XY` triplet collapses to one byte), so the
+        # RAW payload length upper-bounds len(body) and therefore the decoded
+        # byte count -- reject on that bound first, len() is O(1). The "- 2"
+        # gives padding the same benefit of the doubt the exact check below
+        # gives it, so this can only reject what the exact check would also
+        # reject.
+        if len(payload) // 4 * 3 - 2 > max_bytes:
+            raise UrlValidationError(
+                f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
+            )
+    body = unquote(payload)
+    if max_bytes is not None:
+        padding = min(2, len(body) - len(body.rstrip("=")))
+        if len(body) // 4 * 3 - padding > max_bytes:
+            raise UrlValidationError(
+                f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
+            )
     try:
-        return base64.b64decode(unquote(payload), validate=True)
+        return base64.b64decode(body, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise UrlValidationError(f"Malformed base64 in data URI: {exc}") from exc
 

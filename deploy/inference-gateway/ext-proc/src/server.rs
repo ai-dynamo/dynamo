@@ -1774,6 +1774,14 @@ mod tests {
                 current: 8,
                 limit: 8,
             }),
+            KvSchedulerError::DeadlineExceeded,
+            KvSchedulerError::RequestClassifierPanicked("boom".to_string()),
+            KvSchedulerError::RequestClassifierFailed(std::sync::Arc::new(std::io::Error::other(
+                "boom",
+            ))),
+            KvSchedulerError::DuplicateClassificationRequestId("req".to_string()),
+            KvSchedulerError::InvalidClassificationMetadata("bad".to_string()),
+            KvSchedulerError::ClassificationLifecycleEnded("req".to_string()),
         ];
 
         for error in cases {

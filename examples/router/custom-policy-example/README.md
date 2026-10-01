@@ -20,7 +20,9 @@ policy crate -> catalog crate -> router-policy YAML -> frontend or EPP binary
 
 Dynamo owns discovery, eligibility, queueing, validation, reservations, accounting, and metrics. A policy sees only eligible workers and returns one candidate row.
 
-Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, Dynamo does not materialize the multiplier. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
+Declare `WorkerInputs::CACHE` to read cache data through `candidate.cache()` (filter/scorer) or `input.cache()` (picker); otherwise these return `None`. Each cache row includes worker overlaps, `has_tier_matches()`, and `shared_hits()`.
+
+Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, that component receives `None`, even if another component requested it. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
 
 ## Pick a Starting Point
 
@@ -31,7 +33,9 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
 
-The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
+The `simple-filter-score-pick` policy filters on minimum device overlap and scores active requests above the least-loaded worker. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
+
+Custom filters, scorers, and pickers can also read opaque agent headers through `session_context().agent_headers()`, without an additional `WorkerInputs` group. Header values are untrusted observations for the current request. A missing key means no observation was captured. The map preserves unknown names within supported header families and repeated values; plugins own any parsing and cross-agent normalization. See [Agent Harnesses](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/agents/agent-harnesses.mdx#agent-headers) for capture rules and limits.
 
 The [`soft-pin-repin` policy](soft-pin-repin/README.md) documents its load threshold, soft-binding behavior, and two-Mocker `A -> B -> B` walkthrough.
 

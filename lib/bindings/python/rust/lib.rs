@@ -40,9 +40,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-#[cfg(any(feature = "custom-policy", feature = "select-service"))]
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::{KvRouterConfig, plugins::RouterPlugins};
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -116,9 +116,6 @@ type PythonBidirectionalIngress = Ingress<
 >;
 
 static INIT: OnceCell<()> = OnceCell::new();
-
-#[cfg(feature = "custom-policy")]
-static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
@@ -354,7 +351,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::frontend_routes::PyFrontendExtensionContext>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
-    m.add_class::<llm::entrypoint::AicPerfConfig>()?;
+    m.add_class::<llm::entrypoint::AisPerfConfig>()?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::LoadThresholdConfig>()?;
@@ -411,48 +408,47 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-pub(crate) fn worker_selection_policy_factory(
-    config: &KvRouterConfig,
-) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+pub(crate) fn router_plugins(config: &KvRouterConfig) -> anyhow::Result<RouterPlugins> {
     #[cfg(feature = "custom-policy")]
     {
-        Ok(WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .map(|registry| registry.resolve(config))
-            .transpose()?
-            .flatten())
+        Ok(dynamo_llm::kv_router::plugins::router_plugin_registry().resolve_plugins(config)?)
     }
 
     #[cfg(not(feature = "custom-policy"))]
     {
         if let Some(instance) = config.selected_worker_selection_policy_instance()? {
             anyhow::bail!(
-                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked router plugin catalog; rebuild with --features custom-policy"
             );
         }
-        Ok(None)
+        if config.request_classifier_config()?.is_some() {
+            anyhow::bail!(
+                "request_classifier is configured, but no router plugin catalog is installed; rebuild with --features custom-policy"
+            );
+        }
+        Ok(dynamo_llm::kv_router::plugins::router_plugin_registry().resolve_plugins(config)?)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn builtin_default_does_not_require_custom_frontend() {
+    let config = KvRouterConfig::default();
+    let registry = dynamo_llm::kv_router::plugins::router_plugin_registry();
+    assert!(registry.resolve(&config).unwrap().is_some());
+    let plugins = router_plugins(&config).unwrap();
+    assert!(plugins.worker_selection().is_some());
+    assert!(!plugins.has_custom_plugins());
 }
 
 #[cfg(feature = "select-service")]
-pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
-    #[cfg(feature = "custom-policy")]
-    {
-        WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    #[cfg(not(feature = "custom-policy"))]
-    {
-        WorkerSelectionPolicyRegistry::default()
-    }
+pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry {
+    dynamo_llm::kv_router::plugins::router_plugin_registry()
 }
 
 #[cfg(feature = "custom-policy")]
-fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
     // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
     // type names fails here instead of silently overriding it.
     dynamo_custom_policy_builtin::register(&mut registry)
@@ -460,13 +456,11 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
-    // Embedded selection partitions resolve linked policies from the same registry.
-    dynamo_llm::kv_router::install_worker_selection_policy_registry(registry.clone());
-    WORKER_SELECTION_POLICY_REGISTRY
-        .set(registry)
-        .map_err(|_| {
-            PyRuntimeError::new_err("worker-selection policy registry already installed")
-        })?;
+    if !dynamo_llm::kv_router::plugins::install_router_plugin_registry(registry) {
+        return Err(PyRuntimeError::new_err(
+            "router plugin registry already installed",
+        ));
+    }
     register_core(m)
 }
 
@@ -474,7 +468,7 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
 #[cfg(feature = "custom-policy")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    register_core_with_custom_worker_selection_policy(m)
+    register_core_with_router_plugins(m)
 }
 
 /// The stock extension-module entrypoint.
@@ -611,7 +605,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, skip_model_assets=false))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -636,6 +630,7 @@ fn register_model<'p>(
     ignore_weights: bool,
     max_gpu_lora_count: Option<u32>,
     model_aliases: Option<Vec<String>>,
+    skip_model_assets: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -693,6 +688,7 @@ fn register_model<'p>(
 
     let is_tensor_based = model_type.inner.supports_tensor();
     let is_images = model_type.inner.supports_images();
+    let is_audios = model_type.inner.supports_audios();
     let is_videos = model_type.inner.supports_videos();
     let is_realtime = model_type.inner.supports_realtime();
 
@@ -785,14 +781,24 @@ fn register_model<'p>(
         cfg.validate_config()?;
     }
 
+    let lifecycle_role = match worker_type_unwrapped {
+        WorkerType::Prefill => rs::telemetry::LifecycleOperationRole::Prefill,
+        WorkerType::Decode => rs::telemetry::LifecycleOperationRole::Decode,
+        WorkerType::Encode => rs::telemetry::LifecycleOperationRole::Encode,
+        WorkerType::Aggregated => rs::telemetry::LifecycleOperationRole::Worker,
+    };
+    endpoint
+        .inner
+        .set_lifecycle_operation_role(lifecycle_role)
+        .map_err(to_pyerr)?;
+
     crate::future_into_py(py, async move {
         let runtime_config = runtime_config.unwrap_or_default();
 
-        // For TensorBased, Images, Videos, and Realtime models, skip
-        // HuggingFace downloads and register directly. These model types
-        // handle model loading internally; no tokenizer extraction is
-        // needed and the source path is not required to be a HF repo.
-        if is_tensor_based || is_images || is_videos || is_realtime {
+        // These model types handle model loading internally. External adapters can
+        // opt into the same minimal card without resolving local or HF assets.
+        // Ordinary audio registrations retain the builder's metadata and checksum.
+        if is_tensor_based || is_images || is_videos || is_realtime || skip_model_assets {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             // Preserve source_path for compatibility checks (LoRA vs base model).
@@ -813,13 +819,15 @@ fn register_model<'p>(
             card.worker_type = worker_type_value;
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
-            // Aliases are only honored on the LLM surfaces (their handlers
-            // canonicalize alias→primary); ignore them for these types.
-            if !model_aliases.is_empty() {
+            // The audio handler resolves aliases to the primary model name.
+            // Preserve the existing alias behavior for other minimal-card types.
+            if is_audios {
+                card.set_aliases(model_aliases);
+            } else if !model_aliases.is_empty() {
                 tracing::warn!(
                     model_name = %model_name,
                     "Ignoring served-model-name aliases: not supported for \
-                     tensor/images/videos/realtime models"
+                     non-audio minimal model cards"
                 );
             }
 
@@ -1470,15 +1478,9 @@ impl DistributedRuntime {
     /// Workers use this in their RL request-plane route descriptor so the
     /// frontend does not need to derive worker system URLs from static env vars.
     fn system_status_server_url(&self) -> Option<String> {
-        self.inner.system_status_server_info().map(|info| {
-            let socket_addr = info.socket_addr;
-            if socket_addr.ip().is_unspecified() {
-                let host = dynamo_runtime::utils::ip_resolver::local_ip_for_advertise();
-                format!("http://{host}:{}", socket_addr.port())
-            } else {
-                format!("http://{socket_addr}")
-            }
-        })
+        self.inner
+            .system_status_server_info()
+            .map(|info| format!("http://{}", info.advertised_socket_addr()))
     }
 
     /// Register an async Python callback for /engine/{route_name}
@@ -1903,7 +1905,7 @@ impl Client {
         let inner = self.router.client.clone();
         crate::future_into_py(py, async move {
             inner
-                .wait_for_instances()
+                .wait_for_routable_instances()
                 .await
                 .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)
@@ -1977,6 +1979,76 @@ impl Client {
                         matches.len(),
                     ))
                 })?
+            } else {
+                wait.await
+            }
+        })
+    }
+
+    /// Wait until at least `min_count` ready endpoint instances have MDC runtime_data
+    /// containing the requested JSON string value; returns their sorted worker ids.
+    #[pyo3(signature = (key, value, min_count, timeout_s=None))]
+    fn wait_for_instances_by_runtime_data<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: String,
+        min_count: usize,
+        timeout_s: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        if min_count == 0 {
+            return Err(PyValueError::new_err("min_count must be positive"));
+        }
+        let endpoint = self.endpoint.clone();
+        crate::future_into_py(py, async move {
+            // Scope the discovery watcher to this lookup so every exit path stops it.
+            let lifecycle = endpoint.drt().primary_token().child_token();
+            let _guard = lifecycle.clone().drop_guard();
+            let mut last_matches: Vec<u64> = Vec::new();
+            let wait = async {
+                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint, lifecycle.clone())
+                    .await
+                    .map_err(to_pyerr)?;
+
+                loop {
+                    let mut matches: Vec<u64> = rx
+                        .borrow_and_update()
+                        .iter()
+                        .filter_map(|(worker_id, runtime_config)| {
+                            let matched = runtime_config
+                                .runtime_data
+                                .get(&key)
+                                .and_then(|value| value.as_str())
+                                == Some(value.as_str());
+                            matched.then_some(*worker_id)
+                        })
+                        .collect();
+                    matches.sort_unstable();
+
+                    if matches.len() >= min_count {
+                        return Ok(matches);
+                    }
+                    last_matches = matches;
+
+                    rx.changed().await.map_err(to_pyerr)?;
+                }
+            };
+
+            if let Some(timeout_s) = timeout_s {
+                if !timeout_s.is_finite() || timeout_s < 0.0 {
+                    return Err(PyValueError::new_err(
+                        "timeout_s must be a finite non-negative number",
+                    ));
+                }
+                let timeout = std::time::Duration::from_secs_f64(timeout_s);
+                let result = tokio::time::timeout(timeout, wait).await;
+                match result {
+                    Ok(result) => result,
+                    Err(_) => Err(PyTimeoutError::new_err(format!(
+                        "Timed out waiting for {min_count} endpoint instances with runtime_data[{key:?}] == {value:?}; last_match_count={}, matching_ids={last_matches:?}",
+                        last_matches.len(),
+                    ))),
+                }
             } else {
                 wait.await
             }
@@ -2210,12 +2282,7 @@ impl AsyncResponseStream {
                 let value = rx.lock().await.recv().await;
                 match value {
                     Some(pyobj) => {
-                        let pyobj = match pyobj.ok() {
-                            Ok(pyobj) => pyobj,
-                            Err(e) => {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e));
-                            }
-                        };
+                        let pyobj = crate::errors::check_response_error(pyobj)?;
 
                         if annotated {
                             let object = Annotated { inner: pyobj };

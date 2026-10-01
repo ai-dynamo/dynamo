@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use dynamo_tokens::SequenceHash;
@@ -53,7 +53,7 @@ pub type OverloadedWorkerProvider =
 /// set. `None` means no hard-availability source is attached; `Some` is
 /// authoritative, so an empty set rejects every candidate.
 pub type WorkerAvailabilityProvider =
-    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
+    Arc<dyn Fn(&SchedulingRequest) -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerSelectionPolicyError {
@@ -116,6 +116,24 @@ pub enum KvSchedulerError {
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
 
+    #[error("request classifier panicked: {0}")]
+    RequestClassifierPanicked(String),
+
+    #[error("request classifier failed: {0}")]
+    RequestClassifierFailed(Arc<super::ClassifierError>),
+
+    #[error("request classifier is already tracking request ID {0:?}")]
+    DuplicateClassificationRequestId(String),
+
+    #[error("invalid request classification metadata: {0}")]
+    InvalidClassificationMetadata(String),
+
+    #[error("request lifecycle for request ID {0:?} ended before classification completed")]
+    ClassificationLifecycleEnded(String),
+
+    #[error("request deadline exceeded")]
+    DeadlineExceeded,
+
     #[error(transparent)]
     WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
@@ -175,9 +193,21 @@ impl KvSchedulerError {
             | Self::AllEligibleWorkersFiltered
             | Self::SubscriberShutdown
             | Self::InitFailed(_) => SchedulerRejection::Unavailable,
+            // Deadline expiry is deliberately 429, not 504: the deadline elapsed
+            // while waiting for capacity, so it is backpressure the client should
+            // respond to like the overloaded family, not a gateway timeout.
+            Self::DeadlineExceeded => SchedulerRejection::Overloaded,
             Self::PinnedWorkerNotAllowed { .. } => SchedulerRejection::BadRequest,
-            Self::BookingFailed(_) => SchedulerRejection::Conflict,
-            Self::WorkerSelectionPolicy(_) => SchedulerRejection::Internal,
+            // A duplicate live request id, or a lifecycle the caller ended (or
+            // re-registered) mid-classification, is caller-induced, like
+            // `BookingFailed` and `SequenceError::DuplicateRequest`.
+            Self::BookingFailed(_)
+            | Self::DuplicateClassificationRequestId(_)
+            | Self::ClassificationLifecycleEnded(_) => SchedulerRejection::Conflict,
+            Self::WorkerSelectionPolicy(_)
+            | Self::RequestClassifierPanicked(_)
+            | Self::RequestClassifierFailed(_)
+            | Self::InvalidClassificationMetadata(_) => SchedulerRejection::Internal,
         }
     }
 }
@@ -357,6 +387,7 @@ pub struct SessionContext {
     parent_session_id: Option<String>,
     session_final: Option<bool>,
     input_trigger: Option<WorkerSelectionInputTrigger>,
+    agent_headers: Option<Arc<BTreeMap<String, Vec<String>>>>,
 }
 
 impl SessionContext {
@@ -372,6 +403,7 @@ impl SessionContext {
             parent_session_id,
             session_final,
             input_trigger,
+            agent_headers: None,
         }
     }
 
@@ -396,6 +428,27 @@ impl SessionContext {
     /// Return the event that caused this request, when supplied.
     pub fn input_trigger(&self) -> Option<WorkerSelectionInputTrigger> {
         self.input_trigger
+    }
+
+    /// Attach request-scoped opaque headers captured by the protocol ingress.
+    /// The map is shared with the request envelope without copying its values.
+    pub fn with_agent_headers(mut self, headers: Arc<BTreeMap<String, Vec<String>>>) -> Self {
+        self.agent_headers = Some(headers);
+        self
+    }
+
+    /// Return raw coding-agent observations for this request, without normalization.
+    ///
+    /// HTTP ingress lowercases names and preserves repeated text values in order.
+    /// It omits sensitive/non-text values and values exceeding its capture limits
+    /// (64 values, 16 KiB/value, 32 KiB including names). An empty map or missing
+    /// key means no observation was captured, not that a lifecycle event did not
+    /// occur. Values are untrusted; plugins own parsing and harness semantics.
+    /// This request-level input needs no worker signal group and is never weighted
+    /// or interpreted by the default policy.
+    pub fn agent_headers(&self) -> &BTreeMap<String, Vec<String>> {
+        static EMPTY: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        self.agent_headers.as_deref().unwrap_or(&EMPTY)
     }
 }
 
@@ -487,13 +540,24 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         self.request
     }
 
+    pub(crate) fn with_available_workers(
+        mut self,
+        available: Option<&'a HashSet<WorkerId>>,
+    ) -> Self {
+        self.eligibility = self.eligibility.with_available_workers(available);
+        self
+    }
+
     pub fn best_effective_prefill_tokens(&self) -> usize {
         effective_prefill_tokens(self.request.isl_tokens, self.best_cached_tokens())
     }
 
     pub fn best_cached_tokens(&self) -> usize {
         match self.eligibility.pinned_worker() {
-            Some(worker) => self.request.effective_cached_tokens_for(worker),
+            Some(worker) => self
+                .eligibility
+                .validate_worker_rank(self.workers, worker)
+                .map_or(0, |_| self.request.effective_cached_tokens_for(worker)),
             None => self
                 .request
                 .overlap
@@ -627,8 +691,8 @@ mod tests {
             session_context: None,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,

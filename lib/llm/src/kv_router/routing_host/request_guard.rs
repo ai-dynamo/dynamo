@@ -22,7 +22,7 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::queue::BookingHandle,
+    scheduling::{AbortCause, RequestLifecycle, queue::BookingHandle},
 };
 use dynamo_runtime::{
     error::DynamoError,
@@ -373,6 +373,7 @@ impl RequestObservability {
 }
 
 struct OutputBlockUpdate {
+    num_blocks: usize,
     decay_fraction: Option<f64>,
 }
 
@@ -393,6 +394,9 @@ pub(super) struct KvRequestCleanup {
     worker: WorkerWithDpRank,
     approximate_lru: Option<ApproximateRequestLease>,
     lifecycle: Option<RequestAttemptLease>,
+    /// Classifier lifecycle for this attempt. Living here keeps it structurally
+    /// tied to KV routing: builtin and occupancy cleanups cannot hold one.
+    request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 impl KvRequestCleanup {
@@ -422,6 +426,7 @@ impl KvRequestCleanup {
             worker,
             approximate_lru,
             lifecycle,
+            request_lifecycle: None,
         }
     }
 
@@ -494,6 +499,20 @@ impl RequestCleanup {
         }
     }
 
+    fn request_lifecycle_mut(&mut self) -> Option<&mut RequestLifecycle> {
+        match self {
+            Self::Kv(cleanup) => cleanup.request_lifecycle.as_deref_mut(),
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
+        }
+    }
+
+    fn take_request_lifecycle(&mut self) -> Option<Box<RequestLifecycle>> {
+        match self {
+            Self::Kv(cleanup) => cleanup.request_lifecycle.take(),
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
+        }
+    }
+
     async fn finish(&mut self) {
         match self {
             Self::Kv(cleanup) => cleanup.finish().await,
@@ -529,12 +548,16 @@ impl OutputBlockTracker {
             return None;
         }
 
+        let num_blocks = new_total_blocks - self.current_total_blocks;
         // Advance before returning so a failed scheduler update preserves existing no-retry behavior.
         self.current_total_blocks = new_total_blocks;
         let decay_fraction = self
             .expected_output_tokens
             .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
-        Some(OutputBlockUpdate { decay_fraction })
+        Some(OutputBlockUpdate {
+            num_blocks,
+            decay_fraction,
+        })
     }
 }
 
@@ -562,19 +585,26 @@ impl RequestGuard {
         worker: WorkerWithDpRank,
         booking: Option<BookingHandle>,
         request: &PreprocessedRequest,
+        request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
             KvRequestCleanup::new(chooser, context_id, worker, booking),
             request,
+            request_lifecycle,
         )
     }
 
     pub(super) fn new_kv_with_cleanup(
         request_metrics: Arc<RouterRequestMetrics>,
-        cleanup: KvRequestCleanup,
+        mut cleanup: KvRequestCleanup,
         request: &PreprocessedRequest,
+        mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
+        if let Some(lifecycle) = request_lifecycle.as_mut() {
+            lifecycle.observe_context_tokens(request.expanded_prompt_token_count());
+        }
+        cleanup.request_lifecycle = request_lifecycle;
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
         let isl_tokens = request.token_ids.len();
@@ -665,6 +695,12 @@ impl RequestGuard {
 
     pub(super) fn mark_dispatched(&mut self) {
         self.observability.mark_dispatched();
+        if let RequestCleanup::Kv(cleanup) = &mut self.cleanup {
+            let worker = cleanup.worker;
+            if let Some(lifecycle) = cleanup.request_lifecycle.as_mut() {
+                lifecycle.sent(worker);
+            }
+        }
     }
 
     pub(super) fn has_approximate_lru(&self) -> bool {
@@ -702,6 +738,18 @@ impl RequestGuard {
             && let Some(lifecycle) = self.cleanup.lifecycle()
         {
             lifecycle.touch();
+        }
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.responding();
+            lifecycle.observe_output_tokens(new_tokens);
+            if let Some(total_tokens) = item
+                .data
+                .as_ref()
+                .and_then(|data| data.completion_usage.as_ref())
+                .map(|usage| usage.total_tokens as usize)
+            {
+                lifecycle.observe_context_tokens(total_tokens);
+            }
         }
         if !self.prefill_marked {
             let has_tokens = item
@@ -762,13 +810,17 @@ impl RequestGuard {
             && lifecycle.is_active()
             && let Err(error) = cleanup
                 .chooser
-                .enqueue_output_block_if_booking(lifecycle.booking(), update.decay_fraction)
+                .add_output_blocks_if_booking(
+                    lifecycle.booking(),
+                    update.num_blocks,
+                    update.decay_fraction,
+                )
                 .await
         {
             tracing::warn!(
                 request_id = %cleanup.context_id,
                 %error,
-                "Failed to add output block"
+                "Failed to add output blocks"
             );
         }
 
@@ -776,6 +828,9 @@ impl RequestGuard {
     }
 
     pub(super) async fn finish(&mut self) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.complete();
+        }
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability
             .record_metrics(self.record_itl_at_completion);
@@ -783,6 +838,26 @@ impl RequestGuard {
     }
 
     pub(super) async fn abort(&mut self) {
+        self.abort_with_error(None).await;
+    }
+
+    pub(super) async fn release_for_retry(&mut self) -> bool {
+        let Some(migration_state) = self.migration_state.as_ref() else {
+            return false;
+        };
+        let Some(mut lifecycle) = self.cleanup.take_request_lifecycle() else {
+            return false;
+        };
+        lifecycle.prepare_retry();
+        migration_state.store_request_lifecycle(lifecycle);
+        self.cleanup.finish().await;
+        true
+    }
+
+    pub(super) async fn abort_with_error(&mut self, error: Option<&AbortCause>) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
+        }
         self.cleanup.finish().await;
     }
 }
@@ -792,6 +867,57 @@ impl Drop for RequestGuard {
         self.observability
             .record_metrics(self.record_itl_at_completion);
         // RequestCleanup drops immediately afterward and performs resource cleanup.
+    }
+}
+
+#[cfg(test)]
+mod output_block_tests {
+    use super::OutputBlockTracker;
+
+    #[test]
+    fn counts_every_crossed_boundary_once() {
+        let mut tracker = OutputBlockTracker::new(true, 16, 16, None);
+        assert!(tracker.observe(0).is_none());
+        let first = tracker.observe(1).unwrap();
+        assert_eq!(first.num_blocks, 1);
+        assert_eq!(first.decay_fraction, None);
+        assert!(tracker.observe(16).is_none());
+        assert_eq!(tracker.observe(33).unwrap().num_blocks, 2);
+        assert!(tracker.observe(33).is_none());
+        assert!(tracker.observe(48).is_none());
+        assert_eq!(tracker.observe(49).unwrap().num_blocks, 1);
+    }
+
+    #[test]
+    fn accounts_for_a_partial_prompt_block() {
+        let mut tracker = OutputBlockTracker::new(true, 15, 16, None);
+        assert!(tracker.observe(1).is_none());
+        assert_eq!(tracker.observe(34).unwrap().num_blocks, 3);
+        assert!(tracker.observe(49).is_none());
+    }
+
+    #[test]
+    fn preserves_decay_at_the_observed_output_length() {
+        let mut tracker = OutputBlockTracker::new(true, 16, 16, Some(64));
+        let update = tracker.observe(32).unwrap();
+        assert_eq!(update.num_blocks, 2);
+        assert_eq!(update.decay_fraction, Some(0.5));
+        let update = tracker.observe(64).unwrap();
+        assert_eq!(update.num_blocks, 2);
+        assert_eq!(update.decay_fraction, Some(0.0));
+        let update = tracker.observe(96).unwrap();
+        assert_eq!(update.num_blocks, 2);
+        assert_eq!(update.decay_fraction, Some(0.0));
+
+        let mut zero_expected = OutputBlockTracker::new(true, 16, 16, Some(0));
+        assert_eq!(zero_expected.observe(32).unwrap().decay_fraction, Some(0.0));
+    }
+
+    #[test]
+    fn disabled_tracking_emits_no_updates() {
+        let mut tracker = OutputBlockTracker::new(false, 16, 16, None);
+        assert!(tracker.observe(48).is_none());
+        assert_eq!(tracker.current_total_blocks, 1);
     }
 }
 
