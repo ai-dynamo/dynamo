@@ -154,27 +154,39 @@ class MmKwargsSender(ABC):
             cleanup_items: list[Any] = []
             mm_hashes: list[str] = []
 
-            for i, feat in enumerate(mm_features):
-                if feat.mm_hash:
-                    mm_hashes.append(feat.mm_hash)
-                if feat.data is None:
-                    continue
+            try:
+                for i, feat in enumerate(mm_features):
+                    if feat.mm_hash:
+                        mm_hashes.append(feat.mm_hash)
+                    if feat.data is None:
+                        continue
 
-                with _nvtx.annotate(self._pickle_nvtx_label, color=self._nvtx_color):
-                    pickled = pickle.dumps(feat.data)
+                    with _nvtx.annotate(
+                        self._pickle_nvtx_label, color=self._nvtx_color
+                    ):
+                        pickled = pickle.dumps(feat.data)
 
-                encoded, cleanup = await self._encode_item(i, pickled)
-                encoded_items.append(encoded)
-                if cleanup is not None:
-                    cleanup_items.append(cleanup)
+                    encoded, cleanup = await self._encode_item(i, pickled)
+                    if cleanup is not None:
+                        cleanup_items.append(cleanup)
+                    encoded_items.append(encoded)
 
-            if not encoded_items:
-                return None, []
+                if not encoded_items:
+                    return None, []
 
-            return (
-                self._assemble_extra_args(modality, encoded_items, mm_hashes),
-                cleanup_items,
-            )
+                return (
+                    self._assemble_extra_args(modality, encoded_items, mm_hashes),
+                    cleanup_items,
+                )
+            except BaseException:
+                # Include cancellation while a later registration is awaited.
+                # Metadata has not escaped, so none of these reads can start.
+                await self._abort_prepare(cleanup_items)
+                raise
+
+    async def _abort_prepare(self, items: list[Any]) -> None:
+        """Release resources when preparation cannot hand ownership to its caller."""
+        await self.cleanup(items)
 
     @abstractmethod
     async def _encode_item(self, idx: int, pickled: bytes) -> tuple[Any, Any | None]:
@@ -245,19 +257,27 @@ class MmKwargsNixlSender(MmKwargsSender):
             pickled_tensor = torch.frombuffer(bytearray(pickled), dtype=torch.uint8)
             descriptor = self._nixl_connect.Descriptor(pickled_tensor)
             readable_op = await self._connector.create_readable(descriptor)
-        logger.debug(
-            "[NIXL-Sender] feature[%d]: registered %d bytes", idx, len(pickled)
-        )
-        spec = TensorTransferSpec(
-            field_name="__pickled_kwargs_item__",
-            shape=[len(pickled)],
-            dtype_str="uint8",
-            serialized_request=readable_op.metadata().model_dump(),
-        )
+        try:
+            logger.debug(
+                "[NIXL-Sender] feature[%d]: registered %d bytes", idx, len(pickled)
+            )
+            spec = TensorTransferSpec(
+                field_name="__pickled_kwargs_item__",
+                shape=[len(pickled)],
+                dtype_str="uint8",
+                serialized_request=readable_op.metadata().model_dump(),
+            )
+        except BaseException:
+            self._release_all([readable_op])
+            raise
         # Hand back the operation itself, not just its completion awaitable:
         # cleanup() must be able to release the registered memory region even
         # when the remote side never reads it.
         return spec, readable_op
+
+    async def _abort_prepare(self, items: list[Any]) -> None:
+        # No receiver has the metadata yet, so waiting for completion cannot help.
+        self._release_all(items)
 
     def _assemble_extra_args(
         self,
@@ -588,14 +608,18 @@ class MmKwargsShmSender(MmKwargsSender):
         name = f"mm_kwargs_{os.getpid()}_{uuid.uuid4().hex[:12]}_{idx}"
         with _nvtx.annotate("mm_shm:create_and_write", color="cyan"):
             sm = shm.SharedMemory(name=name, create=True, size=len(pickled))
-            sm.buf[: len(pickled)] = pickled
-        logger.debug(
-            "[SHM-Sender] feature[%d]: wrote %d bytes to shm %s",
-            idx,
-            len(pickled),
-            name,
-        )
-        return MmKwargsShmItem(name=name, size=len(pickled)), sm
+            try:
+                sm.buf[: len(pickled)] = pickled
+                logger.debug(
+                    "[SHM-Sender] feature[%d]: wrote %d bytes to shm %s",
+                    idx,
+                    len(pickled),
+                    name,
+                )
+                return MmKwargsShmItem(name=name, size=len(pickled)), sm
+            except BaseException:
+                await self.cleanup([sm])
+                raise
 
     def _assemble_extra_args(
         self,
