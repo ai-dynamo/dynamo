@@ -54,6 +54,11 @@ spec:
       volumeMounts: *modelVolumeMounts
       extraPodSpec:
         priorityClassName: ci-nightly-high-priority
+        mainContainer: &workerMainContainer
+          # DeepSeek V4 Pro loads an 805 GiB checkpoint from Lustre. Preserve
+          # the first cold-start attempt instead of restarting it at 90 minutes.
+          startupProbe:
+            failureThreshold: 900
         imagePullSecrets:
         - name: acr-token-secret
         nodeSelector: *arm64NodeSelector
@@ -75,6 +80,7 @@ spec:
       volumeMounts: *modelVolumeMounts
       extraPodSpec:
         priorityClassName: ci-nightly-high-priority
+        mainContainer: *workerMainContainer
         imagePullSecrets:
         - name: acr-token-secret
         nodeSelector: *arm64NodeSelector
