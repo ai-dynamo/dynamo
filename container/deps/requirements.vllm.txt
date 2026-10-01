@@ -15,6 +15,8 @@
 # it so the --no-deps install refreshes the bundled copy to the current release
 # line.
 cryptography>=50.0.0
+# Runtime video encoding and realtime-audio resampling (installed with --no-deps).
+imageio>=2.37.0
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # Refresh the upstream image's bundled mooncake wheel: older builds vendor a
 # stale Go dependency set inside libetcd_wrapper.so, and current wheels carry
@@ -35,3 +37,4 @@ pillow>=12.3.0
 # rejects; 2.2.0 bundles only libavutil + libavformat (container demux, no codec).
 # Requires NVIDIA_DRIVER_CAPABILITIES to include "video" or it cannot import.
 PyNvVideoCodec>=2.2.0
+scipy>=1.15.0
