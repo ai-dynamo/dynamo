@@ -133,6 +133,15 @@ def test_python_and_rust_policy_constants_match() -> None:
     assert set(url_validator._BLOCKED_HOSTS) == rust_hosts
 
 
+def test_python_and_rust_data_url_cap_match() -> None:
+    """The frontend and the workers read the same variable and default."""
+    rust_source = _find_rust_media_loader_source().read_text(encoding="utf-8")
+    assert f'"{url_validator.DYN_MM_MAX_DATA_URL_MB}"' in rust_source
+    default = re.search(r"const DEFAULT_MAX_DATA_URL_MB: usize = (\d+);", rust_source)
+    assert default is not None
+    assert int(default.group(1)) == url_validator.DEFAULT_MAX_DATA_URL_MB
+
+
 # ---------------------------------------------------------------------------
 # validate_url() — scheme handling
 # ---------------------------------------------------------------------------
