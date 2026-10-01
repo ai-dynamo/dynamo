@@ -283,17 +283,17 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate", "spec", "containers").Index(index).Child("image"), "engine image is required for "+detail))
 		}
 		if spec.Multinode != nil {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "is not supported for "+detail))
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "is not currently supported for "+detail+"; support is planned for a future release"))
 		}
 		if spec.Experimental != nil {
 			if spec.Experimental.Checkpoint != nil && spec.Experimental.Checkpoint.Enabled {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "enabled"), "is not supported for "+detail))
+				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "enabled"), "is not currently supported for "+detail+"; support is planned for a future release"))
 			}
 			if spec.Experimental.GPUMemoryService != nil {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "gpuMemoryService"), "is not supported for "+detail))
+				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "gpuMemoryService"), "is not currently supported for "+detail+"; support is planned for a future release"))
 			}
 			if spec.Experimental.Failover != nil {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "is not supported for "+detail))
+				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "is not currently supported for "+detail+"; support is planned for a future release"))
 			}
 		}
 	}

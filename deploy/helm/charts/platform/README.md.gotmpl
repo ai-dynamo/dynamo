@@ -56,14 +56,14 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 and standalone DCDs, in both API versions. It must have an image and `restartPolicy: Always`.
 Dynamo defaults and runtime-version resolution target this container; `main` runs the engine.
 Only worker, prefill, and decode components support this mode. Multinode, enabled checkpoint,
-GPU memory service, and failover are rejected.
+GPU memory service, and failover are rejected because they are not currently supported in this
+mode. Support for these features is planned for a future release.
 
 **Affected:** Any deployment with an init container named `runtime`, including an unrelated
 setup container using that name.
 
 **Action:** Before upgrading, rename unrelated init containers named `runtime`. For native
 Dynamo sidecars, use `runtime` as the init-container name and specify `restartPolicy: Always`.
-If migrating from the experimental explicit selector, remove `dynamoSidecar` in the same change.
 
 **Existing deployments:** Components without a `runtime` init container retain their current
 mode. Existing components with that name adopt sidecar behavior when reconciled, which can

@@ -126,48 +126,48 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
-			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with a runtime init container`}},
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar beta rejects failover create",
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
-			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with a runtime init container`, `spec.experimental.failover: Forbidden: is not supported for component "worker" with a runtime init container`}},
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar beta rejects gms update", oldDeployment: nativeDCDForAdmission(t, false, nil),
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
-			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with a runtime init container`}},
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar beta rejects failover update", oldDeployment: nativeDCDForAdmission(t, false, nil),
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
-			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with a runtime init container`, `spec.experimental.failover: Forbidden: is not supported for component "worker" with a runtime init container`}},
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar beta rejects multinode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: is not supported for component "worker" with a runtime init container`}},
+		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar alpha rejects gms create",
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
-			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with a runtime init container`}},
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar alpha rejects failover create",
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
-			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with a runtime init container`, `spec.experimental.failover: Forbidden: is not supported for component "worker" with a runtime init container`}},
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar alpha rejects gms update", oldDeployment: nativeDCDForAdmission(t, true, nil),
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
-			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with a runtime init container`}},
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar alpha rejects failover update", oldDeployment: nativeDCDForAdmission(t, true, nil),
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
-			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with a runtime init container`, `spec.experimental.failover: Forbidden: is not supported for component "worker" with a runtime init container`}},
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar alpha rejects multinode", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: is not supported for component "worker" with a runtime init container`}},
+		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
 		{name: "native sidecar requires engine main", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Name = "engine"
 		}), wantWebhookErrs: []string{`spec.podTemplate.spec.containers: Required value: main engine container is required for component "worker" with a runtime init container`}},
@@ -194,7 +194,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
 			}),
-			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not supported for component "worker" with a runtime init container`},
+			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`},
 		},
 		{name: "native sidecar beta rejects nonrestartable init update", oldDeployment: nativeDCDForAdmission(t, false, nil),
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -206,7 +206,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
 			}),
-			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not supported for component "worker" with a runtime init container`},
+			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`},
 		},
 		{name: "native sidecar alpha create", deployment: nativeDCDForAdmission(t, true, nil)},
 		{name: "native sidecar alpha update", oldDeployment: nativeDCDForAdmission(t, true, nil), deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -225,7 +225,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
 			}),
-			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not supported for component "worker" with a runtime init container`},
+			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`},
 		},
 		{name: "native sidecar alpha rejects nonrestartable init update", oldDeployment: nativeDCDForAdmission(t, true, nil),
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -237,7 +237,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
 			}),
-			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not supported for component "worker" with a runtime init container`},
+			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`},
 		},
 		{name: "native sidecar with regular frontend", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.FrontendSidecar = k8sptr.To("http-frontend")
