@@ -2587,13 +2587,16 @@ dependencies = [
 name = "dynamo-sidecar-common"
 version = "1.6.0"
 dependencies = [
+ "anyhow",
  "clap",
  "dynamo-backend-common",
+ "dynamo-runtime",
  "futures",
  "prost-types 0.13.5",
  "prost-types 0.14.4",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tracing",

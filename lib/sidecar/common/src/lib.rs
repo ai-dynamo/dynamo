@@ -7,6 +7,7 @@ mod args;
 mod endpoint;
 mod error;
 mod json;
+mod run;
 mod transport;
 
 #[cfg(feature = "tonic-v14")]
@@ -31,6 +32,8 @@ pub use json::{json_to_struct_v14, struct_to_json_v14};
 pub use transport::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error_chain, startup_deadline,
 };
+
+pub use run::run;
 
 #[cfg(test)]
 #[path = "transport/tests.rs"]
