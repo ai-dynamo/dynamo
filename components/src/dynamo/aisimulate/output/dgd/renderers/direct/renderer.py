@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from dynamo.profiler.sweeper.renderers.base import (
+from dynamo.aisimulate.output.dgd.renderers.base import (
     CandidateLike,
     CandidateMaterializationError,
     DGDGenerationOptions,
@@ -22,7 +22,7 @@ def _load_materializer() -> tuple[type[Exception], Any]:
     """Load Dynamo's config modifiers only when the direct renderer is selected."""
     try:
         materializer = importlib.import_module(
-            "dynamo.profiler.sweeper.renderers.direct.materializer"
+            "dynamo.aisimulate.output.dgd.renderers.direct.materializer"
         )
         return (
             materializer.MaterializationError,

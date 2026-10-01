@@ -5,7 +5,7 @@
 
 from pathlib import Path
 
-from dynamo.profiler.sweeper.output.atomic import replace_text
+from dynamo.aisimulate.output.dgd.writers.atomic import replace_text
 
 _KUSTOMIZATION = """apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

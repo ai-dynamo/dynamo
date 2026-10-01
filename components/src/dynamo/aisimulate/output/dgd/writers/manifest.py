@@ -5,7 +5,7 @@
 
 from pathlib import Path
 
-from dynamo.profiler.sweeper.output.atomic import replace_text
+from dynamo.aisimulate.output.dgd.writers.atomic import replace_text
 
 
 def write(rendered_dgd: str, output_dir: Path, *, stem: str) -> Path:

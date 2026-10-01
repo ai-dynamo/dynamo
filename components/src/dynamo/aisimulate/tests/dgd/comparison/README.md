@@ -21,7 +21,7 @@ The portable runner and comparison-corpus direction build on Ashna Mehrotra's wo
 From the repository root:
 
 ```bash
-python components/src/dynamo/profiler/tests/sweeper/run_cases.py \
+python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
   --hardware h200-sxm-16gpu \
   qwen3-32b-vllm-disagg
 ```
@@ -29,8 +29,8 @@ python components/src/dynamo/profiler/tests/sweeper/run_cases.py \
 ## Generate a suite
 
 ```bash
-python components/src/dynamo/profiler/tests/sweeper/run_cases.py \
-  --suite components/src/dynamo/profiler/tests/sweeper/testsuite-issue-8469.yaml
+python components/src/dynamo/aisimulate/tests/dgd/comparison/run_cases.py \
+  --suite components/src/dynamo/aisimulate/tests/dgd/comparison/testsuite-issue-8469.yaml
 ```
 
 Use `--output-dir` to write into a temporary directory instead of updating the checked-in
@@ -54,7 +54,7 @@ For example:
 
 ```bash
 kubectl apply -f \
-  components/src/dynamo/profiler/tests/sweeper/generated/testsuite-issue-8469/h200-sxm-16gpu/qwen3-32b-vllm-disagg/dgd-sweeper-aic.yaml
+  components/src/dynamo/aisimulate/tests/dgd/comparison/generated/testsuite-issue-8469/h200-sxm-16gpu/qwen3-32b-vllm-disagg/dgd-sweeper-aic.yaml
 ```
 
 Composed inputs, the selected Candidate, caches, and error files are local ignored diagnostics.

@@ -9,14 +9,14 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from dynamo.profiler.sweeper.renderers import (
+from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,
     DGDGenerationOptions,
 )
-from dynamo.profiler.sweeper.renderers import base as base_module
-from dynamo.profiler.sweeper.renderers import render_dgd
-from dynamo.profiler.sweeper.renderers.aic import renderer as aic_renderer
-from dynamo.profiler.sweeper.renderers.direct import renderer as direct_renderer
+from dynamo.aisimulate.output.dgd.renderers import base as base_module
+from dynamo.aisimulate.output.dgd.renderers import render_dgd
+from dynamo.aisimulate.output.dgd.renderers.aic import renderer as aic_renderer
+from dynamo.aisimulate.output.dgd.renderers.direct import renderer as direct_renderer
 
 pytestmark = [
     pytest.mark.unit,
@@ -34,7 +34,7 @@ def test_renderer_contract_import_does_not_load_runtime_modifiers() -> None:
             sys.executable,
             "-c",
             (
-                "import sys; import dynamo.profiler.sweeper.renderers.base; "
+                "import sys; import dynamo.aisimulate.output.dgd.renderers.base; "
                 "assert 'dynamo.profiler.utils.dgd_materialization' not in sys.modules; "
                 "assert 'dynamo.planner' not in sys.modules"
             ),
