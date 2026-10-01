@@ -198,12 +198,12 @@ def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None
 
     assert rendered["kind"] == "DynamoGraphDeployment"
     workers = {
-        component["name"]: component
+        component["type"]: component
         for component in rendered["spec"]["components"]
-        if component["name"] in {"VllmPrefillWorker", "VllmDecodeWorker"}
+        if component.get("type") in {"prefill", "decode"}
     }
-    assert workers["VllmPrefillWorker"]["replicas"] == 1
-    assert workers["VllmDecodeWorker"]["replicas"] == 1
+    assert workers["prefill"]["replicas"] == 1
+    assert workers["decode"]["replicas"] == 1
 
 
 def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:

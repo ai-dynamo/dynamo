@@ -21,7 +21,7 @@ from copy import deepcopy
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Protocol
+from typing import Any, Dict, Literal, Optional, Protocol, cast
 from urllib.parse import parse_qsl
 
 import yaml
@@ -128,7 +128,10 @@ class AISPerfModelSpec(BaseModel):
                 # Use the installed SDK's fields/defaults; never duplicate its
                 # expanding schema or discard an unrecognized input field.
                 request = ForwardPassPerfModelConfig(**config)
-                RustForwardPassPerfModel.normalize_config(json.dumps(request.to_dict()))
+                # AISimulate exposes native APIs lazily through module __getattr__.
+                cast(Any, RustForwardPassPerfModel).normalize_config(
+                    json.dumps(request.to_dict())
+                )
                 # Keep authored roots portable and controls explicit; to_dict()
                 # resolves package/env roots on the machine doing validation.
                 result[role] = asdict(request)
