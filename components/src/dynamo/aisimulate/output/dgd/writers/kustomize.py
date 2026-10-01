@@ -1,23 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Write a rendered DGD as a composable Kustomize source."""
+"""Write rendered DGDs as one composable Kustomize source."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from dynamo.aisimulate.output.dgd.writers.atomic import replace_text
 
-_KUSTOMIZATION = """apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - deploy.yaml
-"""
+
+def write(rendered_dgd: str, output_dir: Path, *, filename: str) -> Path:
+    """Write one DGD manifest and return its path."""
+    artifact_path = output_dir / filename
+    replace_text(artifact_path, rendered_dgd)
+    return artifact_path
 
 
-def write(rendered_dgd: str, output_dir: Path, *, stem: str) -> Path:
-    """Write one Kustomize source and return its directory."""
-    artifact_path = output_dir / stem
-    artifact_path.mkdir(parents=True, exist_ok=True)
-    replace_text(artifact_path / "kustomization.yaml", _KUSTOMIZATION)
-    replace_text(artifact_path / "deploy.yaml", rendered_dgd)
+def finalize(output_dir: Path, resources: Sequence[Path]) -> Path:
+    """Write one Kustomization referencing every selected DGD."""
+    artifact_path = output_dir / "kustomization.yaml"
+    resource_lines = "\n".join(f"  - {resource.name}" for resource in resources)
+    replace_text(
+        artifact_path,
+        "apiVersion: kustomize.config.k8s.io/v1beta1\n"
+        "kind: Kustomization\n"
+        f"resources:\n{resource_lines}\n",
+    )
     return artifact_path
