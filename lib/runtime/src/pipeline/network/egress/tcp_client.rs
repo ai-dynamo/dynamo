@@ -1070,6 +1070,8 @@ struct HostPool {
     last_used_ms: AtomicU64,
     #[cfg(test)]
     before_publish_barrier: parking_lot::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    after_prune_barrier: parking_lot::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl HostPool {
@@ -1089,6 +1091,8 @@ impl HostPool {
             last_used_ms: AtomicU64::new(current_time_ms()),
             #[cfg(test)]
             before_publish_barrier: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            after_prune_barrier: parking_lot::Mutex::new(None),
         }
     }
 
@@ -1150,8 +1154,8 @@ impl HostPool {
         &self,
         connect_limiter: &tokio::sync::Semaphore,
     ) -> Result<Arc<TcpConnection>> {
-        // --- Phase A: lock LRU, prune, decide, build snapshot, unlock ---
-        let (need_connect, new_snap) = {
+        // --- Phase A: lock LRU, prune, decide, publish snapshot, unlock ---
+        let need_connect = {
             let mut lru = self.lru.lock();
 
             // Prune unhealthy (evicted Arcs stay alive for in-flight holders)
@@ -1166,12 +1170,21 @@ impl HostPool {
 
             let snap: Vec<Arc<TcpConnection>> = lru.iter().map(|(_, c)| c.clone()).collect();
             let grow = Self::should_grow(&snap, self.max_connections);
-            (grow, snap)
+            // Publish under the LRU lock so an older prune cannot overwrite a
+            // newer insertion's snapshot after releasing the lock.
+            self.snapshot.store(Arc::new(snap));
+            grow
         };
         // LRU lock released here
 
-        // Atomic snapshot update (no RwLock!)
-        self.snapshot.store(Arc::new(new_snap.clone()));
+        #[cfg(test)]
+        {
+            let barrier = self.after_prune_barrier.lock().take();
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+                barrier.wait().await;
+            }
+        }
 
         // Re-check the snapshot for a usable connection. When need_connect
         // is true, require available_capacity() > 0 to avoid returning a
@@ -1240,7 +1253,7 @@ impl HostPool {
                     Ok(stream) => {
                         let new_conn = Arc::new(stream);
 
-                        // --- Phase C: lock LRU, insert, rebuild snapshot, unlock ---
+                        // --- Phase C: lock LRU, insert, publish snapshot, unlock ---
                         {
                             let mut lru = self.lru.lock();
 
@@ -1259,7 +1272,6 @@ impl HostPool {
 
                             let snap: Vec<Arc<TcpConnection>> =
                                 lru.iter().map(|(_, c)| c.clone()).collect();
-                            drop(lru);
                             self.snapshot.store(Arc::new(snap));
                         }
 
@@ -2808,6 +2820,44 @@ mod tests {
             total_conns
         );
         assert!(ok_count > 0, "At least some requests should succeed");
+    }
+
+    #[tokio::test]
+    async fn delayed_prune_cannot_overwrite_new_connection_snapshot() {
+        let (addr, _) = spawn_echo_server().await;
+        let config = TcpRequestConfig {
+            pool_size: 1,
+            ..TcpRequestConfig::default()
+        };
+        let pool = Arc::new(HostPool::new(addr, &config));
+        let limiter = Arc::new(tokio::sync::Semaphore::new(2));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        *pool.after_prune_barrier.lock() = Some(barrier.clone());
+
+        let delayed = {
+            let pool = pool.clone();
+            let limiter = limiter.clone();
+            tokio::spawn(async move { pool.get_connection(&limiter).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), barrier.wait())
+            .await
+            .expect("first caller should finish pruning the empty pool");
+        let published = tokio::time::timeout(Duration::from_secs(1), pool.get_connection(&limiter))
+            .await
+            .expect("another caller should publish its connection")
+            .unwrap();
+        barrier.wait().await;
+        let delayed = tokio::time::timeout(Duration::from_secs(1), delayed)
+            .await
+            .expect("delayed caller should reuse the published connection")
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            Arc::ptr_eq(&delayed, &published),
+            "a delayed prune must not hide the healthy connection and dial another"
+        );
+        assert!(Arc::ptr_eq(&pool.snapshot.load()[0], &published));
     }
 
     #[tokio::test]
