@@ -34,3 +34,7 @@ pub use transport::{
 };
 
 pub use run::run;
+
+#[cfg(test)]
+#[path = "transport/tests.rs"]
+mod transport_tests;

@@ -55,10 +55,9 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
-// On every operation: defaults nil component Replicas to 1 and persists the
+// On every operation: defaults nil non-LPX component Replicas to 1 and persists the
 // replica counts implied by explicit multinode roles.
 // On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
-// Existing unannotated DGDs remain unselected for controller-side workload adoption.
 // On the Grove pathway: defaults nil MinAvailable to 1. Scaling to replicas=0
 // does not rewrite MinAvailable; it remains the component's configured minimum viable unit.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
@@ -89,12 +88,12 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		provideroverride.DefaultTarget(dgd.Spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil)
 	}
 
-	// Default nil replicas on every operation so newly added components remain safe to expand.
+	// Apply component defaults on every operation, including newly added components.
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 
-		// Default omitted replica counts before the controller expands component roles.
-		if component.Replicas == nil {
+		// Preserve omitted LPX replicas so Grove can retain its native scale.
+		if !component.IsLPX() && component.Replicas == nil {
 			component.Replicas = ptr.To(int32(1))
 		}
 		defaultMultinodeRoleReplicas(component)
