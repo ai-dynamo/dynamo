@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Prod deploy runner smoke test
+
+on:
+  push:
+    branches:
+      - test/prod-deploy-runner-smoke-20261001
+    paths:
+      - .github/workflows/prod-deploy-runner-smoke.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  smoke:
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 2
+    steps:
+      - name: Confirm runner assignment
+        env:
+          RUNNER_NAME: ${{ runner.name }}
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          printf 'Runner: %s\nOS: %s\nArchitecture: %s\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH"
