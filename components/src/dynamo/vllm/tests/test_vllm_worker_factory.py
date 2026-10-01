@@ -13,8 +13,12 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
 from dynamo.vllm.constants import DisaggregationMode
-from dynamo.vllm.instrumented_scheduler import benchmark_content_point_key
+from dynamo.vllm.instrumented_scheduler import (
+    ENV_FPM_BENCHMARK_OUTPUT_PATH,
+    benchmark_content_point_key,
+)
 from dynamo.vllm.worker_factory import (
     CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS,
     ENGINE_PROBE_TIMEOUT_SECONDS,
@@ -2729,8 +2733,6 @@ def _fake_worker(
 def _engine_probe(worker) -> dict:
     """Run the worker-side engine probe on a stub worker, as vLLM does once
     it has mixed the extension class into the worker class."""
-    from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
-
     return FpmBenchmarkWorkerExtension.fpm_engine_probe(worker)
 
 
@@ -3508,11 +3510,13 @@ def test_attach_engine_resolved_never_raises_when_recording_the_failure_fails(
 
     asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
 
-    probe_failed, not_recorded = (
-        record.getMessage() for record in _worker_factory_warnings(caplog)
+    probe_failed, not_recorded = _worker_factory_warnings(caplog)
+    assert "Engine provenance probe failed" in probe_failed.getMessage()
+    assert (
+        "Could not record the engine provenance probe failure"
+        in not_recorded.getMessage()
     )
-    assert "Engine provenance probe failed" in probe_failed
-    assert "Could not record the engine provenance probe failure" in not_recorded
+    assert not_recorded.exc_info is not None
     assert not (tmp_path / "merged_worker_probe.json").exists()
 
 
@@ -3596,8 +3600,6 @@ def test_engine_probe_sidecar_path_follows_the_merged_engine_block(
 def test_engine_probe_sidecar_pointer_is_written_and_a_stale_sidecar_removed(
     monkeypatch, tmp_path
 ):
-    from dynamo.vllm.instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH
-
     monkeypatch.delenv(ENV_FPM_BENCHMARK_OUTPUT_PATH, raising=False)
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
@@ -4141,7 +4143,6 @@ def test_restore_engine_cudagraph_metrics_unexpected_worker_reply_is_not_success
 def test_engine_cudagraph_metrics_worker_extension_turns_the_option_off(monkeypatch):
     monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
     # Local, after the delenv: importing gc_policy starts the GC policy if it is set.
-    from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
     from dynamo.vllm.gc_policy import FpmGcWorkerExtension
 
     # vLLM takes one extension class; the GC one replaces the benchmark one

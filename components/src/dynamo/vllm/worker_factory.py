@@ -1271,7 +1271,9 @@ async def _attach_engine_resolved(
             failure = "probe_failed: no valid worker probe responses"
         record(responses, failure)
     except Exception as error:
-        # Not re-raised: vLLM raises a bare Exception when a worker call fails.
+        # Not re-raised: provenance is best effort and must not block the
+        # restore. The catch is broad because vLLM raises a bare Exception when
+        # a worker call fails.
         # A bare TimeoutError's str() is empty, and it is the single most
         # likely production failure (a dead or wedged engine) -- the
         # exception type name keeps the recorded reason from being useless.

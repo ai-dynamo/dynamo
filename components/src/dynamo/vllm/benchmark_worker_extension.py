@@ -32,7 +32,8 @@ class FpmBenchmarkWorkerExtension:
 
         The model runner reads the option on every step, so the change takes
         effect from the next forward pass. The launcher calls this only when it
-        found the option, so a worker without it fails the call.
+        found the option, so a worker without ``vllm_config`` or its
+        ``observability_config`` fails the call.
         """
         self.vllm_config.observability_config.cudagraph_metrics = False
         return {"cudagraph_metrics": False}
