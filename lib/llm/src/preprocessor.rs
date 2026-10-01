@@ -3071,6 +3071,7 @@ impl OpenAIPreprocessor {
             let hints = nvext.agent_hints.as_ref();
             let (priority_jump, strict_priority, priority) = routing_priorities(hints);
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
+            builder.disable_caching(nvext.disable_caching);
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,

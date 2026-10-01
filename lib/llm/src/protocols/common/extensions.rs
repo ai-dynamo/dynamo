@@ -156,6 +156,73 @@ pub struct AgentHints {
     pub latency_sensitivity: Option<f64>,
 }
 
+/// Best-effort hint that names the newly computed cache entries that a request does not keep.
+///
+/// The goal is cache-pollution control, so consumers (engines, KV offload, tokenizer
+/// caches) can ignore it. `NewBlocks` disables a superset of `DecodeOnly`. A consumer
+/// that cannot honor the requested mode can use a weaker one
+/// (`NewBlocks` -> `DecodeOnly` -> none), but never a stronger one. A stronger mode
+/// discards prompt blocks that the client wants to keep.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DisableCaching {
+    /// Keep prompt blocks; do not retain blocks produced during decode.
+    DecodeOnly,
+    /// Matched blocks stay cached; no block created by this request is retained.
+    NewBlocks,
+}
+
+impl DisableCaching {
+    /// Resolve an `x-dynamo-disable-caching` header value.
+    ///
+    /// `decode-only` and `new-blocks` name a mode; any truthy value is an alias for
+    /// `new-blocks`. Every other value is not truthy and leaves caching enabled.
+    pub fn from_header_value(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("decode-only") {
+            Some(Self::DecodeOnly)
+        } else if value.eq_ignore_ascii_case("new-blocks")
+            || dynamo_runtime::config::is_truthy(value)
+        {
+            Some(Self::NewBlocks)
+        } else {
+            None
+        }
+    }
+
+    /// Worker-side reader for `PreprocessedRequest.disable_caching`.
+    ///
+    /// A value this reader does not know is dropped rather than failing the request:
+    /// the hint is best-effort, and frontends in the N-2 window can send modes that are
+    /// newer than this worker.
+    pub(crate) fn deserialize_tolerant<'de, D>(deserializer: D) -> Result<Option<Self>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+        Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+    }
+}
+
+/// Body form of `nvext.disable_caching`: `true` (alias for `new-blocks`), `false`, `null`,
+/// or a mode name. Unlike the header, an unknown value is a client error.
+fn deserialize_nvext_disable_caching<'de, D>(
+    deserializer: D,
+) -> Result<Option<DisableCaching>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None | Some(serde_json::Value::Bool(false)) => Ok(None),
+        Some(serde_json::Value::Bool(true)) => Ok(Some(DisableCaching::NewBlocks)),
+        Some(value) => serde_json::from_value(value).map(Some).map_err(|_| {
+            serde::de::Error::custom(
+                "invalid disable_caching: expected true, false, \"decode-only\", or \"new-blocks\"",
+            )
+        }),
+    }
+}
+
 /// Dynamo's LLM request extension envelope.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -187,6 +254,14 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub cache_salt: Option<String>,
+
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_nvext_disable_caching"
+    )]
+    #[builder(default, setter(strip_option))]
+    pub disable_caching: Option<DisableCaching>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
@@ -248,8 +323,9 @@ impl NvExt {
         })
     }
 
-    /// Return true when this envelope contains any field other than `cache_salt`.
-    pub fn has_non_cache_salt_fields(&self) -> bool {
+    /// Return true when this envelope contains any field other than the cache controls
+    /// (`cache_salt`, `disable_caching`), which stay honored when NvExt is disabled.
+    pub fn has_non_cache_control_fields(&self) -> bool {
         let Self {
             greed_sampling,
             use_raw_prompt,
@@ -258,6 +334,7 @@ impl NvExt {
             token_data,
             max_thinking_tokens,
             cache_salt: _,
+            disable_caching: _,
             extra_fields,
             metadata_upload,
             prefill_worker_id,
@@ -312,6 +389,7 @@ pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-dynamo-prefill-dp-rank";
 pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
 pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
+pub const HEADER_DISABLE_CACHING: &str = "x-dynamo-disable-caching";
 pub const HEADER_TENANT_ID: &str = "x-tenant-id";
 // Compatibility aliases for the original unprefixed names. Future agents may remove these after
 // the deprecation window.
@@ -498,33 +576,59 @@ pub fn apply_cache_salt_header_override(
     Some(nvext)
 }
 
-/// Remove all NvExt fields except a non-empty cache salt.
-pub fn retain_cache_salt(nvext: Option<NvExt>) -> Option<NvExt> {
-    nvext.and_then(|nvext| {
-        nvext
-            .cache_salt
-            .filter(|cache_salt| !cache_salt.is_empty())
-            .map(|cache_salt| NvExt {
-                cache_salt: Some(cache_salt),
-                ..Default::default()
-            })
+/// Apply the `x-dynamo-disable-caching` override independently of other NvExt features.
+///
+/// A present header is authoritative over the body: a value that is neither a mode nor
+/// truthy clears `disable_caching`. An absent header leaves the body unchanged.
+pub fn apply_disable_caching_header_override(
+    nvext: Option<NvExt>,
+    headers: &HeaderMap,
+) -> Option<NvExt> {
+    let Some(value) = headers.get(HEADER_DISABLE_CACHING) else {
+        return nvext;
+    };
+    let disable_caching = value
+        .to_str()
+        .ok()
+        .and_then(DisableCaching::from_header_value);
+    if disable_caching.is_none() && nvext.is_none() {
+        return None;
+    }
+
+    let mut nvext = nvext.unwrap_or_default();
+    nvext.disable_caching = disable_caching;
+    Some(nvext)
+}
+
+/// Remove all NvExt fields except the cache controls: a non-empty cache salt and
+/// `disable_caching`.
+pub fn retain_cache_controls(nvext: Option<NvExt>) -> Option<NvExt> {
+    let nvext = nvext?;
+    let cache_salt = nvext.cache_salt.filter(|cache_salt| !cache_salt.is_empty());
+    let disable_caching = nvext.disable_caching;
+    (cache_salt.is_some() || disable_caching.is_some()).then(|| NvExt {
+        cache_salt,
+        disable_caching,
+        ..Default::default()
     })
 }
 
 /// Apply the frontend NvExt policy for endpoints that support routing headers.
 ///
-/// Cache-salt resolution always runs. Other body fields and routing headers run only
-/// when NvExt is enabled.
+/// Cache controls (cache salt and `disable_caching`) always resolve: they only scope the
+/// requester's own cache footprint. Other body fields and routing headers run only when
+/// NvExt is enabled.
 pub fn apply_frontend_nvext_policy(
     nvext: Option<NvExt>,
     headers: &HeaderMap,
     nvext_enabled: bool,
 ) -> Option<NvExt> {
     let nvext = apply_cache_salt_header_override(nvext, headers);
+    let nvext = apply_disable_caching_header_override(nvext, headers);
     if nvext_enabled {
         apply_header_routing_overrides(nvext, headers)
     } else {
-        retain_cache_salt(nvext)
+        retain_cache_controls(nvext)
     }
 }
 
@@ -1194,7 +1298,7 @@ mod tests {
 
         let nvext = apply_frontend_nvext_policy(Some(body), &headers, false).unwrap();
         assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
-        assert!(!nvext.has_non_cache_salt_fields());
+        assert!(!nvext.has_non_cache_control_fields());
     }
 
     #[test]
@@ -1283,6 +1387,147 @@ mod tests {
 
         let nvext = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
         assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+    }
+
+    #[test]
+    fn disable_caching_header_value_resolves_modes_and_truthy_alias() {
+        for (value, expected) in [
+            ("decode-only", Some(DisableCaching::DecodeOnly)),
+            (" Decode-Only ", Some(DisableCaching::DecodeOnly)),
+            ("new-blocks", Some(DisableCaching::NewBlocks)),
+            ("NEW-BLOCKS", Some(DisableCaching::NewBlocks)),
+            ("1", Some(DisableCaching::NewBlocks)),
+            ("true", Some(DisableCaching::NewBlocks)),
+            (" Yes ", Some(DisableCaching::NewBlocks)),
+            ("on", Some(DisableCaching::NewBlocks)),
+            ("0", None),
+            ("false", None),
+            ("off", None),
+            ("", None),
+            ("auto", None),
+            ("decode_only", None),
+        ] {
+            assert_eq!(
+                DisableCaching::from_header_value(value),
+                expected,
+                "header value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disable_caching_header_is_authoritative_over_body() {
+        let body = |mode| NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            disable_caching: Some(mode),
+            ..Default::default()
+        };
+
+        let nvext = apply_disable_caching_header_override(
+            Some(body(DisableCaching::DecodeOnly)),
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert_eq!(nvext.disable_caching, Some(DisableCaching::DecodeOnly));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_DISABLE_CACHING, "new-blocks".parse().unwrap());
+        let nvext =
+            apply_disable_caching_header_override(Some(body(DisableCaching::DecodeOnly)), &headers)
+                .unwrap();
+        assert_eq!(nvext.disable_caching, Some(DisableCaching::NewBlocks));
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+
+        // A present header that is neither a mode nor truthy clears the body value
+        // without creating an envelope for a request that had none.
+        headers.insert(HEADER_DISABLE_CACHING, "no".parse().unwrap());
+        let nvext =
+            apply_disable_caching_header_override(Some(body(DisableCaching::NewBlocks)), &headers)
+                .unwrap();
+        assert_eq!(nvext.disable_caching, None);
+        assert!(apply_disable_caching_header_override(None, &headers).is_none());
+
+        headers.insert(HEADER_DISABLE_CACHING, "yes".parse().unwrap());
+        assert_eq!(
+            apply_disable_caching_header_override(None, &headers)
+                .unwrap()
+                .disable_caching,
+            Some(DisableCaching::NewBlocks)
+        );
+    }
+
+    #[test]
+    fn nvext_disable_caching_body_accepts_bool_or_mode() {
+        for (raw, expected) in [
+            (serde_json::json!(true), Some(DisableCaching::NewBlocks)),
+            (serde_json::json!(false), None),
+            (serde_json::json!(null), None),
+            (
+                serde_json::json!("decode-only"),
+                Some(DisableCaching::DecodeOnly),
+            ),
+            (
+                serde_json::json!("new-blocks"),
+                Some(DisableCaching::NewBlocks),
+            ),
+        ] {
+            let nvext = parse_nvext(Some(serde_json::json!({ "disable_caching": raw })))
+                .unwrap()
+                .unwrap();
+            assert_eq!(nvext.disable_caching, expected, "body value {raw}");
+        }
+
+        for raw in [
+            serde_json::json!("auto"),
+            serde_json::json!("yes"),
+            serde_json::json!("Decode-Only"),
+            serde_json::json!(1),
+            serde_json::json!({}),
+        ] {
+            let err = parse_nvext(Some(serde_json::json!({ "disable_caching": raw }))).unwrap_err();
+            assert!(
+                err.to_string().contains("disable_caching"),
+                "body value {raw}: {err}"
+            );
+        }
+
+        let nvext = NvExt {
+            disable_caching: Some(DisableCaching::DecodeOnly),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&nvext).unwrap(),
+            serde_json::json!({ "disable_caching": "decode-only" })
+        );
+        assert_eq!(
+            serde_json::to_value(NvExt::default()).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn frontend_nvext_policy_applies_disable_caching_in_both_modes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_WORKER_INSTANCE_ID, "42".parse().unwrap());
+        headers.insert(HEADER_DISABLE_CACHING, "decode-only".parse().unwrap());
+
+        let nvext = apply_frontend_nvext_policy(None, &headers, false).unwrap();
+        assert_eq!(nvext.disable_caching, Some(DisableCaching::DecodeOnly));
+        assert!(!nvext.has_non_cache_control_fields());
+
+        let nvext = apply_frontend_nvext_policy(None, &headers, true).unwrap();
+        assert_eq!(nvext.disable_caching, Some(DisableCaching::DecodeOnly));
+        assert_eq!(nvext.backend_instance_id, Some(42));
+
+        // A body value survives the disabled gate alongside the cache salt.
+        let body = NvExt {
+            disable_caching: Some(DisableCaching::NewBlocks),
+            backend_instance_id: Some(99),
+            ..Default::default()
+        };
+        let nvext = apply_frontend_nvext_policy(Some(body), &HeaderMap::new(), false).unwrap();
+        assert_eq!(nvext.disable_caching, Some(DisableCaching::NewBlocks));
+        assert_eq!(nvext.backend_instance_id, None);
     }
 
     #[test]

@@ -50,8 +50,9 @@ use crate::protocols::anthropic::types::{
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
-    apply_cache_salt_header_override, apply_header_routing_overrides,
-    has_non_cache_salt_routing_headers, session_affinity_from_headers,
+    apply_cache_salt_header_override, apply_disable_caching_header_override,
+    apply_header_routing_overrides, has_non_cache_salt_routing_headers,
+    session_affinity_from_headers,
 };
 use crate::protocols::common::input_trigger::classify_anthropic_request;
 use crate::protocols::openai::chat_completions::{
@@ -1199,18 +1200,30 @@ fn gate_anthropic_nvext(
     let mut discarded = has_non_cache_salt_routing_headers(headers);
     if let Some(raw_nvext) = request.nvext.take() {
         if let serde_json::Value::Object(mut fields) = raw_nvext {
-            if fields.keys().any(|field| field != "cache_salt") {
+            if fields
+                .keys()
+                .any(|field| field != "cache_salt" && field != "disable_caching")
+            {
                 discarded = true;
             }
 
-            request.nvext = match fields.remove("cache_salt") {
-                None | Some(serde_json::Value::Null) => None,
-                Some(serde_json::Value::String(cache_salt)) if cache_salt.is_empty() => None,
+            let mut retained = serde_json::Map::new();
+            match fields.remove("cache_salt") {
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::String(cache_salt)) if cache_salt.is_empty() => {}
                 Some(serde_json::Value::String(cache_salt)) => {
-                    Some(serde_json::json!({ "cache_salt": cache_salt }))
+                    retained.insert("cache_salt".to_string(), cache_salt.into());
                 }
                 Some(_) => anyhow::bail!("invalid nvext.cache_salt: expected a string or null"),
-            };
+            }
+            // NvExt conversion validates this value with the other fields.
+            if let Some(disable_caching) = fields
+                .remove("disable_caching")
+                .filter(|value| !value.is_null())
+            {
+                retained.insert("disable_caching".to_string(), disable_caching);
+            }
+            request.nvext = (!retained.is_empty()).then_some(serde_json::Value::Object(retained));
         } else {
             discarded = true;
         }
@@ -1226,6 +1239,7 @@ fn apply_anthropic_nvext_policy(
     nvext_enabled: bool,
 ) {
     let nvext = apply_cache_salt_header_override(request.nvext.take(), headers);
+    let nvext = apply_disable_caching_header_override(nvext, headers);
     request.nvext = if nvext_enabled {
         apply_header_routing_overrides(nvext, headers)
     } else {
@@ -1426,7 +1440,9 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::extensions::parse_nvext;
+    use crate::protocols::common::extensions::{
+        DisableCaching, HEADER_DISABLE_CACHING, parse_nvext,
+    };
 
     fn request_with_nvext() -> AnthropicCreateMessageRequest {
         serde_json::from_value(serde_json::json!({
@@ -1540,7 +1556,52 @@ mod tests {
         let nvext = parse_nvext(request.nvext).unwrap().unwrap();
 
         assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
-        assert!(!nvext.has_non_cache_salt_fields());
+        assert!(!nvext.has_non_cache_control_fields());
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_retains_disable_caching_when_disabled() {
+        let mut request = request_with_nvext();
+        request.nvext.as_mut().unwrap()["disable_caching"] = serde_json::json!("decode-only");
+        gate_anthropic_nvext(&mut request, &HeaderMap::new(), false).unwrap();
+        let nvext = parse_nvext(request.nvext).unwrap().unwrap();
+
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+        assert_eq!(nvext.disable_caching, Some(DisableCaching::DecodeOnly));
+        assert!(!nvext.has_non_cache_control_fields());
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_keeps_invalid_disable_caching_for_conversion_error() {
+        let mut request = request_with_nvext();
+        request.nvext.as_mut().unwrap()["disable_caching"] = serde_json::json!("bogus");
+        gate_anthropic_nvext(&mut request, &HeaderMap::new(), false).unwrap();
+
+        // The handler maps this conversion error to a validation (400) response.
+        let error = NvCreateChatCompletionRequest::try_from(request).unwrap_err();
+        assert!(
+            error.to_string().contains("disable_caching"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn anthropic_nvext_policy_applies_disable_caching_header_in_both_modes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_DISABLE_CACHING, "on".parse().unwrap());
+        for nvext_enabled in [true, false] {
+            let mut request = request_with_nvext();
+            gate_anthropic_nvext(&mut request, &headers, nvext_enabled).unwrap();
+            let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+            apply_anthropic_nvext_policy(&mut chat_request, &headers, nvext_enabled);
+
+            assert_eq!(
+                chat_request.nvext.unwrap().disable_caching,
+                Some(DisableCaching::NewBlocks),
+                "nvext_enabled={nvext_enabled}"
+            );
+        }
     }
 
     #[test]

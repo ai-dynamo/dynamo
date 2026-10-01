@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
-use super::extensions::{AgentContext, RouterParams};
+use super::extensions::{AgentContext, DisableCaching, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
@@ -452,6 +452,17 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_reasoning: bool,
 
+    /// Best-effort cache-pollution hint from `nvext.disable_caching`.
+    /// Backends translate it to an engine option where one exists and ignore it
+    /// otherwise. See [`DisableCaching`] for the fallback rule.
+    #[builder(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "DisableCaching::deserialize_tolerant"
+    )]
+    pub disable_caching: Option<DisableCaching>,
+
     /// Router-specific parameters forwarded from `nvext.router`.
     /// Consumed by router implementations (e.g. the global router) and ignored
     /// by engines/backends.
@@ -856,5 +867,34 @@ mod tests {
 
         let decoded: RoutingHints = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.cache_namespace.as_deref(), Some("tenant-a"));
+    }
+
+    #[test]
+    fn disable_caching_wire_form_and_tolerant_reader() {
+        let mut req = request_with_tokens(vec![1, 2, 3]);
+        let unset = serde_json::to_value(&req).unwrap();
+        assert!(
+            !unset.as_object().unwrap().contains_key("disable_caching"),
+            "disable_caching must be absent from wire when None; got {unset}"
+        );
+
+        req.disable_caching = Some(DisableCaching::NewBlocks);
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["disable_caching"], "new-blocks");
+        let back: PreprocessedRequest = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.disable_caching, Some(DisableCaching::NewBlocks));
+
+        // The hint is best-effort: a mode this worker does not know is ignored
+        // rather than failing the request, so newer frontends can add modes.
+        for raw in [
+            serde_json::json!("future-mode"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+        ] {
+            let mut json = json.clone();
+            json["disable_caching"] = raw.clone();
+            let back: PreprocessedRequest = serde_json::from_value(json).unwrap();
+            assert_eq!(back.disable_caching, None, "wire value {raw}");
+        }
     }
 }
