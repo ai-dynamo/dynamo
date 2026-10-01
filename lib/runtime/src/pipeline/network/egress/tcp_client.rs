@@ -1154,7 +1154,6 @@ impl HostPool {
         &self,
         connect_limiter: &tokio::sync::Semaphore,
     ) -> Result<Arc<TcpConnection>> {
-        // --- Phase A: lock LRU, prune, decide, publish snapshot, unlock ---
         let need_connect = {
             let mut lru = self.lru.lock();
 
@@ -1253,7 +1252,6 @@ impl HostPool {
                     Ok(stream) => {
                         let new_conn = Arc::new(stream);
 
-                        // --- Phase C: lock LRU, insert, publish snapshot, unlock ---
                         {
                             let mut lru = self.lru.lock();
 
