@@ -2615,22 +2615,25 @@ async fn handler_chat_completions(
 }
 
 fn parse_chat_json_request(body: &[u8]) -> Result<NvCreateChatCompletionRequest, ErrorResponse> {
-    parse_json_request("chat completions", body).map_err(|mut error| {
-        // Wrapper-owned duplicate fields take precedence over flattened base errors.
-        if error.1.message.starts_with(
-            "Failed to deserialize the JSON body into the target type: duplicate field `",
-        ) {
+    deserialize_json_request("chat completions", body).map_err(|original_error| {
+        let is_data_error = original_error.is_data();
+        let mut error = json_deserialize_error(original_error);
+        // Preserve syntax/EOF errors and wrapper-owned duplicate-field precedence.
+        if !is_data_error
+            || error.1.message.starts_with(
+                "Failed to deserialize the JSON body into the target type: duplicate field `",
+            )
+        {
             return error;
         }
 
         // Diagnose the base schema directly: serde(flatten) loses its field paths.
-        // Only inspect valid JSON after all existing recovery attempts fail.
         // Diagnose the original bytes so duplicate fields retain their precedence.
-        if let Ok(serde_json::Value::Object(_)) = serde_json::from_slice(body)
-            && let Err(source) = serde_path_to_error::deserialize::<
-                _,
-                dynamo_protocols::types::CreateChatCompletionRequest,
-            >(&mut serde_json::Deserializer::from_slice(body))
+        if let Err(source) = serde_path_to_error::deserialize::<
+            _,
+            dynamo_protocols::types::CreateChatCompletionRequest,
+        >(&mut serde_json::Deserializer::from_slice(body))
+            && source.inner().is_data()
             && let Some(serde_path_to_error::Segment::Map { key }) = source.path().iter().next()
         {
             // Nested map keys and deserializer messages can contain user input.
@@ -2642,6 +2645,13 @@ fn parse_chat_json_request(body: &[u8]) -> Result<NvCreateChatCompletionRequest,
 }
 
 fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
+where
+    T: DeserializeOwned,
+{
+    deserialize_json_request(endpoint, body).map_err(json_deserialize_error)
+}
+
+fn deserialize_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
 where
     T: DeserializeOwned,
 {
@@ -2657,12 +2667,10 @@ where
                         );
                         Ok(request)
                     }
-                    Err(_) => parse_json_request_lossy(endpoint, body)
-                        .map_err(|_| json_deserialize_error(original_error)),
+                    Err(_) => parse_json_request_lossy(endpoint, body).map_err(|_| original_error),
                 }
             } else {
-                parse_json_request_lossy(endpoint, body)
-                    .map_err(|_| json_deserialize_error(original_error))
+                parse_json_request_lossy(endpoint, body).map_err(|_| original_error)
             }
         }
     }
@@ -6240,8 +6248,7 @@ mod tests {
             br#"{"model":"test-model","messages":"private-input-canary""#.as_slice(),
             br#"{"model":"test-model"}"#,
             br#"[]"#,
-            br#"{"model":"first","model":"second","messages":[]}"#,
-            br#"{"model":"first","model":"second","messages":42}"#,
+            br#"{"model":"test-model","chat_template_args":false,"temperature":invalid}"#,
             br#"{"model":"test-model","messages":42,"chat_template_args":{},"chat_template_args":{}}"#,
         ] {
             let error = parse_chat_json_request(body).expect_err("request should fail");
