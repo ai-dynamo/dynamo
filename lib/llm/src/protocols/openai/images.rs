@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 mod aggregator;
 mod nvext;
+pub mod schema;
 
 pub use nvext::NvExt;
 
