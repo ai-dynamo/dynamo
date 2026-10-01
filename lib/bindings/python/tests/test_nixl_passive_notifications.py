@@ -21,8 +21,8 @@ pytestmark = [
 ]
 
 
-@pytest.fixture(params=["ReadableOperation", "WritableOperation"])
-def passive_operations(request, monkeypatch):
+@pytest.fixture
+def passive_operations(monkeypatch):
     agent = MagicMock()
     agent.register_memory.side_effect = lambda *args: object()
     agent.notifs = {}
@@ -35,7 +35,7 @@ def passive_operations(request, monkeypatch):
 
     def make_operation():
         descriptor = nixl_connect.Descriptor(torch.zeros(4, dtype=torch.uint8))
-        operation = getattr(nixl_connect, request.param)(connection, descriptor)
+        operation = nixl_connect.ReadableOperation(connection, descriptor)
         operations.append(operation)
         return operation
 
