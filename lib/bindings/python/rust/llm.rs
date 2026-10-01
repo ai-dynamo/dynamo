@@ -26,6 +26,7 @@ use super::*;
 pub mod ais_callback;
 pub mod entrypoint;
 pub mod fpm;
+pub mod sweeper_events;
 pub mod frontend_routes;
 pub mod kv;
 pub mod kv_dc_relay;
