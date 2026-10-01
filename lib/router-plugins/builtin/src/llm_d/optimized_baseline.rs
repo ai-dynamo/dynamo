@@ -173,7 +173,7 @@ impl WorkerPicker for AffinityPicker {
                     device_overlap_blocks(cache) / full_blocks >= self.parameters.affinity_threshold
                 })
         };
-        let modeled_ms = |row: usize| context.modeled_prefill_backlog_ms(candidates[row].worker());
+        let modeled_ms = |row: usize| input.modeled_prefill_backlog_ms(row);
         let use_model = match self.parameters.ttft_source {
             TtftSource::Throughput => false,
             TtftSource::Modeled => true,

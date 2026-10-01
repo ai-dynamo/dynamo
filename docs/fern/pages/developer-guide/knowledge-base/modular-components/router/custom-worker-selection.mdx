@@ -447,7 +447,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
-| `PREFILL_TIME` | `WorkerSelectionContext::modeled_prefill_backlog_ms(worker)` | Derived estimate, in milliseconds, of the time a worker's active prefills still need, excluding this request. Filled only when a component of the policy declares the group and the router runs a prefill-load model (`router_prefill_load_model: ais`). `None` for a worker with any unmodeled or failed prediction. Values synced from router replicas are anchored at receive time |
+| `PREFILL_TIME` | `modeled_prefill_backlog_ms()`, or `modeled_prefill_backlog_ms(row)` on a picker's input | Derived estimate, in milliseconds, of the time a worker's active prefills still need, excluding this request. `None` unless the router runs a prefill-load model (`router_prefill_load_model: ais`), and for a worker with any unmodeled or failed prediction. Values synced from router replicas are anchored at receive time |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 

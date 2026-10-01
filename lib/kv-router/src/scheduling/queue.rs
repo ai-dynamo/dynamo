@@ -4306,14 +4306,13 @@ policy_classes:
 
             fn pick(
                 &mut self,
-                context: &WorkerSelectionContext<'_>,
+                _context: &WorkerSelectionContext<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
-                let worker = input.candidates()[0].worker();
                 self.seen
                     .lock()
                     .unwrap()
-                    .push(context.modeled_prefill_backlog_ms(worker));
+                    .push(input.modeled_prefill_backlog_ms(0));
                 Ok(0)
             }
         }
@@ -4348,7 +4347,6 @@ policy_classes:
                 duration: Duration::from_secs(10),
             }))
         };
-        // The first request finds the worker idle; the second sees the first's 10 s prefill.
         assert_eq!(
             seen_backlogs(WorkerInputs::PREFILL_TIME, estimator()).await,
             [Some(0), Some(10_000)]
