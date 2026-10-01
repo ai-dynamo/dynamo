@@ -525,6 +525,62 @@ async def test_teardown_survives_a_failed_companion_delete(tmp_path) -> None:
     await deployment._delete_deployment()  # must not raise
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(dgd_utils.exceptions.ApiException(status=403), id="forbidden"),
+        pytest.param(dgd_utils.exceptions.ApiException(status=500), id="server-error"),
+        pytest.param(aiohttp.ClientConnectionError("tunnel down"), id="tunnel-down"),
+    ],
+)
+async def test_companions_stay_when_the_deployment_delete_fails(
+    tmp_path, monkeypatch, failure
+) -> None:
+    """A failed delete can leave the DGD running, and its pods mount these."""
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", AsyncMock())
+    spec = DeploymentSpec(str(_multi_document_manifest(tmp_path)))
+    deployment = ManagedDeployment(
+        log_dir=str(tmp_path),
+        deployment_spec=spec,
+        namespace="default",
+    )
+    calls: list = []
+    deployment._kubectl = lambda verb, docs, *extra: calls.append(verb)
+    deployment._deployment_name = "recipe-under-test"
+    deployment._custom_api = SimpleNamespace(
+        delete_namespaced_custom_object=AsyncMock(side_effect=failure)
+    )
+
+    with pytest.raises(type(failure)):
+        await deployment._delete_deployment()
+
+    assert calls == []
+
+
+async def test_companions_are_removed_when_the_deployment_is_already_gone(
+    tmp_path,
+) -> None:
+    """A 404 means no DGD is left to mount them, so they must not leak."""
+    spec = DeploymentSpec(str(_multi_document_manifest(tmp_path)))
+    deployment = ManagedDeployment(
+        log_dir=str(tmp_path),
+        deployment_spec=spec,
+        namespace="default",
+    )
+    calls: list = []
+    deployment._kubectl = lambda verb, docs, *extra: calls.append(verb)
+    deployment._deployment_name = "recipe-under-test"
+    deployment._custom_api = SimpleNamespace(
+        delete_namespaced_custom_object=AsyncMock(
+            side_effect=dgd_utils.exceptions.ApiException(status=404)
+        )
+    )
+
+    await deployment._delete_deployment()
+
+    assert calls == ["delete"]
+
+
 def test_a_placeholder_namespace_is_retargeted(tmp_path) -> None:
     """Four companions in the corpus declare `namespace: <your-namespace>`.
 

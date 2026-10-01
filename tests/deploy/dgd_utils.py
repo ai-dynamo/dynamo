@@ -1907,7 +1907,7 @@ class ManagedDeployment:
 
     async def _delete_deployment(self):
         """
-        Delete the DynamoGraphDeployment CR.
+        Delete the DynamoGraphDeployment CR, then its companion resources.
         """
         if not self._deployment_name or self._custom_api is None:
             return
@@ -1926,16 +1926,23 @@ class ManagedDeployment:
                 (aiohttp.ClientConnectionError,),
                 self._logger,
             )
-        except exceptions.ApiException as error:
-            if error.status == 404:  # Ignore if already deleted
-                return
-            raise
-        finally:
-            # After the DGD, so nothing is still mounting them. Runs on the
-            # 404 ``return`` too, which is the case that most needs it: the
-            # deployment is already gone and its companions would otherwise
-            # outlive every run that created them.
-            await self._delete_companions()
+        except BaseException as error:
+            already_gone = (
+                isinstance(error, exceptions.ApiException) and error.status == 404
+            )
+            if not already_gone:
+                # The DGD can still be running after a failed delete, and its
+                # pods mount the companions, so they stay.
+                if getattr(self.deployment_spec, "companions", None):
+                    self._logger.warning(
+                        "Keeping the companion resources of %s because its "
+                        "delete failed with %s",
+                        self._deployment_name,
+                        type(error).__name__,
+                    )
+                raise
+        # Only after the delete went through or found nothing.
+        await self._delete_companions()
 
     def port_forward(
         self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
