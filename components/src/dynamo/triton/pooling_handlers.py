@@ -175,6 +175,13 @@ class ClassifyWorkerHandler:
     ) -> AsyncGenerator[dict, None]:
         model_name = request.get("model") or self._model.name
         prompts = _extract_text_input(request.get("input"))
+        if not self._batched and len(prompts) > 1:
+            raise ValueError(
+                f"Triton classify model '{self._model.name}' is unbatched "
+                f"(max_batch_size=0) and received {len(prompts)} prompts. "
+                "Send one prompt per request, or raise max_batch_size in "
+                "the model's config.pbtxt."
+            )
         _reject_unsupported_controls(request)
 
         # Mirror vLLM's fallback so concurrent classify responses stay
@@ -213,14 +220,21 @@ class ClassifyWorkerHandler:
             # is FP32 by construction), avoiding a payload-sized copy.
             probs_arr = np.from_dlpack(output_tensor).astype(np.float32, copy=False)
 
-            # Normalize to (batch, features). Triton outputs come in three
-            # shapes: 1D unbatched, 2D flat batched, or >=3D batched with
-            # configured extra dims (e.g. dims=[1, classes] yields
-            # [batch, 1, classes]). Flatten non-batch dims per row.
-            if probs_arr.ndim == 1:
-                probs_arr = probs_arr.reshape(1, -1)
-            elif probs_arr.ndim > 2:
+            # Branch on the batching contract rather than tensor rank:
+            # an unbatched model with dims=[a, b] returns shape (a, b)
+            # that is one classification, not two.
+            if self._batched:
+                if probs_arr.ndim < 2:
+                    raise RuntimeError(
+                        f"Triton model '{self._model.name}' declares "
+                        f"batching (max_batch_size={self._config.max_batch_size}) "
+                        f"but output '{self._output_name}' arrived with "
+                        f"shape {probs_arr.shape}; expected a leading "
+                        "batch axis."
+                    )
                 probs_arr = probs_arr.reshape(probs_arr.shape[0], -1)
+            else:
+                probs_arr = probs_arr.reshape(1, -1)
             batch_size, num_classes = probs_arr.shape
 
             for idx in range(batch_size):

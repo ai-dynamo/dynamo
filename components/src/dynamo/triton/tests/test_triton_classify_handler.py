@@ -453,6 +453,45 @@ class TestClassify:
         with pytest.raises(RuntimeError, match="expected one row per input"):
             _run(handler, {"input": ["a", "b", "c"]})
 
+    def test_unbatched_rank_2_output_flattens_to_single_row(self) -> None:
+        # Unbatched model with dims=[2, 2] returns shape (2, 2), four
+        # class scores for one input. Rank alone would read this as two
+        # rows and trip the row-count check; the handler must branch on
+        # the batching contract and flatten to a single row.
+        probs = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
+        _, handler = _make_handler(
+            responses=[
+                types.SimpleNamespace(outputs={"probs": _mock_fp32_tensor(probs)})
+            ],
+            max_batch_size=0,
+        )
+        responses = _run(handler, {"input": "single"})
+        assert len(responses[0]["data"]) == 1
+        entry = responses[0]["data"][0]
+        assert entry["num_classes"] == 4
+        assert entry["probs"] == pytest.approx([0.1, 0.2, 0.3, 0.4])
+
+    def test_batched_declared_but_rank_1_output_raises(self) -> None:
+        # A model with max_batch_size>0 must always return a leading
+        # batch axis. A rank-1 response is a contract violation and must
+        # raise loudly rather than be silently reshaped as one row.
+        probs = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        _, handler = _make_handler(
+            responses=[
+                types.SimpleNamespace(outputs={"probs": _mock_fp32_tensor(probs)})
+            ]
+        )
+        with pytest.raises(RuntimeError, match="expected a leading batch axis"):
+            _run(handler, {"input": "x"})
+
+    def test_unbatched_rejects_multiple_prompts(self) -> None:
+        # Unbatched models cannot serve more than one prompt per request;
+        # the handler must reject the shape mismatch at the front door
+        # instead of letting Triton emit an opaque infer-time error.
+        _, handler = _make_handler(max_batch_size=0)
+        with pytest.raises(ValueError, match="received 2 prompts"):
+            _run(handler, {"input": ["a", "b"]})
+
 
 # ---------------------------------------------------------------------------
 # Dispatch & validation
