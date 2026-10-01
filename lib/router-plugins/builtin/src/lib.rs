@@ -8,6 +8,7 @@
 //! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
+pub mod credit;
 mod default;
 mod thunderagent;
 mod two_tier_cost_fn;
