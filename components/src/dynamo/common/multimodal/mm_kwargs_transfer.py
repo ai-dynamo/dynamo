@@ -28,6 +28,7 @@ import os
 import pickle
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import ExitStack
 from queue import Queue
 from typing import Any
 
@@ -511,36 +512,39 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
         if not self._available:
             raise RuntimeError("NIXL not available for mm_kwargs reception")
 
-        # Pre-allocate result slots to preserve spec order regardless of
-        # completion order from asyncio.gather.
-        read_tasks = []
+        # Validate the whole batch before borrowing buffers or creating reads.
+        read_metadata = [
+            self._nixl_connect.RdmaMetadata.model_validate(spec.serialized_request)
+            for spec in metadata.tensor_specs
+        ]
         # Track acquired descriptors for release after reads complete.
         acquired: list[tuple[Any, bool, int | None]] = []
         # Store (spec_index, field_name, tensor_view, size_bytes) per task.
         task_meta: list[tuple[int, str, Any, int]] = []
 
-        for idx, spec in enumerate(metadata.tensor_specs):
-            size_bytes = 1
-            for s in spec.shape:
-                size_bytes *= s
-            # uint8 → 1 byte per element
-            desc, tensor_view, is_dynamic, orig_size = self._acquire_descriptor(
-                size_bytes
-            )
-            acquired.append((desc, is_dynamic, orig_size))
-            task_meta.append((idx, spec.field_name, tensor_view, size_bytes))
+        # Preparation cannot issue a transfer. Restore earlier buffers if a later
+        # allocation fails, but do not recycle buffers after reads have started.
+        with ExitStack() as rollback:
+            for idx, spec in enumerate(metadata.tensor_specs):
+                size_bytes = 1
+                for s in spec.shape:
+                    size_bytes *= s
+                # uint8 → 1 byte per element
+                desc, tensor_view, is_dynamic, orig_size = self._acquire_descriptor(
+                    size_bytes
+                )
+                rollback.callback(self._release_descriptor, desc, is_dynamic, orig_size)
+                acquired.append((desc, is_dynamic, orig_size))
+                task_meta.append((idx, spec.field_name, tensor_view, size_bytes))
+            rollback.pop_all()
 
-            rdma_metadata = self._nixl_connect.RdmaMetadata.model_validate(
-                spec.serialized_request
-            )
+        async def _do_read(rm, desc):
+            read_op = await self._connector.begin_read(rm, desc)
+            await read_op.wait_for_completion()
 
-            async def _do_read(rm=rdma_metadata, d=desc):
-                read_op = await self._connector.begin_read(rm, d)
-                await read_op.wait_for_completion()
-
-            read_tasks.append(_do_read())
-
-        await asyncio.gather(*read_tasks)
+        await asyncio.gather(
+            *(_do_read(rm, desc) for rm, (desc, _, _) in zip(read_metadata, acquired))
+        )
 
         # Collect results in spec order (not completion order).
         results: dict[str, Any] = {}
