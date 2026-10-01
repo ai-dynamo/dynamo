@@ -7411,6 +7411,11 @@ impl
                 .map(|name| name.as_ref().clone()),
         )?;
 
+        // Keep the backend payload out of `multi_modal_data`, which the frontend
+        // owns and populates from media content parts below, so the worker can
+        // tell the two apart.
+        builder.backend_multi_modal_data(request.multi_modal_data.take());
+
         // Check if embeddings are provided - skip tokenization path
         let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
             // Skip tokenization for embeddings
@@ -10948,6 +10953,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            multi_modal_data: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };

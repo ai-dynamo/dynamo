@@ -20,6 +20,7 @@ use super::{
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
 };
+use crate::protocols::common::preprocessor::BackendMultiModalData;
 
 mod aggregator;
 mod delta;
@@ -43,6 +44,18 @@ pub struct NvCreateCompletionRequest {
     // metadata - passthrough parameter without restrictions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+
+    /// JSON-safe custom-modality inputs for the selected backend.
+    ///
+    /// Values are opaque to the OpenAI frontend. They are forwarded unchanged
+    /// to the backend's multimodal processor, which owns payload validation.
+    /// The key matches the engine-side name the payload is installed under;
+    /// on the frontend-to-worker wire it travels as
+    /// `PreprocessedRequest::backend_multi_modal_data` so it never collides
+    /// with the frontend-owned URL and RDMA media map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub multi_modal_data: Option<BackendMultiModalData>,
 
     /// When true, logprob token fields are returned as `"token_id:<id>"`
     /// instead of the decoded text.
@@ -465,6 +478,12 @@ impl ValidateRequest for NvCreateCompletionRequest {
             self.inner.prompt_embeds.as_deref(),
         )?;
 
+        validate::validate_backend_multi_modal_data(
+            self.multi_modal_data.as_ref(),
+            self.inner.prompt_embeds.is_some(),
+            get_prompt_batch_size(&self.inner.prompt),
+        )?;
+
         validate::validate_suffix(self.inner.suffix.as_deref())?;
         validate::validate_max_tokens(self.inner.max_tokens)?;
         validate::validate_temperature(self.inner.temperature)?;
@@ -657,6 +676,101 @@ mod tests {
 
         assert!(ValidateRequest::validate(&request).is_ok());
         assert!(request.inner.prompt_embeds.is_some());
+    }
+
+    #[test]
+    fn test_backend_multimodal_data_is_admitted_without_interpretation() {
+        let payload = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "multi_modal_data": {
+                "custom_input": {
+                    "dtype": "float32-le",
+                    "shape": [2, 4],
+                    "data_base64": "AAAAAA=="
+                }
+            }
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(payload).expect("request should deserialize");
+
+        assert!(ValidateRequest::validate(&request).is_ok());
+        assert_eq!(
+            request.multi_modal_data,
+            Some(BackendMultiModalData::from([(
+                "custom_input".to_string(),
+                json!({
+                    "dtype": "float32-le",
+                    "shape": [2, 4],
+                    "data_base64": "AAAAAA=="
+                }),
+            )]))
+        );
+    }
+
+    #[test]
+    fn test_backend_multimodal_data_rejects_empty_map() {
+        let payload = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "multi_modal_data": {}
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(payload).expect("request should deserialize");
+
+        let error = ValidateRequest::validate(&request)
+            .expect_err("an empty modality map carries no payload");
+        assert!(
+            error.to_string().contains("at least one modality entry"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_backend_multimodal_data_rejects_batched_prompt() {
+        // The HTTP batch path clones the whole request per prompt, so one opaque
+        // payload would be applied to every prompt in the batch.
+        let payload = json!({
+            "model": "test-model",
+            "prompt": [[1, 2, 3], [4, 5, 6]],
+            "multi_modal_data": {"custom_input": {"payload": "x"}}
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(payload).expect("request should deserialize");
+
+        let error = ValidateRequest::validate(&request)
+            .expect_err("a batched prompt has no single owner for the payload");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be combined with a batched prompt"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_backend_multimodal_data_rejects_prompt_embeds() {
+        let payload = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "prompt_embeds": base64::engine::general_purpose::STANDARD.encode(vec![0u8; 256]),
+            "multi_modal_data": {"custom_input": {"payload": "x"}}
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(payload).expect("request should deserialize");
+
+        let error = ValidateRequest::validate(&request)
+            .expect_err("prompt_embeds and multi_modal_data are mutually exclusive");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be combined with prompt_embeds"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

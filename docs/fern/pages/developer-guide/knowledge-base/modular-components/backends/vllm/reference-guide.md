@@ -81,6 +81,42 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 - Embeddings are sent as base64-encoded PyTorch tensors via the `prompt_embeds` field in the Completions API
 - NATS must be configured with a 15MB max payload for large embeddings (already set in default deployments)
 
+### Custom Modality Inputs
+
+Models that register their own vLLM multimodal processor — a custom modality whose inputs are not images, video, or audio URLs — accept a JSON-safe payload through the `multi_modal_data` field on the Completions API.
+
+The frontend does not interpret the payload. It admits the field, carries it to the worker in its own wire field (separate from the URL and RDMA media the frontend materializes itself), and the worker installs it as the engine's `multi_modal_data`. Your registered processor owns all validation of the values.
+
+```bash
+curl http://localhost:8000/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "<model>",
+    "prompt": [1, 2, 3],
+    "max_tokens": 16,
+    "multi_modal_data": {
+      "custom_input": {"dtype": "float32-le", "shape": [2, 4], "data_base64": "AAAAAA=="}
+    }
+  }'
+```
+
+- Enable with `--enable-multimodal`; the worker rejects the payload otherwise
+- The payload must be a non-empty JSON object mapping a modality name to its value
+- Values are forwarded as the same semantic JSON value; the frontend applies no modality-specific schema transformation
+- Modality names are yours to choose, including names the frontend uses for its own media: a backend payload never reaches frontend media handling
+- Cannot be combined with `prompt_embeds`, which replaces the entire prompt and leaves no placeholder sequence for the processor to expand
+- Chat Completions uses content parts for media instead; this field is Completions-only
+- The payload travels the request plane inline, so size it against your NATS `max_payload` as you would for `prompt_embeds`
+
+> [!NOTE]
+> KV-aware routing scores this request on its placeholder prompt tokens alone, because the frontend cannot hash a payload it does not interpret. Two requests with the same prompt and different payloads look identical to the router. The engine's own prefix cache is unaffected — vLLM folds multimodal identity into its block hashes — but router prefix-overlap estimates will be optimistic.
+
+> [!NOTE]
+> Disaggregated serving is supported for models whose decode leg continues from the prefill worker's expanded prompt token IDs. Qwen-VL rebuilds mRoPE position IDs from `image_grid_thw`, which Dynamo cannot derive from a payload it does not interpret, so it rejects the payload in disaggregated mode. Use aggregated serving for that family.
+
+> [!NOTE]
+> Only the vLLM backend installs this payload. The SGLang and TensorRT-LLM backends reject the request rather than answer it as if it were text-only.
+
 ## Hashing Consistency for KV Events
 
 When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches. Choose one of the following:

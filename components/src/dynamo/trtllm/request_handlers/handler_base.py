@@ -38,7 +38,10 @@ from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
-from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.multimodal.cache_uuid import (
+    reject_unsupported_backend_multimodal_data,
+    reject_unsupported_multimodal_uuids,
+)
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
@@ -1010,6 +1013,9 @@ class HandlerBase(BaseGenerativeHandler):
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
+        reject_unsupported_backend_multimodal_data(
+            request.get("backend_multi_modal_data")
+        )
 
         request_token_ids = request.get("token_ids")
         logging.debug(

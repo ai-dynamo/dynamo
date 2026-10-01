@@ -29,6 +29,7 @@ impl CompletionSample {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            multi_modal_data: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };

@@ -285,6 +285,14 @@ pub enum MultimodalData {
 // multimodal map containing {mm_part_type: [data...]}
 pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalData>>;
 
+/// Backend-owned multimodal inputs whose values are interpreted by the selected engine.
+///
+/// Unlike [`MultimodalDataMap`], this preserves JSON-safe custom modality
+/// payloads instead of constraining them to Dynamo's URL and RDMA media forms.
+/// The frontend does not interpret these values; the backend validates them
+/// against its registered modality processor.
+pub type BackendMultiModalData = std::collections::HashMap<String, serde_json::Value>;
+
 /// Backend cache UUIDs aligned positionally with multimodal data slots.
 pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String>>>;
 
@@ -337,6 +345,16 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
+
+    /// JSON-safe multimodal inputs forwarded unchanged to the selected backend.
+    ///
+    /// This is separate from URL/RDMA media because the latter is owned and
+    /// transformed by the frontend preprocessor. The vLLM worker installs this
+    /// value as its engine-facing `multi_modal_data` after validating the
+    /// request's multimodal opt-in.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_multi_modal_data: Option<BackendMultiModalData>,
 
     /// User-provided backend cache identities aligned with `multi_modal_data`.
     #[builder(default)]

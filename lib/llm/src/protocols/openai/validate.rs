@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
 use super::tools::{ToolChoiceError, validate_openai_tool_choice};
+use crate::protocols::common::preprocessor::BackendMultiModalData;
 
 //
 // Hyperparameter Contraints
@@ -823,6 +824,43 @@ pub fn validate_prompt_or_embeds(
         // Only validate prompt content if prompt_embeds is NOT provided
         // When embeddings are present, prompt can be empty/placeholder
         validate_prompt(p)?;
+    }
+
+    Ok(())
+}
+
+/// Validates the backend multimodal payload carried on completion requests.
+///
+/// The frontend does not interpret the values; it only enforces the invariants a
+/// backend cannot recover from. `prompt_embeds` replaces the whole prompt, so no
+/// placeholder sequence is left for a modality processor to expand; an empty map
+/// would trip the worker's multimodal opt-in without carrying any payload; and a
+/// batched prompt has no single owner for the payload, because the batch path
+/// clones the whole request per prompt and the frontend cannot split a value it
+/// does not interpret.
+pub fn validate_backend_multi_modal_data(
+    multi_modal_data: Option<&BackendMultiModalData>,
+    has_prompt_embeds: bool,
+    prompt_batch_size: usize,
+) -> Result<(), anyhow::Error> {
+    let Some(multi_modal_data) = multi_modal_data else {
+        return Ok(());
+    };
+
+    if multi_modal_data.is_empty() {
+        anyhow::bail!("multi_modal_data must contain at least one modality entry");
+    }
+
+    if has_prompt_embeds {
+        anyhow::bail!(
+            "multi_modal_data cannot be combined with prompt_embeds; prompt_embeds replaces the entire prompt"
+        );
+    }
+
+    if prompt_batch_size > 1 {
+        anyhow::bail!(
+            "multi_modal_data cannot be combined with a batched prompt; send one request per prompt"
+        );
     }
 
     Ok(())
