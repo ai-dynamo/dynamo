@@ -14,10 +14,13 @@ from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
-import dynamo.vllm.handlers as mod
 import numpy as np
 import pytest
 import torch
+from vllm.logprobs import Logprob
+from vllm.outputs import CompletionOutput, RequestOutput
+
+import dynamo.vllm.handlers as mod
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -29,8 +32,6 @@ from dynamo.vllm.multimodal_utils.request_processor import (
     PreparedMultimodalInput,
     VllmMultimodalRequestProcessor,
 )
-from vllm.logprobs import Logprob
-from vllm.outputs import CompletionOutput, RequestOutput
 
 pytestmark = [
     pytest.mark.pre_merge,
