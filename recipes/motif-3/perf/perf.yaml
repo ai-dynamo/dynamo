@@ -55,7 +55,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: aiperf
-          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.13.0rc2
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.13.0
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-lc"]
           args:
