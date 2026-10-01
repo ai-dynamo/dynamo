@@ -49,6 +49,12 @@ spec:
       envs: &workerEnvs
       - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
         value: "1200"
+      # vLLM reads per-transfer NIXL telemetry. The NOP exporter keeps that
+      # data available without binding one Prometheus port per DP process.
+      - name: NIXL_TELEMETRY_ENABLE
+        value: "y"
+      - name: NIXL_TELEMETRY_EXPORTER
+        value: NOP
       volumeMounts: *modelVolumeMounts
       extraPodSpec:
         priorityClassName: ci-nightly-high-priority
