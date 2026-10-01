@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Any, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
@@ -23,6 +23,9 @@ class StopConditions(BaseModel):
     stop_token_ids_hidden: Optional[List[TokenIdType]] = None
     min_tokens: Optional[int] = None
     ignore_eos: Optional[bool] = None
+    max_thinking_tokens: Annotated[
+        int, Field(strict=True, ge=0, le=2**32 - 1)
+    ] | None = None
 
 
 class SamplingOptions(BaseModel):

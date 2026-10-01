@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pydantic import ValidationError
 from sglang.srt.managers.io_struct import GenerateReqInput
 
 from dynamo.common.constants import DisaggregationMode
@@ -230,6 +231,9 @@ def _new_decode_handler(
     use_sglang_tokenizer: bool = False,
     skip_tokenizer_init: bool = False,
     enable_rl: bool = False,
+    enable_strict_thinking: bool = True,
+    reasoning_parser: str | None = "qwen3",
+    grammar_backend: str = "xgrammar",
 ):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.shutdown_event = None
@@ -238,6 +242,9 @@ def _new_decode_handler(
         server_args=SimpleNamespace(
             served_model_name="test-model",
             skip_tokenizer_init=skip_tokenizer_init,
+            enable_strict_thinking=enable_strict_thinking,
+            reasoning_parser=reasoning_parser,
+            grammar_backend=grammar_backend,
         ),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
@@ -1166,6 +1173,62 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert "seed" not in sampling_params
 
 
+def test_build_sampling_params_maps_thinking_budget_for_token_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "require_reasoning": True,
+            "stop_conditions": {
+                "max_tokens": 128,
+                "max_thinking_tokens": 32,
+            },
+        }
+    )
+
+    assert sampling_params["custom_params"] == {"thinking_budget": 32}
+
+
+def test_build_sampling_params_rejects_budget_with_sglang_tokenizer():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    with pytest.raises(InvalidArgument, match="requires Dynamo frontend preprocessing"):
+        handler._build_sampling_params(
+            {
+                "max_tokens": 128,
+                "thinking_token_budget": 0,
+                "require_reasoning": True,
+            }
+        )
+
+
+def test_build_sampling_params_drops_raw_custom_params_without_public_budget():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "max_tokens": 128,
+            "custom_params": {"thinking_budget": -1},
+        }
+    )
+
+    assert "custom_params" not in sampling_params
+
+
+def test_build_sampling_params_omits_thinking_budget_when_unset():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {"max_tokens": 128},
+        }
+    )
+
+    assert "custom_params" not in sampling_params
+
+
 def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
@@ -1368,6 +1431,38 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
     assert sampling_params["min_new_tokens"] == 64
     assert sampling_params["max_new_tokens"] == 64
     assert sampling_params["ignore_eos"] is True
+
+
+@pytest.mark.parametrize("value", [True, "32", 1.0, -1, 2**32])
+def test_multimodal_stop_conditions_reject_invalid_thinking_budget(value):
+    with pytest.raises(ValidationError):
+        StopConditions.model_validate({"max_thinking_tokens": value})
+
+
+def test_multimodal_build_sampling_params_maps_thinking_budget():
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            require_reasoning=True,
+            stop_conditions=StopConditions(
+                max_tokens=64,
+                max_thinking_tokens=16,
+            ),
+            sampling_options=SamplingOptions(),
+        )
+    )
+
+    sampling_params = SglangUtils.build_sampling_params(
+        request,
+        server_args=SimpleNamespace(
+            enable_strict_thinking=True,
+            reasoning_parser="qwen3",
+            skip_tokenizer_init=False,
+            grammar_backend="xgrammar",
+        ),
+    )
+
+    assert sampling_params["custom_params"] == {"thinking_budget": 16}
 
 
 @pytest.mark.parametrize(

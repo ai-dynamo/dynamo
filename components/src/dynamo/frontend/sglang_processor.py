@@ -22,6 +22,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
@@ -361,6 +362,7 @@ def _preprocess_worker(
         require_reasoning=_guided_output_requires_reasoning(
             request, pre.force_reasoning, _w_reasoning_parser_name, pre.guided_decoding
         ),
+        force_reasoning=pre.force_reasoning,
     )
 
     effective_reasoning_parser_name = (
@@ -386,8 +388,15 @@ def _build_dynamo_preproc(
     tool_call_parser: ToolCallParserType | None = None,
     reasoning_parser: ReasoningParser | None = None,
     require_reasoning: bool = False,
+    force_reasoning: bool = False,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
+    thinking_token_budget = resolve_thinking_token_budget(request)
+    if thinking_token_budget is not None and not force_reasoning:
+        raise InvalidArgument(
+            "thinking_token_budget requires reasoning to be enabled for the request"
+        )
+    require_reasoning = require_reasoning or thinking_token_budget is not None
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
     stop = request.get("stop")
@@ -449,6 +458,7 @@ def _build_dynamo_preproc(
             "stop_token_ids": stop_token_ids,
             "min_tokens": request.get("min_tokens", 0),
             "ignore_eos": request.get("ignore_eos", False),
+            "max_thinking_tokens": thinking_token_budget,
         },
         "sampling_options": {
             "n": request.get("n", 1),
@@ -622,6 +632,7 @@ class SglangProcessor:
                     self.reasoning_parser_name,
                     pre.guided_decoding,
                 ),
+                force_reasoning=pre.force_reasoning,
             )
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc
