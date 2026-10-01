@@ -324,7 +324,7 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 - Disaggregated decode attempts do not report, because each engine counts the KV transferred from the prefill worker as cached; read worker reuse from the `prefill` phase. The exception is a decode attempt that prefills locally under conditional disaggregation, which reports under `phase="decode"`.
 - Attempts take their `phase` from the frontend's request tracker. A standalone router (`python -m dynamo.router`) does not set one, so all of its attempts are labeled `aggregated`.
 - The router counts a report only when its `prompt_tokens` equals the routed prompt length. Engines count multimodal prompts after placeholder expansion, so a multimodal report counts only when the router also routed on expanded tokens; TensorRT-LLM does not report multimodal requests. F2 and F3 count expanded routing tokens while F0 counts the unexpanded prompt, so multimodal ratios to F0 can exceed 100%.
-- With `n > 1`, vLLM reports only the first sample, because later samples reuse the prompt blocks it just cached. SGLang does not report, because it caches the prompt before running the samples.
+- With `n > 1`, vLLM and SGLang do not report. vLLM merges sample outputs without preserving which sample supplied the cached-token count, and SGLang caches the prompt before running the samples.
 - Engines recompute the last prompt token, so a full-prefix hit reports at least one token less than F3, and up to one block less for vLLM.
 - Preemption, partial-block reuse in TensorRT-LLM, and KV loads that fail under a recompute policy can also make F4 differ from F3 when the router's estimate is accurate.
 

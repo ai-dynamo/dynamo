@@ -131,7 +131,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
-    // Track the maximum over the eligible ranks row() already visits; no second scan.
+    // Track accepted candidates during collection, after policy filters.
     max_raw_cached_tokens: Cell<Option<usize>>,
     cache_snapshot: CacheSnapshot<'a>,
 }
@@ -165,6 +165,16 @@ impl<'a> MaterializedSelectionInput<'a> {
         self.max_raw_cached_tokens.get()
     }
 
+    fn record_candidate(&self, worker: WorkerWithDpRank) {
+        if let Some(current_max) = self.max_raw_cached_tokens.get() {
+            let raw_cached_tokens = self
+                .request
+                .raw_cached_tokens_for(worker, self.context.block_size);
+            self.max_raw_cached_tokens
+                .set(Some(current_max.max(raw_cached_tokens)));
+        }
+    }
+
     #[inline(always)]
     fn row(
         &self,
@@ -188,13 +198,6 @@ impl<'a> MaterializedSelectionInput<'a> {
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
     ) -> CandidateData {
-        if let Some(current_max) = self.max_raw_cached_tokens.get() {
-            let raw_cached_tokens = self
-                .request
-                .raw_cached_tokens_for(worker, self.context.block_size);
-            self.max_raw_cached_tokens
-                .set(Some(current_max.max(raw_cached_tokens)));
-        }
         let cached_tokens = if inputs.contains(WorkerInputs::CACHE) {
             self.request.effective_cached_tokens_for(worker)
         } else {
@@ -570,8 +573,8 @@ mod cache_reuse_tests {
         request.overlap.tier_overlap_blocks.disk.insert(second, 2);
         let input = MaterializedSelectionInput::new(&request, 16);
 
-        input.row(first, None, WorkerInputs::NONE);
-        input.row(second, None, WorkerInputs::NONE);
+        input.record_candidate(first);
+        input.record_candidate(second);
 
         assert_eq!(input.max_raw_cached_tokens(), Some(96));
         let result = selection_result(&request, first, 16, input.max_raw_cached_tokens());
@@ -588,7 +591,7 @@ mod cache_reuse_tests {
         request.overlap.effective_cached_tokens.insert(worker, 96);
         let input = MaterializedSelectionInput::new(&request, 16);
 
-        input.row(worker, None, WorkerInputs::NONE);
+        input.record_candidate(worker);
 
         assert_eq!(input.max_raw_cached_tokens(), None);
         let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens());
@@ -641,7 +644,7 @@ mod cache_reuse_tests {
         let eligibility = request.eligibility();
 
         eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
-            input.row(worker, None, WorkerInputs::NONE);
+            input.record_candidate(worker);
         });
 
         assert!(

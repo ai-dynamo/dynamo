@@ -3416,6 +3416,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         want_engine_data=False,
     ):
         try:
+            # Parallel outputs share a collector whose cached-token count may
+            # belong to another sample, even when emitting sample 0.
+            report_kv_cache_hit = report_kv_cache_hit and sampling_params.n == 1
             # Log LoRA usage for this generation (debug level to avoid log spam)
             self._log_with_lora_context(
                 "Starting token generation for request {request_id}{lora_info}",
@@ -3536,12 +3539,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
-                        # With n > 1 vLLM schedules one child per sample, and
-                        # later children hit the prompt blocks sample 0 just
-                        # cached, so only sample 0 measures prior reuse.
                         kv_cache_hit = (
                             BaseWorkerHandler._kv_cache_hit_engine_data(res)
-                            if report_kv_cache_hit and output_idx == 0
+                            if report_kv_cache_hit
                             else {}
                         )
                         if kv_cache_hit:

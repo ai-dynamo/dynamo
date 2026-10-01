@@ -1461,7 +1461,7 @@ class HandlerBase(BaseGenerativeHandler):
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
                             )
-                            generation_only = (
+                            is_generation_only = (
                                 getattr(disaggregated_params, "request_type", None)
                                 == "generation_only"
                             )
@@ -1470,7 +1470,7 @@ class HandlerBase(BaseGenerativeHandler):
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
                                 prompt_tokens_details = _prompt_tokens_details(
-                                    res, num_input_tokens, generation_only
+                                    res, num_input_tokens, is_generation_only
                                 )
                                 engine_reported = prompt_tokens_details.pop(
                                     "_engine_reported", None
@@ -1492,7 +1492,7 @@ class HandlerBase(BaseGenerativeHandler):
                             # prompt KV as cached, and a multimodal count includes
                             # expanded image tokens the unexpanded prompt length
                             # omits, so only text context attempts report.
-                            if not generation_only and not isinstance(
+                            if not is_generation_only and not isinstance(
                                 processed_input, dict
                             ):
                                 kv_cache_hit = _kv_cache_hit_engine_data(

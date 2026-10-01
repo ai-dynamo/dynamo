@@ -189,7 +189,7 @@ def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _warms_parallel_prefix(sampling_params: Any) -> bool:
+def _has_parallel_prefix_warmup(sampling_params: Any) -> bool:
     """Whether SGLang caches the prompt with a zero-token request before sampling.
 
     For n > 1 every sample's cached_tokens then includes that warm-up hit, so
@@ -667,7 +667,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 submitted_request_id=submitted_request_id,
                 internal_request_id=sglang_request_id,
                 response_request_id=native_payload.get("rid") or context.id(),
-                report_kv_cache_hit=not _warms_parallel_prefix(
+                report_kv_cache_hit=not _has_parallel_prefix_warmup(
                     native_payload.get("sampling_params")
                 ),
             ):
@@ -750,7 +750,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
-                    report_kv_cache_hit=not _warms_parallel_prefix(sampling_params),
+                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                        sampling_params
+                    ),
                 ):
                     yield out
             else:
@@ -841,7 +843,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
-                    report_kv_cache_hit=not _warms_parallel_prefix(sampling_params),
+                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                        sampling_params
+                    ),
                 ):
                     yield out
             else:

@@ -80,9 +80,8 @@ pub(super) struct RouteObservation {
 
 struct KvHitTracking {
     prompt_tokens: u64,
-    model: String,
-    phase: RequestPhase,
-    recorded: bool,
+    reused_tokens: prometheus::IntCounter,
+    has_recorded: bool,
 }
 
 /// Cache-hit report the worker attaches to its final chunk (`engine_data.kv_cache_hit`).
@@ -638,14 +637,19 @@ impl RequestGuard {
             request_metrics.requests_started_total.inc();
         }
         let phase = request.phase();
-        if let Some(route) = kv_route {
-            request_metrics.observe_kv_route_estimate(
+        let kv_hit = kv_route.map(|route| {
+            let reused_tokens = request_metrics.observe_kv_route_estimate(
                 phase,
                 &request.model,
                 route.best_router_tokens,
                 route.selected_router_tokens,
             );
-        }
+            KvHitTracking {
+                prompt_tokens: route.prompt_tokens,
+                reused_tokens,
+                has_recorded: false,
+            }
+        });
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
             .as_ref()
@@ -664,12 +668,7 @@ impl RequestGuard {
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
-            kv_hit: kv_route.map(|route| KvHitTracking {
-                prompt_tokens: route.prompt_tokens,
-                recorded: false,
-                model: request.model.clone(),
-                phase,
-            }),
+            kv_hit,
             _lora_load: None,
         }
     }
@@ -900,7 +899,7 @@ impl RequestGuard {
         let Some(kv) = self.kv_hit.as_mut() else {
             return;
         };
-        if kv.recorded {
+        if kv.has_recorded {
             return;
         }
         let reused = item
@@ -910,10 +909,8 @@ impl RequestGuard {
             .and_then(|data| data.get("kv_cache_hit"))
             .and_then(|value| worker_cache_hit_tokens(kv.prompt_tokens, value));
         if let Some(reused) = reused {
-            self.observability
-                .request_metrics()
-                .observe_kv_worker_hit(kv.phase, &kv.model, reused);
-            kv.recorded = true;
+            kv.reused_tokens.inc_by(reused);
+            kv.has_recorded = true;
         }
     }
 }

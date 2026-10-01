@@ -602,29 +602,42 @@ class TestReasoningParserForwarding:
             assert "kv_cache_hit" not in engine_data
 
     @pytest.mark.asyncio
-    async def test_generate_tokens_reports_cache_hit_for_first_sample_only(self):
-        """Later n > 1 samples hit the prompt blocks sample 0 just cached."""
+    @pytest.mark.parametrize("coalesced", [False, True])
+    async def test_generate_tokens_omits_parallel_sample_cache_hits(self, coalesced):
+        """The shared collector can attach sample 1's cache count to sample 0."""
         from vllm.sampling_params import SamplingParams
 
         handler = _make_handler()
         handler._extract_logprobs = MagicMock(return_value=(None, None))
 
         async def fake_generate(*args, **kwargs):
-            # Sample 1 finishes first, with a count inflated by sample 0.
+            responses = []
             for index, cached in ((1, 2), (0, 0)):
-                yield SimpleNamespace(
-                    outputs=[
-                        SimpleNamespace(
-                            index=index,
-                            token_ids=[11],
-                            finish_reason="stop",
-                            stop_reason=None,
-                        )
-                    ],
-                    prompt_token_ids=[1, 2],
-                    prompt_logprobs=None,
-                    num_cached_tokens=cached,
+                responses.append(
+                    RequestOutput(
+                        request_id="req-n2",
+                        prompt=None,
+                        outputs=[
+                            CompletionOutput(
+                                index=index,
+                                text="",
+                                token_ids=[11],
+                                cumulative_logprob=None,
+                                logprobs=None,
+                                finish_reason="stop",
+                            )
+                        ],
+                        prompt_token_ids=[1, 2],
+                        prompt_logprobs=None,
+                        finished=True,
+                        num_cached_tokens=cached,
+                    )
                 )
+            if coalesced:
+                responses[0].add(responses[1], aggregate=False)
+                responses = responses[:1]
+            for response in responses:
+                yield response
 
         handler.engine_client = MagicMock()
         handler.engine_client.generate = fake_generate
@@ -642,7 +655,7 @@ class TestReasoningParserForwarding:
             chunk["index"]: chunk.get("engine_data", {}).get("kv_cache_hit")
             for chunk in chunks
         }
-        assert reports == {1: None, 0: {"prompt_tokens": 2, "reused_tokens": 0}}
+        assert reports == {1: None, 0: None}
 
     @pytest.mark.asyncio
     async def test_generate_tokens_rejects_sampling_mask_length_mismatch(self):

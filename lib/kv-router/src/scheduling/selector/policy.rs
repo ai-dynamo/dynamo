@@ -262,6 +262,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
                 preferred_taint_multiplier,
                 state.scorer_picker_inputs,
             );
+            input.record_candidate(worker);
             state.push_candidate(candidate);
             false
         });
@@ -317,6 +318,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             additional_inputs,
         );
         let candidate = filter_candidate.with_inputs_from(&additional, state.scorer_picker_inputs);
+        input.record_candidate(worker);
         state.push_candidate(candidate);
         false
     });
@@ -838,6 +840,62 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
+    fn raw_cache_reuse_excludes_policy_rejected_workers() {
+        struct RejectWorkerZero;
+
+        impl WorkerFilter for RejectWorkerZero {
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(candidate.worker().worker_id != 0)
+            }
+        }
+
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "filtered-reuse".into(),
+        };
+        let rejected = WorkerWithDpRank::from_worker_id(0);
+        let accepted = WorkerWithDpRank::from_worker_id(1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(rejected, 6);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(accepted, 1);
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(RejectWorkerZero)],
+            Vec::new(),
+            Box::new(FirstPicker),
+        );
+
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+
+        assert_eq!(selected.worker, accepted);
+        assert_eq!(selected.max_raw_cached_tokens, Some(16));
+        assert_eq!(selected.selected_raw_cached_tokens, Some(16));
     }
 
     #[test]

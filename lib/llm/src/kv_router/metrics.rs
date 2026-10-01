@@ -1246,14 +1246,14 @@ impl RouterRequestMetrics {
             .observe(overlap_blocks_lost);
     }
 
-    /// Router-side estimates for one tracked routing attempt, recorded at selection time.
+    /// Record router estimates and return this attempt's worker-reuse counter.
     pub fn observe_kv_route_estimate(
         &self,
         phase: RequestPhase,
         model: &str,
         best_tokens: u64,
         selected_tokens: u64,
-    ) {
+    ) -> IntCounter {
         let labels = &[phase.as_str(), model];
         self.kv_best_eligible_cached_prefix_tokens
             .with_label_values(labels)
@@ -1262,20 +1262,7 @@ impl RouterRequestMetrics {
             .with_label_values(labels)
             .inc_by(selected_tokens);
         // Export zero even when this backend never sends a worker report.
-        self.kv_worker_reused_tokens.with_label_values(labels);
-    }
-
-    /// The first valid reuse report received for a tracked attempt.
-    pub(crate) fn observe_kv_worker_hit(
-        &self,
-        phase: RequestPhase,
-        model: &str,
-        reused_tokens: u64,
-    ) {
-        let labels = &[phase.as_str(), model];
-        self.kv_worker_reused_tokens
-            .with_label_values(labels)
-            .inc_by(reused_tokens);
+        self.kv_worker_reused_tokens.with_label_values(labels)
     }
 }
 
@@ -1520,8 +1507,9 @@ mod tests {
         let hierarchy =
             kv_publisher_registration_tests::FakeHierarchy::component("dynamo", "frontend", 0x123);
         let metrics = RouterRequestMetrics::build(&hierarchy, &[(labels::ROUTER_ID, "291")]);
-        metrics.observe_kv_route_estimate(RequestPhase::Prefill, "m", 96, 64);
-        metrics.observe_kv_worker_hit(RequestPhase::Prefill, "m", 72);
+        metrics
+            .observe_kv_route_estimate(RequestPhase::Prefill, "m", 96, 64)
+            .inc_by(72);
         metrics
             .input_sequence_tokens
             .with_label_values(&["prefill", "m"])
