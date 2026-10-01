@@ -79,6 +79,24 @@ rejected on updates.
 
 #### Operator behavior breaking changes
 
+##### Frontend sidecar identity in container discovery mode
+
+**Change:** The operator now sets `CONTAINER_NAME` to the container selected by
+`spec.frontendSidecar`, rather than the name of `spec.podTemplate.spec.containers[name=main]`.
+In container discovery mode, the frontend registers as `{pod}-<name>`, where `<name>` is
+`spec.frontendSidecar`, instead of sharing the `{pod}` identity.
+
+**Affected:** Existing components with `spec.frontendSidecar` and
+`nvidia.com/dynamo-kube-discovery-mode: container`. For DGD components, replace the leading
+`spec` in these field paths with `spec.components[*]`.
+
+**Action:** Plan for a one-time rollout of affected worker pods when upgrading the operator
+to v1.6.0. Update any tooling that depends on the frontend's previous registration identity.
+
+**Existing deployments:** Reconciliation updates the frontend container's `CONTAINER_NAME`,
+which changes the pod template and triggers the rollout even without a manifest change.
+Components without a frontend sidecar or using pod discovery are unaffected by this change.
+
 ##### Environment variable order in newly created DGDs
 
 **Change:** For DGDs whose `nvidia.com/dynamo-operator-origin-version` annotation is 1.6.0 or later,

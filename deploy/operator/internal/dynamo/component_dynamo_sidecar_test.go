@@ -15,11 +15,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
 
 func TestNativeSidecarEnvironmentOrderByOrigin(t *testing.T) {
-	for _, origin := range []string{"1.6.0", "1.5.0", ""} {
+	const orderedOrigin = "1.6.0"
+
+	for _, origin := range []string{orderedOrigin, "1.5.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Configure graph, engine, runtime, and frontend dependencies with duplicate overrides")
 			graphEnv := []corev1.EnvVar{{Name: "Z_GRAPH", Value: "graph"}, {Name: "A_GRAPH", Value: "$(Z_GRAPH)"}}
@@ -55,7 +58,7 @@ func TestNativeSidecarEnvironmentOrderByOrigin(t *testing.T) {
 				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, FrontendSidecar: ptr.To("frontend"),
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}},
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: orderedOrigin}},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{Name: "main", Image: "engine:latest", Env: engineEnv},
@@ -65,7 +68,7 @@ func TestNativeSidecarEnvironmentOrderByOrigin(t *testing.T) {
 					},
 				},
 			}
-			if origin == "1.6.0" {
+			if origin == orderedOrigin {
 				component.PodTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = "1.5.0"
 			}
 			dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{component}
@@ -95,7 +98,7 @@ func TestNativeSidecarEnvironmentOrderByOrigin(t *testing.T) {
 				require.NotContains(t, runtime.VolumeMounts, corev1.VolumeMount{Name: "cache", MountPath: "/cache"})
 				require.NotContains(t, envVarsToMap(runtime.Env), "VLLM_CACHE_ROOT")
 				require.Equal(t, "required", envVarsToMap(runtime.Env)[commonconsts.EnvKvTransferEnforcement])
-				if origin == "1.6.0" {
+				if origin == orderedOrigin {
 					require.Equal(t, slices.Concat([]corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: "/cache"}}, graphEnv, engineEnv), engine.Env)
 					// Policy fields remain authoritative; other duplicate names survive.
 					wantRuntimeSuffix := slices.Concat(graphEnv, runtimeEnv[:len(runtimeEnv)-1])
@@ -111,8 +114,9 @@ func TestNativeSidecarEnvironmentOrderByOrigin(t *testing.T) {
 					require.Equal(t, []corev1.EnvVar{
 						{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
 						{Name: "A_GRAPH", Value: "$(Z_GRAPH)"},
-						{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
+						{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
 						{Name: "Z_GRAPH", Value: "graph"},
+						{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
 					}, engine.Env)
 					for _, container := range []corev1.Container{runtime, frontend} {
 						require.True(t, sort.SliceIsSorted(container.Env, func(i, j int) bool { return container.Env[i].Name < container.Env[j].Name }))
@@ -235,22 +239,48 @@ func TestNativeSidecarRendering(t *testing.T) {
 	}
 }
 
-func TestMergeDynamoSidecarDefaults_ErrorPaths(t *testing.T) {
-	ctx := ComponentContext{DynamoNamespace: "test"}
+func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
+	cases := []struct {
+		name          string
+		componentType v1beta1.ComponentType
+		restartPolicy *corev1.ContainerRestartPolicy
+		multinode     *v1beta1.MultinodeSpec
+		wantErrors    field.ErrorList
+	}{
+		{
+			name: "frontend with runtime init container", componentType: v1beta1.ComponentTypeFrontend,
+			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+			wantErrors:    field.ErrorList{field.Forbidden(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("name"), "is supported only for worker, prefill, and decode components")},
+		},
+		{
+			name: "runtime without restartPolicy Always", componentType: v1beta1.ComponentTypeWorker,
+			wantErrors: field.ErrorList{field.Invalid(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("restartPolicy"), corev1.ContainerRestartPolicy(""), `must be Always for component "worker" with a runtime init container`)},
+		},
+		{
+			name: "multinode worker", componentType: v1beta1.ComponentTypeWorker,
+			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
+			wantErrors: field.ErrorList{field.Forbidden(field.NewPath("spec", "multinode"), `is not currently supported for component "worker" with a runtime init container; support is planned for a future release`)},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Construct a stored component that has not passed current admission")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: tc.componentType, Multinode: tc.multinode,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: "main", Image: "engine:1.6.0"}},
+					InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: tc.restartPolicy}},
+				}},
+			}
+			original := component.DeepCopy()
 
-	t.Run("no matching init container", func(t *testing.T) {
-		podSpec := &corev1.PodSpec{}
-		err := mergeDynamoSidecarDefaults(podSpec, ctx)
-		require.ErrorContains(t, err, `"runtime" does not match any podTemplate init container`)
-	})
-
-	t.Run("init container missing restartPolicy Always", func(t *testing.T) {
-		podSpec := &corev1.PodSpec{
-			InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.5.0"}},
-		}
-		err := mergeDynamoSidecarDefaults(podSpec, ctx)
-		require.ErrorContains(t, err, `requires restartPolicy Always`)
-	})
+			t.Log("Reject rendering with the same typed field errors as admission")
+			pod, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, nil, "test", "test", RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			require.Equal(t, tc.wantErrors.ToAggregate(), err)
+			require.Nil(t, pod)
+			require.Equal(t, original, component)
+		})
+	}
 }
 
 func TestRuntimeContainerModeTransitions(t *testing.T) {
@@ -311,7 +341,9 @@ func (r *nativeSidecarSecretsRetriever) GetSecrets(namespace, image string) ([]s
 }
 
 func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
-	for _, origin := range []string{"1.6.0", "1.5.0", ""} {
+	const orderedOrigin = "1.6.0"
+
+	for _, origin := range []string{orderedOrigin, "1.5.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Configure a combined worker that references and overrides the cache default")
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -324,6 +356,7 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 						Env: []corev1.EnvVar{
 							{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
 							{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
+							{Name: "VLLM_USE_V1", Value: "1"},
 						},
 					}}},
 				},
@@ -334,21 +367,25 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 			require.NoError(t, err)
 			var cacheEnv []corev1.EnvVar
 			for _, env := range pod.Containers[0].Env {
-				if env.Name == "A_CACHE" || env.Name == "VLLM_CACHE_ROOT" {
+				if env.Name == "A_CACHE" || env.Name == "VLLM_CACHE_ROOT" || env.Name == "VLLM_USE_V1" {
 					cacheEnv = append(cacheEnv, env)
 				}
 			}
-			if origin == "1.6.0" {
+			if origin == orderedOrigin {
 				require.Equal(t, []corev1.EnvVar{
 					{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
 					{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
 					{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
+					{Name: "VLLM_USE_V1", Value: "1"},
 				}, cacheEnv)
 			} else {
 				require.Equal(t, []corev1.EnvVar{
 					{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
+					{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
+					{Name: "VLLM_USE_V1", Value: "1"},
 					{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
 				}, cacheEnv)
+				require.Equal(t, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: "/cache"}, pod.Containers[0].Env[len(pod.Containers[0].Env)-1])
 			}
 		})
 	}

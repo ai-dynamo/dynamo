@@ -20,13 +20,9 @@ spec:
   - name: prefill
     type: prefill
     replicas: 1
+    sharedMemorySize: 10Gi
     podTemplate:
       spec:
-        volumes:
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 10Gi
         initContainers:
         - name: runtime
           image: <your-registry>/dynamo-sidecar:1.6.0
@@ -94,9 +90,6 @@ spec:
               nvidia.com/gpu: '1'
               rdma/ib: '1'
               ephemeral-storage: 2Gi
-          volumeMounts:
-          - name: dshm
-            mountPath: /dev/shm
           command:
           - /bin/sh
           - -c
@@ -109,13 +102,9 @@ spec:
   - name: decode
     type: decode
     replicas: 1
+    sharedMemorySize: 10Gi
     podTemplate:
       spec:
-        volumes:
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 10Gi
         initContainers:
         - name: runtime
           image: <your-registry>/dynamo-sidecar:1.6.0
@@ -183,9 +172,6 @@ spec:
               nvidia.com/gpu: '1'
               rdma/ib: '1'
               ephemeral-storage: 2Gi
-          volumeMounts:
-          - name: dshm
-            mountPath: /dev/shm
           command:
           - /bin/sh
           - -c

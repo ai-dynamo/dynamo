@@ -54,6 +54,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -1583,6 +1584,12 @@ func generateBasePodSpecWithDefaults(
 	componentDefaults ComponentDefaults,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
+	// Stored objects must satisfy the sidecar contract even when admission is not rerun.
+	if errs := ValidateDynamoSidecar(component, field.NewPath("spec")); len(errs) > 0 {
+		return nil, errs.ToAggregate()
+	}
+	nativeSidecar := GetDynamoSidecar(component) != nil
+
 	// Start with base container generated per component type
 	annotations := GetPodTemplateAnnotations(component)
 	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations), operatorConfig.Infrastructure)
@@ -1592,13 +1599,11 @@ func generateBasePodSpecWithDefaults(
 
 	// Native-sidecar engines retain their image entrypoint and user configuration.
 	container := corev1.Container{Name: commonconsts.MainContainerName}
-	if GetDynamoSidecar(component) == nil {
+	if !nativeSidecar {
 		container, err = componentDefaults.GetBaseContainer(componentContext)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get base container: %w", err)
 		}
-	} else if GetMainContainer(component) == nil {
-		return nil, fmt.Errorf("component %q: runtime init container requires a main engine container", component.ComponentName)
 	}
 
 	orderedEnvironment := compatibility.OrderedEnvironmentVariables.Enabled(annotations)
@@ -1660,10 +1665,15 @@ func generateBasePodSpecWithDefaults(
 
 	// Native-sidecar mode does not yet support multi-node deployments.
 	// Single-node engines are launched entirely by the user.
-	if GetDynamoSidecar(component) == nil {
+	if !nativeSidecar {
 		if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
 			return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
 		}
+	}
+
+	// Cache env remains a backend addition in both worker modes, preserving legacy ordering.
+	if backendFramework == BackendFrameworkVLLM && component.CompilationCache != nil {
+		container.Env = append(container.Env, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: component.CompilationCache.MountPath})
 	}
 
 	// Backends inspect the effective environment and append their own variables.
@@ -1722,22 +1732,20 @@ func generateBasePodSpecWithDefaults(
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
 	// Merge runtime defaults only into the selected restartable init container.
-	if GetDynamoSidecar(component) != nil {
+	if nativeSidecar {
 		if err := mergeDynamoSidecarDefaults(&podSpec, componentContext); err != nil {
 			return nil, err
 		}
+	} else {
+		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
 	}
 
 	if component.FrontendSidecar != nil {
-		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, frontendSidecarMounts, annotations); err != nil {
+		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, frontendSidecarMounts); err != nil {
 			return nil, err
 		}
 	}
 
-	// Backend pod defaults describe the combined Python worker in standard mode.
-	if GetDynamoSidecar(component) == nil {
-		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
-	}
 	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
 
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
@@ -1908,18 +1916,6 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 	}
 	container.VolumeMounts = normalizedMounts
 
-	// Set backend-specific env var so the engine reads from the mounted cache path.
-	switch backendFramework {
-	case BackendFrameworkVLLM:
-		cacheEnv := []corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: mountPath}}
-		annotations := GetPodTemplateAnnotations(component)
-		if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
-			container.Env = MergeEnvs(cacheEnv, container.Env)
-		} else {
-			// Older deployments keep the mounted path authoritative and the list sorted.
-			container.Env = mergeEnvsLegacy(container.Env, cacheEnv)
-		}
-	}
 	return nil
 }
 
@@ -2000,7 +1996,7 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 	return ordered
 }
 
-func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, parentMounts []corev1.VolumeMount, annotations map[string]string) error {
+func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, parentMounts []corev1.VolumeMount) error {
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name != sidecarName {
 			continue
@@ -2030,7 +2026,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
-		base.Env = MergeEnvsForOrigin(annotations, baseEnv, user.Env)
+		base.Env = MergeEnvsForOrigin(parentContext.Annotations, baseEnv, user.Env)
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
 		return nil
@@ -2249,12 +2245,9 @@ func applyKvTransferPolicyToWorkerComponent(
 	podTemplate := ensurePodTemplate(component)
 
 	// The runtime publishes routing topology; the engine does not consume this projection.
-	if GetDynamoSidecar(component) == nil {
-		ensureMainContainer(podTemplate)
-	}
-	runtime := GetDynamoContainer(component)
+	runtime := GetDynamoSidecar(component)
 	if runtime == nil {
-		return
+		runtime = ensureMainContainer(podTemplate)
 	}
 	runtime.Env = MergeEnvsForOrigin(annotations, workerKvTransferPolicyEnvVars(kvt), removeWorkerKvTransferPolicyEnvVars(runtime.Env))
 	runtime.VolumeMounts = appendTopologyLabelVolumeMount(runtime.VolumeMounts, TopologyLabelVolumeMount())
