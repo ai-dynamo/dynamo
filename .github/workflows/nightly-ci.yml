@@ -1310,6 +1310,9 @@ jobs:
       framework: vllm
       pytest_markers: 'vllm'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      dd_env: nightly
+    secrets:
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
