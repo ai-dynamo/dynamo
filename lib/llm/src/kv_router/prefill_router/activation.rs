@@ -647,6 +647,7 @@ mod tests {
     use super::*;
     use crate::discovery::CommittedWorkerSetTarget;
     use crate::entrypoint::RouterConfig;
+    use crate::kv_router::prefill_router::PrefillRouterLifecycle;
     use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_kv_router::protocols::RoutingConstraints;
     use dynamo_runtime::{
@@ -660,6 +661,7 @@ mod tests {
         storage::kv,
     };
     use futures::StreamExt;
+    use std::collections::HashSet;
 
     fn card(router_config: Option<RouterConfig>) -> ModelDeploymentCard {
         let mut card = ModelDeploymentCard::with_name_only("test-model");
@@ -912,6 +914,10 @@ mod tests {
         })
         .await
         .expect("committed prefill target must activate");
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint.id()),
+            Some(HashSet::from([ids[0]]))
+        );
         let retired = router.binding.load_full().unwrap();
         let chooser = retired
             .router
@@ -993,8 +999,13 @@ mod tests {
         admissions.send_replace(Vec::new());
         drop(admissions);
         router.set_target(None);
+        assert!(router.available_worker_ids_for(&endpoint.id()).is_none());
         let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
         router.set_target(Some(target(2, 32, successor_ids)));
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint.id()),
+            Some(HashSet::new())
+        );
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let worker = prefilled_worker(&router).await;
@@ -1007,6 +1018,10 @@ mod tests {
         })
         .await
         .expect("same-endpoint successor must activate");
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint.id()),
+            Some(HashSet::from([ids[2]]))
+        );
         assert_eq!(
             router
                 .binding

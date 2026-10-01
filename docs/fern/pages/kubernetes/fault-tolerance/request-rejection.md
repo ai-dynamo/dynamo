@@ -177,22 +177,42 @@ If decode-block load does not produce HTTP 529 responses:
 1. Confirm that `GET /busy_threshold` shows a numeric `active_decode_blocks_threshold` for the model.
 2. Confirm that the Frontend started with `--router-mode kv`.
 3. For long-output workloads, confirm that the Frontend started with `--router-track-output-blocks`.
-4. Check that the Frontend receives worker updates:
+4. Check worker availability on the same Frontend before diagnosing missing load telemetry:
+
+   ```bash
+   curl -s http://localhost:8000/metrics \
+     | grep -E '^dynamo_frontend_router_(workers|worker_state)\{'
+   ```
+
+   Inspect the entries for the affected model, target endpoint, and worker type. A worker with
+   `state="excluded"` has no exposed load sample; inspect its `reason`, such as
+   `checksum_mismatch`, before troubleshooting the load feed. This reason applies only to the
+   rejected worker ID; first-wins admission leaves the incumbent `pending` during initialization or
+   `available` after it succeeds. With one healthy incumbent and one incompatible newcomer, expect
+   `discovered=2`, `available=1`, `pending=0`, and `excluded=1`; rejection does not remove the
+   incumbent. Workers removed from discovery have no per-worker state sample, while previously observed
+   empty groups retain `dynamo_frontend_router_workers{state="available"}` with value `0`. Missing
+   inventory series do not imply zero workers; verify scrape health and discovery. Inspect each
+   Frontend independently rather than aggregating readiness across Frontends. See
+   [Router Worker Inventory](../../reference/observability/metrics-catalog.mdx#router-worker-inventory)
+   for the full metric semantics.
+
+5. If the worker is available, check its latest exposed load sample:
 
    ```bash
    curl -s http://localhost:8000/metrics \
      | grep dynamo_frontend_worker_active_decode_blocks
    ```
 
-5. Check Frontend logs for worker-monitor subscription warnings.
-6. Confirm that each worker publishes its total KV block count:
+6. If the load sample is missing, check Frontend logs for worker-monitor subscription warnings.
+7. Confirm that each worker publishes its total KV block count:
 
    ```bash
    curl -s http://<worker-system-port>/metrics \
      | grep dynamo_component_total_blocks
    ```
 
-7. Verify the event-plane configuration and connectivity between the Frontend and workers.
+8. Verify the event-plane configuration and connectivity between the Frontend and workers.
 
 `--router-track-active-blocks` is a separate routing option. Busy rejection depends on configured
 thresholds and worker-load events; it does not require that internal router tracking flag.

@@ -8,6 +8,12 @@ subtitle: Worker-load event processing, busy-state aggregation, overload errors,
 Dynamo implements request rejection (load shedding) at two layers: Frontend routing can avoid workers
 reported as busy, and each worker can enforce a hard request-plane concurrency cap.
 
+Frontend discovery uses first-wins admission for each model and target group. The first observed checksum
+cohort remains the incumbent; an incompatible newcomer is excluded by its individual worker ID and does
+not remove or change the incumbent. If the incumbent cohort disappears, the next remaining cohort can
+become its successor after initialization. Each Frontend observes this lifecycle independently, so
+separate Frontends can choose different incumbents.
+
 For deployment steps, see [Request Rejection](../../../../kubernetes/fault-tolerance/request-rejection.md). For exact
 configuration fields, see [Frontend Configuration](../../../../reference/components/frontend-configuration.mdx#fault-tolerance)
 and [Runtime Configuration](../../../../reference/components/runtime-configuration.mdx#operations).
@@ -96,8 +102,23 @@ When a request arrives:
 
 The Frontend also exports the latest observed worker values through
 `dynamo_frontend_worker_active_decode_blocks` and
-`dynamo_frontend_worker_active_prefill_tokens`, which help distinguish missing telemetry from a
-threshold that is simply too high.
+`dynamo_frontend_worker_active_prefill_tokens`. These gauges include only currently committed,
+available workers. A missing sample can mean that the worker was removed or excluded, not only
+that load telemetry is missing.
+
+Use `dynamo_frontend_router_worker_state` on the same Frontend to check the worker's current state
+and exclusion reason before diagnosing its load feed. For example, `state="excluded"` with
+`reason="checksum_mismatch"` identifies an individual worker whose Model Deployment Card checksum
+differs from the incumbent. During incumbent initialization, the incumbent remains
+`state="pending",reason="initializing"`; rejecting a newcomer never makes the incumbent pending or
+excluded. A worker removed from discovery has no per-worker state sample;
+`dynamo_frontend_router_workers` retains explicit zero counts after the last worker disappears for a
+previously observed group. If the worker is available but its load sample is missing, investigate load
+publication and subscriptions. Transient overload is separate from this availability check, so busy
+workers can still expose load samples for comparison with the configured threshold. Do not aggregate
+inventory across Frontends as worker-global readiness.
+See [Router Worker Inventory](../../../../reference/observability/metrics-catalog.mdx#router-worker-inventory)
+for state, label, and lifetime semantics.
 
 ## Worker-Side Request Admission
 
