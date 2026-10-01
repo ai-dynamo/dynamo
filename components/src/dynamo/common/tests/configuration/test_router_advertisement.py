@@ -51,9 +51,10 @@ def test_kv_tuning_is_carried_not_reset():
     name a mode but not the tuning that goes with it, advertising `kv` would
     quietly discard whatever KV tuning the frontend was configured with.
     """
-    config, _ = parse_worker_router_config(
-        ["--router-mode", "kv", "--router-kv-overlap-score-credit", "2.5"]
-    )
+    with pytest.warns(FutureWarning, match="--router-policy-config"):
+        config, _ = parse_worker_router_config(
+            ["--router-mode", "kv", "--router-kv-overlap-score-credit", "2.5"]
+        )
     router_config = build_router_config(config)
     assert router_config is not None
     assert router_config.kv_router_config.overlap_score_credit == 2.5

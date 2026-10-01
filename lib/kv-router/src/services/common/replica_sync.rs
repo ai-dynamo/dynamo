@@ -282,6 +282,7 @@ impl ScopedSequencePublisher {
         }
     }
 
+    #[cfg(feature = "standalone-selection")]
     pub(crate) fn with_load_sink(mut self, sink: Option<Arc<dyn SchedulerLoadSink>>) -> Self {
         self.load_sink = sink;
         self
