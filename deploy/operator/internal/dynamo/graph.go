@@ -1857,7 +1857,11 @@ func generateBasePodSpecWithDefaults(
 		// Snapshot + intra-pod GMS uses V1 for every backend. GMS or
 		// failover without checkpoint stays on the V0 sidecar.
 		useV1 := GetCheckpoint(component) != nil
+		mainEnvironmentEnd := len(podSpec.Containers[0].Env)
 		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], useV1)
+		if orderedEnvironment {
+			placeAppendedEnvironmentBeforeUser(&podSpec.Containers[0], mainEnvironmentEnd, userEnvironmentCount)
+		}
 		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
@@ -1879,12 +1883,29 @@ func generateBasePodSpecWithDefaults(
 	// Clone main container into two engine containers (active + standby) for failover.
 	// Runs after GMS so the main container already has DRA claims and shared volume.
 	if IsIntraPodFailoverEnabled(component) {
-		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
+		failoverUserEnvironmentCount := 0
+		if orderedEnvironment {
+			failoverUserEnvironmentCount = userEnvironmentCount
+		}
+		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework, failoverUserEnvironmentCount); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
 	}
 
 	return &podSpec, nil
+}
+
+// placeAppendedEnvironmentBeforeUser keeps late system variables ahead of the user suffix.
+func placeAppendedEnvironmentBeforeUser(container *corev1.Container, appendStart, userEnvironmentCount int) {
+	if userEnvironmentCount == 0 || len(container.Env) == appendStart {
+		return
+	}
+	userEnvironmentStart := appendStart - userEnvironmentCount
+	container.Env = slices.Concat(
+		container.Env[:userEnvironmentStart],
+		container.Env[appendStart:],
+		container.Env[userEnvironmentStart:appendStart],
+	)
 }
 
 func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {
@@ -2952,7 +2973,13 @@ func generatePodSpecForRole(
 		if err != nil {
 			return nil, fmt.Errorf("failed to get GPU count for GMS weight server: %w", err)
 		}
-		return gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount)), nil
+		gmsPodSpec := gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount))
+		if compatibility.OrderedEnvironmentVariables.Enabled(GetPodTemplateAnnotations(component)) {
+			if main := GetMainContainer(component); main != nil {
+				placeAppendedEnvironmentBeforeUser(&gmsPodSpec.Containers[0], len(basePodSpec.Containers[0].Env), len(main.Env))
+			}
+		}
+		return gmsPodSpec, nil
 	}
 
 	// Engine pod (or non-GMS pod): optionally use a rank-aware deployer for multinode inter-pod GMS
@@ -2972,7 +2999,13 @@ func generatePodSpecForRole(
 	}
 
 	if isInterPodGMS {
-		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled())
+		userEnvironmentCount := 0
+		if compatibility.OrderedEnvironmentVariables.Enabled(GetPodTemplateAnnotations(component)) {
+			if main := GetMainContainer(component); main != nil {
+				userEnvironmentCount = len(main.Env)
+			}
+		}
+		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled(), userEnvironmentCount)
 	}
 
 	return podSpec, nil

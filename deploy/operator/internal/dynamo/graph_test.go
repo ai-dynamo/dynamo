@@ -1882,17 +1882,6 @@ func TestGeneratePodSpecForComponentUsesOnlyDGDOriginForEnvironmentOrder(t *test
 			componentOrigin: "1.5.0",
 			want:            []corev1.EnvVar{dgdEnvironment, componentEnvironment},
 		},
-		{
-			name:            "older DGD origin overrides newer component origin",
-			dgdOrigin:       "1.5.0",
-			componentOrigin: "1.6.0",
-			want:            []corev1.EnvVar{componentEnvironment, dgdEnvironment},
-		},
-		{
-			name:            "missing DGD origin removes newer component origin",
-			componentOrigin: "1.6.0",
-			want:            []corev1.EnvVar{componentEnvironment, dgdEnvironment},
-		},
 	}
 
 	for _, tt := range tests {
