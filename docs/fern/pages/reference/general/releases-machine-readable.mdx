@@ -150,12 +150,12 @@ Release highlights (stable releases):
 | KV-Aware Routing | Supported | Supported | Supported |
 | SLA-Based Planner | Supported | Supported | Supported |
 | KV Block Manager | Experimental (Work in progress across all combinations) | Supported | Supported |
-| Multimodal (Image) | Supported (KV-aware routing supported on Dynamo's SGLang image for aggregated workers; a custom build without the hash-forwarding patch falls back to text-prefix routing. Separately, multimodal serving supports EPD, E/PD and E/P/D disaggregation (not traditional EP/D)) | Supported (Image URLs + pre-computed embeddings. Disagg: EP/D + E/P/D. KV-aware routing via dedicated MM Router Worker (requires KV event publishing)) | Supported (With KV-aware routing, image-aware routing on documented paths) |
+| Multimodal (Image) | Supported (Image input) | Supported (Image URLs and pre-computed embeddings) | Supported |
 | Multimodal (Video) | Supported | Not supported | Supported (Video input with frame sampling) |
 | Multimodal (Audio) | Not supported | Not supported | Experimental (Qwen2-Audio, experimental) |
-| Request Migration | Supported | Supported (Work in progress with multimodal) | Supported |
-| Request Cancellation | Experimental (Remote-prefill-phase cancellation not supported in disaggregated mode) | Supported with caveat (Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)) | Supported |
-| LoRA | Experimental (Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested; disaggregated serving not end-to-end validated) | Not supported | Supported (Dynamic load/unload; KV-aware routing supports adapter affinity) |
+| Request Migration | Supported | Supported | Supported |
+| Request Cancellation | Supported | Supported with caveat (Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)) | Supported |
+| LoRA | Experimental (Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested) | Not supported | Supported (Dynamic load and unload) |
 | Tool Calling | Supported | Supported | Supported |
 | Speculative Decoding | Experimental (Code hooks exist; no examples or docs yet) | Supported | Supported (Eagle3) |
 | GPU Memory Service | Supported (Weights and KV; upstream integration remains in progress) | Experimental (Weights only; multinode and upstream integration remain in progress) | Supported (Weights and KV; upstream integration remains in progress) |
