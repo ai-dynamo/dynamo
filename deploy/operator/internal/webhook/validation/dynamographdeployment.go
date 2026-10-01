@@ -431,6 +431,15 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				oldComponent:                      opts.oldComponents[component.ComponentName],
 			},
 		)...)
+		for _, err := range dynamo.ValidateFailoverCheckpointForDGD(
+			component,
+			spec.BackendFramework,
+		) {
+			allErrs = append(allErrs, field.Forbidden(
+				componentPath.Child("experimental", "checkpoint"),
+				err.Error(),
+			))
+		}
 	}
 
 	// Validate conductor requirements on the converted graph.

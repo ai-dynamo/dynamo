@@ -120,8 +120,7 @@ func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilit
 	require.Equal(t, dcd.Generation, available.ObservedGeneration)
 	require.Equal(t, "InvalidCheckpointConfiguration", available.Reason)
 	require.Equal(t,
-		"Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"Snapshot with active/passive failover is temporarily unsupported",
+		"Snapshot with gpuMemoryService.mode=InterPod is unsupported",
 		available.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)
