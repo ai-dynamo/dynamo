@@ -9,9 +9,9 @@ import yaml
 from aisimulate.output_adapter import validate_output_adapter
 from pydantic import ValidationError
 
-from dynamo.profiler.sweeper import adapter as adapter_module
-from dynamo.profiler.sweeper.adapter import DGDOutputConfig, create_dgd_output_adapter
-from dynamo.profiler.sweeper.renderers import CandidateMaterializationError
+from dynamo.aisimulate.output.dgd import adapter as adapter_module
+from dynamo.aisimulate.output.dgd.adapter import DGDOutputConfig, create_adapter
+from dynamo.aisimulate.output.dgd.renderers import CandidateMaterializationError
 
 pytestmark = [
     pytest.mark.unit,
@@ -60,7 +60,7 @@ spec:
 
 
 def test_adapter_matches_aisimulate_contract_and_defaults() -> None:
-    adapter = create_dgd_output_adapter()
+    adapter = create_adapter()
     config = DGDOutputConfig.model_validate(_config())
 
     assert validate_output_adapter(adapter, requested_name="dgd") is adapter
@@ -88,7 +88,7 @@ def test_name_form_must_match_result_view(
 ) -> None:
     monkeypatch.setattr(adapter_module, "_workload", lambda _result: object())
     with pytest.raises(ValueError, match=message):
-        create_dgd_output_adapter().write(
+        create_adapter().write(
             config,
             result=_result([_Candidate(1.0)], pareto=pareto),
             output_dir=tmp_path,
@@ -109,7 +109,7 @@ def test_scalar_writes_only_the_selected_winner(monkeypatch, tmp_path) -> None:
         return _rendered_dgd(dgd_name, candidate.score)
 
     monkeypatch.setattr(adapter_module, "render_dgd", fake_render)
-    artifacts = create_dgd_output_adapter().write(
+    artifacts = create_adapter().write(
         _config(),
         result=_result(candidates),
         output_dir=tmp_path,
@@ -133,7 +133,7 @@ def test_pareto_writes_every_selected_candidate(monkeypatch, tmp_path) -> None:
         ),
     )
 
-    artifacts = create_dgd_output_adapter().write(
+    artifacts = create_adapter().write(
         _config(name=None, name_prefix="qwen-pareto", format="kustomize"),
         result=_result(candidates, pareto=True),
         output_dir=tmp_path,
@@ -153,7 +153,7 @@ def test_pareto_writes_every_selected_candidate(monkeypatch, tmp_path) -> None:
 
 def test_adapter_rejects_empty_selection(tmp_path) -> None:
     with pytest.raises(CandidateMaterializationError, match="no feasible candidate"):
-        create_dgd_output_adapter().write(
+        create_adapter().write(
             _config(),
             result=_result([]),
             output_dir=tmp_path,

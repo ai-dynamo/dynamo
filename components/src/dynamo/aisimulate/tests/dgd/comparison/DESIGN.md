@@ -49,7 +49,7 @@ Kustomize matrices. They can be composed with a generated Kustomize base for liv
 ## Layout
 
 ```text
-components/src/dynamo/profiler/tests/sweeper/
+components/src/dynamo/aisimulate/tests/dgd/comparison/
 ├── DESIGN.md
 ├── testsuite-issue-8469.yaml
 ├── cases/

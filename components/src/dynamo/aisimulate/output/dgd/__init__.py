@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dynamo composition for AI Simulate Sweeper candidates."""
+"""DynamoGraphDeployment output adapter for AISimulate recommendations."""
 
-from dynamo.profiler.sweeper.adapter import (
+from dynamo.aisimulate.output.dgd.adapter import (
     DGDOutputAdapter,
     DGDOutputConfig,
-    create_dgd_output_adapter,
+    create_adapter,
 )
-from dynamo.profiler.sweeper.renderers import (
+from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,
     DGDGenerationOptions,
     DGDRenderer,
@@ -21,6 +21,6 @@ __all__ = [
     "DGDOutputAdapter",
     "DGDOutputConfig",
     "DGDRenderer",
-    "create_dgd_output_adapter",
+    "create_adapter",
     "render_dgd",
 ]

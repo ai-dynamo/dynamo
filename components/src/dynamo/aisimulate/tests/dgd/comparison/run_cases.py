@@ -24,11 +24,11 @@ from typing import Any
 
 import yaml
 
-from dynamo.profiler.sweeper.output.atomic import replace_text
-from dynamo.profiler.sweeper.renderers import DGDGenerationOptions, render_dgd
+from dynamo.aisimulate.output.dgd.renderers import DGDGenerationOptions, render_dgd
+from dynamo.aisimulate.output.dgd.writers.atomic import replace_text
 
 _ROOT = Path(__file__).parent
-_REPOSITORY_ROOT = _ROOT.parents[5]
+_REPOSITORY_ROOT = _ROOT.parents[6]
 _CASES_ROOT = _ROOT / "cases"
 _HARDWARE_ROOT = _ROOT / "hardware"
 _DEFAULT_OUTPUT_ROOT = _ROOT / "generated"

@@ -129,7 +129,7 @@ dynamo = "dynamo.replay.simulation:DynamoReplayRunnerFactory"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
 
 [project.entry-points."aisimulate.output_adapters"]
-dgd = "dynamo.profiler.sweeper:create_dgd_output_adapter"
+dgd = "dynamo.aisimulate.output.dgd:create_adapter"
 
 [dependency-groups]
 docs = [
