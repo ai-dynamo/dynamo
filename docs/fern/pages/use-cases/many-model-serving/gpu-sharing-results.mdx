@@ -67,6 +67,23 @@ Note that we expect degredation in the model performance since we are sharing th
 
 </details>
 
+### Cost per 1M Output Tokens
+
+This table compares the cost of serving 16 models when each model receives the same traffic. Serving 16 models with one model per GPU requires leasing two 8× A100 nodes, while GPU fractions serves all 16 on one node. The baseline is extrapolated from the 8-model run by doubling its throughput. Both configurations are priced at $27.50 per node-hour.
+
+Unlike the tables above, rows here are matched on concurrency per model, not requests per GPU.
+
+| Concurrency per model | Baseline tok/s (2 nodes) | Baseline $/1M | Fractions tok/s (1 node) | Fractions $/1M | Fractions cost vs Baseline |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1,782 | $8.57 | 1,155 | $6.61 | -22.9% |
+| 2 | 3,640 | $4.20 | 2,074 | $3.68 | -12.2% |
+| 4 | 6,866 | $2.23 | 3,649 | $2.09 | -5.9% |
+| 8 | 10,740 | $1.42 | 5,782 | $1.32 | -7.1% |
+| 16 | 14,868 | $1.03 | 8,027 | $0.95 | -7.4% |
+| 32 | 18,268 | $0.84 | 9,059 | $0.84 | +0.8% |
+
+$/1M is the hourly node cost divided by output tokens per hour, scaled to one million tokens. Only output tokens are counted. At light per-model load, a dedicated GPU sits mostly idle, and packing two models onto it recovers that idle capacity. At 32 concurrent requests per model, the dedicated GPUs are busy enough that the cost advantage disappears.
+
 ## Reading the Table
 
 ### Rows Are Matched on Load per GPU
