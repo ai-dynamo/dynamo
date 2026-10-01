@@ -12,7 +12,7 @@
 
 ## Related Issues
 
-> ⚠️ **This section is required.** Choose one path below and delete the other.
+> ⚠️ **This section is required.** Reference at least one existing GitHub issue or Linear ticket. The PR Issue Reference workflow verifies references in the title and description and reports their titles. All listed references must be accessible and valid.
 
 **🔗 This PR is linked to an issue:**
 <!-- Replace XXXX with the real issue number e.g.
@@ -26,5 +26,4 @@
 
 - Closes #XXXX
 
-**🚫 This PR is NOT linked to an issue**:
-- [ ] Confirmed — no related issue
+<!-- A Linear ticket ID or issue URL is also accepted. -->
