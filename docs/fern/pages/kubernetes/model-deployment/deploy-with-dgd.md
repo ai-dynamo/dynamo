@@ -550,6 +550,11 @@ variable cannot reference a component variable. Duplicate names remain visible i
 the API server might warn that the later definition `hides previous definition`. This is expected,
 and the later value wins.
 
+In `v1alpha1`, `service.envs` and `extraPodSpec.mainContainer.env` are combined during API
+conversion. When both lists define the same name, the extra container value replaces the
+service value at its original position. Put variables that need ordered expansion or duplicate
+names in one of these lists, or use `v1beta1` with `podTemplate.spec.containers[*].env`.
+
 DGDs created by an operator older than 1.6.0, or without the
 `nvidia.com/dynamo-operator-origin-version` annotation, retain the legacy sorted and de-duplicated
 output after an operator upgrade. See the
