@@ -74,6 +74,32 @@ func TestResolveComponentRuntimeStatusUsesModelPathFallback(t *testing.T) {
 	}
 }
 
+func TestResolveComponentRuntimeStatusFromRenderedTRTLLMLeader(t *testing.T) {
+	t.Log("Render a TRT-LLM leader and resolve identity through its nested bash launch wrapper")
+	container := &corev1.Container{
+		Name:    commonconsts.MainContainerName,
+		Command: []string{"python3"},
+		Args: []string{
+			"--model", "Qwen/Qwen3-8B",
+			"--endpoint", "dyn://prod.custom-decode.generate",
+		},
+	}
+	backend := &TRTLLMBackend{MpiRunSecretName: "mpi-run"}
+	require.NoError(t, backend.UpdateContainer(
+		container,
+		2,
+		RoleLeader,
+		&v1beta1.DynamoComponentDeploymentSharedSpec{},
+		"decode",
+		&GroveMultinodeDeployer{},
+		staticContainerGPUCount(1),
+	))
+
+	status := ResolveComponentRuntimeStatus(&corev1.PodSpec{Containers: []corev1.Container{*container}}, nil)
+	assert.Equal(t, "Qwen/Qwen3-8B", status.ServedModelName)
+	assert.Equal(t, "custom-decode", status.RuntimeComponentName)
+}
+
 func TestResolveGroveComponentRuntimeStatusesUsesServingRole(t *testing.T) {
 	t.Log("Select the semantic leader instead of a generated worker clique")
 	dgd := &v1beta1.DynamoGraphDeployment{

@@ -884,6 +884,32 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 GPU sidecar addition is rejected for a power component",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				addBetaWorkerGPUSidecar(dgd)
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.spec: Invalid value: "2": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name: "v1beta1 GPU sidecar removal is rejected for a power component",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				addBetaWorkerGPUSidecar(dgd)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.spec: Invalid value: "1": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
 			name: "v1beta1 power node count change is rejected by the webhook",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
@@ -3543,6 +3569,17 @@ func setBetaWorkerPowerInputs(
 		corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse(gpus),
 	}
 	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
+}
+
+func addBetaWorkerGPUSidecar(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	worker := betaWorkerComponent(dgd)
+	worker.PodTemplate.Spec.Containers = append(worker.PodTemplate.Spec.Containers, corev1.Container{
+		Name:  "gpu-sidecar",
+		Image: "registry.example/gpu-sidecar:1.0.0",
+		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+		}},
+	})
 }
 
 func setBetaWorkerResourceClaim(

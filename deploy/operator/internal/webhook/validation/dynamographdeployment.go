@@ -961,13 +961,25 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 	}
 
 	if oldHasPowerLimit {
-		// Keep the Planner's remaining cached per-replica power inputs stable.
+		// Keep the Planner's cached main-container GPU input stable.
 		newNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(newComponent, fldPath)
 		oldNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(oldComponent, fldPath)
 		if !newNumberOfGPUs.equal(oldNumberOfGPUs) {
 			allErrs = append(allErrs, field.Invalid(
 				newNumberOfGPUs.path,
 				newNumberOfGPUs.invalidValue(),
+				apivalidation.FieldImmutableErrorMsg,
+			))
+			return allErrs
+		}
+
+		// Keep auxiliary-container GPU allocations used by the cached per-replica cost stable.
+		newPodGPUs, newErr := effectivePodGPUCountV1Beta1(v.ctx, newComponent, fldPath)
+		oldPodGPUs, oldErr := effectivePodGPUCountV1Beta1(v.ctx, oldComponent, fldPath)
+		if newErr == nil && oldErr == nil && !newPodGPUs.equal(oldPodGPUs) {
+			allErrs = append(allErrs, field.Invalid(
+				newPodGPUs.path,
+				newPodGPUs.invalidValue(),
 				apivalidation.FieldImmutableErrorMsg,
 			))
 		}

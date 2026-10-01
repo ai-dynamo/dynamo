@@ -111,9 +111,28 @@ func shellCommandLineTokens(command, args []string) []string {
 	parts = append(parts, args...)
 	tokens := make([]string, 0, len(parts))
 	for _, part := range parts {
-		tokens = append(tokens, splitShellWords(part)...)
+		tokens = append(tokens, shellCommandTokens(part)...)
 	}
 	return tokens
+}
+
+func shellCommandTokens(value string) []string {
+	tokens := splitShellWords(value)
+	expanded := append([]string(nil), tokens...)
+	for i := 0; i+2 < len(tokens); i++ {
+		if isShellExecutable(tokens[i]) && tokens[i+1] == "-c" {
+			expanded = append(expanded, shellCommandTokens(tokens[i+2])...)
+		}
+	}
+	return expanded
+}
+
+func isShellExecutable(value string) bool {
+	name := value
+	if index := strings.LastIndexByte(name, '/'); index >= 0 {
+		name = name[index+1:]
+	}
+	return name == "sh" || name == "bash"
 }
 
 func splitShellWords(value string) []string {
