@@ -52,6 +52,18 @@ async def test_aggregated_mode_emits_max_tokens_chunks():
     assert "disaggregated_params" not in chunks[-1]
 
 
+async def test_packed_token_ids_are_unpacked_before_use():
+    engine = SampleLLMEngine(
+        max_tokens=2,
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+    )
+    request = {"token_ids": b"".join(i.to_bytes(4, "little") for i in (1, 2, 3))}
+    chunks = await _collect(engine, request)
+    assert request["token_ids"] == [1, 2, 3]
+    assert len(chunks) == 2
+
+
 async def test_prefill_mode_caps_to_one_token_with_disaggregated_params():
     engine = SampleLLMEngine(
         max_tokens=16,

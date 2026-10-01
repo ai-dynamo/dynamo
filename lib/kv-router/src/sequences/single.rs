@@ -22,7 +22,6 @@ use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::Instant;
-use uuid::Uuid;
 
 #[cfg(test)]
 use rustc_hash::FxHashSet;
@@ -265,24 +264,30 @@ impl ActiveSequences {
         Some(membership_delta)
     }
 
-    /// Add an output block with a random hash and optional fractional decay weight.
+    /// Append output blocks and apply the optional decay weight once.
     ///
-    /// This is used during generation to track output blocks as they are created.
-    pub(super) fn add_output_block(
+    /// Return whether blocks were appended. A zero count or missing request returns
+    /// `false` without changing block state or applying decay.
+    pub(super) fn add_output_blocks(
         &mut self,
         request_id: &RequestId,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
-    ) -> Option<SequenceHash> {
+    ) -> bool {
+        if num_blocks == 0 {
+            return false;
+        }
         let Some(request_state) = self.requests.get_mut(request_id) else {
-            tracing::warn!("Request {request_id} not found for add_output_block");
-            return None;
+            tracing::warn!("Request {request_id} not found for add_output_blocks");
+            return false;
         };
 
         // TODO: Output blocks still use random hashes, so indexing them mainly simplifies
         // generic block bookkeeping and usually adds little real reuse signal.
-        let random_hash: SequenceHash = Uuid::new_v4().as_u64_pair().0;
-        self.blocks
-            .append_output(&mut request_state.blocks, random_hash);
+        for _ in 0..num_blocks {
+            let hash = fastrand::u64(..);
+            self.blocks.append_output(&mut request_state.blocks, hash);
+        }
 
         if let Some(frac) = decay_fraction {
             self.blocks
@@ -290,7 +295,7 @@ impl ActiveSequences {
         }
 
         self.validate_state();
-        Some(random_hash)
+        true
     }
 
     /// Force expiry of stale requests if the timer has elapsed.
@@ -478,25 +483,17 @@ mod tests {
                 new_suffix_start: 0,
             }]
         );
-        assert_eq!(
-            seq_manager.active_block_hashes(),
-            [1, 2, 3].into_iter().collect()
-        );
+        let prompt_hashes = seq_manager.active_block_hashes();
+        assert_eq!(prompt_hashes, [1, 2, 3].into_iter().collect());
 
-        let output_hash = seq_manager
-            .add_output_block(&"r1".to_string(), Some(0.5))
-            .expect("request exists");
-        assert_eq!(
-            seq_manager.active_block_hashes(),
-            [1, 2, 3, output_hash].into_iter().collect()
-        );
+        assert!(seq_manager.add_output_blocks(&"r1".to_string(), 1, Some(0.5)));
+        let active_hashes = seq_manager.active_block_hashes();
+        assert!(active_hashes.is_superset(&prompt_hashes));
+        assert_eq!(active_hashes.len(), prompt_hashes.len() + 1);
 
         seq_manager.mark_prefill_completed(&"r1".to_string(), decay_now);
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
-        assert_eq!(
-            seq_manager.active_block_hashes(),
-            [1, 2, 3, output_hash].into_iter().collect()
-        );
+        assert_eq!(seq_manager.active_block_hashes(), active_hashes);
 
         let free_delta = seq_manager
             .free(&"r1".to_string(), decay_now)
@@ -578,12 +575,10 @@ mod tests {
         );
         assert_eq!(seq_manager.active_blocks(), 3);
 
-        assert!(
-            seq_manager
-                .add_output_block(&"r1".to_string(), Some(0.5))
-                .is_some()
-        );
-        assert_eq!(seq_manager.active_blocks(), 2);
+        assert!(!seq_manager.add_output_blocks(&"r1".to_string(), 0, Some(0.0)));
+        assert_eq!(seq_manager.active_blocks(), 3);
+        assert!(seq_manager.add_output_blocks(&"r1".to_string(), 3, Some(0.5)));
+        assert_eq!(seq_manager.active_blocks(), 3);
 
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
@@ -593,17 +588,14 @@ mod tests {
             tracking_hint(8),
             decay_now,
         );
-        assert_eq!(seq_manager.active_blocks(), 2);
+        assert_eq!(seq_manager.active_blocks(), 3);
 
-        assert!(
-            seq_manager
-                .add_output_block(&"r1".to_string(), Some(0.0))
-                .is_some()
-        );
+        assert!(seq_manager.add_output_blocks(&"r1".to_string(), 2, Some(0.0)));
         assert_eq!(seq_manager.active_blocks(), 1);
 
         seq_manager.free(&"r2".to_string(), decay_now);
         seq_manager.free(&"r1".to_string(), decay_now);
+        assert!(!seq_manager.add_output_blocks(&"r1".to_string(), 1, None));
         assert_eq!(seq_manager.active_blocks(), 0);
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
     }
