@@ -1074,6 +1074,8 @@ struct HostPool {
     after_prune_barrier: parking_lot::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     #[cfg(test)]
     before_connect_wait_barrier: parking_lot::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    before_connect_gate_barrier: parking_lot::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl HostPool {
@@ -1097,6 +1099,8 @@ impl HostPool {
             after_prune_barrier: parking_lot::Mutex::new(None),
             #[cfg(test)]
             before_connect_wait_barrier: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            before_connect_gate_barrier: parking_lot::Mutex::new(None),
         }
     }
 
@@ -1219,6 +1223,15 @@ impl HostPool {
         // --- Phase B: connect (no locks held, CAS gate prevents stampede) ---
         // Bounded retry loop instead of recursion
         for retry in 0..MAX_CONNECT_RETRIES {
+            #[cfg(test)]
+            {
+                let barrier = self.before_connect_gate_barrier.lock().take();
+                if let Some(barrier) = barrier {
+                    barrier.wait().await;
+                    barrier.wait().await;
+                }
+            }
+
             // Capture completion broadcasts before checking the gate. A winner
             // can publish and notify before a losing caller starts waiting.
             let notified = self.connect_notify.notified();
@@ -1233,6 +1246,31 @@ impl HostPool {
                     connecting: &self.connecting,
                     notify: &self.connect_notify,
                 };
+
+                // A previous winner may have published after our last snapshot
+                // check but before this CAS. Recheck capacity while owning the gate.
+                {
+                    let guard = self.snapshot.load();
+                    let conns = &**guard;
+                    let len = conns.len();
+                    if len > 0 {
+                        let start = self.counter.fetch_add(1, Ordering::Relaxed) as usize;
+                        for i in 0..len {
+                            let conn = &conns[(start + i) % len];
+                            if conn.is_healthy() && conn.available_capacity() > 0 {
+                                return Ok(conn.clone());
+                            }
+                        }
+                        if len >= self.max_connections {
+                            for i in 0..len {
+                                let conn = &conns[(start + i) % len];
+                                if conn.is_healthy() {
+                                    return Ok(conn.clone());
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Acquire global connect permit to limit total connect bursts.
                 // If this await is cancelled, _connecting_guard drops and
@@ -2924,6 +2962,61 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(pool.snapshot.load().len(), 1);
+        assert!(!pool.connecting.load(Ordering::Acquire));
+        assert_eq!(limiter.available_permits(), 2);
+    }
+
+    #[rstest::rstest]
+    #[case::available_at_limit(1, false, true)]
+    #[case::available_below_limit(2, false, true)]
+    #[case::saturated_at_limit(1, true, true)]
+    #[case::saturated_below_limit(2, true, false)]
+    #[tokio::test]
+    async fn stale_cold_path_rechecks_capacity_after_winning_gate(
+        #[case] pool_size: usize,
+        #[case] saturated: bool,
+        #[case] should_reuse: bool,
+    ) {
+        let (addr, _) = spawn_echo_server().await;
+        let config = TcpRequestConfig {
+            pool_size,
+            channel_buffer: 1,
+            ..TcpRequestConfig::default()
+        };
+        let pool = Arc::new(HostPool::new(addr, &config));
+        let limiter = Arc::new(tokio::sync::Semaphore::new(2));
+        let before_gate = Arc::new(tokio::sync::Barrier::new(2));
+        *pool.before_connect_gate_barrier.lock() = Some(before_gate.clone());
+        let delayed = {
+            let pool = pool.clone();
+            let limiter = limiter.clone();
+            tokio::spawn(async move { pool.get_connection(&limiter).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), before_gate.wait())
+            .await
+            .expect("delayed caller should observe an empty pool before the gate");
+        let published = tokio::time::timeout(Duration::from_secs(1), pool.get_connection(&limiter))
+            .await
+            .expect("another caller should publish a connection")
+            .unwrap();
+        // Control the capacity heuristic while preserving an actual live socket.
+        published
+            .inflight
+            .store(u64::from(saturated), Ordering::Release);
+        before_gate.wait().await;
+        let delayed = tokio::time::timeout(Duration::from_secs(1), delayed)
+            .await
+            .expect("delayed caller should finish after acquiring the gate")
+            .unwrap()
+            .unwrap();
+        published.inflight.store(0, Ordering::Release);
+
+        assert_eq!(
+            Arc::ptr_eq(&delayed, &published),
+            should_reuse,
+            "the winning caller must use current capacity, not its earlier empty snapshot"
+        );
+        assert_eq!(pool.snapshot.load().len(), if should_reuse { 1 } else { 2 });
         assert!(!pool.connecting.load(Ordering::Acquire));
         assert_eq!(limiter.available_permits(), 2);
     }
