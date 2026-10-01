@@ -163,21 +163,21 @@ struct State {
 struct ResponseRegistrationGuard {
     state: Arc<Mutex<State>>,
     subject: String,
-    active: bool,
+    is_active: bool,
 }
 
 impl ResponseRegistrationGuard {
     /// Serialize prologue acceptance with cancellation under the registration lock.
     /// A removed cancellation entry means cancellation already won.
     fn accept(mut self) -> bool {
-        self.active = false;
+        self.is_active = false;
         TcpStreamServer::finish_response_stream(&self.state, &self.subject)
     }
 }
 
 impl Drop for ResponseRegistrationGuard {
     fn drop(&mut self) {
-        if self.active {
+        if self.is_active {
             TcpStreamServer::finish_response_stream(&self.state, &self.subject);
         }
     }
@@ -475,7 +475,7 @@ impl TcpStreamServer {
     /// already removed the registration.
     fn finish_response_stream(state: &Mutex<State>, subject: &str) -> bool {
         let mut state = state.lock();
-        let pending = state.rx_cancellations.remove(subject).is_some();
+        let is_pending = state.rx_cancellations.remove(subject).is_some();
         if let Some(key) = state.subject_instance.remove(subject)
             && let Some(subjects) = state.instance_subjects.get_mut(&key)
         {
@@ -484,7 +484,7 @@ impl TcpStreamServer {
                 state.instance_subjects.remove(&key);
             }
         }
-        pending
+        is_pending
     }
 }
 
@@ -1125,9 +1125,9 @@ async fn tcp_listener(
             error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject)
         })?;
         let registration_guard = ResponseRegistrationGuard {
-            state: state.clone(),
-            subject: subject.clone(),
-            active: true,
+            state,
+            subject,
+            is_active: true,
         };
 
         // unwrap response_stream
@@ -2553,7 +2553,7 @@ mod tests {
             let guard = ResponseRegistrationGuard {
                 state: server.state.clone(),
                 subject: subject.clone(),
-                active: true,
+                is_active: true,
             };
 
             if removal_first {
@@ -2588,7 +2588,7 @@ mod tests {
         let guard = ResponseRegistrationGuard {
             state: server.state.clone(),
             subject: subject.clone(),
-            active: true,
+            is_active: true,
         };
         // One byte cannot hold a framed Kill; retaining the unread peer stalls send().
         let (socket, _peer) = tokio::io::duplex(1);
