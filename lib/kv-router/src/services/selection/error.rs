@@ -180,8 +180,7 @@ mod tests {
         assert_eq!(body.as_ref(), br#"{"error":"request classifier failed"}"#);
     }
 
-    /// A policy class refusing to admit is backpressure, not unavailability:
-    /// every eligible worker may be healthy while one class is at its limit.
+    /// A full policy class is backpressure (429), not unavailability.
     #[test]
     fn queue_rejection_is_throttling_not_unavailable() {
         let rejection = crate::scheduling::QueueRejection {

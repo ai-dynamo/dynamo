@@ -138,18 +138,8 @@ pub enum KvSchedulerError {
     WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
 
-/// What a scheduler refusal means to a client, independent of any one host's
-/// status vocabulary.
-///
-/// Several hosts turn the same [`KvSchedulerError`] into a client response: the
-/// standalone selection service over HTTP, and the Rust EPP over ext_proc.
-/// Each has its own status type, but the *meaning* of a refusal must not differ
-/// between them, so it is classified once, here, next to the error.
-///
-/// Deliberately coarser than [`KvSchedulerError`]: a host only needs enough
-/// resolution to pick a status class and a metric label. Being a small closed
-/// enum also keeps a new [`KvSchedulerError`] variant from breaking every host
-/// that maps it.
+/// What a scheduler refusal means to a client. Classified once here so every
+/// host (the selection service, the Rust EPP) gives an error the same status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerRejection {
     /// Downstream capacity is saturated; retryable backpressure.
@@ -174,15 +164,8 @@ impl KvSchedulerError {
         )
     }
 
-    /// Classify this error for a client-facing host.
-    ///
-    /// [`SchedulerRejection::QueueRejected`] stays distinct from
-    /// [`SchedulerRejection::Overloaded`] — the workers can have capacity while
-    /// one class's queue is full, and hosts label the two differently — but it
-    /// is throttling, not unavailability, so hosts answer both the same way.
-    /// DEP #9755: "Terminal router-side rejection SHOULD use downstream
-    /// throttling semantics, such as `TooManyRequests` / HTTP 429. This
-    /// includes router queue full [...]".
+    /// Classify this error for a client-facing host. `QueueRejected` stays
+    /// distinct from `Overloaded` but is answered the same way: 429, per DEP #9755.
     pub fn rejection(&self) -> SchedulerRejection {
         match self {
             Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. } => {

@@ -998,8 +998,8 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
-            // Keep these statuses aligned with `scheduler_error_status` in
-            // `lib/kv-router/src/services/selection/error.rs`.
+            // Must match `scheduler_error_status`; see
+            // `epp_statuses_match_the_selection_service`.
             PickError::RouterOverloaded => Self {
                 status_code: StatusCode::TooManyRequests,
                 message: e.to_string(),
@@ -1740,14 +1740,7 @@ mod tests {
         assert!(inject_body_extensions(body, Some(&[1]), None).is_err());
     }
 
-    /// The EPP and the standalone selection service must answer the same
-    /// scheduler error with the same status. Classification is already shared
-    /// (`KvSchedulerError::rejection`), but each host renders it in its own
-    /// status type, and the rendering is what a client sees.
-    ///
-    /// Variants are listed explicitly rather than iterated, so adding one to the
-    /// `#[non_exhaustive]` upstream enum does not silently inherit the
-    /// `Unavailable` fallback here without someone deciding it should.
+    /// The EPP and the selection service give every scheduler error the same status.
     #[test]
     fn epp_statuses_match_the_selection_service() {
         use crate::admission::RouterRejectionExt;
@@ -1786,7 +1779,6 @@ mod tests {
 
         for error in cases {
             let label = error.to_string();
-            // Read the classification before the error moves into `SelectionError`.
             let epp = ExtProcError::from_pick_error(error.rejection().into_pick_error());
             let selection = SelectionError::Scheduler(error).status_code();
 
@@ -1797,19 +1789,13 @@ mod tests {
         }
     }
 
-    /// Router-reported worker saturation is 429, matching `scheduler_error_status`
-    /// in `lib/kv-router/src/services/selection/error.rs`. Deliberately distinct
-    /// from the EPP's own front-door shed, which stays 503 — see
-    /// `overloaded_pick_error_maps_to_503` above.
+    /// Router saturation is 429; the EPP's own cap stays 503.
     #[test]
     fn router_overloaded_maps_to_429() {
         let err = ExtProcError::from_pick_error(PickError::RouterOverloaded);
         assert_eq!(err.status_code, StatusCode::TooManyRequests);
     }
 
-    /// A full policy-class queue is 429, like the overloaded family: the class
-    /// refused to admit, so the client should back off rather than be sent
-    /// looking for another endpoint.
     #[test]
     fn router_queue_rejection_maps_to_429() {
         let err = ExtProcError::from_pick_error(PickError::RouterQueueRejected);

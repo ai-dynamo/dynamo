@@ -93,16 +93,8 @@ pub fn observe_cached_tokens(cached_tokens: u64) {
         .observe(cached_tokens as f64);
 }
 
-/// Requests the embedded KV router refused to place, by reason.
-///
-/// Counterpart to the Dynamo Frontend's rejection accounting: without it, a
-/// gateway deployment can shed load steadily with nothing to show for it, since
-/// a rejection never reaches the response body the EPP samples for
-/// [`observe_cached_tokens`].
-///
-/// `reason` is bounded by [`RouterRejection`]'s variants rather than any
-/// request-derived string, so cardinality is fixed at compile time — the same
-/// discipline `model` follows above.
+/// Requests the embedded router refused, by reason. `reason` comes from
+/// [`RouterRejection`], so its cardinality is fixed.
 static ROUTER_REJECTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     let counter = IntCounterVec::new(
         Opts::new(
@@ -118,10 +110,7 @@ static ROUTER_REJECTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     counter
 });
 
-/// Count one router rejection against the model bound by [`set_served_model`].
-///
-/// Cheap and non-blocking: an atomic increment on a pre-registered series, safe
-/// to call inline on the `pick()` path.
+/// Count one rejection for the served model. Non-blocking; safe on the `pick()` path.
 pub fn inc_router_rejection(rejection: RouterRejection) {
     ROUTER_REJECTIONS
         .with_label_values(&[served_model_label(), rejection.metric_label()])

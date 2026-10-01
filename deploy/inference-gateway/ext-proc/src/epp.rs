@@ -510,10 +510,8 @@ impl Router {
     /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
     /// mismatch excludes a worker from selection.
     ///
-    /// Every refusal is classified into a [`PickError`] whose status class
-    /// follows the router's own mapping; nothing here is stringified, so the
-    /// reason survives to the ext_proc boundary and the router's internal text
-    /// never reaches the client.
+    /// A per-class queue limit rejection surfaces as an error here, the same as
+    /// it does for the integrated frontend.
     #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,
@@ -550,10 +548,7 @@ impl Router {
             )
             .await
             .map_err(|error| {
-                // Classify at the boundary, where the router's typed error is
-                // still intact. Stringifying here is what previously collapsed
-                // every rejection into one 503 and leaked the router's `Debug`
-                // text to the client.
+                // Classify while the router's error is still typed.
                 let rejection = classify_router_error(&error);
                 tracing::warn!(
                     rejection = rejection.metric_label(),
@@ -570,9 +565,7 @@ impl Router {
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
-            // A queue rejection is an outcome rather than an error, so it never
-            // reaches `classify_router_error`; classify it explicitly and to the
-            // same status the router's own mapping uses (503).
+            // An outcome, not an error, so it is classified here.
             FindBestMatchOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
                     rejection = RouterRejection::QueueRejected.metric_label(),
