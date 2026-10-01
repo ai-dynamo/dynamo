@@ -55,7 +55,7 @@ lib/sidecar/
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
     │       ├── vllm.rs        # vLLM protocol, Mocker and child-command adapter
-    │       ├── sglang.rs      # SGLang protocol and Mocker adapter
+    │       ├── sglang.rs      # SGLang protocol, discovery, health and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     └── README.md              # This guide
 ```
@@ -174,18 +174,19 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `conformance.rs` | Four common scenarios registered for both vLLM and SGLang; active cancellation, consumer drop and peer teardown initially enrolled for vLLM; vLLM request/logprob fields, admission rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
-| `cross_process.rs` | Registration and error recovery, readiness, startup failure/interruption, request isolation, SIGTERM withdrawal/drain; vLLM prefill/decode handoff through the real router | CPU, ordinary pre-merge Cargo tests |
+| `conformance.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
+| `cross_process.rs` | Both backends: registration/error recovery, readiness, startup failure, cancellation, SIGTERM and real PrefillRouter handoff; SGLang discovery identity, HealthCheck and changed-role startup | CPU, ordinary pre-merge Cargo tests |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
-SGLang currently registers the four baseline scenarios. Its process and active
-work enrollment requires implementing and exercising the additional fixture
-contract. TensorRT-LLM is not enrolled here.
+Both vLLM and SGLang register the shared wire and process scenarios.
+TensorRT-LLM is not enrolled here.
 
-CPU handoff checks the routing and opaque metadata contract. A Mocker cannot
-prove that a real engine accepts the serialized request, executes a
-structured-output constraint, releases its real scheduler work, or transfers
-GPU KV cache.
+CPU handoff checks opaque vLLM metadata and SGLang concurrent bootstrap
+coordination. CPU handoff cancellation holds the peers before Mocker admission;
+it proves transport cleanup and recovery, not native scheduler or transfer
+cleanup. A Mocker cannot prove that a real engine accepts the serialized request,
+executes a structured-output constraint, releases its real scheduler work, or
+transfers GPU KV cache.
 
 Existing tests in `lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` retain distinct
 KV-event and handoff coverage. Backend-local socket tests in `vllm/src/tests.rs`
@@ -242,7 +243,8 @@ Build the sidecar binary and run the testkit together from the repository root:
 
 ```sh
 CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 \
-  cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sidecar-testkit
+  cargo test --locked -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar \
+    -p dynamo-sidecar-testkit
 ```
 
 Use normal test parallelism. These suites need a Linux host with the repository's
@@ -250,10 +252,10 @@ Rust build prerequisites, permission to bind loopback sockets and spawn child
 processes, and writable temporary storage. Running them needs no GPU, engine
 installation, model download or external discovery service.
 
-The workspace's ordinary `cargo test --locked --all-targets` builds the vLLM
-executable through its executable integration target. A testkit-only command
+The workspace's ordinary `cargo test --locked --all-targets` builds both sidecar
+executables through their executable integration targets. A testkit-only command
 can instead pick up an older binary from the build directory. Always build the
-vLLM package alongside testkit when validating source changes. After that build,
+vLLM and SGLang packages alongside testkit when validating source changes. After that build,
 you can select a suite or test by name:
 
 ```sh

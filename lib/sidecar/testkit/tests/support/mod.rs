@@ -81,6 +81,15 @@ pub trait ProcessFixture: WireFixture {
     fn assert_registration(card: &ModelDeploymentCard);
 }
 
+pub trait HandoffFixture: ProcessFixture {
+    const HAS_BOOTSTRAP: bool;
+    fn assert_handoff(
+        prefill: &RequestHandle<Self::Protocol>,
+        decode: &RequestHandle<Self::Protocol>,
+        id: &str,
+    );
+}
+
 pub fn sidecar_command(binary_name: &str, override_env: &str) -> Command {
     let binary = std::env::var_os(override_env)
         .map(PathBuf::from)

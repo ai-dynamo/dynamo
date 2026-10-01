@@ -26,8 +26,8 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use super::{
-    FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture, fast_engine_args,
-    sidecar_command, wait_scheduler_idle,
+    FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
+    fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
 pub struct Fixture {
@@ -417,5 +417,41 @@ impl ProcessFixture for Fixture {
         assert!(card.runtime_config.tool_call_parser.is_none());
         assert!(card.runtime_config.reasoning_parser.is_none());
         assert_eq!(card.effective_context_length(), 4096);
+    }
+}
+
+impl HandoffFixture for Fixture {
+    const HAS_BOOTSTRAP: bool = false;
+
+    fn assert_handoff(
+        prefill: &RequestHandle<Self::Protocol>,
+        decode: &RequestHandle<Self::Protocol>,
+        id: &str,
+    ) {
+        let prefill_wire = prefill.native_request().unwrap();
+        let decode_wire = decode.native_request().unwrap();
+        assert_eq!(prefill_wire.request_id, id);
+        assert_eq!(decode_wire.request_id, id);
+        assert_eq!(prefill_wire.stopping.unwrap().max_new_tokens, 1);
+        assert_eq!(decode_wire.stopping.unwrap().max_new_tokens, 3);
+        let mut native_handoff = prefill
+            .native_responses()
+            .into_iter()
+            .find_map(|response| response.outputs?.finish_info?.kv_transfer_params)
+            .expect("native prefill handoff");
+        let mut forwarded = decode_wire.kv.unwrap().kv_transfer_params.unwrap();
+        assert_eq!(
+            forwarded.fields["mocker_request_id"].kind,
+            Some(prost_types_v14::value::Kind::StringValue(id.to_string()))
+        );
+        assert_eq!(
+            native_handoff.fields.remove("remote_port").unwrap().kind,
+            Some(prost_types_v14::value::Kind::NumberValue(0.0))
+        );
+        assert_eq!(
+            forwarded.fields.remove("remote_port").unwrap().kind,
+            Some(prost_types_v14::value::Kind::StringValue("0".to_string()))
+        );
+        assert_eq!(forwarded, native_handoff);
     }
 }
