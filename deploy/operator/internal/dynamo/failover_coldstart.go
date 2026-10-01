@@ -22,18 +22,20 @@ const (
 // vLLM with GMS V0. Engines initialize concurrently in shadow mode and need
 // separate collective/KV ports, unlike the restored snapshot engine pair.
 // Mutates podSpec, which must not be nil and must already have GMS resources.
-func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework) error {
+func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework, userEnvironmentCount int) error {
 	// Reject other backends before changing the pod.
 	if backendFramework != BackendFrameworkVLLM {
 		return fmt.Errorf("cold-start failover is currently supported only for vLLM (detected: %s)", backendFramework)
 	}
-	if err := buildFailoverEnginePair(podSpec); err != nil {
+	userEnvironmentCounts, err := buildFailoverEnginePair(podSpec, userEnvironmentCount)
+	if err != nil {
 		return err
 	}
 
 	// Only the two cloned engines receive legacy shadow initialization settings.
 	for engineID := range failoverEngineCount {
 		c := &podSpec.Containers[engineID]
+		environmentEnd := len(c.Env)
 		c.Env = append(c.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
 		c.Env = append(c.Env,
 			corev1.EnvVar{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
@@ -56,6 +58,9 @@ func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, bac
 				corev1.EnvVar{Name: "NNODES", Value: strconv.Itoa(int(numberOfNodes))},
 			)
 		}
+
+		// Keep backend additions ahead of the user suffix in ordered composition.
+		placeAppendedEnvironmentBeforeUser(c, environmentEnd, userEnvironmentCounts[engineID])
 	}
 	return nil
 }

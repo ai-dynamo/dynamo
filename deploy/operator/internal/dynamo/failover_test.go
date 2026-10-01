@@ -135,7 +135,7 @@ func TestAugmentEngineForGMS(t *testing.T) {
 		}},
 	}
 
-	augmentEngineForGMS(podSpec, 1, true)
+	augmentEngineForGMS(podSpec, 1, true, 0)
 	c := podSpec.Containers[0]
 
 	assert.True(t, hasEnvVar(c, "ENGINE_ID", ""), "ENGINE_ID should be set (via Downward API)")
@@ -193,7 +193,7 @@ func TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever(t *testing.T) {
 		}},
 	}
 
-	augmentEngineForGMS(podSpec, 0, false)
+	augmentEngineForGMS(podSpec, 0, false, 0)
 
 	assert.Equal(t, corev1.RestartPolicy(""), podSpec.RestartPolicy,
 		"standalone inter-pod GMS engine must not have RestartPolicy overridden; "+
@@ -207,7 +207,7 @@ func TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever(t *testing.T) {
 
 func TestAugmentEngineForGMS_EmptyContainers(t *testing.T) {
 	podSpec := &corev1.PodSpec{}
-	augmentEngineForGMS(podSpec, 0, true)
+	augmentEngineForGMS(podSpec, 0, true, 0)
 	assert.Empty(t, podSpec.Containers)
 }
 
@@ -620,7 +620,7 @@ func TestBuildColdStartFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
 	ps.Containers[1].Name = "engine-helper"
 	sidecar := ps.Containers[1].DeepCopy()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	t.Log("Clone main and leave the sidecar untouched by legacy overrides")
@@ -632,14 +632,14 @@ func TestBuildColdStartFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
 func TestBuildColdStartFailoverPod_RejectsSGLangColdStart(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkSGLang)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkSGLang, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "currently supported only for vLLM")
 }
@@ -650,7 +650,7 @@ func TestBuildSnapshotFailoverPod_RejectsMultinodeWithoutMutation(t *testing.T) 
 	original := ps.DeepCopy()
 
 	t.Log("Reject multiple nodes before cloning engine containers")
-	err := buildSnapshotFailoverPod(&ps, 2, BackendFrameworkVLLM)
+	err := buildSnapshotFailoverPod(&ps, 2, BackendFrameworkVLLM, 0)
 	require.ErrorContains(t, err, "requires a single node setup")
 	assert.Equal(t, original, &ps)
 }
@@ -663,7 +663,7 @@ func TestBuildSnapshotFailoverPod_Backends(t *testing.T) {
 			ps.Containers[0].Env = append(ps.Containers[0].Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
 			ps.Containers[0].Args = []string{vllmMasterPortFlag, "29500"}
 			original := ps.DeepCopy()
-			err := buildSnapshotFailoverPod(&ps, 1, backend)
+			err := buildSnapshotFailoverPod(&ps, 1, backend, 0)
 
 			if backend == BackendFrameworkTRTLLM {
 				t.Log("Reject TRT-LLM before changing the pod")
@@ -689,7 +689,7 @@ func TestBuildSnapshotFailoverPod_Backends(t *testing.T) {
 func TestBuildColdStartFailoverPod_EngineEnvVars(t *testing.T) {
 	t.Log("Build the active-passive engine containers from a container-discovery base")
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	t.Log("Verify each engine keeps container discovery and receives its own container identity")
@@ -762,7 +762,7 @@ func TestStaggerFlagValue(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_StaggeredPorts(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -777,7 +777,7 @@ func TestBuildColdStartFailoverPod_StaggeredPorts(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -797,7 +797,7 @@ func TestBuildColdStartFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_PreservesDRAClaim(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -809,7 +809,7 @@ func TestBuildColdStartFailoverPod_PreservesDRAClaim(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -820,7 +820,7 @@ func TestBuildColdStartFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 
 func TestBuildColdStartFailoverPod_MultinodeNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 4, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 4, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -829,9 +829,69 @@ func TestBuildColdStartFailoverPod_MultinodeNNODES(t *testing.T) {
 	}
 }
 
+func TestBuildFailoverPod_OrderedEnvironmentKeepsUserSuffix(t *testing.T) {
+	for _, tt := range []struct {
+		name                 string
+		userEnvironmentCount int
+		wantLast             string
+	}{
+		{name: "ordered", userEnvironmentCount: 2, wantLast: "USER_OVERRIDE"},
+		{name: "legacy", userEnvironmentCount: 0, wantLast: "NNODES"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build both engine containers with system and user environment entries")
+			podSpec := intraPodFailoverPodSpec()
+			podSpec.Containers[0].Env = append(podSpec.Containers[0].Env,
+				corev1.EnvVar{Name: "USER_REFERENCE", Value: "$(ENGINE_ID)"},
+				corev1.EnvVar{Name: "USER_OVERRIDE", Value: "value"},
+			)
+			require.NoError(t, buildColdStartFailoverPod(&podSpec, 2, BackendFrameworkVLLM, tt.userEnvironmentCount))
+
+			t.Log("Verify the selected ordering and both generated engine values")
+			for i := range 2 {
+				environment := podSpec.Containers[i].Env
+				require.Equal(t, tt.wantLast, environment[len(environment)-1].Name)
+				if tt.userEnvironmentCount > 0 {
+					assert.Less(t, envIndex(t, environment, "ENGINE_ID"), envIndex(t, environment, "USER_REFERENCE"))
+					assert.Less(t, envIndex(t, environment, "NNODES"), envIndex(t, environment, "USER_REFERENCE"))
+				}
+			}
+		})
+	}
+}
+
+func TestAugmentEngineForGMS_OrderedEnvironmentKeepsUserSuffix(t *testing.T) {
+	t.Log("Add inter-pod GMS variables before an existing user reference")
+	podSpec := &corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "engine",
+		Env: []corev1.EnvVar{
+			{Name: "SYSTEM", Value: "value"},
+			{Name: "USER_REFERENCE", Value: "$(ENGINE_ID)"},
+		},
+	}}}
+	augmentEngineForGMS(podSpec, 0, false, 1)
+
+	t.Log("Verify the user reference follows the generated rank and socket variables")
+	environment := podSpec.Containers[0].Env
+	assert.Less(t, envIndex(t, environment, "ENGINE_ID"), envIndex(t, environment, "USER_REFERENCE"))
+	assert.Less(t, envIndex(t, environment, gms.EnvSocketDir), envIndex(t, environment, "USER_REFERENCE"))
+	assert.Equal(t, "USER_REFERENCE", environment[len(environment)-1].Name)
+}
+
+func envIndex(t *testing.T, environment []corev1.EnvVar, name string) int {
+	t.Helper()
+	for i, variable := range environment {
+		if variable.Name == name {
+			return i
+		}
+	}
+	t.Fatalf("environment variable %q was not rendered", name)
+	return 0
+}
+
 func TestBuildColdStartFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildColdStartFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {

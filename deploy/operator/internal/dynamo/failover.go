@@ -20,6 +20,7 @@ package dynamo
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -191,13 +192,15 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 //     isInterPodFailover is true, so forcing Never in the standalone case
 //     would strand engine pods in Failed state with nothing listening to
 //     force-delete them.
-func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32, isInterPodFailover bool) {
+func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32, isInterPodFailover bool, userEnvironmentCount int) {
 	if len(podSpec.Containers) == 0 {
 		return
 	}
 	c := &podSpec.Containers[0]
 
+	environmentEnd := len(c.Env)
 	c.Env = append(c.Env, gmsEngineEnvVars()...)
+	placeAppendedEnvironmentBeforeUser(c, environmentEnd, userEnvironmentCount)
 	removeEnvVar(c, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
 
 	applyGMSSharedResources(podSpec, c, rank)
@@ -501,7 +504,7 @@ func PrepareSnapshotFailoverCapture(container *corev1.Container) {
 // and SGLang with GMS V1. TRT-LLM is gated until its restore/election path exists.
 // Collective ports are captured state, so cold shadow overrides do not apply.
 // Mutates podSpec, which must not be nil and must already have GMS resources.
-func buildSnapshotFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework) error {
+func buildSnapshotFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework, userEnvironmentCount int) error {
 	// Defend direct rendering as well as objects that bypassed admission.
 	if !snapshotFailoverBackendSupported(backendFramework) {
 		return fmt.Errorf("Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: %s)", backendFramework)
@@ -510,32 +513,51 @@ func buildSnapshotFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, back
 		return fmt.Errorf("Snapshot-backed intra-pod failover requires a single node setup")
 	}
 
-	return buildFailoverEnginePair(podSpec)
+	_, err := buildFailoverEnginePair(podSpec, userEnvironmentCount)
+	return err
 }
 
 // buildFailoverEnginePair replaces main with two engine containers, preserving
 // sidecars and the already configured DRA claim and GMS shared mount. Both the
 // snapshot path and cold-start failover path use these identity/probe settings.
 // Mutates podSpec, which must not be nil and must have main as its first container.
-func buildFailoverEnginePair(podSpec *corev1.PodSpec) error {
+func buildFailoverEnginePair(podSpec *corev1.PodSpec, userEnvironmentCount int) ([failoverEngineCount]int, error) {
+	var userEnvironmentCounts [failoverEngineCount]int
 	if len(podSpec.Containers) == 0 {
-		return fmt.Errorf("pod spec must have at least one container for failover transformation")
+		return userEnvironmentCounts, fmt.Errorf("pod spec must have at least one container for failover transformation")
 	}
 
 	// Clone main before applying any path-specific overrides.
 	mainContainer := podSpec.Containers[0]
 	sidecars := podSpec.Containers[1:]
 	engines := make([]corev1.Container, failoverEngineCount, failoverEngineCount+len(sidecars))
+	userEnvironmentStarts := make([]int, failoverEngineCount)
+	userEnvironmentEnds := make([]int, failoverEngineCount)
 	for i := range failoverEngineCount {
-		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
+		engines[i], userEnvironmentStarts[i], userEnvironmentEnds[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i, userEnvironmentCount)
 	}
 	podSpec.Containers = append(engines, sidecars...)
-	return nil
+
+	// Place the cloned engine defaults ahead of each surviving user suffix.
+	for i := range engines {
+		userEnvironmentCounts[i] = userEnvironmentEnds[i] - userEnvironmentStarts[i]
+		if userEnvironmentStarts[i] == userEnvironmentEnds[i] {
+			continue
+		}
+		engine := &podSpec.Containers[i]
+		engine.Env = slices.Concat(
+			engine.Env[:userEnvironmentStarts[i]],
+			engine.Env[userEnvironmentEnds[i]:],
+			engine.Env[userEnvironmentStarts[i]:userEnvironmentEnds[i]],
+		)
+	}
+
+	return userEnvironmentCounts, nil
 }
 
 // buildEngineContainer clones the main container with ENGINE_ID and failover env vars.
 // Each engine gets a unique system port and named port for probe targeting.
-func buildEngineContainer(base corev1.Container, engineID int, systemPort int) corev1.Container {
+func buildEngineContainer(base corev1.Container, engineID int, systemPort, userEnvironmentCount int) (corev1.Container, int, int) {
 	engine := *base.DeepCopy()
 	engine.Name = fmt.Sprintf("engine-%d", engineID)
 
@@ -565,11 +587,18 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 	}
 
 	var filtered []corev1.EnvVar
-	for _, env := range engine.Env {
+	userEnvironmentStart := len(engine.Env) - userEnvironmentCount
+	survivingUserEnvironmentCount := 0
+	for i, env := range engine.Env {
 		if !removeSet[env.Name] {
 			filtered = append(filtered, env)
+			if i >= userEnvironmentStart {
+				survivingUserEnvironmentCount++
+			}
 		}
 	}
+	userEnvironmentEnd := len(filtered)
+	userEnvironmentStart = userEnvironmentEnd - survivingUserEnvironmentCount
 
 	failoverEnvs := []corev1.EnvVar{
 		{Name: "ENGINE_ID", Value: strconv.Itoa(engineID)},
@@ -599,5 +628,5 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		engine.ReadinessProbe.HTTPGet.Port = portRef
 	}
 
-	return engine
+	return engine, userEnvironmentStart, userEnvironmentEnd
 }
