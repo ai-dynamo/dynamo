@@ -65,7 +65,7 @@ print(json.dumps({
 def _snapshot(deployment: ManagedDeployment) -> dict[str, dict[str, int]]:
     """Capture resource measurements for the frontend and decode worker."""
     snapshots: dict[str, dict[str, int]] = {}
-    for service_name in ("Frontend", "VllmDecodeWorker"):
+    for service_name in ("Frontend", "worker"):
         pods = deployment.get_pods([service_name]).get(service_name, [])
         assert len(pods) == 1, f"Expected one {service_name} pod, got {len(pods)}"
         snapshots[service_name] = _memory_probe(pods[0])
@@ -196,10 +196,8 @@ async def test_lora_registration_churn_has_bounded_resources(
     deployment_spec = DeploymentSpec(str(_dgd_manifest_path(tmp_path)))
     deployment_spec.name = "vllm-lora-churn"
     deployment_spec.set_image(frontend_image, service_name="Frontend")
-    deployment_spec.set_image(image, service_name="VllmDecodeWorker")
-    deployment_spec.add_arg_to_service(
-        "VllmDecodeWorker", "--gpu-memory-utilization", "0.7"
-    )
+    deployment_spec.set_image(image, service_name="worker")
+    deployment_spec.add_arg_to_service("worker", "--gpu-memory-utilization", "0.7")
     model_cache_pvc = request.config.getoption("--model-cache-pvc")
     if model_cache_pvc:
         deployment_spec.mount_model_cache_pvc(model_cache_pvc)
@@ -212,9 +210,9 @@ async def test_lora_registration_churn_has_bounded_resources(
         readiness_timeout=900,
     ) as deployment:
         frontend_pods = deployment.get_pods(["Frontend"])["Frontend"]
-        worker_pods = deployment.get_pods(["VllmDecodeWorker"])["VllmDecodeWorker"]
+        worker_pods = deployment.get_pods(["worker"])["worker"]
         assert len(frontend_pods) == 1, "Expected one frontend pod"
-        assert len(worker_pods) == 1, "Expected one VllmDecodeWorker pod"
+        assert len(worker_pods) == 1, "Expected one worker pod"
         frontend_port_forward = deployment.port_forward(
             frontend_pods[0], deployment_spec.port
         )
@@ -222,9 +220,9 @@ async def test_lora_registration_churn_has_bounded_resources(
             worker_pods[0], deployment_spec.system_port
         )
         assert frontend_port_forward is not None, "Unable to port-forward the frontend"
-        assert (
-            worker_port_forward is not None
-        ), "Unable to port-forward the decode worker"
+        assert worker_port_forward is not None, (
+            "Unable to port-forward the decode worker"
+        )
         base_url = f"http://localhost:{frontend_port_forward.local_port}"
         system_url = f"http://localhost:{worker_port_forward.local_port}"
         assert wait_for_model_availability(
