@@ -2463,6 +2463,86 @@ class TestToolCallGuidedDecoding:
 
         assert guided == {"structural_tag": {"format": {"strict": [False]}}}
 
+    @pytest.mark.parametrize(
+        "token_suffix", [":6124c78e", ""], ids=["suffixed", "plain"]
+    )
+    @pytest.mark.parametrize("tool_choice_kind", ["auto", "required", "named"])
+    @pytest.mark.parametrize("stream_response", [False, True], ids=["batch", "stream"])
+    def test_hyv4_structural_tag_matches_checkpoint_tokens(
+        self, tokenizer, monkeypatch, token_suffix, tool_choice_kind, stream_response
+    ):
+        import vllm.envs as vllm_envs
+        import xgrammar as xgr
+        from vllm.tool_parsers.hy_v4_tool_parser import HYV4ToolParser
+
+        # Dynamo's explicit policy must work without vLLM's environment gate.
+        monkeypatch.setattr(vllm_envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", False)
+        request = self._request(
+            tokenizer,
+            tools=[parity_tool()],
+            tool_choice=tool_choice_value(tool_choice_kind),
+        )
+        markers = [
+            f"<{closing}{name}{token_suffix}>"
+            for name in ("tool_calls", "tool_call", "arg_key", "arg_value")
+            for closing in ("", "/")
+        ]
+        # Only the vocabulary is needed to detect this checkpoint's suffix.
+        vocab = {marker: index for index, marker in enumerate(markers)}
+        parser = HYV4ToolParser(
+            SimpleNamespace(get_vocab=lambda: vocab, init_kwargs={}), request.tools
+        )
+        assert parser.get_structural_tag(request) is None
+
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+        assert guided is not None
+        assert set(guided) == {"structural_tag"}
+        compiler = xgr.GrammarCompiler(
+            xgr.TokenizerInfo(["x"], vocab_type=xgr.VocabType.RAW), max_threads=1
+        )
+        compiled = compiler.compile_structural_tag(json.dumps(guided["structural_tag"]))
+        native_output = (
+            f"<tool_calls{token_suffix}><tool_call{token_suffix}>get_weather"
+            f"<arg_key{token_suffix}>city</arg_key{token_suffix}>"
+            f"<arg_value{token_suffix}>Paris</arg_value{token_suffix}>"
+            f"</tool_call{token_suffix}></tool_calls{token_suffix}>"
+        )
+        assert xgr.GrammarMatcher(compiled).accept_string(native_output)
+        assert not xgr.GrammarMatcher(compiled).accept_string(
+            native_output.replace("get_weather", "unknown_tool")
+        )
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=parser,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+            stream_response=stream_response,
+        )
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=native_output,
+                token_ids=list(vocab.values()),
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+        assert choice is not None
+        assert choice["finish_reason"] == "tool_calls"
+        assert not choice["delta"].get("content")
+        function = choice["delta"]["tool_calls"][0]["function"]
+        assert function["name"] == "get_weather"
+        assert json.loads(function["arguments"]) == {"city": "Paris"}
+
     def test_structural_tag_builder_error_uses_forced_json_fallback(self, tokenizer):
         class RaisingParser(_FakeStructuralTagParser):
             def get_structural_tag(self, request, *, reasoning=False):

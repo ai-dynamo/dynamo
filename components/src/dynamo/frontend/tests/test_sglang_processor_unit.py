@@ -19,6 +19,7 @@ from contextlib import nullcontext
 from enum import IntEnum
 
 import pytest
+import xgrammar as xgr
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
 from _thinking_parity import RESOLVED_DISABLED, RESOLVED_ENABLED, THINKING_PARITY_CASES
 from _tool_guidance_parity import (
@@ -28,6 +29,8 @@ from _tool_guidance_parity import (
     parity_tool,
     tool_choice_value,
 )
+from sglang.srt.constrained.reasoner_grammar_backend import ReasonerGrammarObject
+from sglang.srt.constrained.xgrammar_backend import XGrammarGrammar
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -90,6 +93,13 @@ BYTE_FALLBACK_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 @pytest.fixture(scope="module")
 def tokenizer():
     return get_tokenizer(MODEL)
+
+
+@pytest.fixture(scope="module")
+def tool_grammar_compiler(tokenizer):
+    return xgr.GrammarCompiler(
+        xgr.TokenizerInfo.from_huggingface(tokenizer), max_threads=1
+    )
 
 
 @pytest.fixture(scope="module")
@@ -1194,6 +1204,10 @@ def test_kimi_k3_auto_tool_sets_reasoning_gate_pool(thinking, monkeypatch):
         sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
     )
     monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+    # Exercise enabled guidance independently of worker initialization or test order.
+    monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_mode", "on")
+    monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_scope", "always")
+    monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_schema", "auto")
 
     request = {
         "model": "moonshotai/Kimi-K3",
@@ -1480,6 +1494,183 @@ class TestBuildResponseFormatGuidedDecoding:
         assert build_response_format_guided_decoding(
             {"model": "test", "response_format": response_format}
         ) == {"structural_tag": response_format}
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        pytest.param("required", id="required"),
+        pytest.param(
+            {"type": "function", "function": {"name": "get_weather"}}, id="named"
+        ),
+    ],
+)
+def test_forced_structural_tag_returns_tool_call(
+    tokenizer, monkeypatch, use_pool, tool_choice
+):
+    """Native forced-tool guidance must be decoded into an API tool call."""
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
+        "tool_choice": tool_choice,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+    }
+    native_call = (
+        "<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>\nParis\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    engine = FakeRoutedEngine(
+        items=[{"token_ids": tokenizer.encode(native_call), "finish_reason": "stop"}]
+    )
+
+    if use_pool:
+        # Exercise the real worker and parser reconstruction without a subprocess.
+        monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_tool_call_parser_name", "qwen3_coder"
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", None)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+        )
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_template_force_reasoning", False
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_default_thinking_mode", None)
+        monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_mode", "on")
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_structural_tag_scope", "always"
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_structural_tag_schema", "auto")
+
+    with ThreadPoolExecutor(max_workers=1) if use_pool else nullcontext() as pool:
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=engine,
+            tool_call_parser_name="qwen3_coder",
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            preprocess_pool=pool,
+            preprocess_workers=1 if use_pool else 0,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        output = asyncio.run(collect())
+
+    # Check the actual installed guidance, not just the requested policy.
+    assert "structural_tag" in engine.requests[0]["sampling_options"]["guided_decoding"]
+    choices = [choice for item in output for choice in item["data"]["choices"]]
+    calls = [
+        call for choice in choices for call in choice["delta"].get("tool_calls", [])
+    ]
+    assert calls, output
+    assert {call["index"] for call in calls} == {0}
+    assert [
+        call["function"]["name"] for call in calls if call["function"].get("name")
+    ] == ["get_weather"]
+    assert json.loads(
+        "".join(call["function"].get("arguments", "") for call in calls)
+    ) == {"city": "Paris"}
+    assert not any(choice["delta"].get("content") for choice in choices)
+    assert choices[-1]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
+@pytest.mark.parametrize("thinking", [False, True], ids=["chat", "thinking"])
+@pytest.mark.parametrize(
+    "separate_reasoning", [False, True], ids=["combined", "separate"]
+)
+def test_tool_structural_tag_enforced_after_one_reasoning_boundary(
+    tokenizer, tool_grammar_compiler, tool_choice, thinking, separate_reasoning
+):
+    """The backend consumes reasoning; the inner grammar must enforce tools next."""
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": [parity_tool()],
+        "tool_choice": tool_choice_value(tool_choice),
+        "chat_template_kwargs": {"enable_thinking": thinking},
+        "separate_reasoning": separate_reasoning,
+    }
+    pre = preprocess_chat_request(
+        request,
+        tokenizer=tokenizer,
+        tool_call_parser_name="qwen3_coder",
+        reasoning_parser_name="qwen3",
+        structural_tag_mode="on",
+        structural_tag_scope="always",
+    )
+    assert pre.force_reasoning is thinking
+    require_reasoning = _guided_output_requires_reasoning(
+        request, pre.force_reasoning, "qwen3", pre.guided_decoding
+    )
+    assert require_reasoning is thinking
+    assert pre.guided_decoding is not None
+    compiled = tool_grammar_compiler.compile_structural_tag(
+        pre.guided_decoding["structural_tag"]
+    )
+
+    def grammar_after_reasoning():
+        inner = XGrammarGrammar(
+            matcher=xgr.GrammarMatcher(compiled),
+            vocab_size=compiled.tokenizer_info.vocab_size,
+            ctx=compiled,
+            override_stop_tokens=None,
+        )
+        grammar = ReasonerGrammarObject(
+            inner, think_end_ids=tokenizer.encode("</think>", add_special_tokens=False)
+        )
+        grammar.maybe_init_reasoning(require_reasoning)
+        if thinking:
+            for token in tokenizer.encode(
+                "I should check the weather.</think>", add_special_tokens=False
+            ):
+                grammar.accept_token(token)
+            # The wrapper consumes the prefix, including the end marker.
+            assert inner.accepted_tokens == []
+        return grammar
+
+    native_call = (
+        "<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>\nParis\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    grammar = grammar_after_reasoning()
+    for token in tokenizer.encode(native_call, add_special_tokens=False):
+        grammar.accept_token(token)
+    grammar.accept_token(tokenizer.eos_token_id)
+    assert grammar.is_terminated()
+
+    # A second reasoning prefix must not leave an undeclared tool unconstrained.
+    grammar = grammar_after_reasoning()
+    unknown_call = native_call.replace("get_weather", "undeclared_tool")
+    with pytest.raises(ValueError, match="Tokens not accepted"):
+        for token in tokenizer.encode(unknown_call, add_special_tokens=False):
+            grammar.accept_token(token)
 
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
@@ -1840,7 +2031,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert guided == {"structural_tag": {"type": "object"}}
         assert seen == {
             "strict": expected_strict,
-            "thinking_mode": True,
+            "thinking_mode": False,
             "strict_level": "FUNCTION",
         }
         assert function.get("strict") is request_strict
@@ -1964,7 +2155,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert rp is not None
 
     def test_required_creates_json_array_parser(self):
-        """tool_choice='required' creates JsonArrayParser, not FunctionCallParser."""
+        """Required choice without structural-tag guidance keeps JsonArrayParser."""
         request = {
             "tools": [
                 {
@@ -1984,7 +2175,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert isinstance(tcp, JsonArrayParser)
 
     def test_named_tool_choice_creates_json_array_parser(self):
-        """Named tool_choice creates JsonArrayParser."""
+        """Named choice without structural-tag guidance keeps JsonArrayParser."""
         request = {
             "tools": [
                 {

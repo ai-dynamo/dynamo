@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Structural Tag (Guided Decoding for Tool Calls)
 subtitle: Constrain model output to valid tool call format using xgrammar structural tags
@@ -80,17 +80,18 @@ decoding. See [Activation Scope](#activation-scope) for the exact policy.
 
 | Flag | Values | Default | Description |
 |---|---|---|---|
-| `--dyn-enable-structural-tag` | bool | `true` | Master switch for the Rust, Python vLLM, and Python SGLang frontend preprocessing paths. Explicitly disabling it prevents tool-call structural-tag injection. |
+| `--dyn-enable-structural-tag` | bool | `true` | Enables tool-call structural tags in Rust, Python vLLM, and Python SGLang preprocessing. Rust retains native forced-tool tags for Kimi K2 required/named and Kimi K3 named choices when disabled. |
 | `--dyn-structural-tag-scope` | `auto`, `always` | `always` | Controls when structural tags are activated (see [Activation Scope](#activation-scope)). |
 | `--dyn-structural-tag-schema` | `auto`, `strict` | `auto` | Controls parameter schema strictness inside structural tags (see [Schema Modes](#schema-modes)). |
 
 ## Preserve Previous Behavior
 
-To disable structural tags, pass the negated flag to the worker:
+To disable optional structural guidance, pass the negated flag to the worker:
 
 ```bash
 python3 -m dynamo.vllm ... --no-dyn-enable-structural-tag
 python3 -m dynamo.sglang ... --no-dyn-enable-structural-tag
+python3 -m dynamo.trtllm ... --no-dyn-enable-structural-tag
 ```
 
 Or set the equivalent environment variable before starting the worker:
@@ -98,6 +99,12 @@ Or set the equivalent environment variable before starting the worker:
 ```bash
 export DYN_ENABLE_STRUCTURAL_TAG=false
 ```
+
+Rust preprocessing preserves the existing native grammars for Kimi K2
+`required`/named choices and Kimi K3 named choices even when structural tags
+are disabled. Kimi K2/K3 automatic choices and Kimi K3 `required` do not use
+this exception. Python vLLM and SGLang preprocessing respect the opt-out for
+all tool choices.
 
 To keep structural tags enabled but preserve the previous conditional activation
 policy, set the scope to `auto`:
@@ -110,10 +117,11 @@ With this scope, required and named tool choices remain eligible. Automatic tool
 choice uses structural tags only when a tool sets `strict: true` or the request
 sets `parallel_tool_calls` to `false`.
 
-Setting `strict: false` on a tool relaxes its argument schema. On pinned vLLM
-0.29.0, auto choice with every tool explicitly non-strict also gets no
-structural tag from the registry; see [Schema Modes](#schema-modes). Use the
-global opt-out above to disable structural tags for all requests.
+Setting `strict: false` on a tool relaxes its argument schema. On vLLM
+0.30.0, pinned by Dynamo's CUDA image, auto choice with every tool explicitly
+non-strict also gets no structural tag from the registry; see
+[Schema Modes](#schema-modes). Use the global opt-out above to disable optional
+structural guidance.
 
 ## Supported Parsers
 
@@ -138,9 +146,10 @@ therefore differ by backend and engine version.
 
 > [!NOTE]
 > Native Rust sidecars retain their existing conservative `off`/`auto`
-> settings and are not included in this default change. The default-on policy
-> applies when regular vLLM or SGLang workers publish the deployment runtime
-> configuration consumed by frontend preprocessing.
+> settings, including the native Kimi forced-tool exception described above,
+> and are not included in this default change. The default-on policy
+> applies when regular vLLM, SGLang, or TensorRT-LLM workers publish the
+> deployment runtime configuration consumed by frontend preprocessing.
 
 ## Activation Scope
 
@@ -185,7 +194,7 @@ the strongest safe tool envelope and relaxes that argument section. If the
 builder cannot produce a structural tag at all, Dynamo uses the existing
 compatibility path rather than introducing a new request error; automatic tool
 choice may therefore remain unconstrained for that parser/schema combination.
-In the vLLM 0.29.0 version pinned by Dynamo, `tool_choice="auto"` returns no
+In vLLM 0.30.0, pinned by Dynamo's CUDA image, `tool_choice="auto"` returns no
 structural tag when every tool is explicitly `strict: false`. The `always`
 activation scope still attempts the tag, but cannot enforce the native tool
 envelope for that request. Set schema mode to `strict` to override the opt-out

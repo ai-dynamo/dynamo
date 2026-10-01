@@ -158,7 +158,6 @@ mod tests {
     fn kimi_k3_named_dynamic_tool_uses_structural_tag_policy() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("kimi_k3".to_string()),
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
             ..Default::default()
         };
         let result = apply_request_tool_call_parsing_options(
@@ -212,7 +211,6 @@ mod tests {
     fn kimi_k2_required_resolves_to_the_real_structural_tag_decision() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("kimi_k2".to_string()),
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
             ..Default::default()
         };
         let result =
@@ -221,7 +219,7 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "kimi_k2 + required must use the enabled structural tag, not a reconstructed JSON schema"
+            "kimi_k2 + required must retain its native structural tag when mode is off"
         );
     }
 
@@ -229,7 +227,6 @@ mod tests {
     fn kimi_k2_named_resolves_to_the_real_structural_tag_decision() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("kimi_k2".to_string()),
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
             ..Default::default()
         };
         let named = json!({"type": "function", "function": {"name": "get_weather"}});
@@ -238,7 +235,7 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "kimi_k2 + a named tool choice must use the enabled structural tag, not a reconstructed JSON schema"
+            "kimi_k2 + a named tool choice must retain its native structural tag when mode is off"
         );
     }
 

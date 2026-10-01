@@ -716,6 +716,9 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             reasoning_parser_name=preproc_result.effective_reasoning_parser_name,
             force_reasoning=preproc_result.force_reasoning,
+            guided_decoding=preproc_result.dynamo_preproc["sampling_options"][
+                "guided_decoding"
+            ],
         )
 
         post = SglangStreamingPostProcessor(

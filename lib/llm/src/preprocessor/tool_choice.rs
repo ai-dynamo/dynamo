@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn structural_tag_off_keeps_kimi_k2_required_on_native_fallback() {
+    fn structural_tag_off_preserves_kimi_k2_required_native_tag() {
         let request = request(json!({
             "tools": tools(),
             "tool_choice": "required"
@@ -726,12 +726,19 @@ mod tests {
             .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
             .unwrap();
 
-        assert_eq!(applied, GuidedToolConstraint::None);
-        assert!(common_request.sampling_options.guided_decoding.is_none());
+        assert_eq!(applied, GuidedToolConstraint::StructuralTag);
+        assert!(
+            common_request
+                .sampling_options
+                .guided_decoding
+                .as_ref()
+                .and_then(|guided| guided.structural_tag.as_ref())
+                .is_some()
+        );
     }
 
     #[test]
-    fn structural_tag_off_keeps_kimi_k3_named_on_native_fallback() {
+    fn structural_tag_off_preserves_kimi_k3_named_native_tag() {
         let request = request(json!({
             "tools": tools(),
             "tool_choice": {
@@ -746,8 +753,15 @@ mod tests {
             .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
             .unwrap();
 
-        assert_eq!(applied, GuidedToolConstraint::None);
-        assert!(common_request.sampling_options.guided_decoding.is_none());
+        assert_eq!(applied, GuidedToolConstraint::StructuralTag);
+        assert!(
+            common_request
+                .sampling_options
+                .guided_decoding
+                .as_ref()
+                .and_then(|guided| guided.structural_tag.as_ref())
+                .is_some()
+        );
     }
 
     #[test]
@@ -772,6 +786,61 @@ mod tests {
                 .and_then(|guided| guided.json.as_ref())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn kimi_k3_builder_error_uses_native_fallback() {
+        let request = request(json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "strict": true,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "type": "string",
+                                "$id": "urn:example:scoped",
+                                "$defs": {
+                                    "allowed": {"type": "string", "enum": ["safe"]}
+                                },
+                                "allOf": [{"$ref": "#/$defs/allowed"}]
+                            }
+                        },
+                        "required": ["value"]
+                    }
+                }
+            }],
+            "tool_choice": "auto"
+        }));
+        let preprocessor = preprocessor("kimi_k3", StructuralTagMode::On);
+        let tools = convert_tools(request.inner.tools.as_deref().unwrap());
+        let ctx = dynamo_parsers::tool_calling::ToolCallFormatBuildContext {
+            tool_choice: &ToolChoice::Auto,
+            tools: &tools,
+            parallel_tool_calls: request.inner.parallel_tool_calls,
+            schema_mode: preprocessor.runtime_config.structural_tag_schema,
+            starts_in_reasoning: false,
+        };
+        // A scoped string reference cannot be safely rendered as raw XTML.
+        // Verify an actual builder error, rather than a policy skip or Ok(None).
+        let error = dynamo_parsers::tool_calling::StructuralTagBuilder::KimiK3
+            .build_tool_call_format(&ctx)
+            .expect_err("scoped string reference must reach the builder-error fallback");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("value") && message.contains("string"),
+            "{message}"
+        );
+
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+            .expect("builder errors must allow the request to continue without a structural tag");
+
+        assert_eq!(applied, GuidedToolConstraint::None);
+        assert!(common_request.sampling_options.guided_decoding.is_none());
     }
 
     #[test]

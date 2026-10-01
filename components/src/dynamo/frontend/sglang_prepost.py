@@ -296,6 +296,7 @@ def create_parsers(
     reasoning_parser_name: str | None,
     sglang_tools: list[SglangTool] | None = None,
     force_reasoning: bool = False,
+    guided_decoding: dict[str, Any] | None = None,
 ) -> tuple[ToolCallParserType | None, ReasoningParser | None]:
     """Create tool call and reasoning parsers for a request.
 
@@ -305,10 +306,9 @@ def create_parsers(
     If ``sglang_tools`` is provided, reuses them; otherwise converts from
     the request's ``tools`` field.
 
-    For ``tool_choice="required"`` or a named function, uses
-    :class:`JsonArrayParser` (matching native SGLang) since guided decoding
-    constrains the output to a JSON array.  Otherwise uses the model-specific
-    :class:`FunctionCallParser`.
+    Required and named choices use the model-specific :class:`FunctionCallParser`
+    when the effective guidance is a structural tag. Their JSON fallback keeps
+    :class:`JsonArrayParser`. Automatic choices use :class:`FunctionCallParser`.
     """
     if sglang_tools is None:
         sglang_tools = convert_tools(request.get("tools"))
@@ -316,7 +316,9 @@ def create_parsers(
 
     tool_call_parser: ToolCallParserType | None = None
     if sglang_tools and tool_choice != "none":
-        if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        if (tool_choice == "required" or _is_named_tool_choice(tool_choice)) and not (
+            guided_decoding is not None and "structural_tag" in guided_decoding
+        ):
             tool_call_parser = JsonArrayParser()
         elif tool_call_parser_name:
             tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
@@ -691,7 +693,9 @@ def build_tool_call_guided_decoding(
                 parser.get_structure_constraint,
                 sglang_tool_choice,
                 parallel_tool_calls=parallel_tool_calls,
-                thinking_mode=force_reasoning,
+                # The backend's reasoning gate consumes the reasoning prefix;
+                # this grammar starts with the tool payload after that boundary.
+                thinking_mode=False,
             )
         except (
             AttributeError,
@@ -942,15 +946,6 @@ def preprocess_chat_request(
             tokenizer.apply_chat_template(template_messages, **template_kwargs)
         )
 
-    # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
-    # while still sharing the existing Dynamo parser/guided-decoding behavior.
-    tool_call_parser, reasoning_parser = create_parsers(
-        request,
-        tool_call_parser_name=tool_call_parser_name,
-        reasoning_parser_name=effective_reasoning_parser_name,
-        sglang_tools=sglang_tools,
-        force_reasoning=force_reasoning,
-    )
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
         request,
@@ -1004,6 +999,16 @@ def preprocess_chat_request(
         else legacy_guidance
         or response_format_guided_decoding
         or tool_call_guided_decoding
+    )
+
+    # Match the parser to the installed format, including forced-choice fallback.
+    tool_call_parser, reasoning_parser = create_parsers(
+        request,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=effective_reasoning_parser_name,
+        sglang_tools=sglang_tools,
+        force_reasoning=force_reasoning,
+        guided_decoding=guided_decoding,
     )
 
     return SglangPreprocessResult(

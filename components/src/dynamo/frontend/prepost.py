@@ -289,12 +289,20 @@ def build_tool_call_guided_decoding(
         )
         try:
             structural_tag_model = getattr(tool_parser, "structural_tag_model", None)
+            structural_tag_kwargs = {}
+            if structural_tag_model == "hy_v4" and get_model_structural_tag is not None:
+                # HYV4's parser detects checkpoint-specific tokens at construction.
+                # Keep its suffix while Dynamo owns activation of the registry path.
+                structural_tag_kwargs["token_suffix"] = getattr(
+                    tool_parser, "_extractor"
+                ).token_suffix
             structural_tag = (
                 get_model_structural_tag(
                     model=structural_tag_model,
                     tools=request_for_tag.tools,
                     tool_choice=request_for_tag.tool_choice,
                     reasoning=False,
+                    **structural_tag_kwargs,
                 )
                 if structural_tag_model is not None
                 and get_model_structural_tag is not None
