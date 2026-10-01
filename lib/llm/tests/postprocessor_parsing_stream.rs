@@ -5189,10 +5189,10 @@ async fn postprocessor_parsing_stream_preserves_repeated_qwen_reason_text_tool_o
             }
             if kinds.len() > 1 {
                 event_order.push("multiple-fields");
-            } else if let Some(kind) = kinds.first() {
-                if event_order.last() != Some(kind) {
-                    event_order.push(kind);
-                }
+            } else if let Some(kind) = kinds.first()
+                && event_order.last() != Some(kind)
+            {
+                event_order.push(kind);
             }
         }
     }
