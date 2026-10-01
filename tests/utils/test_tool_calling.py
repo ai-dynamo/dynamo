@@ -1,8 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the deadline that ``run_tool_loop`` puts on a tool scenario."""
+"""Unit tests for the tool-calling helpers that the test suites share."""
 
+import os
+import subprocess
+import sys
+import textwrap
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +19,8 @@ openai = pytest.importorskip("openai")
 ChatCompletionChunk = pytest.importorskip("openai.types.chat").ChatCompletionChunk
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _TOOLS = [
     {
@@ -141,3 +149,67 @@ def test_without_a_deadline_the_client_is_used_as_given(clock):
 
     assert client.timeouts == []
     assert client.requests == tool_calling.MAX_TOOL_TURNS
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("workers", [0, 2], ids=["in-process", "xdist"])
+def test_a_recorded_property_reaches_the_junit_xml_from_an_xfail_test(
+    tmp_path, workers
+):
+    """The body runs, and its property reaches the JUnit XML.
+
+    In-process, pytest's ``record_property`` errors at setup whenever pytest
+    writes JUnit XML, and the xfail marker still reports XFAIL with the body
+    never run. CI runs the SGLang tool-calling module that way, with ``-n 0``.
+    The xdist case checks that the value also arrives from a worker.
+    """
+    if workers:
+        pytest.importorskip("xdist")
+    probe = tmp_path / "test_probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            import pathlib
+
+            import pytest
+
+            from tests.utils.tool_calling import property_recorder
+
+
+            @pytest.mark.xfail(strict=False, reason="capability limit")
+            def test_capability(request):
+                pathlib.Path(__file__).with_name("body_ran").write_text("yes")
+                property_recorder(request)("capability", "unsupported")
+                raise AssertionError("cannot chain")
+            """
+        )
+    )
+    xml = tmp_path / "out.xml"
+    # CI puts --ddtrace in PYTEST_ADDOPTS; the inner session must not report.
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            str(_REPO_ROOT / "pyproject.toml"),
+            "--rootdir",
+            str(_REPO_ROOT),
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            f"--junitxml={xml}",
+            *(["-n", str(workers)] if workers else []),
+            str(probe),
+        ],
+        cwd=_REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=110,
+    )
+
+    assert (tmp_path / "body_ran").exists(), result.stdout[-3000:]
+    recorded = [(p.get("name"), p.get("value")) for p in ET.parse(xml).iter("property")]
+    assert recorded == [("capability", "unsupported")], result.stdout[-3000:]

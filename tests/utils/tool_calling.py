@@ -26,7 +26,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -212,6 +212,22 @@ def assistant_tool_message_from_result(result: StreamResult) -> dict[str, Any]:
         "content": result.content or None,
         "tool_calls": result.tool_calls,
     }
+
+
+def property_recorder(request: pytest.FixtureRequest) -> Callable[[str, object], None]:
+    """A replacement for pytest's ``record_property`` fixture.
+
+    ``record_property`` warns that test-case properties break the JUnit xunit2
+    schema, and ``filterwarnings = error`` in ``pyproject.toml`` turns that
+    warning into a setup error whenever pytest writes JUnit XML, as CI does.
+    Under an ``xfail`` marker the error reports as XFAIL, and the test body never
+    runs. This appends to the same ``user_properties`` list without the warning.
+    """
+
+    def record(name: str, value: object) -> None:
+        request.node.user_properties.append((name, value))
+
+    return record
 
 
 MAX_TOOL_TURNS = 6

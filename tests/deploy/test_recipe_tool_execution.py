@@ -35,11 +35,15 @@ from __future__ import annotations
 
 import http.server
 import logging
+import os
 import re
+import subprocess
 import sys
 import threading
 import time
 import uuid
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, NamedTuple, Optional
 
@@ -52,6 +56,7 @@ from tests.utils.client import wait_for_model_availability
 from tests.utils.tool_calling import (
     assert_chained_tools_thread_real_output,
     assert_executes_real_tool_and_uses_output,
+    property_recorder,
 )
 
 openai = pytest.importorskip("openai")
@@ -316,9 +321,9 @@ async def test_recipe_executes_tools_end_to_end(
     image: Optional[str],
     namespace: str,
     skip_service_restart: bool,
-    record_property: Any,
 ):
     """Deploy --recipe, then prove the model actually uses real tool output."""
+    record_property = property_recorder(request)
     recipe = request.config.getoption("--recipe")
     if not recipe:
         pytest.skip("--recipe not provided; nothing to deploy")
@@ -891,3 +896,42 @@ def test_a_stalled_frontend_cannot_hold_a_scenario_past_its_deadline(
 
     assert time.monotonic() - start < 5.0
     assert fake_frontend.requests == 1
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.timeout(120)
+def test_the_recipe_test_skips_cleanly_when_pytest_writes_junit_xml(tmp_path):
+    """CI runs pytest with --junitxml, where the recipe test used to error at
+    setup on ``record_property`` instead of skipping for a missing --recipe."""
+    xml = tmp_path / "out.xml"
+    # CI puts --ddtrace in PYTEST_ADDOPTS; the inner session must not report.
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            f"--junitxml={xml}",
+            f"{Path(__file__).name}::test_recipe_executes_tools_end_to_end",
+        ],
+        cwd=Path(__file__).parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=110,
+    )
+
+    outcomes = [
+        (child.tag, child.get("message", ""))
+        for case in ET.parse(xml).iter("testcase")
+        for child in case
+        if child.tag in ("skipped", "error", "failure")
+    ]
+    assert len(outcomes) == 1, result.stdout[-3000:]
+    assert outcomes[0][0] == "skipped", result.stdout[-3000:]
+    assert "--recipe not provided" in outcomes[0][1]

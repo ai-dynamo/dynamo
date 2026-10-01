@@ -40,6 +40,7 @@ from tests.utils.tool_calling import (
     assert_finish_reason,
     assistant_tool_message_from_result,
     parse_and_validate_tool_call,
+    property_recorder,
     stream_chat,
     tool_schema_map,
 )
@@ -927,7 +928,7 @@ class TestToolExecutionE2E:
         ),
     )
     def test_chained_tools_second_call_uses_first_calls_real_output(
-        self, client: OpenAI, model: str, record_property: Any
+        self, client: OpenAI, model: str, request: pytest.FixtureRequest
     ):
         """Capability signal, deliberately non-gating.
 
@@ -943,6 +944,7 @@ class TestToolExecutionE2E:
         that gains the capability shows up as data rather than only as a status
         flip nobody reads.
         """
+        record_property = property_recorder(request)
         try:
             assert_chained_tools_thread_real_output(client, model)
         except AssertionError as exc:
