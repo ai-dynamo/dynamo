@@ -200,6 +200,16 @@ cargo build                 # whole workspace
 cargo build -p dynamo-llm   # one crate
 ```
 
+The media protocol models under `components/src/dynamo/common/protocols/` are generated
+artifacts. Their source is the Rust types in `lib/llm/src/protocols/openai/{audios,images,videos}.rs`
+and their `nvext.rs`. After a change to those types, regenerate the Python files. Commit both
+sides together. A `cargo test` run in `dynamo-llm` fails while they differ:
+
+```bash
+cargo run -p dynamo-llm --bin generate-media-protocols            # write
+cargo run -p dynamo-llm --bin generate-media-protocols -- --check # verify
+```
+
 ## Test
 
 ```bash

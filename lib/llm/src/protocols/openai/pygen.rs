@@ -798,6 +798,18 @@ class DemoResponse(BaseModel):
         assert_eq!(lines, vec![r#"    """Say "hi" """"#]);
     }
 
+    /// The committed Python modules are build artifacts of this emitter. If
+    /// one drifts, the workers parse a different contract than the frontend
+    /// serves. The mismatch then surfaces at request time instead of here.
+    #[test]
+    fn committed_media_protocols_match_generated() {
+        for modality in Modality::ALL {
+            if let Some(drift) = check_committed(modality).unwrap() {
+                panic!("{drift}");
+            }
+        }
+    }
+
     #[test]
     fn first_divergent_line_reports_the_first_difference() {
         assert_eq!(first_divergent_line("a\nb\n", "a\nb\n"), None);
