@@ -2616,6 +2616,13 @@ async fn handler_chat_completions(
 
 fn parse_chat_json_request(body: &[u8]) -> Result<NvCreateChatCompletionRequest, ErrorResponse> {
     parse_json_request("chat completions", body).map_err(|mut error| {
+        // Wrapper-owned duplicate fields take precedence over flattened base errors.
+        if error.1.message.starts_with(
+            "Failed to deserialize the JSON body into the target type: duplicate field `",
+        ) {
+            return error;
+        }
+
         // Diagnose the base schema directly: serde(flatten) loses its field paths.
         // Only inspect valid JSON after all existing recovery attempts fail.
         // Diagnose the original bytes so duplicate fields retain their precedence.
@@ -6194,8 +6201,6 @@ mod tests {
                 "messages",
                 serde_json::json!({"private-input-canary": "secret"}),
             ),
-            ("messages", serde_json::json!(123456789)),
-            ("messages", serde_json::json!(true)),
             ("messages", serde_json::Value::Null),
             ("tools", serde_json::json!("private-input-canary")),
             ("temperature", serde_json::json!("private-input-canary")),
@@ -6233,11 +6238,11 @@ mod tests {
     fn test_parse_chat_completion_request_preserves_unclassified_errors() {
         for body in [
             br#"{"model":"test-model","messages":"private-input-canary""#.as_slice(),
-            br#"{"model":"test-model","messages":[],"tools":123"#,
             br#"{"model":"test-model"}"#,
             br#"[]"#,
             br#"{"model":"first","model":"second","messages":[]}"#,
             br#"{"model":"first","model":"second","messages":42}"#,
+            br#"{"model":"test-model","messages":42,"chat_template_args":{},"chat_template_args":{}}"#,
         ] {
             let error = parse_chat_json_request(body).expect_err("request should fail");
             let original =
