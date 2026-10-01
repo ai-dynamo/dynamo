@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 
-import aiohttp
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
@@ -29,7 +28,7 @@ from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -49,6 +48,10 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
+
+# Whole-request budget for one embedding download. A file at the default
+# --max-file-size-mb (50) finishes in time at about 171 KiB/s or faster.
+_EMBEDDING_FETCH_TIMEOUT_S = 300.0
 
 
 def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
@@ -218,37 +221,6 @@ class MultimodalRequestProcessor:
             return False
         return bool(parsed.scheme and parsed.netloc)
 
-    @staticmethod
-    def _assert_public_url(url: str) -> None:
-        """Reject a URL that resolves to a non-public address (SSRF guard).
-
-        The embedding path is a request-supplied input, so a client must not be
-        able to steer the fetch to an internal or cloud-metadata address.
-        """
-        import ipaddress
-        import socket
-
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            raise RuntimeError("Invalid embedding URL")
-        default_port = 443 if parsed.scheme == "https" else 80
-        for info in socket.getaddrinfo(
-            parsed.hostname, parsed.port or default_port, type=socket.SOCK_STREAM
-        ):
-            ip_str = str(info[4][0]).split("%", 1)[0]
-            addr = ipaddress.ip_address(ip_str)
-            if (
-                addr.is_private
-                or addr.is_loopback
-                or addr.is_link_local
-                or addr.is_reserved
-                or addr.is_multicast
-                or addr.is_unspecified
-            ):
-                raise RuntimeError(
-                    f"Embedding URL resolves to blocked address: {addr}"
-                )
-
     def _unwrap_safetensors(
         self, data: Dict[str, torch.Tensor]
     ) -> "torch.Tensor | Dict[str, torch.Tensor]":
@@ -285,58 +257,23 @@ class MultimodalRequestProcessor:
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             try:
-                # Per-operation budget (connect + per-read), not a single
-                # whole-request cap: a large embedding on a slow link keeps
-                # downloading as long as it makes progress, while a stalled
-                # connect or a read that hangs still fast-fails at 300s.
-                timeout = aiohttp.ClientTimeout(sock_connect=300.0, sock_read=300.0)
-                # trust_env=True honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY, which
-                # aiohttp ignores by default.
-                async with aiohttp.ClientSession(
-                    timeout=timeout, trust_env=True
-                ) as client:
-                    # Do not follow redirects: this path applies no destination
-                    # policy, so following Location would turn one unvalidated
-                    # fetch into an attacker-chained multi-hop one.
-                    async with client.get(path, allow_redirects=False) as resp:
-                        # raise_for_status() only fires at >= 400, so a 3xx would
-                        # otherwise fall through to an empty-body read and surface
-                        # as a cryptic "safetensors: empty buffer". Redirecting
-                        # .safetensors URLs are common (CDN / presigned), so give
-                        # the operator an actionable message. Do not echo Location
-                        # or the path — both are caller-controlled and unbounded.
-                        if 300 <= resp.status < 400:
-                            raise RuntimeError(
-                                f"Embedding URL returned HTTP {resp.status}; this "
-                                "path does not follow redirects because it applies "
-                                "no destination policy. Supply the final URL."
-                            )
-                        resp.raise_for_status()
-                        content_length = resp.headers.get("content-length")
-                        if (
-                            content_length
-                            and int(content_length) > self.max_file_size_bytes
-                        ):
-                            raise RuntimeError(
-                                f"File size exceeds limit: "
-                                f"{int(content_length) // (1024*1024)}MB > "
-                                f"{self.max_file_size_mb}MB"
-                            )
-                        chunks = []
-                        downloaded = 0
-                        async for chunk in resp.content.iter_chunked(1 << 20):
-                            downloaded += len(chunk)
-                            if downloaded > self.max_file_size_bytes:
-                                raise RuntimeError(
-                                    f"File size exceeds limit: "
-                                    f"{downloaded // (1024*1024)}MB > "
-                                    f"{self.max_file_size_mb}MB"
-                                )
-                            chunks.append(chunk)
-                        content = b"".join(chunks)
+                # The shared client checks self._url_policy on the URL and on
+                # each redirect hop, filters blocked addresses again when it
+                # connects, and stops reading past the size cap.
+                content = await fetch_bytes(
+                    path,
+                    _EMBEDDING_FETCH_TIMEOUT_S,
+                    policy=self._url_policy,
+                    max_bytes=self.max_file_size_bytes,
+                )
                 data = safetensors_load(content)
                 return self._unwrap_safetensors(data)
             except RuntimeError:
+                raise
+            except (UrlValidationError, HttpStatusError, HttpConfigurationError):
+                # Keep the type, so that the callers can tell a rejected URL
+                # (a client error) from a proxy configuration fault (a server
+                # error).
                 raise
             except Exception as e:
                 logging.error(f"Failed to download or load tensor from URL: {e}")
@@ -590,6 +527,15 @@ class MultimodalRequestProcessor:
                             logging.info(
                                 f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
                             )
+                    except (
+                        UrlValidationError,
+                        HttpStatusError,
+                        HttpConfigurationError,
+                    ):
+                        # Keep the type: a rejected URL is a client error (4xx)
+                        # and a proxy configuration fault is a server error
+                        # (5xx). A None return makes both a generic 500.
+                        raise
                     except Exception as e:
                         logging.error(f"Failed to load embeddings: {e}")
                         return None
