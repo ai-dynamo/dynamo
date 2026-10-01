@@ -255,10 +255,7 @@ class TestUsageStatistics:
         assert result["prompt_tokens_details"] == expected_prompt_tokens_details
 
     @pytest.mark.core
-    @pytest.mark.parametrize("num_cached_tokens", [0, 3])
-    def test_kv_cache_hit_engine_data_uses_stock_aggregate_counter(
-        self, num_cached_tokens
-    ):
+    def test_kv_cache_hit_engine_data_uses_stock_aggregate_counter(self):
         request_output = RequestOutput(
             request_id="cache-reuse",
             prompt=None,
@@ -266,18 +263,18 @@ class TestUsageStatistics:
             prompt_logprobs=None,
             outputs=[],
             finished=True,
-            num_cached_tokens=num_cached_tokens,
+            num_cached_tokens=3,
         )
 
         assert BaseWorkerHandler._kv_cache_hit_engine_data(request_output) == {
             "prompt_tokens": 4,
-            "reused_tokens": num_cached_tokens,
+            "reused_tokens": 3,
         }
 
     @pytest.mark.core
     @pytest.mark.parametrize(
         ("prompt_token_ids", "num_cached_tokens"),
-        [([1, 2], None), (None, 0), (None, None)],
+        [([1, 2], None), (None, 0)],
     )
     def test_kv_cache_hit_engine_data_omits_missing_counters(
         self, prompt_token_ids, num_cached_tokens

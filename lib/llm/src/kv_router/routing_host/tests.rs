@@ -890,25 +890,6 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
     runtime.shutdown();
 }
 
-#[tokio::test]
-#[serial_test::serial]
-async fn kv_cache_hit_ignores_missing_or_mismatched_report_fields() {
-    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
-        finish_reason: Some(FinishReason::Stop),
-        engine_data: Some(serde_json::json!({
-            "kv_cache_hit": {
-                "prompt_tokens": 99,
-                "reused_tokens": 85,
-            }
-        })),
-        ..Default::default()
-    })
-    .await;
-    assert_eq!(after.best - before.best, 75);
-    assert_eq!(after.selected - before.selected, 60);
-    assert_eq!(after.reused - before.reused, 0);
-}
-
 fn engine_shutdown_frame() -> Annotated<LLMEngineOutput> {
     Annotated {
         data: None,

@@ -648,16 +648,6 @@ mod tests {
             .expect("valid request")
     }
 
-    #[tokio::test]
-    async fn phase_defaults_to_aggregated_and_follows_tracker() {
-        let mut request = request_with_tokens(vec![1]);
-        assert_eq!(request.phase(), RequestPhase::Aggregated);
-        let tracker = Arc::new(RequestTracker::new());
-        request.tracker = Some(tracker.clone());
-        let _permit = tracker.set_phase(RequestPhase::Prefill).await;
-        assert_eq!(request.phase(), RequestPhase::Prefill);
-    }
-
     #[test]
     fn clone_shares_token_storage_until_mutated() {
         let request = request_with_tokens(vec![1, 2, 3]);

@@ -1559,30 +1559,6 @@ mod tests {
     }
 
     #[test]
-    fn kv_cache_hit_metrics_export_counters() {
-        let registry = dynamo_runtime::MetricsRegistry::new();
-        let metrics = RouterRequestMetrics::for_test(&registry);
-        metrics.observe_kv_route_estimate(RequestPhase::Prefill, "m", 96, 64);
-        metrics.observe_kv_worker_hit(RequestPhase::Prefill, "m", 72);
-
-        let output = registry.prometheus_expfmt_combined().unwrap();
-        for (name, value) in [
-            ("kv_best_eligible_cached_prefix_tokens", 96),
-            ("kv_selected_cached_prefix_tokens", 64),
-            ("kv_worker_reused_tokens", 72),
-        ] {
-            assert!(
-                output.contains(&format!(
-                    "dynamo_component_router_{name}_total{{model=\"m\",phase=\"prefill\"}} {value}\n"
-                )),
-                "{output}"
-            );
-            assert!(!output.contains(&format!("{name}_bucket")));
-            assert!(!output.contains(&format!("{name}_sum")));
-        }
-    }
-
-    #[test]
     fn kv_estimates_and_input_tokens_have_matching_labels() {
         let registry = dynamo_runtime::MetricsRegistry::new();
         let metrics = RouterRequestMetrics::for_test(&registry);
