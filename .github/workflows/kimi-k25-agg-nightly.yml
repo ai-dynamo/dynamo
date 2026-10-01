@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   perf:
-    name: Kimi K2.5
+    name: Kimi K2.5 aggregated
     uses: ./.github/workflows/shared-recipe-perf.yml
     with:
       recipe: kimi-k25-agg
