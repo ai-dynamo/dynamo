@@ -443,7 +443,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "incomplete automatic snapshot failover candidate is rejected",
 			deployment: automaticFailoverCandidateForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				delete(dcd.Annotations, consts.SnapshotJobCandidateUIDAnnotation)
+				delete(dcd.Spec.PodTemplate.Annotations, consts.SnapshotJobCandidateUIDAnnotation)
 			}),
 			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic single-node Worker checkpoint: checkpointRef must name the checkpoint to restore"},
 		},
@@ -1988,7 +1988,7 @@ func automaticFailoverCandidateForAdmission(mutate func(*nvidiacomv1beta1.Dynamo
 			Kind:       nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind,
 			Name:       "graph", UID: "graph-uid", Controller: k8sptr.To(true),
 		}}
-		dcd.Annotations = map[string]string{
+		dcd.Spec.PodTemplate.Annotations = map[string]string{
 			consts.RestoreCandidateSourceKindAnnotation: consts.RestoreCandidateSourceSnapshotJob,
 			consts.CheckpointNameAnnotation:             "automatic-checkpoint",
 			consts.SnapshotJobCandidateUIDAnnotation:    "snapshot-job-uid",

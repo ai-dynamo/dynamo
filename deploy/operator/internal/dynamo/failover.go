@@ -450,7 +450,7 @@ func ValidateFailoverCheckpointForDCD(
 		// Automatic DGD checkpoints are handed off through a UID-bound SnapshotJob
 		// candidate rather than a user-facing checkpointRef.
 		owner := metav1.GetControllerOf(dcd)
-		candidate, present, candidateErr := checkpoint.AutomaticSnapshotJobReferenceFromAnnotations(dcd.Annotations)
+		candidate, present, candidateErr := checkpoint.AutomaticSnapshotJobReferenceFromAnnotations(GetPodTemplateAnnotations(component))
 		managed := false
 		if owner != nil && owner.Kind == v1beta1.DynamoGraphDeploymentGVK.Kind {
 			gv, err := schema.ParseGroupVersion(owner.APIVersion)
