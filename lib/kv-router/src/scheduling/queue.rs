@@ -1387,15 +1387,21 @@ impl<
     }
 
     fn has_dispatchable_ready_head(&self) -> bool {
-        let active_tokens = self.slots.active_tokens(Instant::now());
+        let decay_now = Instant::now();
+        let mut active_tokens = None;
         self.pending.any_ready_head(|_, class, queued| {
+            if !class.queueing_enabled() {
+                return true;
+            }
+            let active_tokens =
+                active_tokens.get_or_insert_with(|| self.slots.active_tokens(decay_now));
             let available = self
                 .available_worker_provider
                 .as_ref()
                 .and_then(|provider| provider(&queued.request));
             let configs = self.workers_with_configs.borrow();
             !Self::all_workers_prefill_busy_with(
-                &active_tokens,
+                active_tokens,
                 &configs,
                 class,
                 queued
@@ -1477,18 +1483,26 @@ impl<
                 break;
             }
             let decay_now = Instant::now();
-            let active_tokens = self.slots.active_tokens(decay_now);
+            // Share a capacity snapshot within this pass only. The next admission
+            // must observe the capacity reserved by the previous one.
+            let mut active_tokens = None;
             let popped = {
+                let slots = &self.slots;
                 let provider = self.available_worker_provider.as_ref();
                 let workers = &self.workers_with_configs;
                 self.pending.pop_next(|_, class, queued| {
+                    if !class.queueing_enabled() {
+                        return true;
+                    }
+                    let active_tokens =
+                        active_tokens.get_or_insert_with(|| slots.active_tokens(decay_now));
                     let available = provider.and_then(|provider| provider(&queued.request));
                     let configs = workers.borrow();
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
                     // that class until a bounded non-HOL policy is introduced.
                     !Self::all_workers_prefill_busy_with(
-                        &active_tokens,
+                        active_tokens,
                         &configs,
                         class,
                         queued
@@ -2956,6 +2970,84 @@ policy_classes:
         }
         assert_eq!(queue.pending_count(), 0);
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
+    async fn mixed_classes_recheck_capacity_after_each_admission() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: uncapped
+    policy_family: uncapped
+    cache_bucket: all
+    quantum: 1
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let (mut active, active_rx) = make_request("active", 64);
+        active.policy_class = Some("uncapped".into());
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (mut first, mut first_rx) = make_request("first", 64);
+        first.pinned_worker = Some(worker);
+        queue.enqueue(first).await;
+        let (second, mut second_rx) = make_request("second", 64);
+        queue.enqueue(second).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        // The uncapped class can still run while the capped class waits.
+        let (mut uncapped, uncapped_rx) = make_request("uncapped", 64);
+        uncapped.policy_class = Some("uncapped".into());
+        queue.enqueue(uncapped).await;
+        assert_eq!(uncapped_rx.await.unwrap().unwrap().best_worker, worker);
+        assert_eq!(queue.pending_count(), 2);
+        assert!(matches!(
+            first_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            second_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        for id in ["active", "uncapped"] {
+            slots
+                .mark_prefill_completed(&id.to_string(), decay_now())
+                .unwrap();
+            slots.free(&id.to_string(), decay_now()).unwrap();
+        }
+        queue.update().await;
+        assert_eq!(first_rx.try_recv().unwrap().unwrap().best_worker, worker);
+        // Reusing the pre-admission snapshot would also admit the second request.
+        assert!(matches!(
+            second_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(queue.pending_count(), 1);
+
+        slots
+            .mark_prefill_completed(&"first".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"first".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        assert_eq!(second_rx.try_recv().unwrap().unwrap().best_worker, worker);
+        assert_eq!(queue.pending_count(), 0);
+        slots
+            .mark_prefill_completed(&"second".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"second".to_string(), decay_now()).unwrap();
         slots.assert_completely_drained(decay_now());
     }
 

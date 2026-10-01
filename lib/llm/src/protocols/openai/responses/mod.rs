@@ -7,9 +7,9 @@ use std::collections::{HashMap, HashSet};
 
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
-    InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails,
-    Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem, OutputMessage,
-    OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+    InputContent, InputImageContent, InputItem, InputOutputMessageContent, InputParam, InputRole,
+    InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
+    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
     Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status,
     SummaryPart, TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
@@ -18,15 +18,16 @@ use dynamo_protocols::types::responses::{
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImageArgs,
-    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessageContentPartImageArgs, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
     CreateChatCompletionRequest, FinishReason, FunctionName, FunctionObject, FunctionType,
-    ImageDetail as ChatImageDetail, ImageUrl, ReasoningContent,
-    ReasoningEffort as ChatReasoningEffort, ResponseFormat, ServiceTier as ChatServiceTier,
+    ImageUrl, ReasoningContent, ReasoningEffort as ChatReasoningEffort, ResponseFormat,
+    ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -256,20 +257,38 @@ pub(crate) enum ResponsesConversionError {
     UnsupportedContent(String),
 }
 
-/// Convert a Responses API ImageDetail to the Chat Completions ImageDetail.
-/// The responses module re-exports an `ImageDetail` from the upstream async-openai
-/// crate which is distinct from `dynamo_protocols::types::ImageDetail` (chat).
-/// We bridge via serde to avoid direct cross-crate type dependencies.
-fn convert_image_detail_str(detail: &impl serde::Serialize) -> ChatImageDetail {
-    match serde_json::to_value(detail)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .as_deref()
-    {
-        Some("low") => ChatImageDetail::Low,
-        Some("high") => ChatImageDetail::High,
-        _ => ChatImageDetail::Auto,
-    }
+fn convert_input_image_to_chat_image(
+    img: &InputImageContent,
+) -> Result<ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
+    let url_str = match (img.file_id.as_deref(), img.image_url.as_deref()) {
+        (None, None) => {
+            return Err(ResponsesConversionError::InvalidArgument(
+                "input_image requires file_id or image_url".to_string(),
+            )
+            .into());
+        }
+        (Some(file_id), None) if file_id.trim().is_empty() => {
+            return Err(ResponsesConversionError::InvalidArgument(
+                "input_image file_id must be non-empty".to_string(),
+            )
+            .into());
+        }
+        (Some(_), None) => {
+            return Err(ResponsesConversionError::UnsupportedContent(
+                "Image input by file_id is not yet supported".to_string(),
+            )
+            .into());
+        }
+        (_, Some(url_str)) => url_str,
+    };
+    let url = url::Url::parse(url_str).map_err(|error| {
+        ResponsesConversionError::InvalidArgument(format!("Invalid image URL: {error}"))
+    })?;
+    let mut image_url = ImageUrl::from(url.to_string());
+    image_url.detail = Some(img.detail.clone());
+    Ok(ChatCompletionRequestMessageContentPartImageArgs::default()
+        .image_url(image_url)
+        .build()?)
 }
 
 /// Convert a slice of InputContent to ChatCompletionRequestUserMessageContent.
@@ -296,38 +315,7 @@ fn convert_input_content_to_user_content(
                 ));
             }
             InputContent::InputImage(img) => {
-                let url_str = match (img.file_id.as_deref(), img.image_url.as_deref()) {
-                    (None, None) => {
-                        return Err(ResponsesConversionError::InvalidArgument(
-                            "input_image requires file_id or image_url".to_string(),
-                        )
-                        .into());
-                    }
-                    (Some(file_id), None) if file_id.trim().is_empty() => {
-                        return Err(ResponsesConversionError::InvalidArgument(
-                            "input_image file_id must be non-empty".to_string(),
-                        )
-                        .into());
-                    }
-                    (Some(_), None) => {
-                        return Err(ResponsesConversionError::UnsupportedContent(
-                            "Image input by file_id is not yet supported".to_string(),
-                        )
-                        .into());
-                    }
-                    (_, Some(url_str)) => url_str,
-                };
-                let url = url::Url::parse(url_str).map_err(|error| {
-                    ResponsesConversionError::InvalidArgument(format!(
-                        "Invalid image URL '{url_str}': {error}"
-                    ))
-                })?;
-                let mut image_url = ImageUrl::from(url.to_string());
-                image_url.detail = Some(convert_image_detail_str(&img.detail));
-                let image_part = ChatCompletionRequestMessageContentPartImageArgs::default()
-                    .image_url(image_url)
-                    .build()?;
-                chat_parts.push(image_part.into());
+                chat_parts.push(convert_input_image_to_chat_image(img)?.into());
             }
             // TODO: handle InputVideo / InputAudio when upstream adds them
             InputContent::InputFile(file) => {
@@ -383,27 +371,43 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
         .join("")
 }
 
-/// Convert function-call output content to the plain text representation that
-/// Chat Completions tool messages accept.
-///
-/// Images and files have no faithful representation in a tool message. Reject
-/// them instead of silently dropping the parts and potentially sending an empty
-/// tool result to the model.
-fn convert_function_call_output_content_to_text(
+fn convert_function_call_output_content(
     content: &[InputContent],
-) -> Result<String, anyhow::Error> {
-    for part in content {
-        let unsupported = match part {
-            InputContent::InputText(_) => continue,
-            InputContent::InputImage(_) => "Image",
-            InputContent::InputFile(_) => "File",
-        };
-        return Err(ResponsesConversionError::UnsupportedContent(format!(
-            "{unsupported} function call output content is not yet supported"
-        ))
-        .into());
+) -> Result<ChatCompletionRequestToolMessageContent, anyhow::Error> {
+    if content
+        .iter()
+        .all(|part| matches!(part, InputContent::InputText(_)))
+    {
+        return Ok(ChatCompletionRequestToolMessageContent::Text(
+            convert_input_content_to_text(content),
+        ));
     }
-    Ok(convert_input_content_to_text(content))
+
+    let mut parts = Vec::with_capacity(content.len());
+    for part in content {
+        match part {
+            InputContent::InputText(text) => {
+                parts.push(ChatCompletionRequestToolMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: text.text.clone(),
+                    },
+                ));
+            }
+            InputContent::InputImage(img) => {
+                parts.push(ChatCompletionRequestToolMessageContentPart::ImageUrl(
+                    convert_input_image_to_chat_image(img)?,
+                ));
+            }
+            InputContent::InputFile(_) => {
+                // Reject unsupported files rather than silently dropping tool output.
+                return Err(ResponsesConversionError::UnsupportedContent(
+                    "File function call output content is not yet supported".to_string(),
+                )
+                .into());
+            }
+        }
+    }
+    Ok(ChatCompletionRequestToolMessageContent::Array(parts))
 }
 
 /// Accumulator for consecutive assistant-side items (OutputMessage, FunctionCall,
@@ -573,15 +577,15 @@ fn convert_input_items_to_messages(
                 }
                 Item::FunctionCallOutput(fco) => {
                     std::mem::take(&mut pending).flush_into(&mut messages);
-                    let output_text = match &fco.output {
-                        FunctionCallOutput::Text(text) => text.clone(),
+                    let content = match &fco.output {
+                        FunctionCallOutput::Text(text) => text.clone().into(),
                         FunctionCallOutput::Content(parts) => {
-                            convert_function_call_output_content_to_text(parts)?
+                            convert_function_call_output_content(parts)?
                         }
                     };
                     messages.push(ChatCompletionRequestMessage::Tool(
                         ChatCompletionRequestToolMessage {
-                            content: ChatCompletionRequestToolMessageContent::Text(output_text),
+                            content,
                             tool_call_id: fco.call_id.clone(),
                         },
                     ));
@@ -1387,7 +1391,7 @@ mod tests {
         InputParam, InputRole, InputTextContent, Item, MessageItem, Role as ResponseRole,
     };
     use dynamo_protocols::types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent, ImageDetail,
     };
 
     use super::*;
@@ -1765,7 +1769,7 @@ mod tests {
                             text: "What is in this image?".into(),
                         }),
                         InputContent::InputImage(InputImageContent {
-                            detail: Default::default(),
+                            detail: ImageDetail::Original,
                             file_id: None,
                             image_url: Some("https://example.com/cat.jpg".into()),
                         }),
@@ -1801,6 +1805,14 @@ mod tests {
                     });
                     assert!(has_text, "text part missing");
                     assert!(has_image, "image part dropped — regression of #9468 review");
+                    let ChatCompletionRequestUserMessageContentPart::ImageUrl(image) = &parts[1]
+                    else {
+                        panic!("expected image part after text");
+                    };
+                    assert_eq!(
+                        image.image_url.as_ref().unwrap().detail,
+                        Some(ImageDetail::Original)
+                    );
                 }
                 ChatCompletionRequestUserMessageContent::Text(t) => panic!(
                     "expected Array content with image preserved, got Text({t:?}) — images were dropped",
@@ -2003,35 +2015,68 @@ mod tests {
     }
 
     #[test]
-    fn test_function_call_output_content_rejects_images_and_files() {
-        for (part, expected_error) in [
-            (
-                serde_json::json!({
-                    "type": "input_image",
-                    "image_url": "https://example.com/image.png"
-                }),
-                "Image function call output content is not yet supported",
-            ),
-            (
-                serde_json::json!({
-                    "type": "input_file",
-                    "file_data": "data:text/plain;base64,aGVsbG8="
-                }),
-                "File function call output content is not yet supported",
-            ),
-        ] {
-            let output: FunctionCallOutput =
-                serde_json::from_value(serde_json::json!([part])).unwrap();
-            let error =
-                NvCreateChatCompletionRequest::try_from(make_response_with_function_output(output))
-                    .unwrap_err();
+    fn test_function_call_output_image_content_preserves_part_order_and_detail() {
+        let output: FunctionCallOutput = serde_json::from_value(serde_json::json!([
+            {"type": "input_text", "text": "Screenshot: "},
+            {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8=", "detail": "low"},
+            {"type": "input_image", "image_url": "https://example.com/original.png", "detail": "original"},
+            {"type": "input_text", "text": "end"}
+        ]))
+        .unwrap();
 
-            assert_eq!(error.to_string(), expected_error);
-            assert!(matches!(
-                error.downcast_ref::<ResponsesConversionError>(),
-                Some(ResponsesConversionError::UnsupportedContent(_))
-            ));
-        }
+        let chat_req: NvCreateChatCompletionRequest = make_response_with_function_output(output)
+            .try_into()
+            .unwrap();
+        let ChatCompletionRequestMessage::Tool(message) = &chat_req.inner.messages[0] else {
+            panic!("expected tool message");
+        };
+        assert_eq!(message.tool_call_id, "call_123");
+        let ChatCompletionRequestToolMessageContent::Array(parts) = &message.content else {
+            panic!("expected multimodal tool content");
+        };
+        assert_eq!(parts.len(), 4);
+        assert!(matches!(
+            &parts[0],
+            ChatCompletionRequestToolMessageContentPart::Text(text) if text.text == "Screenshot: "
+        ));
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[1] else {
+            panic!("expected image part");
+        };
+        let image_url = image.image_url.as_ref().unwrap();
+        assert_eq!(image_url.url.as_str(), "data:image/png;base64,aGVsbG8=");
+        assert_eq!(image_url.detail, Some(ImageDetail::Low));
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[2] else {
+            panic!("expected second image part");
+        };
+        assert_eq!(
+            image.image_url.as_ref().unwrap().detail,
+            Some(ImageDetail::Original)
+        );
+        assert!(matches!(
+            &parts[3],
+            ChatCompletionRequestToolMessageContentPart::Text(text) if text.text == "end"
+        ));
+    }
+
+    #[test]
+    fn test_function_call_output_content_rejects_files() {
+        let output: FunctionCallOutput = serde_json::from_value(serde_json::json!([
+            {"type": "input_text", "text": "Report: "},
+            {"type": "input_file", "file_data": "data:text/plain;base64,aGVsbG8="}
+        ]))
+        .unwrap();
+        let error =
+            NvCreateChatCompletionRequest::try_from(make_response_with_function_output(output))
+                .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "File function call output content is not yet supported"
+        );
+        assert!(matches!(
+            error.downcast_ref::<ResponsesConversionError>(),
+            Some(ResponsesConversionError::UnsupportedContent(_))
+        ));
     }
 
     #[test]

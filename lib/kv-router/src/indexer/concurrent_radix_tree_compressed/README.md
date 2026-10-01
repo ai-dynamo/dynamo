@@ -194,8 +194,24 @@ exclusive shape gate.
 
 `find_matches` is best-effort during concurrent shape changes. It reads node
 state and child pointers without taking `shape_gate` on the hot step, so it may
-observe adjacent tree shapes during a split and undercount. It must not panic or
-return a match past a valid reachable prefix.
+observe adjacent tree shapes during a split and undercount. It must not panic,
+and apart from the equal-size skip below it must not return a match past a
+valid reachable prefix.
+
+### Equal-size skip
+
+After the first node, the walk intersects its active workers with each node's
+full-edge coverage. When the two sets have the same size, it skips that
+intersection and treats them as equal. This is an accepted approximation.
+Removal does not cascade to children, so after a worker's head blocks are
+evicted a child can still list it, and an equal-sized coverage set can then hold
+a different worker than the walk carries. The walk credits the carried worker
+with the child's depth, past its cached prefix.
+
+The skip saves a pass over up to all workers at most hops. On the Mooncake
+replay with 128 workers it fired about 4.3M times and was wrong in 0 of them at a
+keep-up load and 2 of about 741K when overloaded, while always intersecting
+raised lookup service p50 by 34%.
 
 ## Wire Compatibility
 

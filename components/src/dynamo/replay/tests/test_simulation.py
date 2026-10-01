@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -603,12 +604,45 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
     assert "aic_pp_size" not in lowered
 
 
-def test_factory_preserves_trtllm_disagg_gate() -> None:
+def test_factory_supports_native_trtllm_disagg() -> None:
     capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
 
     assert capabilities.supports_backend_topology("trtllm", "agg")
-    assert not capabilities.supports_backend_topology("trtllm", "disagg")
+    assert capabilities.supports_backend_topology("trtllm", "disagg")
+    assert capabilities.supports_disaggregated_attention_dp
+
+
+def test_factory_follows_engine_capabilities_with_adapter_constraints(
+    monkeypatch,
+) -> None:
+    native = replace(
+        simulation.EngineReplayRunnerFactory().capabilities(),
+        supported_backend_topologies=(
+            ("vllm", "agg"),
+            ("trtllm", "disagg"),
+            ("vllm", "afd"),
+            ("future_backend", "agg"),
+        ),
+        supports_disaggregated_attention_dp=False,
+    )
+    monkeypatch.setattr(
+        simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
+    )
+
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+
+    assert capabilities.supports_backend_topology("trtllm", "disagg")
+    assert not capabilities.supports_backend_topology("sglang", "agg")
+    assert not capabilities.supports_backend_topology("vllm", "afd")
+    assert not capabilities.supports_backend_topology("future_backend", "agg")
     assert not capabilities.supports_disaggregated_attention_dp
+    for provider, kind in (
+        ("dynamo.router", "placement_policy"),
+        ("dynamo.planner", "scaling_policy"),
+    ):
+        assert capabilities.supports_hook(
+            RuntimeHookSpec(provider=provider, kind=kind, api_version=1, config={})
+        )
 
 
 def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
@@ -637,7 +671,7 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
 
     assert simulation._REPLAY_SPEC_API_VERSION == 1
     assert seen["version"] == 1
-    assert seen["supports_disaggregated_attention_dp"] is False
+    assert seen["supports_disaggregated_attention_dp"] is True
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:

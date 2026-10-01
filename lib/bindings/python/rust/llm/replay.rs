@@ -1312,10 +1312,8 @@ fn run_loaded_dynamo_request_trace(
             }
         }
         DynamoRequestTrace::Agentic(trace) => {
-            anyhow::ensure!(
-                scaling_policy.is_none(),
-                "scaling_policy replay does not support agentic Dynamo request traces"
-            );
+            // TODO(aisimulate): cap requests admitted by agentic Workload inputs;
+            // max_in_flight currently does not constrain this admission source.
             if replay_concurrency.is_some() {
                 anyhow::bail!(
                     "agentic Dynamo request traces are not supported with replay_concurrency"
@@ -1325,7 +1323,7 @@ fn run_loaded_dynamo_request_trace(
                 .normalize_starts()
                 .speed_up_timing(arrival_speedup_ratio)?;
             match (args_selection, replay_mode) {
-                (ReplayArgsSelection::Aggregated(args), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode_and_telemetry(
+                (ReplayArgsSelection::Aggregated(args), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode_and_runtime_observers(
                     *args,
                     router_config,
                     prefill_load_estimator,
@@ -1336,7 +1334,7 @@ fn run_loaded_dynamo_request_trace(
                     max_sim_time_ms,
                     agentic_lanes,
                     sla,
-                    telemetry,
+                    take_runtime_observers(&mut scaling_policy, &mut telemetry),
                 ),
                 (ReplayArgsSelection::Aggregated(args), "online") => dynamo_mocker::replay::simulate_agentic_trace_live_workload_with_router_mode_and_options(
                     *args,
@@ -1349,7 +1347,7 @@ fn run_loaded_dynamo_request_trace(
                     agentic_lanes,
                     sla,
                 ),
-                (ReplayArgsSelection::Disagg(config), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_disagg_with_router_mode_and_telemetry(
+                (ReplayArgsSelection::Disagg(config), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_disagg_with_router_mode_and_runtime_observers(
                     *config,
                     router_config,
                     prefill_load_estimator,
@@ -1359,7 +1357,7 @@ fn run_loaded_dynamo_request_trace(
                     max_sim_time_ms,
                     agentic_lanes,
                     sla,
-                    telemetry,
+                    take_runtime_observers(&mut scaling_policy, &mut telemetry),
                 ),
                 (ReplayArgsSelection::Disagg(_), "online") => anyhow::bail!(
                     "online P/D agentic replay is not supported"

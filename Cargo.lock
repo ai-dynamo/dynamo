@@ -2931,9 +2931,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.4.0"
+version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06464b1deb9b6e185476e2e4280cbbbc5f16d0d6fd8732ff8b5732d43ec0567b"
+checksum = "1ae779560f8f10956a03cf7a75c87adc35fe379e6929fc6821b588fe0828e716"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2994,6 +2994,7 @@ dependencies = [
  "figment",
  "fs4",
  "futures",
+ "h2 0.4.14",
  "humantime",
  "jsonschema",
  "k8s-openapi",
@@ -3040,6 +3041,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic 0.14.6",
+ "tower 0.5.3",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",
@@ -3098,17 +3100,42 @@ dependencies = [
 name = "dynamo-sidecar-common"
 version = "1.6.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-runtime",
  "futures",
  "prost-types 0.13.5",
  "prost-types 0.14.3",
  "serde_json",
+ "temp-env",
  "tokio",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-sidecar-testkit"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "dynamo-sglang-mocker",
+ "dynamo-sglang-sidecar",
+ "dynamo-vllm-mocker",
+ "dynamo-vllm-sidecar",
+ "futures",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic 0.14.6",
+ "tonic-health 0.14.6",
 ]
 
 [[package]]
@@ -3150,6 +3177,29 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-trtllm-mocker"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "clap",
+ "dashmap",
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "dynamo-trtllm-sidecar",
+ "futures",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic-health 0.13.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -3222,6 +3272,7 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost-types 0.14.3",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
