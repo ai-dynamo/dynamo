@@ -345,6 +345,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     "flag, expected", [(False, ["text"]), (True, None), (None, None), ("false", None)]
 )
 def test_input_modalities_only_declare_text_only_models(flag, expected):
+    # Keep registration imports lazy for pytest-marker-report's SGLang stubs.
     from dynamo.sglang.register import _get_input_modalities
 
     engine = SimpleNamespace(
@@ -353,5 +354,11 @@ def test_input_modalities_only_declare_text_only_models(flag, expected):
         )
     )
     assert _get_input_modalities(engine) == expected
+
+
+def test_input_modalities_without_engine_metadata():
+    # Keep registration imports lazy for pytest-marker-report's SGLang stubs.
+    from dynamo.sglang.register import _get_input_modalities
+
     assert _get_input_modalities(None) is None
     assert _get_input_modalities(SimpleNamespace()) is None

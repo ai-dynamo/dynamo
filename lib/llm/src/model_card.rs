@@ -19,7 +19,8 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{
-    ModelRuntimeConfig, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    INPUT_MODALITIES_RUNTIME_KEY, ModelRuntimeConfig, TokenizerBackend,
+    VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
@@ -1273,6 +1274,24 @@ impl ModelDeploymentCard {
                     &self.runtime_config,
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 );
+
+                // Processors capture this admission policy from the cohort's card.
+                // Treat declarations as sets; absent/malformed values keep legacy checksums.
+                if let Some(serde_json::Value::Array(declared)) =
+                    self.runtime_config.runtime_data.get(INPUT_MODALITIES_RUNTIME_KEY)
+                    && let Some(mut modalities) = declared
+                        .iter()
+                        .map(serde_json::Value::as_str)
+                        .collect::<Option<Vec<_>>>()
+                {
+                    modalities.sort_unstable();
+                    modalities.dedup();
+                    bytes_to_hash.extend_from_slice(b"\0input_modalities\0");
+                    bytes_to_hash.extend(
+                        serde_json::to_vec(&modalities)
+                            .expect("serializing input modality strings cannot fail"),
+                    );
+                }
 
                 // TODO: Do we want any other user_data or runtime_config?
 
@@ -3280,6 +3299,51 @@ mod ownership_tests {
         enabled.runtime_config.kv_event_publishing_enabled = Some(true);
 
         assert_eq!(disabled.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn input_modalities_checksum_matches_declared_sets() {
+        use crate::local_model::runtime_config::INPUT_MODALITIES_RUNTIME_KEY;
+
+        fn card_with_modalities(value: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert(INPUT_MODALITIES_RUNTIME_KEY.to_string(), value);
+            card
+        }
+
+        // Fresh cards keep the cached checksum from hiding a changed contract.
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let text = card_with_modalities(serde_json::json!(["text"]));
+        let image = card_with_modalities(serde_json::json!(["text", "image"]));
+        let empty = card_with_modalities(serde_json::json!([]));
+        let checksums = [&missing, &text, &image, &empty]
+            .map(ModelDeploymentCard::mdcsum)
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            checksums.len(),
+            4,
+            "distinct declarations must not share workers"
+        );
+        assert_eq!(
+            image.mdcsum(),
+            card_with_modalities(serde_json::json!(["image", "text", "image"])).mdcsum(),
+            "ordering and duplicates do not change admission"
+        );
+
+        for malformed in [
+            serde_json::Value::Null,
+            serde_json::json!("text"),
+            serde_json::json!(["text", 1]),
+        ] {
+            assert_eq!(
+                missing.mdcsum(),
+                card_with_modalities(malformed).mdcsum(),
+                "malformed declarations preserve undeclared behavior"
+            );
+        }
     }
 
     #[test]
