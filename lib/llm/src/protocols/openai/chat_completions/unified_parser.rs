@@ -31,7 +31,7 @@
 //! `push` into one delta object would throw away exactly the ordering this path exists
 //! to preserve, so every [`UnifiedParserEvent`] becomes its own chunk.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::LazyLock;
 
 use async_stream::stream;
@@ -1146,221 +1146,165 @@ pub(crate) fn empty_choice(index: u32) -> ChatChoiceStream {
     }
 }
 
-// This probe classifies JSON-prefilled output only. Tool argument bytes go directly
-// to the grammar owner so a literal marker cannot stall argument deltas.
-#[derive(Default)]
-struct QuotedControlMarkerProbe {
-    markers: Vec<String>,
-    quote: Option<char>,
-    escaped: bool,
-    pending_quote_candidate: bool,
-    previous_character: Option<char>,
-    pending: String,
-    pending_marker: Option<String>,
-    inspected_bytes: usize,
-}
-
-impl QuotedControlMarkerProbe {
-    fn new(family: &str) -> Self {
-        Self {
-            markers: unified_parser_control_markers(family),
-            ..Default::default()
-        }
-    }
-
-    fn push(&mut self, text: &str) -> String {
-        self.inspected_bytes += text.len();
-        let marker_strings = self.markers.clone();
-        let markers = marker_strings
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let mut ready = String::new();
-        let mut cursor = 0;
-
-        if self.pending_quote_candidate {
-            let Some(next) = text.chars().next() else {
-                return ready;
-            };
-            self.pending_quote_candidate = false;
-            if !is_internal_apostrophe(self.previous_character, Some(next)) {
-                self.quote = None;
-                self.mask_pending_markers(&markers);
-                ready.push_str(&std::mem::take(&mut self.pending));
-                self.pending_marker = None;
-            }
-            self.previous_character = Some('\'');
-        }
-
-        while !self.pending.is_empty() && self.pending_marker.is_none() {
-            let Some(character) = text[cursor..].chars().next() else {
-                return ready;
-            };
-            let mut candidate = self.pending.clone();
-            candidate.push(character);
-            if markers.iter().any(|marker| marker.starts_with(&candidate)) {
-                let is_complete_marker = markers.iter().any(|marker| **marker == candidate);
-                self.pending.push(character);
-                cursor += character.len_utf8();
-                self.previous_character = Some(character);
-                if is_complete_marker {
-                    // A configured marker can also prefix a longer marker. Stop on
-                    // the complete marker so the next byte cannot flush it unmasked.
-                    self.pending_marker = Some(candidate);
-                }
-            } else {
-                ready.push_str(&std::mem::take(&mut self.pending));
-            }
-        }
-
-        while cursor < text.len() {
-            if self.pending_marker.is_some() {
-                let character = text[cursor..]
-                    .chars()
-                    .next()
-                    .expect("cursor is before the end of the input");
-                let previous = self.previous_character;
-                self.pending.push(character);
-                cursor += character.len_utf8();
-                let next = text[cursor..].chars().next();
-                let mut defer_previous_update = false;
-                if self.escaped {
-                    self.escaped = false;
-                } else if character == '\\' {
-                    self.escaped = true;
-                } else if self.quote == Some(character) {
-                    if character == '\'' && is_internal_apostrophe(previous, next) {
-                        // Apostrophes inside words do not close a quoted span.
-                    } else if character == '\''
-                        && next.is_none()
-                        && previous.is_some_and(char::is_alphanumeric)
-                    {
-                        self.pending_quote_candidate = true;
-                        defer_previous_update = true;
-                    } else {
-                        self.quote = None;
-                        self.mask_pending_markers(&markers);
-                        ready.push_str(&std::mem::take(&mut self.pending));
-                        self.pending_marker = None;
-                    }
-                }
-                if !defer_previous_update {
-                    self.previous_character = Some(character);
-                }
-                continue;
-            }
-
-            let remaining = &text[cursor..];
-            if self.quote.is_some() {
-                if let Some(marker) = markers
-                    .iter()
-                    .find(|marker| remaining.starts_with(**marker))
-                {
-                    self.pending.push_str(marker);
-                    self.pending_marker = Some((*marker).to_string());
-                    cursor += marker.len();
-                    self.previous_character = marker.chars().next_back();
-                    continue;
-                }
-                if markers.iter().any(|marker| marker.starts_with(remaining)) {
-                    self.pending.push_str(remaining);
-                    self.previous_character = remaining.chars().next_back();
-                    break;
-                }
-            }
-
-            let character = remaining
-                .chars()
-                .next()
-                .expect("cursor is before the end of the input");
-            let previous = self.previous_character;
-            ready.push(character);
-            cursor += character.len_utf8();
-            let next = text[cursor..].chars().next();
-            let mut defer_previous_update = false;
-            if let Some(quote) = self.quote {
-                if self.escaped {
-                    self.escaped = false;
-                } else if character == '\\' {
-                    self.escaped = true;
-                } else if character == quote {
-                    if quote == '\'' && is_internal_apostrophe(previous, next) {
-                        // Apostrophes inside words do not close a quoted span.
-                    } else if quote == '\''
-                        && next.is_none()
-                        && previous.is_some_and(char::is_alphanumeric)
-                    {
-                        self.pending_quote_candidate = true;
-                        defer_previous_update = true;
-                    } else {
-                        self.quote = None;
-                    }
-                }
-            } else if character == '\'' {
-                if !previous.is_some_and(char::is_alphanumeric) {
-                    self.quote = Some(character);
-                }
-            } else if matches!(character, '"' | '`') {
-                self.quote = Some(character);
-            }
-            if !defer_previous_update {
-                self.previous_character = Some(character);
-            }
-        }
-        ready
-    }
-
-    fn mask_pending_markers(&mut self, markers: &[&str]) {
-        let pending = std::mem::take(&mut self.pending);
-        self.inspected_bytes += pending.len();
-        let mut cursor = 0;
-        while cursor < pending.len() {
-            if let Some(marker) = markers
-                .iter()
-                .find(|marker| pending[cursor..].starts_with(**marker))
-            {
-                self.pending.extend(std::iter::repeat_n('\0', marker.len()));
-                cursor += marker.len();
-            } else {
-                let character = pending[cursor..]
-                    .chars()
-                    .next()
-                    .expect("cursor is before the end of pending text");
-                self.pending.push(character);
-                cursor += character.len_utf8();
-            }
-        }
-    }
-
-    fn finish(&mut self) -> String {
-        if self.pending_quote_candidate {
-            self.quote = None;
-            self.pending_quote_candidate = false;
-        }
-        if self.quote.is_none() {
-            let marker_strings = self.markers.clone();
-            let markers = marker_strings
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>();
-            self.mask_pending_markers(&markers);
-        }
-        self.pending_marker = None;
-        self.quote = None;
-        self.escaped = false;
-        std::mem::take(&mut self.pending)
-    }
-}
-
 /// Per-choice streaming state: one parser instance plus the bookkeeping the OpenAI
 /// streaming tool-call contract needs. One instance parses exactly one choice of one
 /// request, which is what gives per-stream isolation by construction.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum QwenNativeLexicalMode {
+    #[default]
+    OutsideBlock,
+    InsideBlock,
+    ParameterHeader,
+    ParameterValue,
+}
+
+#[derive(Clone, Default)]
+struct QwenNativeLexicalState {
+    mode: QwenNativeLexicalMode,
+    marker_tail: String,
+}
+
+impl QwenNativeLexicalState {
+    fn observe(&mut self, text: &str) {
+        const BLOCK_START: &str = "<tool_call>";
+        const BLOCK_END: &str = "</tool_call>";
+        const PARAMETER_START: &str = "<parameter=";
+        const PARAMETER_END: &str = "</parameter>";
+
+        let mut input = std::mem::take(&mut self.marker_tail);
+        input.push_str(text);
+        loop {
+            match self.mode {
+                QwenNativeLexicalMode::OutsideBlock => {
+                    if let Some(start) = input.find(BLOCK_START) {
+                        input.drain(..start + BLOCK_START.len());
+                        self.mode = QwenNativeLexicalMode::InsideBlock;
+                    } else {
+                        self.retain_partial_suffix(&input, &[BLOCK_START]);
+                        return;
+                    }
+                }
+                QwenNativeLexicalMode::InsideBlock => {
+                    let parameter = input.find(PARAMETER_START);
+                    let block_end = input.find(BLOCK_END);
+                    match (parameter, block_end) {
+                        (Some(parameter), Some(block_end)) if block_end < parameter => {
+                            input.drain(..block_end + BLOCK_END.len());
+                            self.mode = QwenNativeLexicalMode::OutsideBlock;
+                        }
+                        (Some(parameter), _) => {
+                            input.drain(..parameter + PARAMETER_START.len());
+                            self.mode = QwenNativeLexicalMode::ParameterHeader;
+                        }
+                        (None, Some(block_end)) => {
+                            input.drain(..block_end + BLOCK_END.len());
+                            self.mode = QwenNativeLexicalMode::OutsideBlock;
+                        }
+                        (None, None) => {
+                            self.retain_partial_suffix(&input, &[PARAMETER_START, BLOCK_END]);
+                            return;
+                        }
+                    }
+                }
+                QwenNativeLexicalMode::ParameterHeader => {
+                    if let Some(header_end) = input.find('>') {
+                        input.drain(..header_end + 1);
+                        self.mode = QwenNativeLexicalMode::ParameterValue;
+                    } else {
+                        input.clear();
+                        return;
+                    }
+                }
+                QwenNativeLexicalMode::ParameterValue => {
+                    if let Some(parameter_end) = input.find(PARAMETER_END) {
+                        input.drain(..parameter_end + PARAMETER_END.len());
+                        self.mode = QwenNativeLexicalMode::InsideBlock;
+                    } else {
+                        self.retain_partial_suffix(&input, &[PARAMETER_END]);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn retain_partial_suffix(&mut self, input: &str, markers: &[&str]) {
+        let suffix_length = markers
+            .iter()
+            .flat_map(|marker| (1..marker.len()).map(move |length| &marker[..length]))
+            .filter(|prefix| input.ends_with(prefix))
+            .map(str::len)
+            .max()
+            .unwrap_or_default();
+        self.marker_tail = input[input.len() - suffix_length..].to_string();
+    }
+
+    fn can_start_call(&self) -> bool {
+        self.mode != QwenNativeLexicalMode::ParameterValue
+    }
+
+    fn has_open_call(&self) -> bool {
+        self.mode != QwenNativeLexicalMode::OutsideBlock || !self.marker_tail.is_empty()
+    }
+}
+
+fn qwen_opener_resolution(held: &str, text: &str) -> Option<(usize, bool)> {
+    const BLOCK_START: &str = "<tool_call>";
+    for (start, character) in text.char_indices() {
+        let end = start + character.len_utf8();
+        let candidate = format!("{held}{}", &text[..end]);
+        if candidate == BLOCK_START {
+            return Some((end, true));
+        }
+        if !BLOCK_START.starts_with(&candidate) {
+            return Some((end, false));
+        }
+    }
+    None
+}
+
+fn qwen_partial_opener_suffix_start(
+    lexical_state: &QwenNativeLexicalState,
+    text: &str,
+) -> Option<usize> {
+    const BLOCK_START: &str = "<tool_call>";
+    let start = (1..BLOCK_START.len())
+        .rev()
+        .find(|length| text.ends_with(&BLOCK_START[..*length]))
+        .map(|length| text.len() - length)?;
+    let mut before_candidate = lexical_state.clone();
+    before_candidate.observe(&text[..start]);
+    (before_candidate.mode == QwenNativeLexicalMode::OutsideBlock).then_some(start)
+}
+
 pub(crate) struct ChoiceState {
     family: String,
     parser: Box<dyn UnifiedParser>,
-    /// Tool indices whose opening chunk (id + type + name) has already gone out.
+    tool_output_mode: UnifiedToolOutputMode,
+    qwen_native_lexical_state: QwenNativeLexicalState,
+    /// Qwen's native tool opener is held until it is complete or disproven.
+    pending_qwen_opener_text: String,
+    /// Reasoning chunks arriving while a split Qwen block opener is ambiguous.
+    /// They must follow recovered opener text on mismatch and precede call events
+    /// when the opener completes.
+    pending_qwen_opener_reasoning: Vec<String>,
+    /// Tool indices that have emitted at least one `tool_calls` delta.
     opened_calls: HashSet<usize>,
-    /// Whether any tool-call chunk was emitted; flips a terminal `Stop` to `ToolCalls`.
+    /// Upstream IDs and types may arrive after an index opens. Names remain fragments.
+    tool_ids_emitted: HashSet<usize>,
+    tool_types_emitted: HashSet<usize>,
+    /// Stable externally visible indices for parser-local and pass-through calls.
+    parser_tool_indices: HashMap<usize, usize>,
+    passthrough_tool_indices: HashMap<usize, usize>,
+    /// Offset applied to tool indices from a parser instance rebuilt after a detour.
+    tool_index_offset: usize,
+    /// Next externally visible tool index, retained across parser-instance detours.
+    next_tool_index: usize,
+    /// Tool indices whose UnifiedParser events have not emitted an explicit completion.
+    pending_tool_calls: HashSet<usize>,
+    /// Pass-through OpenAI call fragments awaiting a terminal finish reason.
+    pending_parsed_tool_calls: HashSet<usize>,
+    /// Whether any tool-call delta was emitted, including a streamed fragment.
     tool_emitted: bool,
     /// The parser errored. Later chunks pass through as plain text instead of failing
     /// the request — a parser bug must not turn a served answer into a 500.
@@ -1391,24 +1335,47 @@ impl ChoiceState {
         parser.initialize_request(UnifiedParserInit {
             prompt_token_ids: Vec::new(),
             starting_state: prefill,
-            tool_output_mode,
+            tool_output_mode: tool_output_mode.clone(),
             invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
         })?;
         Ok(Self {
             family: family.to_string(),
             parser,
+            tool_output_mode,
+            qwen_native_lexical_state: QwenNativeLexicalState::default(),
+            pending_qwen_opener_text: String::new(),
+            pending_qwen_opener_reasoning: Vec::new(),
             opened_calls: HashSet::new(),
+            tool_ids_emitted: HashSet::new(),
+            tool_types_emitted: HashSet::new(),
+            parser_tool_indices: HashMap::new(),
+            passthrough_tool_indices: HashMap::new(),
+            tool_index_offset: 0,
+            next_tool_index: 0,
+            pending_tool_calls: HashSet::new(),
+            pending_parsed_tool_calls: HashSet::new(),
             tool_emitted: false,
             failed: false,
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn new_default(family: &str, tools: &[Tool]) -> anyhow::Result<Self> {
         Ok(Self {
             family: family.to_string(),
             parser: create_unified_parser_for_family(family, tools)?,
+            tool_output_mode: UnifiedToolOutputMode::Native,
+            qwen_native_lexical_state: QwenNativeLexicalState::default(),
+            pending_qwen_opener_text: String::new(),
+            pending_qwen_opener_reasoning: Vec::new(),
             opened_calls: HashSet::new(),
+            tool_ids_emitted: HashSet::new(),
+            tool_types_emitted: HashSet::new(),
+            parser_tool_indices: HashMap::new(),
+            passthrough_tool_indices: HashMap::new(),
+            tool_index_offset: 0,
+            next_tool_index: 0,
+            pending_tool_calls: HashSet::new(),
+            pending_parsed_tool_calls: HashSet::new(),
             tool_emitted: false,
             failed: false,
         })
@@ -1419,12 +1386,59 @@ impl ChoiceState {
         if self.failed {
             return text_delta(text.to_string());
         }
-        self.push_parser_text(text)
+        if self.is_qwen_native_outside_block() {
+            let held = std::mem::take(&mut self.pending_qwen_opener_text);
+            if !self.pending_qwen_opener_reasoning.is_empty() && !held.is_empty() {
+                if let Some((_resolution_end, opener_completed)) =
+                    qwen_opener_resolution(&held, text)
+                {
+                    let mut combined = held.clone();
+                    combined.push_str(text);
+                    let mut events = self.parse_segment(&combined);
+                    if opener_completed {
+                        self.prepend_pending_qwen_reasoning(&mut events);
+                    } else {
+                        self.insert_pending_qwen_reasoning_after_recovered_opener(
+                            &held,
+                            &mut events,
+                        );
+                    }
+                    return events;
+                }
+                self.pending_qwen_opener_text = held;
+                self.pending_qwen_opener_text.push_str(text);
+                return Vec::new();
+            }
+
+            let mut combined = held;
+            combined.push_str(text);
+            if let Some(start) =
+                qwen_partial_opener_suffix_start(&self.qwen_native_lexical_state, &combined)
+            {
+                let safe_text = combined[..start].to_string();
+                self.pending_qwen_opener_text = combined[start..].to_string();
+                return if safe_text.is_empty() {
+                    Vec::new()
+                } else {
+                    self.parse_segment(&safe_text)
+                };
+            }
+            return self.parse_segment(&combined);
+        }
+        self.parse_segment(text)
     }
 
-    fn push_parser_text(&mut self, text: &str) -> Vec<UnifiedParserEvent> {
-        if text.is_empty() {
-            return Vec::new();
+    fn is_qwen_native_outside_block(&self) -> bool {
+        self.family == QWEN3_UNIFIED_FAMILY
+            && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
+            && self.qwen_native_lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
+    }
+
+    fn parse_segment(&mut self, text: &str) -> Vec<UnifiedParserEvent> {
+        if self.family == QWEN3_UNIFIED_FAMILY
+            && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
+        {
+            self.qwen_native_lexical_state.observe(text);
         }
         let mut output = UnifiedParserOutput::default();
         match self.parser.parse_into(text, &mut output) {
@@ -1441,13 +1455,71 @@ impl ChoiceState {
         }
     }
 
+    fn queue_qwen_opener_reasoning(&mut self, reasoning: String) {
+        self.pending_qwen_opener_reasoning.push(reasoning);
+    }
+
+    fn prepend_pending_qwen_reasoning(&mut self, events: &mut Vec<UnifiedParserEvent>) {
+        let mut reasoning = std::mem::take(&mut self.pending_qwen_opener_reasoning)
+            .into_iter()
+            .map(UnifiedParserEvent::Reasoning)
+            .collect::<Vec<_>>();
+        reasoning.append(events);
+        *events = reasoning;
+    }
+
+    fn append_pending_qwen_reasoning(&mut self, events: &mut Vec<UnifiedParserEvent>) {
+        events.extend(
+            std::mem::take(&mut self.pending_qwen_opener_reasoning)
+                .into_iter()
+                .map(UnifiedParserEvent::Reasoning),
+        );
+    }
+
+    fn insert_pending_qwen_reasoning_after_recovered_opener(
+        &mut self,
+        held: &str,
+        events: &mut Vec<UnifiedParserEvent>,
+    ) {
+        let pending = std::mem::take(&mut self.pending_qwen_opener_reasoning);
+        let mut ordered = Vec::new();
+        let mut inserted = false;
+        for event in std::mem::take(events) {
+            if !inserted {
+                if let UnifiedParserEvent::Text(text) = &event {
+                    if let Some(remainder) = text.strip_prefix(held) {
+                        if !held.is_empty() {
+                            ordered.push(UnifiedParserEvent::Text(held.to_string()));
+                        }
+                        ordered.extend(pending.iter().cloned().map(UnifiedParserEvent::Reasoning));
+                        if !remainder.is_empty() {
+                            ordered.push(UnifiedParserEvent::Text(remainder.to_string()));
+                        }
+                        inserted = true;
+                        continue;
+                    }
+                }
+            }
+            ordered.push(event);
+        }
+        if !inserted {
+            ordered.extend(pending.into_iter().map(UnifiedParserEvent::Reasoning));
+        }
+        *events = ordered;
+    }
+
     /// Flush buffered partial state at end of stream.
     pub(crate) fn finish(&mut self) -> Vec<UnifiedParserEvent> {
         if self.failed {
             return Vec::new();
         }
-        let mut deltas = Vec::new();
-        match self.parser.finish() {
+        let pending_qwen_opener = std::mem::take(&mut self.pending_qwen_opener_text);
+        let mut events = if pending_qwen_opener.is_empty() {
+            Vec::new()
+        } else {
+            self.parse_segment(&pending_qwen_opener)
+        };
+        events.extend(match self.parser.finish() {
             // `finish` now hands back the whole `UnifiedParserOutput`; this path only ever
             // wants the ordered events out of it.
             Ok(output) => {
@@ -1463,7 +1535,9 @@ impl ChoiceState {
                 deltas.extend(self.give_up(""));
                 deltas
             }
-        }
+        });
+        self.append_pending_qwen_reasoning(&mut events);
+        events
     }
 
     /// Stop using the parser and surface whatever it was holding.
@@ -1475,13 +1549,13 @@ impl ChoiceState {
     /// does instead, so that chunk is not lost either.
     fn give_up(&mut self, fallback: &str) -> Vec<UnifiedParserEvent> {
         self.failed = true;
-        let recovered = self.parser.reset();
+        let mut recovered = self.parser.reset();
         if recovered.is_empty() {
             // TODO: Preserve the parser's consumed offset so a partial-commit error cannot replay input.
-            text_delta(fallback.to_string())
-        } else {
-            text_delta(recovered)
+            recovered.push_str(fallback);
         }
+        recovered.push_str(&std::mem::take(&mut self.pending_qwen_opener_text));
+        text_delta(recovered)
     }
 
     /// Convert one ordered delta into a streaming choice for `index`.
@@ -1494,16 +1568,32 @@ impl ChoiceState {
             UnifiedParserEvent::Reasoning(text) => {
                 choice.delta.reasoning_content = Some(text);
             }
-            UnifiedParserEvent::ToolCall(mut call) => {
+            UnifiedParserEvent::ToolCall(call) => {
+                let parser_index = call.tool_index + self.tool_index_offset;
+                let tool_index = stable_tool_index(
+                    parser_index,
+                    &mut self.parser_tool_indices,
+                    &self.opened_calls,
+                    &mut self.next_tool_index,
+                );
                 self.tool_emitted = true;
+                if call.complete {
+                    self.pending_tool_calls.remove(&tool_index);
+                    self.pending_parsed_tool_calls.remove(&tool_index);
+                } else {
+                    self.pending_tool_calls.insert(tool_index);
+                }
                 // The OpenAI streaming tool-call contract: the FIRST chunk for a tool
                 // index carries id + type + name, later chunks carry only argument
                 // fragments. `dynamo-parsers-v2` mints no ids (serving layers own them),
                 // so one is minted here per call, exactly once.
-                let first = self.opened_calls.insert(call.tool_index);
-                let name = call.name.take();
+                let first = self.opened_calls.insert(tool_index);
+                if first {
+                    self.tool_ids_emitted.insert(tool_index);
+                    self.tool_types_emitted.insert(tool_index);
+                }
                 choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
-                    index: call.tool_index as u32,
+                    index: tool_index as u32,
                     id: first.then(|| format!("call-{}", Uuid::new_v4())),
                     r#type: first.then_some(FunctionType::Function),
                     function: Some(FunctionCallStream {
@@ -1528,6 +1618,10 @@ impl ChoiceState {
         emit_tool_calls: bool,
         finish_reason: Option<FinishReason>,
     ) -> Vec<ChatChoiceStream> {
+        let terminal_tool_call_delta = finish_reason_closes_tool_calls(finish_reason.as_ref());
+        if terminal_tool_call_delta {
+            self.pending_parsed_tool_calls.clear();
+        }
         let deltas = coalesce(
             deltas
                 .into_iter()
@@ -1536,6 +1630,23 @@ impl ChoiceState {
                 })
                 .collect(),
         );
+        let mut original = original.clone();
+        if let Some(original_calls) = original.delta.tool_calls.as_mut() {
+            for call in original_calls {
+                let tool_index = normalize_passthrough_tool_call(
+                    call,
+                    &mut self.passthrough_tool_indices,
+                    &mut self.opened_calls,
+                    &mut self.tool_ids_emitted,
+                    &mut self.tool_types_emitted,
+                    &mut self.next_tool_index,
+                );
+                if !terminal_tool_call_delta {
+                    self.pending_parsed_tool_calls.insert(tool_index);
+                }
+                self.tool_emitted = true;
+            }
+        }
         let index = original.index;
         let count = deltas.len();
         let mut choices = Vec::with_capacity(count.max(1));
@@ -1554,9 +1665,6 @@ impl ChoiceState {
                         .insert_str(0, reasoning);
                 }
                 if let Some(mut original_calls) = original.delta.tool_calls.clone() {
-                    if !original_calls.is_empty() {
-                        self.tool_emitted = true;
-                    }
                     if let Some(parsed_calls) = choice.delta.tool_calls.take() {
                         original_calls.extend(parsed_calls);
                     }
@@ -1603,12 +1711,41 @@ impl ChoiceState {
 
     #[cfg(test)]
     pub(crate) fn unterminated_finish_reason(&self) -> Option<FinishReason> {
-        self.tool_emitted.then_some(FinishReason::ToolCalls)
+        self.has_terminal_tool_calls()
+            .then_some(FinishReason::ToolCalls)
     }
 
-    /// Whether this choice has emitted a tool call so far.
+    /// Whether this choice has emitted a tool-call delta so far.
     pub(crate) fn tool_emitted(&self) -> bool {
         self.tool_emitted
+    }
+
+    fn has_terminal_tool_calls(&self) -> bool {
+        self.tool_emitted
+            && self.pending_tool_calls.is_empty()
+            && self.pending_parsed_tool_calls.is_empty()
+    }
+
+    fn is_guided_named(&self) -> bool {
+        matches!(
+            &self.tool_output_mode,
+            UnifiedToolOutputMode::GuidedJson {
+                named_tool: Some(_)
+            }
+        )
+    }
+
+    fn should_preserve_reasoning_only_state(&self) -> bool {
+        self.is_guided_named()
+            || self.tool_emitted()
+            || (self.family == QWEN3_UNIFIED_FAMILY
+                && (self.qwen_native_lexical_state.has_open_call()
+                    || !self.pending_qwen_opener_text.is_empty()))
+            || self.family == "kimi_k2"
+    }
+
+    fn qwen_resumed_marker_can_start_call(&self) -> bool {
+        self.qwen_native_lexical_state.can_start_call()
     }
 
     /// Seed tool-call history from before an already-parsed detour into a freshly
@@ -1617,16 +1754,67 @@ impl ChoiceState {
         self.tool_emitted = true;
     }
 
-    /// OpenAI streaming contract: once a choice has emitted tool calls, a `Stop`
-    /// terminating reason must be reported as `ToolCalls`. `Length` / `ContentFilter`
-    /// describe why generation stopped and are preserved as-is.
+    /// OpenAI streaming contract: `Stop` becomes `ToolCalls` only when every emitted
+    /// call index is complete. `Length` / `ContentFilter` stay unchanged.
     fn normalize_finish_reason(&self, finish_reason: Option<FinishReason>) -> Option<FinishReason> {
-        if finish_reason == Some(FinishReason::Stop) && self.tool_emitted {
+        if finish_reason == Some(FinishReason::Stop) && self.has_terminal_tool_calls() {
             Some(FinishReason::ToolCalls)
         } else {
             finish_reason
         }
     }
+}
+
+// OpenAI tool-call chunks have no per-delta completion bit, so only a terminal
+// finish reason can close a pass-through call fragment.
+fn finish_reason_closes_tool_calls(finish_reason: Option<&FinishReason>) -> bool {
+    matches!(
+        finish_reason,
+        Some(FinishReason::Stop | FinishReason::ToolCalls)
+    )
+}
+
+fn stable_tool_index(
+    source_index: usize,
+    indices: &mut HashMap<usize, usize>,
+    opened_calls: &HashSet<usize>,
+    next_tool_index: &mut usize,
+) -> usize {
+    if let Some(tool_index) = indices.get(&source_index) {
+        return *tool_index;
+    }
+    let tool_index = if opened_calls.contains(&source_index) {
+        let mut candidate = *next_tool_index;
+        while opened_calls.contains(&candidate) {
+            candidate += 1;
+        }
+        candidate
+    } else {
+        source_index
+    };
+    indices.insert(source_index, tool_index);
+    *next_tool_index = (*next_tool_index).max(tool_index + 1);
+    tool_index
+}
+
+fn normalize_passthrough_tool_call(
+    call: &mut ChatCompletionMessageToolCallChunk,
+    indices: &mut HashMap<usize, usize>,
+    opened_calls: &mut HashSet<usize>,
+    ids_emitted: &mut HashSet<usize>,
+    types_emitted: &mut HashSet<usize>,
+    next_tool_index: &mut usize,
+) -> usize {
+    let tool_index = stable_tool_index(call.index as usize, indices, opened_calls, next_tool_index);
+    if call.id.is_some() && !ids_emitted.insert(tool_index) {
+        call.id = None;
+    }
+    if call.r#type.is_some() && !types_emitted.insert(tool_index) {
+        call.r#type = None;
+    }
+    call.index = tool_index as u32;
+    opened_calls.insert(tool_index);
+    tool_index
 }
 
 /// One text delta, or nothing at all when the text is empty — an empty content chunk
@@ -1767,11 +1955,23 @@ pub(crate) fn parse_complete_with_policy(
 }
 
 /// Per-choice bookkeeping that outlives any single `ChoiceState` instance for that
-/// index: whether it has ever emitted a tool call, and whether its terminal chunk has
+/// index: whether it has emitted a tool call, which indices remain provisional, and whether its terminal chunk has
 /// already been sent. See the field comment at its use site in
 /// `apply_stream_with_constraint` for why this can't just live inside `ChoiceState`.
 #[derive(Default)]
 struct ChoiceRecord {
+    opened_calls: HashSet<usize>,
+    tool_ids_emitted: HashSet<usize>,
+    tool_types_emitted: HashSet<usize>,
+    parser_tool_indices: HashMap<usize, usize>,
+    passthrough_tool_indices: HashMap<usize, usize>,
+    next_tool_index: usize,
+    /// Incomplete events from the live UnifiedParser instance.
+    pending_tool_calls: HashSet<usize>,
+    /// Pass-through OpenAI call fragments awaiting a terminal finish reason.
+    pending_parsed_tool_calls: HashSet<usize>,
+    /// Source envelopes for Qwen reasoning held until a split native opener resolves.
+    pending_qwen_opener_responses: VecDeque<PendingQwenReasoningResponse>,
     tool_emitted: bool,
     finished: bool,
     /// Whether an already-parsed chunk has EVER interrupted this choice. An
@@ -1785,20 +1985,84 @@ struct ChoiceRecord {
     detoured: bool,
 }
 
+struct PendingQwenReasoningResponse {
+    text: String,
+    response: Annotated<NvCreateChatCompletionStreamResponse>,
+}
+
+enum FinishedStreamChunk {
+    Choice(ChatChoiceStream),
+    Source(Annotated<NvCreateChatCompletionStreamResponse>),
+}
+
+fn take_qwen_reasoning_responses(
+    record: &mut ChoiceRecord,
+    reasoning: &ChatChoiceStream,
+) -> Option<Vec<Annotated<NvCreateChatCompletionStreamResponse>>> {
+    let pending_reasoning: String = record
+        .pending_qwen_opener_responses
+        .iter()
+        .map(|pending| pending.text.as_str())
+        .collect();
+    if pending_reasoning.is_empty()
+        || reasoning.delta.reasoning_content.as_deref() != Some(pending_reasoning.as_str())
+    {
+        return None;
+    }
+
+    Some(
+        std::iter::from_fn(|| record.pending_qwen_opener_responses.pop_front())
+            .map(|pending| {
+                let mut response = pending.response;
+                let mut source_reasoning = reasoning.clone();
+                source_reasoning.delta.reasoning_content = Some(pending.text);
+                source_reasoning.finish_reason = None;
+                response
+                    .data
+                    .as_mut()
+                    .expect("queued source response has data")
+                    .inner
+                    .choices = vec![source_reasoning];
+                response
+            })
+            .collect(),
+    )
+}
+
+impl ChoiceRecord {
+    fn remember_state(&mut self, state: &ChoiceState) {
+        self.opened_calls.extend(state.opened_calls.iter().copied());
+        self.tool_ids_emitted
+            .extend(state.tool_ids_emitted.iter().copied());
+        self.tool_types_emitted
+            .extend(state.tool_types_emitted.iter().copied());
+        self.parser_tool_indices
+            .extend(state.parser_tool_indices.iter().map(|(k, v)| (*k, *v)));
+        self.passthrough_tool_indices
+            .extend(state.passthrough_tool_indices.iter().map(|(k, v)| (*k, *v)));
+        self.next_tool_index = self.next_tool_index.max(state.next_tool_index);
+        self.pending_tool_calls
+            .clone_from(&state.pending_tool_calls);
+        self.pending_parsed_tool_calls
+            .clone_from(&state.pending_parsed_tool_calls);
+        self.tool_emitted |= state.tool_emitted();
+    }
+}
+
 /// Finish every choice that never received a terminating chunk, in index order.
 ///
 /// A choice can reach this point two ways: still holding a live `ChoiceState` (the
 /// common case — nothing special happened, it just never got an explicit terminal),
 /// or "history-only" — its `ChoiceState` was removed by an already-parsed detour and
 /// never rebuilt, so all that remains is its `ChoiceRecord`. The second case has
-/// nothing left to flush, but a tool-emitting choice still needs a synthesized
+/// nothing left to flush, but a choice with a completed tool call still needs a synthesized
 /// `ToolCalls` terminal so a strict client doesn't hang waiting for one; a choice that
 /// never called a tool gets no synthetic chunk at all, matching the no-signal,
 /// text-only contract a live `ChoiceState` already has via `tool_emitted` above.
 fn finish_unterminated_choices(
     states: &mut HashMap<u32, ChoiceState>,
     records: &mut HashMap<u32, ChoiceRecord>,
-) -> Vec<ChatChoiceStream> {
+) -> Vec<FinishedStreamChunk> {
     let mut indices: Vec<u32> = states
         .keys()
         .copied()
@@ -1807,36 +2071,65 @@ fn finish_unterminated_choices(
     indices.sort_unstable();
     indices.dedup();
 
-    let mut choices = Vec::new();
+    let mut chunks = Vec::new();
     for index in indices {
         if records.get(&index).is_some_and(|record| record.finished) {
             continue;
         }
-        records.entry(index).or_default().finished = true;
+        let record = records.entry(index).or_default();
+        record.finished = true;
         let base = empty_choice(index);
         match states.get_mut(&index) {
             Some(state) => {
                 let deltas = state.finish();
-                // A choice that emitted tool calls must terminate with `ToolCalls`
-                // even when the backend never sent a finish_reason: a strict client
-                // waits for a non-null one before considering the call complete, and
-                // would otherwise hang.
-                let finish_reason = state.tool_emitted().then_some(FinishReason::ToolCalls);
-                choices.extend(state.choices_for(&base, deltas, true, finish_reason));
+                // Only complete calls get a synthetic `ToolCalls` terminal at EOF;
+                // provisional parser or pass-through fragments must stay provisional.
+                let mut flushed = state.choices_for(&base, deltas, true, None);
+                if state.has_terminal_tool_calls() {
+                    if let Some(last) = flushed.last_mut() {
+                        last.finish_reason = Some(FinishReason::ToolCalls);
+                    } else {
+                        flushed.extend(state.choices_for(
+                            &base,
+                            Vec::new(),
+                            true,
+                            Some(FinishReason::ToolCalls),
+                        ));
+                    }
+                }
+                for choice in flushed {
+                    if let Some(responses) = take_qwen_reasoning_responses(record, &choice) {
+                        chunks.extend(responses.into_iter().map(FinishedStreamChunk::Source));
+                    } else {
+                        chunks.push(FinishedStreamChunk::Choice(choice));
+                    }
+                }
             }
             None => {
-                if records
-                    .get(&index)
-                    .is_some_and(|record| record.tool_emitted)
+                while let Some(pending) = record.pending_qwen_opener_responses.pop_front() {
+                    let mut choice = base.clone();
+                    choice.delta.reasoning_content = Some(pending.text);
+                    let mut response = pending.response;
+                    response
+                        .data
+                        .as_mut()
+                        .expect("queued source response has data")
+                        .inner
+                        .choices = vec![choice];
+                    chunks.push(FinishedStreamChunk::Source(response));
+                }
+                if record.tool_emitted
+                    && record.pending_tool_calls.is_empty()
+                    && record.pending_parsed_tool_calls.is_empty()
                 {
                     let mut choice = base;
                     choice.finish_reason = Some(FinishReason::ToolCalls);
-                    choices.push(choice);
+                    chunks.push(FinishedStreamChunk::Choice(choice));
                 }
             }
         }
     }
-    choices
+    chunks
 }
 
 /// Wrap one rewritten choice in a response built from `template`.
@@ -1996,315 +2289,570 @@ where
     let tools = to_v2_tools(tool_definitions.as_deref());
     let prefill = policy.starting_state(family, prefill);
     stream! {
-        let mut states: HashMap<u32, ChoiceState> = HashMap::new();
-        let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
-        // Per-choice bookkeeping that must outlive a single `ChoiceState`: a
-        // `ChoiceState` is dropped whenever an already-parsed chunk interrupts a
-        // choice (its buffered parser state would be wrong to keep across the
-        // detour), but whether that choice ever called a tool and whether its
-        // terminal has already gone out must still be known afterward — by a
-        // resumed raw run, an already-parsed terminal, or the EOF backstop below,
-        // even when no `ChoiceState` for that index exists any more (or never did:
-        // an index whose first-ever chunk is already-parsed never gets one either).
-        let mut records: HashMap<u32, ChoiceRecord> = HashMap::new();
-        // Last data response with its choices cleared, so an end-of-stream flush has an
-        // envelope (id, model, created) to attach synthesized chunks to.
-        let mut template: Option<NvCreateChatCompletionStreamResponse> = None;
+            let mut states: HashMap<u32, ChoiceState> = HashMap::new();
+            let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
+            // Per-choice bookkeeping that must outlive a single `ChoiceState`: a
+            // `ChoiceState` is dropped whenever an already-parsed chunk interrupts a
+            // choice (its buffered parser state would be wrong to keep across the
+            // detour), but whether that choice ever called a tool and whether its
+            // terminal has already gone out must still be known afterward — by a
+            // resumed raw run, an already-parsed terminal, or the EOF backstop below,
+            // even when no `ChoiceState` for that index exists any more (or never did:
+            // an index whose first-ever chunk is already-parsed never gets one either).
+            let mut records: HashMap<u32, ChoiceRecord> = HashMap::new();
+            // Last data response with its choices cleared, so an end-of-stream flush has an
+            // envelope (id, model, created) to attach synthesized chunks to.
+            let mut template: Option<NvCreateChatCompletionStreamResponse> = None;
 
-        tokio::pin!(stream_in);
+            tokio::pin!(stream_in);
 
-        while let Some(mut response) = stream_in.next().await {
-            if response.is_error() {
-                yield response;
-                return;
-            }
-            let Some(chat) = response.data.as_mut() else {
-                // Non-data annotations (errors, comments) pass through untouched.
-                yield response;
-                continue;
-            };
-
-            {
-                let mut next = chat.clone();
-                next.inner.choices.clear();
-                next.inner.usage = None;
-                next.nvext = None;
-                next.llm_metrics = None;
-                template = Some(next);
-            }
-
-            if chat.inner.choices.is_empty() {
-                // A usage-only chunk. OpenAI stream ordering requires every choice's
-                // terminal finish_reason to precede it, so flush first.
-                if let Some(template) = &template {
-                    for choice in flush_undecided_guided_prefixes(&mut undecided_guided_prefix, policy, prefill).into_iter().chain(finish_unterminated_choices(&mut states, &mut records)) {
-                        yield response_with_choice(template, choice);
-                    }
+            while let Some(mut response) = stream_in.next().await {
+                if response.is_error() {
+                    yield response;
+                    return;
                 }
-                yield response;
-                continue;
-            }
+                let response_id = response.id.clone();
+                let response_event = response.event.clone();
+                let response_comment = response.comment.clone();
+                let response_error = response.error.clone();
+                let Some(chat) = response.data.as_mut() else {
+                    // Non-data annotations (errors, comments) pass through untouched.
+                    yield response;
+                    continue;
+                };
 
-            let originals = std::mem::take(&mut chat.inner.choices);
-            let mut emitted: Vec<ChatChoiceStream> = Vec::new();
-            for mut original in originals {
-                if already_parsed(&original) {
-                    if let Some(prefix) = undecided_guided_prefix.remove(&original.index)
-                        && let Some(choice) = resolve_guided_prefix(original.index, prefix, policy, prefill)
-                    { emitted.push(choice); }
-                    // Record this index exists even if no `ChoiceState` is ever
-                    // built for it (e.g. its first-ever chunk is already-parsed),
-                    // so it is not invisible to `finish_unterminated_choices`.
-                    let record = records.entry(original.index).or_default();
-                    // Any raw run resuming this choice after this point must rebuild
-                    // starting at `Response`, not the outer request-level `prefill` —
-                    // see the `Vacant` arm below and the field doc on `ChoiceRecord`.
-                    record.detoured = true;
-                    // An already-parsed chunk carries its tool calls verbatim in its
-                    // own delta rather than through a `ChoiceState`, so that history
-                    // has to be observed here directly — a state may never exist for
-                    // this index at all (its very first chunk can be already-parsed).
-                    if original
-                        .delta
-                        .tool_calls
-                        .as_ref()
-                        .is_some_and(|calls| !calls.is_empty())
-                    {
-                        record.tool_emitted = true;
-                    }
-                    if let Some(mut state) = states.remove(&original.index) {
-                        // A prior raw chunk on this choice may have emitted a tool
-                        // call before this already-parsed terminal replaced it; that
-                        // history lives only in the state being discarded here, so
-                        // fold it into the record before it's gone (also needed by a
-                        // later chunk or the EOF backstop after this `ChoiceState` is
-                        // gone). Normalize against `record.tool_emitted`, not the
-                        // state's own flag: this chunk's own `delta.tool_calls` (set
-                        // into `record` above) can carry a tool call the state itself
-                        // never saw, e.g. an already-parsed terminal chunk that is
-                        // itself the first and only tool-call signal for this choice.
-                        if state.tool_emitted() {
-                            record.tool_emitted = true;
+                {
+                    let mut next = chat.clone();
+                    next.inner.choices.clear();
+                    next.inner.usage = None;
+                    next.nvext = None;
+                    next.llm_metrics = None;
+                    template = Some(next);
+                }
+
+                if chat.inner.choices.is_empty() {
+                    // A usage-only chunk. OpenAI stream ordering requires every choice's
+                    // terminal finish_reason to precede it, so flush first.
+                    if let Some(template) = &template {
+                        for choice in flush_undecided_guided_prefixes(&mut undecided_guided_prefix, policy, prefill) {
+                            yield response_with_choice(template, choice);
                         }
-                        original.finish_reason =
-                            if original.finish_reason == Some(FinishReason::Stop) && record.tool_emitted {
-                                Some(FinishReason::ToolCalls)
-                            } else {
-                                original.finish_reason
-                            };
-                        let deltas = state.finish();
-                        emitted.extend(state.choices_for(
-                            &empty_choice(original.index),
-                            deltas,
-                            true,
-                            None,
-                        ));
-                    } else if record.tool_emitted
-                        && original.finish_reason == Some(FinishReason::Stop)
-                    {
-                        // No live state for this chunk (an earlier already-parsed
-                        // chunk already discarded it), but this choice emitted a
-                        // tool call before that gap.
-                        original.finish_reason = Some(FinishReason::ToolCalls);
+                        for output in finish_unterminated_choices(&mut states, &mut records) {
+                            match output {
+                                FinishedStreamChunk::Choice(choice) => {
+                                    yield response_with_choice(template, choice);
+                                }
+                                FinishedStreamChunk::Source(response) => yield response,
+                            }
+                        }
                     }
-                    if original.finish_reason.is_some() {
-                        record.finished = true;
-                    }
-                    emitted.push(original);
+                    yield response;
                     continue;
                 }
 
-                let mut detected_prefill = prefill;
-                if !states.contains_key(&original.index)
-                    && (prefill == UnifiedParserStartingState::Reasoning
-                        || policy.structured_response && prefill == UnifiedParserStartingState::None)
-                    && policy.inspects_json_prefill(&guided_tool_constraint)
-                    && !records.get(&original.index).is_some_and(|record| record.detoured)
-                {
-                    let text = match original.delta.content.as_ref() {
-                        Some(ChatCompletionMessageContent::Text(text)) => text.as_str(),
-                        _ => "",
-                    };
-                    let mut probe = undecided_guided_prefix.remove(&original.index).unwrap_or_default();
-                    probe.push(text);
-                    let probe_decision = if prefill == UnifiedParserStartingState::None {
-                        // Without a prompt-opened channel, non-JSON may contain an explicit
-                        // reasoning opener. Let the native parser recognize it.
-                        probe.unopened_channel_decision(original.finish_reason.is_some())
-                    } else {
-                        match probe.decision_for_family(
-                            family,
-                            original.finish_reason.is_some(),
-                            text,
-                        ) {
-                            Ok(decision) => decision,
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = %error,
-                                    family,
-                                    choice = original.index,
-                                    "structured response prefill detection failed; treating buffered output as reasoning"
+                let originals = std::mem::take(&mut chat.inner.choices);
+                let mut emitted: Vec<ChatChoiceStream> = Vec::new();
+                let mut deferred_qwen_responses = Vec::new();
+                for mut original in originals {
+                    if already_parsed(&original) {
+                        if let Some(prefix) = undecided_guided_prefix.remove(&original.index)
+                            && let Some(choice) = resolve_guided_prefix(original.index, prefix, policy, prefill)
+                        { emitted.push(choice); }
+                        // Record this index exists even if no `ChoiceState` is ever
+                        // built for it (e.g. its first-ever chunk is already-parsed),
+                        // so it is not invisible to `finish_unterminated_choices`.
+                        let record = records.entry(original.index).or_default();
+                        // Any raw run resuming this choice after this point must rebuild
+                        // starting at `Response`, not the outer request-level `prefill` —
+                        // see the `Vacant` arm below and the field doc on `ChoiceRecord`.
+                        record.detoured = true;
+                        if let Some(state) = states.get(&original.index) {
+                            record.remember_state(state);
+                        }
+                        let parsed_calls_are_terminal =
+                            finish_reason_closes_tool_calls(original.finish_reason.as_ref());
+                        if parsed_calls_are_terminal {
+                            record.pending_parsed_tool_calls.clear();
+                        }
+                        // An already-parsed chunk carries its tool calls verbatim in its
+                        // own delta rather than through a `ChoiceState`, so that history
+                        // has to be observed here directly — a state may never exist for
+                        // this index at all (its very first chunk can be already-parsed).
+                        if let Some(calls) = original
+                            .delta
+                            .tool_calls
+                            .as_mut()
+                            .filter(|calls| !calls.is_empty())
+                        {
+                            record.tool_emitted = true;
+                            for call in calls {
+                                let tool_index = normalize_passthrough_tool_call(
+                                    call,
+                                    &mut record.passthrough_tool_indices,
+                                    &mut record.opened_calls,
+                                    &mut record.tool_ids_emitted,
+                                    &mut record.tool_types_emitted,
+                                    &mut record.next_tool_index,
                                 );
-                                Some(UnifiedParserStartingState::Reasoning)
+                                if parsed_calls_are_terminal {
+                                    record.pending_tool_calls.remove(&tool_index);
+                                } else {
+                                    record.pending_parsed_tool_calls.insert(tool_index);
+                                }
                             }
                         }
-                    };
-                    let awaiting_reasoning_boundary = prefill == UnifiedParserStartingState::Reasoning
-                        && policy.structured_response
-                        && !policy.reasoning_disabled
-                        && probe_decision == Some(UnifiedParserStartingState::None)
-                        && original.finish_reason.is_none();
-                    if (probe.text.trim().is_empty() && original.finish_reason.is_none())
-                        || policy.structured_response
-                            && (probe_decision.is_none() || awaiting_reasoning_boundary)
-                    {
-                        undecided_guided_prefix.insert(original.index, probe);
-                        original.delta.content = None;
-                        emitted.push(original);
-                        continue;
-                    }
-                    if prefill == UnifiedParserStartingState::None
-                        && probe_decision == Some(UnifiedParserStartingState::Response)
-                    {
-                        detected_prefill = UnifiedParserStartingState::Response;
-                    }
-                    original.delta.content = Some(ChatCompletionMessageContent::Text(probe.text));
-                }
-
-                let state = match states.entry(original.index) {
-                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        let mode = tool_output_mode(&guided_tool_constraint);
-                        // `Vacant` covers both a brand-new choice AND one whose
-                        // `ChoiceState` was just dropped by an already-parsed detour.
-                        // Only the former may start at the request-level `prefill`
-                        // (what the PROMPT opened); a choice that has already been
-                        // through a detour has, by definition, already emitted
-                        // structured output, so its reasoning phase (if any) already
-                        // concluded and a resumed raw run must start at `Response`.
-                        let choice_prefill = if records
-                            .get(&original.index)
-                            .is_some_and(|record| record.detoured)
-                        {
-                            UnifiedParserStartingState::Response
-                        } else if prefill == UnifiedParserStartingState::Reasoning
-                            && policy.inspects_json_prefill(&guided_tool_constraint)
-                        {
-                            if policy.structured_response {
-                                match original.delta.content.as_ref() {
-                                    Some(ChatCompletionMessageContent::Text(text)) => match structured_json_response_prefill(family, text, original.finish_reason.is_some()) {
-                                        Ok(Some(state)) => state,
-                                        Ok(None) => UnifiedParserStartingState::Reasoning,
-                                        Err(error) => {
-                                            tracing::warn!(
-                                                error = %error,
-                                                family,
-                                                choice = original.index,
-                                                "structured response prefill detection failed; treating output as reasoning"
-                                            );
-                                            UnifiedParserStartingState::Reasoning
-                                        }
+                        let reported_tool_indices: HashSet<usize> = if parsed_calls_are_terminal {
+                            original
+                                .delta
+                                .tool_calls
+                                .as_ref()
+                                .into_iter()
+                                .flatten()
+                                .map(|call| call.index as usize)
+                                .collect()
+                        } else {
+                            HashSet::new()
+                        };
+                        let preserve_reasoning_only_state = original.finish_reason.is_none()
+                            && original.delta.reasoning_content.is_some()
+                            && original.delta.content.is_none()
+                            && original.delta.tool_calls.is_none()
+                            && original.delta.function_call.is_none()
+                            && original.delta.refusal.is_none()
+                            && states
+                                .get(&original.index)
+                                .is_some_and(ChoiceState::should_preserve_reasoning_only_state);
+                        let queue_qwen_opener_reasoning = preserve_reasoning_only_state
+                            && family == QWEN3_UNIFIED_FAMILY
+                            && states.get(&original.index).is_some_and(|state| {
+                                state.qwen_native_lexical_state.mode
+                                    == QwenNativeLexicalMode::OutsideBlock
+                                    && !state.pending_qwen_opener_text.is_empty()
+                            });
+                        if preserve_reasoning_only_state {
+                            // Reasoning is an ordered event between generated bytes, not a
+                            // replacement parser input. Keep the parser state alive so a
+                            // later raw chunk can finish the same native call or guided
+                            // argument object. Kimi may still be buffering an open JSON
+                            // string before its first tool-call event.
+                            if queue_qwen_opener_reasoning {
+                                let reasoning = original
+                                    .delta
+                                    .reasoning_content
+                                    .take()
+                                    .expect("reasoning-only chunk has reasoning content");
+                                states
+                                    .get_mut(&original.index)
+                                    .expect("preserved parser state must still exist")
+                                    .queue_qwen_opener_reasoning(reasoning.clone());
+                                let mut source_data = chat.clone();
+                                source_data.inner.choices.clear();
+                                record.pending_qwen_opener_responses.push_back(
+                                    PendingQwenReasoningResponse {
+                                        text: reasoning,
+                                        response: Annotated {
+                                            data: Some(source_data),
+                                            id: response_id.clone(),
+                                            event: response_event.clone(),
+                                            comment: response_comment.clone(),
+                                            error: response_error.clone(),
+                                        },
                                     },
-                                    _ => UnifiedParserStartingState::Reasoning,
-                                }
-                            } else {
-                                bare_guided_json_prefill(original.delta.content.as_ref())
+                                );
+                            }
+                        } else if let Some(mut state) = states.remove(&original.index) {
+                            // A prior raw chunk on this choice may have emitted a tool
+                            // call before this already-parsed terminal replaced it; that
+                            // history lives only in the state being discarded here, so
+                            // fold it into the record before it's gone (also needed by a
+                            // later chunk or the EOF backstop after this `ChoiceState` is
+                            // gone). Normalize against `record.tool_emitted`, not the
+                            // state's own flag: this chunk's own `delta.tool_calls` (set
+                            // into `record` above) can carry a tool call the state itself
+                            // never saw, e.g. an already-parsed terminal chunk that is
+                            // itself the first and only tool-call signal for this choice.
+                            if state.tool_emitted() {
+                                record.tool_emitted = true;
+                            }
+                            record
+                                .pending_tool_calls
+                                .extend(
+                                    state
+                                        .pending_tool_calls
+                                        .iter()
+                                        .filter(|index| !reported_tool_indices.contains(*index))
+                                        .copied(),
+                                );
+                            record.opened_calls.extend(state.opened_calls.iter().copied());
+                            record
+                                .tool_ids_emitted
+                                .extend(state.tool_ids_emitted.iter().copied());
+                            record
+                                .tool_types_emitted
+                                .extend(state.tool_types_emitted.iter().copied());
+                            record
+                                .parser_tool_indices
+                                .extend(state.parser_tool_indices.iter().map(|(k, v)| (*k, *v)));
+                            record.passthrough_tool_indices.extend(
+                                state
+                                    .passthrough_tool_indices
+                                    .iter()
+                                    .map(|(k, v)| (*k, *v)),
+                            );
+                            record.next_tool_index =
+                                record.next_tool_index.max(state.next_tool_index);
+                            state
+                                .pending_tool_calls
+                                .retain(|index| !reported_tool_indices.contains(index));
+                            state
+                                .pending_tool_calls
+                                .extend(record.pending_tool_calls.iter().copied());
+                            if parsed_calls_are_terminal {
+                                state.pending_parsed_tool_calls.clear();
+                            }
+                            state
+                                .pending_parsed_tool_calls
+                                .extend(record.pending_parsed_tool_calls.iter().copied());
+                            let deltas = state.finish();
+                            emitted.extend(state.choices_for(
+                                &empty_choice(original.index),
+                                deltas,
+                                true,
+                                None,
+                            ));
+                            record.remember_state(&state);
+                            if original.finish_reason == Some(FinishReason::Stop)
+                                && record.tool_emitted
+                                && record.pending_tool_calls.is_empty()
+                                && record.pending_parsed_tool_calls.is_empty()
+                            {
+                                original.finish_reason = Some(FinishReason::ToolCalls);
                             }
                         } else {
-                            detected_prefill
-                        };
-                        match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming) {
-                            Ok(mut state) => {
-                                // A raw run resuming after an already-parsed detour
-                                // gets a brand-new parser instance; seed it with any
-                                // tool-call history from before the gap so a Stop at
-                                // the end of this run still normalizes correctly.
-                                if records.get(&original.index).is_some_and(|record| record.tool_emitted) {
-                                    state.mark_tool_emitted();
-                                }
-                                entry.insert(state)
+                            if record.tool_emitted
+                                && record.pending_tool_calls.is_empty()
+                                && record.pending_parsed_tool_calls.is_empty()
+                                && original.finish_reason == Some(FinishReason::Stop)
+                            {
+                                // No live state for this chunk (an earlier already-parsed
+                                // chunk already discarded it), but this choice emitted a
+                                // tool call before that gap.
+                                original.finish_reason = Some(FinishReason::ToolCalls);
                             }
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = %error,
-                                    family,
-                                    choice = original.index,
-                                    "unified parser construction failed; passing choice through"
+                        }
+                        if original.finish_reason.is_some() {
+                            record.finished = true;
+                        }
+                        if !queue_qwen_opener_reasoning {
+                            emitted.push(original);
+                        }
+                        continue;
+                    }
+
+                    let mut detected_prefill = prefill;
+                    if !states.contains_key(&original.index)
+                        && (prefill == UnifiedParserStartingState::Reasoning
+                            || policy.structured_response && prefill == UnifiedParserStartingState::None)
+                        && policy.inspects_json_prefill(&guided_tool_constraint)
+                        && !records.get(&original.index).is_some_and(|record| record.detoured)
+                    {
+                        let text = match original.delta.content.as_ref() {
+                            Some(ChatCompletionMessageContent::Text(text)) => text.as_str(),
+                            _ => "",
+                        };
+                        let mut probe = undecided_guided_prefix.remove(&original.index).unwrap_or_default();
+                        probe.push(text);
+                        let probe_decision = if prefill == UnifiedParserStartingState::None {
+                            // Without a prompt-opened channel, non-JSON may contain an explicit
+                            // reasoning opener. Let the native parser recognize it.
+                            probe.unopened_channel_decision(original.finish_reason.is_some())
+                        } else {
+                            match probe.decision_for_family(
+                                family,
+                                original.finish_reason.is_some(),
+                                text,
+                            ) {
+                                Ok(decision) => decision,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        family,
+                                        choice = original.index,
+                                        "structured response prefill detection failed; treating buffered output as reasoning"
+                                    );
+                                    Some(UnifiedParserStartingState::Reasoning)
+                                }
+                            }
+                        };
+                        let awaiting_reasoning_boundary = prefill == UnifiedParserStartingState::Reasoning
+                            && policy.structured_response
+                            && !policy.reasoning_disabled
+                            && probe_decision == Some(UnifiedParserStartingState::None)
+                            && original.finish_reason.is_none();
+                        if (probe.text.trim().is_empty() && original.finish_reason.is_none())
+                            || policy.structured_response
+                                && (probe_decision.is_none() || awaiting_reasoning_boundary)
+                        {
+                            undecided_guided_prefix.insert(original.index, probe);
+                            original.delta.content = None;
+                            emitted.push(original);
+                            continue;
+                        }
+                        if prefill == UnifiedParserStartingState::None
+                            && probe_decision == Some(UnifiedParserStartingState::Response)
+                        {
+                            detected_prefill = UnifiedParserStartingState::Response;
+                        }
+                        original.delta.content = Some(ChatCompletionMessageContent::Text(probe.text));
+    }
+
+                    // Keep a provisional native call's parser across a reasoning-only
+                    // detour so its argument tail can finish. If the resumed bytes start
+                    // a fresh call instead, finish the old parser first; the record keeps
+                    // its emitted index pending while the next parser gets a new index.
+                    // Qwen's lexical state distinguishes a new block marker from the same
+                    // text inside a parameter value; JSON grammars use their own quoted
+                    // strings and may legally contain another parser marker there.
+                    let new_native_call_after_detour = records
+                        .get(&original.index)
+                        .is_some_and(|record| record.detoured)
+                        && family == QWEN3_UNIFIED_FAMILY
+                        && states
+                            .get(&original.index)
+                            .is_some_and(|state| {
+                                matches!(&state.tool_output_mode, UnifiedToolOutputMode::Native)
+                                    && !state.pending_tool_calls.is_empty()
+                                    && state.qwen_resumed_marker_can_start_call()
+                            })
+                        && match original.delta.content.as_ref() {
+                            Some(ChatCompletionMessageContent::Text(text)) => {
+                                first_unquoted_structural_tool_call_marker(
+                                    text,
+                                    QWEN3_TOOL_CALL_PARSER,
+                                )
+                                    .is_some_and(|marker| text[..marker].trim().is_empty())
+                            }
+                            _ => false,
+                        };
+                    if new_native_call_after_detour {
+                        if let Some(mut state) = states.remove(&original.index) {
+                            let deltas = state.finish();
+                            records
+                                .entry(original.index)
+                                .or_default()
+                                .remember_state(&state);
+                            emitted.extend(state.choices_for(
+                                &empty_choice(original.index),
+                                deltas,
+                                true,
+                                None,
+                            ));
+                        }
+                    }
+
+                    let state = match states.entry(original.index) {
+                        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            let mode = tool_output_mode(&guided_tool_constraint);
+                            // `Vacant` covers both a brand-new choice AND one whose
+                            // `ChoiceState` was just dropped by an already-parsed detour.
+                            // Only the former may start at the request-level `prefill`
+                            // (what the PROMPT opened); a choice that has already been
+                            // through a detour has, by definition, already emitted
+                            // structured output, so its reasoning phase (if any) already
+                            // concluded and a resumed raw run must start at `Response`.
+                            let choice_prefill = if records
+                                .get(&original.index)
+                                .is_some_and(|record| record.detoured)
+                            {
+                                UnifiedParserStartingState::Response
+                            } else if prefill == UnifiedParserStartingState::Reasoning
+                                && policy.inspects_json_prefill(&guided_tool_constraint)
+                            {
+                                if policy.structured_response {
+                                    match original.delta.content.as_ref() {
+                                        Some(ChatCompletionMessageContent::Text(text)) => match structured_json_response_prefill(family, text, original.finish_reason.is_some()) {
+                                            Ok(Some(state)) => state,
+                                            Ok(None) => UnifiedParserStartingState::Reasoning,
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    error = %error,
+                                                    family,
+                                                    choice = original.index,
+                                                    "structured response prefill detection failed; treating output as reasoning"
+                                                );
+                                                UnifiedParserStartingState::Reasoning
+                                            }
+                                        },
+                                        _ => UnifiedParserStartingState::Reasoning,
+                                    }
+                                } else {
+                                    bare_guided_json_prefill(original.delta.content.as_ref())
+                                }
+                            } else {
+                                detected_prefill
+                            };
+                            match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming) {
+                                Ok(mut state) => {
+                                    // A raw run resuming after an already-parsed detour
+                                    // gets a brand-new parser instance; seed it with any
+                                    // tool-call history from before the gap so a Stop at
+                                    // the end of this run still normalizes correctly.
+                                    if records
+                                        .get(&original.index)
+                                        .is_some_and(|record| record.tool_emitted)
+                                    {
+                                        state.mark_tool_emitted();
+                                    }
+                                    if let Some(record) = records.get(&original.index) {
+                                        state.tool_index_offset = record.next_tool_index;
+                                        state.next_tool_index = record.next_tool_index;
+                                        state.opened_calls.extend(record.opened_calls.iter().copied());
+                                        state
+                                            .tool_ids_emitted
+                                            .extend(record.tool_ids_emitted.iter().copied());
+                                        state
+                                            .tool_types_emitted
+                                            .extend(record.tool_types_emitted.iter().copied());
+                                        state
+                                            .parser_tool_indices
+                                            .extend(record.parser_tool_indices.iter().map(|(k, v)| (*k, *v)));
+                                        state.passthrough_tool_indices.extend(
+                                            record
+                                                .passthrough_tool_indices
+                                                .iter()
+                                                .map(|(k, v)| (*k, *v)),
+                                        );
+                                        state
+                                            .pending_tool_calls
+                                            .extend(record.pending_tool_calls.iter().copied());
+                                        state.pending_parsed_tool_calls.extend(
+                                            record.pending_parsed_tool_calls.iter().copied(),
+                                        );
+                                    }
+                                    entry.insert(state)
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        family,
+                                        choice = original.index,
+                                        "unified parser construction failed; passing choice through"
+                                    );
+                                    emitted.push(original);
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+
+                    let mut deltas = Vec::new();
+                    if let Some(ChatCompletionMessageContent::Text(text)) =
+                        original.delta.content.as_ref()
+                    {
+                        deltas.extend(state.push(text));
+                    }
+                    let terminal = original.finish_reason;
+                    let already_finished = records
+                        .get(&original.index)
+                        .is_some_and(|record| record.finished);
+                    if terminal.is_some() {
+                        if !already_finished {
+                            deltas.extend(state.finish());
+                        }
+                        records.entry(original.index).or_default().finished = true;
+                    }
+
+                    let mut parsed = state.choices_for(&original, deltas, true, terminal);
+                    if let Some(record) = records.get_mut(&original.index) {
+                        if let Some(position) = parsed.iter().position(|choice| {
+                            let queued_text: String = record
+                                .pending_qwen_opener_responses
+                                .iter()
+                                .map(|pending| pending.text.as_str())
+                                .collect();
+                            !queued_text.is_empty()
+                                && choice.delta.reasoning_content.as_deref()
+                                    == Some(queued_text.as_str())
+                        }) {
+                            let reasoning = parsed.remove(position);
+                            if let Some(responses) = take_qwen_reasoning_responses(record, &reasoning) {
+                                deferred_qwen_responses.extend(
+                                    responses
+                                        .into_iter()
+                                        .map(|response| (emitted.len() + position, response)),
                                 );
-                                emitted.push(original);
-                                continue;
                             }
                         }
                     }
-                };
-
-                let mut deltas = Vec::new();
-                if let Some(ChatCompletionMessageContent::Text(text)) =
-                    original.delta.content.as_ref()
-                {
-                    deltas.extend(state.push(text));
-                }
-                let terminal = original.finish_reason;
-                let already_finished = records
-                    .get(&original.index)
-                    .is_some_and(|record| record.finished);
-                if terminal.is_some() {
-                    if !already_finished {
-                        deltas.extend(state.finish());
+                    if parsed.is_empty() {
+                        // A marker-only chunk produced no deltas. Keep it as an empty
+                        // choice so the typed llm_metrics and annotation metadata it
+                        // carries still reach the client.
+                        parsed.push(empty_choice(original.index));
                     }
-                    records.entry(original.index).or_default().finished = true;
+                    emitted.extend(parsed);
                 }
 
-                let mut parsed = state.choices_for(&original, deltas, true, terminal);
-                if parsed.is_empty() {
-                    // A marker-only chunk produced no deltas. Keep it as an empty
-                    // choice so the typed llm_metrics and annotation metadata it
-                    // carries still reach the client.
-                    parsed.push(empty_choice(original.index));
+                if emitted.is_empty() && deferred_qwen_responses.is_empty() {
+                    continue;
                 }
-                emitted.extend(parsed);
+
+                // One upstream chunk can fan out into several. Usage, nvext and annotation
+                // fields stay on the last child. Token metrics stay on one reasoning child
+                // when present so the downstream reasoning-usage estimator preserves the
+                // source chunk's classification without counting it twice.
+                let last = emitted.len().checked_sub(1);
+                let llm_metrics_position = fanout_llm_metrics_position(&emitted);
+                let mut deferred_qwen_responses = deferred_qwen_responses.into_iter().peekable();
+                for position in 0..=emitted.len() {
+                    while deferred_qwen_responses
+                        .peek()
+                        .is_some_and(|(deferred_position, _)| *deferred_position == position)
+                    {
+                        let (_, response) = deferred_qwen_responses
+                            .next()
+                            .expect("peeked Qwen response should be present");
+                        yield response;
+                    }
+                    let Some(choice) = emitted.get(position).cloned() else {
+                        continue;
+                    };
+                    let is_last = Some(position) == last;
+                    let mut data = chat.clone();
+                    data.inner.choices = vec![choice];
+                    if !is_last {
+                        data.inner.usage = None;
+                        data.nvext = None;
+                    }
+                    if Some(position) != llm_metrics_position {
+                        data.llm_metrics = None;
+                    }
+                    yield Annotated {
+                        data: Some(data),
+                        id: if is_last { response.id.take() } else { None },
+                        event: if is_last { response.event.take() } else { None },
+                        comment: if is_last { response.comment.take() } else { None },
+                        error: if is_last { response.error.take() } else { None },
+                    };
+                }
             }
 
-            if emitted.is_empty() {
-                continue;
-            }
-
-            // One upstream chunk can fan out into several. Usage, nvext and annotation
-            // fields stay on the last child. Token metrics stay on one reasoning child
-            // when present so the downstream reasoning-usage estimator preserves the
-            // source chunk's classification without counting it twice.
-            let last = emitted.len() - 1;
-            let Some(llm_metrics_position) = fanout_llm_metrics_position(&emitted) else {
-                continue;
-            };
-            for (position, choice) in emitted.into_iter().enumerate() {
-                let is_last = position == last;
-                let mut data = chat.clone();
-                data.inner.choices = vec![choice];
-                if !is_last {
-                    data.inner.usage = None;
-                    data.nvext = None;
+            // Backstop: the stream ended without a terminating chunk for some choice.
+            if let Some(template) = &template {
+                        for choice in flush_undecided_guided_prefixes(&mut undecided_guided_prefix, policy, prefill) {
+                            yield response_with_choice(template, choice);
+                        }
+                for output in finish_unterminated_choices(&mut states, &mut records) {
+                    match output {
+                        FinishedStreamChunk::Choice(choice) => {
+                            yield response_with_choice(template, choice);
+                        }
+                        FinishedStreamChunk::Source(response) => yield response,
+                    }
                 }
-                if position != llm_metrics_position {
-                    data.llm_metrics = None;
-                }
-                yield Annotated {
-                    data: Some(data),
-                    id: if is_last { response.id.take() } else { None },
-                    event: if is_last { response.event.take() } else { None },
-                    comment: if is_last { response.comment.take() } else { None },
-                    error: if is_last { response.error.take() } else { None },
-                };
             }
         }
-
-        // Backstop: the stream ended without a terminating chunk for some choice.
-        if let Some(template) = &template {
-            for choice in flush_undecided_guided_prefixes(&mut undecided_guided_prefix, policy, prefill).into_iter().chain(finish_unterminated_choices(&mut states, &mut records)) {
-                yield response_with_choice(template, choice);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2314,6 +2862,7 @@ mod tests {
     use dynamo_protocols::types::{
         ChatCompletionStreamResponseDeltaFunctionCall, CreateChatCompletionStreamResponse, Role,
     };
+    use futures::FutureExt;
     use futures::stream;
 
     struct PartialCommitParser {
@@ -2380,6 +2929,18 @@ mod tests {
                 "type": "object",
                 "properties": {"city": {"type": "string"}},
                 "required": ["city"]
+            })),
+            strict: None,
+        }]
+    }
+
+    fn count_tools() -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "count_items".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"count": {"type": "integer"}},
+                "required": ["count"]
             })),
             strict: None,
         }]
@@ -3487,6 +4048,19 @@ mod tests {
         })
     }
 
+    fn partial_call_delta(
+        tool_index: usize,
+        name: Option<&str>,
+        arguments: &str,
+    ) -> UnifiedParserEvent {
+        UnifiedParserEvent::ToolCall(ToolCallDelta {
+            tool_index,
+            name: name.map(str::to_string),
+            arguments: arguments.to_string(),
+            complete: false,
+        })
+    }
+
     fn test_state() -> ChoiceState {
         ChoiceState::new(
             QWEN3_UNIFIED_FAMILY,
@@ -3533,6 +4107,69 @@ mod tests {
         // Only the last chunk terminates, and Stop became ToolCalls.
         assert_eq!(choices[3].finish_reason, Some(FinishReason::ToolCalls));
         assert!(choices[..3].iter().all(|c| c.finish_reason.is_none()));
+    }
+
+    #[test]
+    fn mixed_raw_content_and_upstream_tool_call_do_not_reuse_tool_index() {
+        let mut state = test_state();
+        let mut original = empty_choice(0);
+        original.delta.content = Some(ChatCompletionMessageContent::Text(
+            "raw parser input".to_string(),
+        ));
+        original.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("upstream-call".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("upstream".to_string()),
+                arguments: Some("{}".to_string()),
+            }),
+        }]);
+
+        let choices = state.choices_for(
+            &original,
+            vec![call_delta(0, Some("parsed"), "{}")],
+            true,
+            None,
+        );
+        let mut indices: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .flatten()
+            .map(|call| call.index)
+            .collect();
+        indices.sort_unstable();
+
+        assert_eq!(indices, vec![0, 1]);
+
+        let mut upstream_continuation = empty_choice(0);
+        upstream_continuation.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: None,
+            r#type: None,
+            function: Some(FunctionCallStream {
+                name: None,
+                arguments: Some("more".to_string()),
+            }),
+        }]);
+        let choices = state.choices_for(&upstream_continuation, Vec::new(), true, None);
+        assert_eq!(
+            choices[0].delta.tool_calls.as_ref().unwrap()[0].index,
+            0,
+            "the pass-through call keeps its remapped index across chunks"
+        );
+
+        let choices = state.choices_for(
+            &empty_choice(0),
+            vec![call_delta(0, None, "more")],
+            true,
+            None,
+        );
+        assert_eq!(
+            choices[0].delta.tool_calls.as_ref().unwrap()[0].index,
+            1,
+            "the parser call keeps its index while the pass-through call continues"
+        );
     }
 
     #[test]
@@ -3632,6 +4269,119 @@ mod tests {
         assert!(choices[1].delta.role.is_none());
         assert!(choices[0].finish_reason.is_none());
         assert_eq!(choices[1].finish_reason, Some(FinishReason::ToolCalls));
+    }
+
+    #[test]
+    fn incomplete_tool_call_fragments_do_not_mark_the_choice_terminal() {
+        let mut state = test_state();
+        let partial = state.choices_for(
+            &empty_choice(0),
+            vec![partial_call_delta(
+                0,
+                Some("get_weather"),
+                r#"{"city":"Tok"#,
+            )],
+            true,
+            Some(FinishReason::Stop),
+        );
+
+        assert_eq!(partial.len(), 1);
+        assert!(partial[0].delta.tool_calls.is_some());
+        assert_eq!(
+            partial[0].finish_reason,
+            Some(FinishReason::Stop),
+            "an unfinished parser fragment must not rewrite Stop to ToolCalls"
+        );
+        assert!(state.tool_emitted());
+        assert_eq!(state.unterminated_finish_reason(), None);
+
+        let completed = state.choices_for(
+            &empty_choice(0),
+            vec![call_delta(0, None, "yo\"}")],
+            true,
+            Some(FinishReason::Stop),
+        );
+        assert_eq!(completed[0].finish_reason, Some(FinishReason::ToolCalls));
+        assert!(state.tool_emitted());
+        assert_eq!(
+            state.unterminated_finish_reason(),
+            Some(FinishReason::ToolCalls)
+        );
+    }
+
+    #[test]
+    fn completed_call_does_not_hide_another_incomplete_call() {
+        let mut state = test_state();
+        let partial = state.choices_for(
+            &empty_choice(0),
+            vec![partial_call_delta(0, Some("first"), r#"{"city":"Tok"#)],
+            true,
+            None,
+        );
+        assert_eq!(partial.len(), 1);
+
+        let completed = state.choices_for(
+            &empty_choice(0),
+            vec![call_delta(1, Some("second"), r#"{"city":"Paris"}"#)],
+            true,
+            Some(FinishReason::Stop),
+        );
+        assert_eq!(completed[0].finish_reason, Some(FinishReason::Stop));
+        assert_eq!(state.unterminated_finish_reason(), None);
+
+        let final_fragment = state.choices_for(
+            &empty_choice(0),
+            vec![call_delta(0, None, "yo\"}")],
+            true,
+            Some(FinishReason::Stop),
+        );
+        assert_eq!(
+            final_fragment[0].finish_reason,
+            Some(FinishReason::ToolCalls)
+        );
+        assert_eq!(
+            state.unterminated_finish_reason(),
+            Some(FinishReason::ToolCalls)
+        );
+    }
+
+    #[test]
+    fn separate_terminal_finish_closes_all_parsed_call_fragments() {
+        let mut state = test_state();
+        let mut parsed_fragments = empty_choice(0);
+        parsed_fragments.delta.tool_calls = Some(vec![
+            ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: Some("call-first".to_string()),
+                r#type: Some(FunctionType::Function),
+                function: Some(FunctionCallStream {
+                    name: Some("first".to_string()),
+                    arguments: Some(r#"{"city":"Par"#.to_string()),
+                }),
+            },
+            ChatCompletionMessageToolCallChunk {
+                index: 1,
+                id: Some("call-second".to_string()),
+                r#type: Some(FunctionType::Function),
+                function: Some(FunctionCallStream {
+                    name: Some("second".to_string()),
+                    arguments: Some(r#"{"city":"Tok"#.to_string()),
+                }),
+            },
+        ]);
+        let partials = state.choices_for(&parsed_fragments, Vec::new(), true, None);
+        assert_eq!(partials.len(), 1);
+        assert_eq!(state.unterminated_finish_reason(), None);
+
+        let terminal =
+            state.choices_for(&empty_choice(0), Vec::new(), true, Some(FinishReason::Stop));
+
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0].finish_reason, Some(FinishReason::ToolCalls));
+        assert_eq!(
+            state.unterminated_finish_reason(),
+            Some(FinishReason::ToolCalls)
+        );
     }
 
     #[test]
@@ -3764,6 +4514,331 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qwen_delayed_reasoning_keeps_source_envelope_and_continuation_metadata() {
+        let mut reasoning = chunk("", false);
+        let choice = &mut reasoning.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("held thought".to_string());
+        let source = reasoning.data.as_mut().unwrap();
+        source.nvext = Some(serde_json::json!({"source": "reasoning"}));
+        source.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+            chunk_tokens: 7,
+            ..Default::default()
+        });
+        reasoning.id = Some("reasoning-source-id".to_string());
+        reasoning.event = Some("reasoning-source-event".to_string());
+        reasoning.comment = Some(vec!["reasoning-source-comment".to_string()]);
+
+        let mut continuation = chunk(
+            "all>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n</tool_call>answer",
+            true,
+        );
+        let continuation_data = continuation.data.as_mut().unwrap();
+        continuation_data.nvext = Some(serde_json::json!({"source": "continuation"}));
+        continuation.id = Some("continuation-id".to_string());
+        continuation.event = Some("continuation-event".to_string());
+        continuation.comment = Some(vec!["continuation-comment".to_string()]);
+
+        let responses = apply_stream(
+            stream::iter([chunk("before <tool_c", false), reasoning, continuation]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let delayed_reasoning = responses
+            .iter()
+            .find(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner.choices.iter().any(|choice| {
+                        choice.delta.reasoning_content.as_deref() == Some("held thought")
+                    })
+                })
+            })
+            .expect("queued reasoning should be released when the opener resolves");
+        let delayed_data = delayed_reasoning.data.as_ref().unwrap();
+        assert_eq!(delayed_reasoning.id.as_deref(), Some("reasoning-source-id"));
+        assert_eq!(
+            delayed_reasoning.event.as_deref(),
+            Some("reasoning-source-event")
+        );
+        assert_eq!(
+            delayed_reasoning.comment.as_deref(),
+            Some(["reasoning-source-comment".to_string()].as_slice())
+        );
+        assert_eq!(
+            delayed_data.nvext,
+            Some(serde_json::json!({"source": "reasoning"}))
+        );
+        assert_eq!(delayed_data.llm_metrics.as_ref().unwrap().chunk_tokens, 7);
+        assert_eq!(delayed_data.inner.choices.len(), 1);
+        assert!(delayed_data.inner.choices[0].delta.tool_calls.is_none());
+
+        let continuation_answer = responses
+            .iter()
+            .find(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner.choices.iter().any(|choice| {
+                        matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if text == "answer")
+                    })
+                })
+            })
+            .expect("continuation answer should keep the resolving chunk envelope");
+        let continuation_data = continuation_answer.data.as_ref().unwrap();
+        assert_eq!(continuation_answer.id.as_deref(), Some("continuation-id"));
+        assert_eq!(
+            continuation_answer.event.as_deref(),
+            Some("continuation-event")
+        );
+        assert_eq!(
+            continuation_answer.comment.as_deref(),
+            Some(["continuation-comment".to_string()].as_slice())
+        );
+        assert_eq!(
+            continuation_data.nvext,
+            Some(serde_json::json!({"source": "continuation"}))
+        );
+        let content_chunks: Vec<_> = responses
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            content_chunks.iter().all(|text| !text.contains("<tool_c")),
+            "a partial native opener must not leak into visible content: {content_chunks:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn qwen_eof_flushes_held_opener_before_source_annotated_reasoning() {
+        let mut reasoning = chunk("", false);
+        let choice = &mut reasoning.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("eof thought".to_string());
+        let source = reasoning.data.as_mut().unwrap();
+        source.nvext = Some(serde_json::json!({"source": "reasoning"}));
+        source.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+            chunk_tokens: 9,
+            ..Default::default()
+        });
+        reasoning.id = Some("eof-reasoning-id".to_string());
+        reasoning.event = Some("eof-reasoning-event".to_string());
+        reasoning.comment = Some(vec!["eof-reasoning-comment".to_string()]);
+
+        let responses = apply_stream(
+            stream::iter([chunk("before <tool_c", false), reasoning]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let ordered: Vec<_> = responses
+            .iter()
+            .filter_map(|response| {
+                let choice = response.data.as_ref()?.inner.choices.first()?;
+                if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                    Some(("text", text.as_str()))
+                } else {
+                    choice
+                        .delta
+                        .reasoning_content
+                        .as_deref()
+                        .map(|text| ("reasoning", text))
+                }
+            })
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                ("text", "before "),
+                ("text", "<tool_c"),
+                ("reasoning", "eof thought"),
+            ],
+            "EOF must release each held byte once, before queued reasoning"
+        );
+
+        let delayed_reasoning = responses
+            .iter()
+            .find(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner.choices.iter().any(|choice| {
+                        choice.delta.reasoning_content.as_deref() == Some("eof thought")
+                    })
+                })
+            })
+            .expect("EOF must release the queued reasoning chunk");
+        let delayed_data = delayed_reasoning.data.as_ref().unwrap();
+        assert_eq!(delayed_reasoning.id.as_deref(), Some("eof-reasoning-id"));
+        assert_eq!(
+            delayed_reasoning.event.as_deref(),
+            Some("eof-reasoning-event")
+        );
+        assert_eq!(
+            delayed_reasoning.comment.as_deref(),
+            Some(["eof-reasoning-comment".to_string()].as_slice())
+        );
+        assert_eq!(
+            delayed_data.nvext,
+            Some(serde_json::json!({"source": "reasoning"}))
+        );
+        assert_eq!(delayed_data.llm_metrics.as_ref().unwrap().chunk_tokens, 9);
+        assert_eq!(delayed_data.inner.choices.len(), 1);
+        assert!(delayed_data.inner.choices[0].delta.tool_calls.is_none());
+
+        let held_text_count = responses
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter(|choice| {
+                matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if text == "<tool_c")
+            })
+            .count();
+        assert_eq!(held_text_count, 1);
+    }
+
+    #[tokio::test]
+    async fn qwen_mismatched_opener_releases_source_reasoning_between_recovery_and_suffix() {
+        let (input_tx, input_rx) = futures::channel::mpsc::unbounded();
+        let mut output = Box::pin(apply_stream(
+            input_rx,
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        ));
+
+        input_tx
+            .unbounded_send(chunk("before <tool_c", false))
+            .unwrap();
+        let prefix_response = output.next().await.expect("visible prefix should stream");
+        let prefix_choice = &prefix_response.data.as_ref().unwrap().inner.choices[0];
+        assert!(matches!(
+            &prefix_choice.delta.content,
+            Some(ChatCompletionMessageContent::Text(text)) if text == "before "
+        ));
+
+        let mut reasoning = chunk("", false);
+        let choice = &mut reasoning.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("middle".to_string());
+        let source = reasoning.data.as_mut().unwrap();
+        source.nvext = Some(serde_json::json!({"source": "reasoning"}));
+        source.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+            chunk_tokens: 5,
+            ..Default::default()
+        });
+        reasoning.id = Some("mismatch-reasoning-id".to_string());
+        reasoning.event = Some("mismatch-reasoning-event".to_string());
+        reasoning.comment = Some(vec!["mismatch-reasoning-comment".to_string()]);
+        input_tx.unbounded_send(reasoning).unwrap();
+
+        assert!(
+            output.next().now_or_never().is_none(),
+            "reasoning must remain held while the opener is ambiguous"
+        );
+
+        let mut continuation = chunk("Xtail", true);
+        let continuation_data = continuation.data.as_mut().unwrap();
+        continuation_data.nvext = Some(serde_json::json!({"source": "continuation"}));
+        continuation.id = Some("mismatch-continuation-id".to_string());
+        continuation.event = Some("mismatch-continuation-event".to_string());
+        continuation.comment = Some(vec!["mismatch-continuation-comment".to_string()]);
+        input_tx.unbounded_send(continuation).unwrap();
+        drop(input_tx);
+        let mut responses = vec![prefix_response];
+        responses.extend(output.collect::<Vec<_>>().await);
+
+        let ordered: Vec<_> = responses
+            .iter()
+            .filter_map(|response| {
+                let choice = response.data.as_ref()?.inner.choices.first()?;
+                if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                    Some(("text", text.as_str()))
+                } else {
+                    choice
+                        .delta
+                        .reasoning_content
+                        .as_deref()
+                        .map(|text| ("reasoning", text))
+                }
+            })
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                ("text", "before "),
+                ("text", "<tool_c"),
+                ("reasoning", "middle"),
+                ("text", "Xtail"),
+            ]
+        );
+
+        let delayed_reasoning = responses
+            .iter()
+            .find(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner
+                        .choices
+                        .iter()
+                        .any(|choice| choice.delta.reasoning_content.as_deref() == Some("middle"))
+                })
+            })
+            .unwrap();
+        let delayed_data = delayed_reasoning.data.as_ref().unwrap();
+        assert_eq!(
+            delayed_reasoning.id.as_deref(),
+            Some("mismatch-reasoning-id")
+        );
+        assert_eq!(
+            delayed_reasoning.event.as_deref(),
+            Some("mismatch-reasoning-event")
+        );
+        assert_eq!(
+            delayed_reasoning.comment.as_deref(),
+            Some(["mismatch-reasoning-comment".to_string()].as_slice())
+        );
+        assert_eq!(
+            delayed_data.nvext,
+            Some(serde_json::json!({"source": "reasoning"}))
+        );
+        assert_eq!(delayed_data.llm_metrics.as_ref().unwrap().chunk_tokens, 5);
+
+        let suffix = responses
+            .iter()
+            .find(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner.choices.iter().any(|choice| {
+                        matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if text == "Xtail")
+                    })
+                })
+            })
+            .unwrap();
+        assert_eq!(suffix.id.as_deref(), Some("mismatch-continuation-id"));
+        assert_eq!(suffix.event.as_deref(), Some("mismatch-continuation-event"));
+        assert_eq!(
+            suffix.comment.as_deref(),
+            Some(["mismatch-continuation-comment".to_string()].as_slice())
+        );
+        assert_eq!(
+            suffix.data.as_ref().unwrap().nvext,
+            Some(serde_json::json!({"source": "continuation"}))
+        );
+    }
+
+    #[tokio::test]
     async fn named_guided_json_becomes_a_tool_call() {
         let responses = apply_stream(
             stream::iter([
@@ -3827,6 +4902,428 @@ mod tests {
                 .iter()
                 .any(|c| c.finish_reason == Some(FinishReason::ToolCalls)),
             "the stream must terminate with ToolCalls"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_named_guided_json_stays_pending_at_stop() {
+        let responses = apply_stream(
+            stream::iter([
+                chunk("reason</think>{\"city\": ", false),
+                chunk("\"Tokyo\"", true),
+            ]),
+            Some(weather_tools()),
+            Some(named_choice("get_weather")),
+            false,
+            UnifiedParserStartingState::Reasoning,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let choices = collect_choices(&responses);
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "the guided parser may have already streamed the provisional call"
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect::<Vec<_>>(),
+            vec![FinishReason::Stop],
+            "an incomplete argument object must not be reported as a completed tool call"
+        );
+    }
+
+    #[tokio::test]
+    async fn named_guided_json_continues_across_reasoning_detour() {
+        let mut reasoning_detour = chunk("", false);
+        let choice = &mut reasoning_detour.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("interleaved thought".to_string());
+
+        let responses = apply_stream(
+            stream::iter([
+                chunk("reason</think>{\"city\": ", false),
+                reasoning_detour,
+                chunk("\"Tokyo\"}", true),
+            ]),
+            Some(weather_tools()),
+            Some(named_choice("get_weather")),
+            false,
+            UnifiedParserStartingState::Reasoning,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let choices = collect_choices(&responses);
+        let arguments: String = choices
+            .iter()
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .flatten()
+            .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+            .collect();
+        assert_eq!(arguments, "{\"city\": \"Tokyo\"}");
+        assert!(
+            choices.iter().any(|choice| {
+                choice.delta.reasoning_content.as_deref() == Some("interleaved thought")
+            }),
+            "the reasoning detour must remain visible in its original position"
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.finish_reason == Some(FinishReason::ToolCalls)),
+            "the resumed argument object must complete the same guided tool call"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_qwen_call_continues_across_reasoning_detour() {
+        let mut reasoning_detour = chunk("", false);
+        let choice = &mut reasoning_detour.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("interleaved thought".to_string());
+
+        let responses = apply_stream(
+            stream::iter([
+                chunk("<tool_call><function=get_weather><parameter=city>NY", false),
+                reasoning_detour,
+                chunk("C</parameter></function></tool_call>", true),
+            ]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let choices = collect_choices(&responses);
+        let calls: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .flatten()
+            .collect();
+        let arguments: String = calls
+            .iter()
+            .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+            .collect();
+        assert_eq!(arguments, r#"{"city":"NYC"}"#);
+        assert!(calls.iter().any(|call| call.index == 0));
+        assert_eq!(
+            choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect::<Vec<_>>(),
+            vec![FinishReason::ToolCalls]
+        );
+        let reasoning_position = choices
+            .iter()
+            .position(|choice| choice.delta.reasoning_content.is_some())
+            .expect("the already-parsed reasoning delta must remain visible");
+        assert!(
+            choices[..reasoning_position]
+                .iter()
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "the provisional native call must be released before the reasoning detour"
+        );
+        assert!(
+            choices[reasoning_position + 1..]
+                .iter()
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "the resumed native call fragment must follow the reasoning detour"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_qwen_partial_call_opener_survives_reasoning_detour_at_every_split() {
+        let opener = "<tool_call>";
+        let body_and_answer = concat!(
+            "\n<function=get_weather>\n",
+            "<parameter=city>Paris</parameter>\n",
+            "</function>\n</tool_call>answer"
+        );
+
+        for split in 1..opener.len() {
+            let mut reasoning_detour = chunk("", false);
+            let choice = &mut reasoning_detour.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some("interleaved thought".to_string());
+
+            let continuation = format!("{}{}", &opener[split..], body_and_answer);
+            let responses = apply_stream(
+                stream::iter([
+                    chunk(&opener[..split], false),
+                    reasoning_detour,
+                    chunk(&continuation, true),
+                ]),
+                Some(weather_tools()),
+                None,
+                false,
+                UnifiedParserStartingState::None,
+                QWEN3_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+            let choices = collect_choices(&responses);
+            let calls: Vec<_> = choices
+                .iter()
+                .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                .collect();
+            let arguments: String = calls
+                .iter()
+                .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                .collect();
+            assert_eq!(arguments, r#"{"city":"Paris"}"#, "split {split}");
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                    .collect::<String>(),
+                "get_weather",
+                "split {split}"
+            );
+            let mut indices: Vec<_> = calls.iter().map(|call| call.index).collect();
+            indices.sort_unstable();
+            indices.dedup();
+            assert_eq!(indices, vec![0], "split {split}");
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter_map(|call| call.id.as_deref())
+                    .collect::<HashSet<_>>()
+                    .len(),
+                1,
+                "split {split} must keep one call ID"
+            );
+            assert!(choices.iter().any(|choice| {
+                choice.delta.reasoning_content.as_deref() == Some("interleaved thought")
+            }));
+            let content: String = choices
+                .iter()
+                .filter_map(|choice| match &choice.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(content, "answer", "split {split}");
+            assert_eq!(
+                choices
+                    .iter()
+                    .filter_map(|choice| choice.finish_reason)
+                    .collect::<Vec<_>>(),
+                vec![FinishReason::ToolCalls],
+                "split {split}"
+            );
+
+            let reasoning_position = choices
+                .iter()
+                .position(|choice| choice.delta.reasoning_content.is_some())
+                .expect("reasoning detour must be emitted");
+            let call_position = choices
+                .iter()
+                .position(|choice| choice.delta.tool_calls.is_some())
+                .expect("tool call must follow the detour");
+            let answer_position = choices
+                .iter()
+                .position(|choice| choice.delta.content.is_some())
+                .expect("trailing answer must be emitted");
+            assert!(
+                reasoning_position < call_position && call_position < answer_position,
+                "raw/parsed/raw order changed at split {split}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_qwen_mismatched_partial_opener_orders_recovery_before_reasoning_at_every_split()
+    {
+        let opener = "<tool_call>";
+
+        for split in 1..opener.len() {
+            let mismatch_position = opener.len() - 1;
+            let continuation = format!("{}Xpost", &opener[split..mismatch_position]);
+            let mut reasoning_detour = chunk("", false);
+            let choice = &mut reasoning_detour.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some("interleaved thought".to_string());
+
+            let responses = apply_stream(
+                stream::iter([
+                    chunk(&opener[..split], false),
+                    reasoning_detour,
+                    chunk(&continuation, true),
+                ]),
+                Some(weather_tools()),
+                None,
+                false,
+                UnifiedParserStartingState::None,
+                QWEN3_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let choices = collect_choices(&responses);
+            let ordered: Vec<_> = choices
+                .iter()
+                .filter_map(|choice| {
+                    if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                        Some(("content", text.as_str()))
+                    } else {
+                        choice
+                            .delta
+                            .reasoning_content
+                            .as_deref()
+                            .map(|text| ("reasoning", text))
+                    }
+                })
+                .collect();
+
+            assert_eq!(
+                ordered,
+                vec![
+                    ("content", &opener[..split]),
+                    ("reasoning", "interleaved thought"),
+                    ("content", &continuation[..]),
+                ],
+                "mismatch at opener split {split}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_qwen_partial_opener_eof_flushes_recovered_text_before_reasoning() {
+        let mut reasoning_detour = chunk("", false);
+        let choice = &mut reasoning_detour.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("interleaved thought".to_string());
+
+        let responses = apply_stream(
+            stream::iter([chunk("before <tool_c", false), reasoning_detour]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let ordered: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| {
+                if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                    Some(("content", text.as_str()))
+                } else {
+                    choice
+                        .delta
+                        .reasoning_content
+                        .as_deref()
+                        .map(|text| ("reasoning", text))
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            ordered,
+            vec![
+                ("content", "before "),
+                ("content", "<tool_c"),
+                ("reasoning", "interleaved thought"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_qwen_buffered_non_string_argument_survives_reasoning_detour() {
+        let mut reasoning_detour = chunk("", false);
+        let choice = &mut reasoning_detour.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("interleaved thought".to_string());
+
+        let responses = apply_stream(
+            stream::iter([
+                chunk("<tool_call><function=count_items><parameter=count>1", false),
+                reasoning_detour,
+                chunk("2</parameter></function></tool_call>", true),
+            ]),
+            Some(count_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let choices = collect_choices(&responses);
+        let calls: Vec<_> = choices
+            .iter()
+            .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0]
+                .function
+                .as_ref()
+                .and_then(|function| function.name.as_deref()),
+            Some("count_items")
+        );
+        assert_eq!(
+            calls[0]
+                .function
+                .as_ref()
+                .and_then(|function| function.arguments.as_deref()),
+            Some(r#"{"count":12}"#)
+        );
+        assert!(choices.iter().any(|choice| {
+            choice.delta.reasoning_content.as_deref() == Some("interleaved thought")
+        }));
+        assert_eq!(
+            choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect::<Vec<_>>(),
+            vec![FinishReason::ToolCalls]
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_named_guided_json_stays_pending_across_reasoning_detour_at_eof() {
+        let mut reasoning_detour = chunk("", false);
+        let choice = &mut reasoning_detour.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("interleaved thought".to_string());
+
+        let responses = apply_stream(
+            stream::iter([chunk("reason</think>{\"city\": ", false), reasoning_detour]),
+            Some(weather_tools()),
+            Some(named_choice("get_weather")),
+            false,
+            UnifiedParserStartingState::Reasoning,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let choices = collect_choices(&responses);
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "the cursor may have streamed provisional name and argument fragments"
+        );
+        assert!(
+            choices
+                .iter()
+                .all(|choice| choice.finish_reason != Some(FinishReason::ToolCalls)),
+            "EOF must not complete an invalid or truncated argument object"
         );
     }
 
@@ -4079,6 +5576,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumed_raw_tool_call_gets_a_new_index_after_an_already_parsed_detour() {
+        let first_partial = concat!(
+            "<tool_call>\n<function=get_weather>\n",
+            "<parameter=city>Paris</parameter>"
+        );
+        let already_parsed = {
+            let mut value = chunk("", false);
+            let choice = &mut value.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some("already parsed".to_string());
+            value
+        };
+        let second_call = concat!(
+            "<tool_call>\n<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n</function>\n</tool_call>"
+        );
+        let responses = apply_stream(
+            stream::iter([
+                chunk(first_partial, false),
+                already_parsed,
+                chunk(second_call, true),
+            ]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let calls: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .flatten()
+            .collect();
+        assert!(calls.iter().any(|call| call.index == 0));
+        assert!(calls.iter().any(|call| call.index == 1));
+        let first_ids: HashSet<_> = calls
+            .iter()
+            .filter(|call| call.index == 0)
+            .filter_map(|call| call.id.as_deref())
+            .collect();
+        let second_ids: HashSet<_> = calls
+            .iter()
+            .filter(|call| call.index == 1)
+            .filter_map(|call| call.id.as_deref())
+            .collect();
+        assert_eq!(
+            first_ids.len(),
+            1,
+            "the first call identity must stay stable"
+        );
+        assert_eq!(second_ids.len(), 1, "the resumed call needs one stable ID");
+        assert_ne!(first_ids, second_ids, "separate calls must not reuse an ID");
+        let names: Vec<_> = calls
+            .iter()
+            .filter_map(|call| call.function.as_ref()?.name.as_deref())
+            .collect();
+        assert_eq!(names, vec!["get_weather", "get_weather"]);
+    }
+
+    #[tokio::test]
     async fn mixed_preparsed_reasoning_still_parses_raw_content() {
         let output = concat!(
             "<tool_call>\n<function=get_weather>\n",
@@ -4175,6 +5735,102 @@ mod tests {
         assert!(
             !visible.contains("<tool_call>"),
             "raw markup leaked: {visible:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn already_parsed_detour_allocates_index_after_parser_index_collision() {
+        let raw_call = concat!(
+            "<tool_call>\n<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n</function>\n</tool_call>"
+        );
+        let mut upstream_call = chunk("", false);
+        let choice = &mut upstream_call.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("upstream-call".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("upstream".to_string()),
+                arguments: Some("{\"city\":\"Paris\"}".to_string()),
+            }),
+        }]);
+
+        let mut continuation = chunk("", false);
+        let choice = &mut continuation.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: None,
+            r#type: None,
+            function: Some(FunctionCallStream {
+                name: None,
+                arguments: Some("more".to_string()),
+            }),
+        }]);
+
+        let responses = apply_stream(
+            stream::iter([chunk(raw_call, false), upstream_call, continuation]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let calls: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .flatten()
+            .collect();
+        let parser_call = calls
+            .iter()
+            .find(|call| {
+                call.function
+                    .as_ref()
+                    .and_then(|function| function.name.as_deref())
+                    == Some("get_weather")
+            })
+            .expect("raw parser call must be emitted");
+        let upstream_open = calls
+            .iter()
+            .find(|call| {
+                call.function
+                    .as_ref()
+                    .and_then(|function| function.name.as_deref())
+                    == Some("upstream")
+            })
+            .expect("the first upstream call chunk must keep its name");
+        assert_eq!(parser_call.index, 0);
+        assert_eq!(upstream_open.index, 1);
+        assert_eq!(upstream_open.id.as_deref(), Some("upstream-call"));
+        let passthrough_continuation = choices
+            .iter()
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .flatten()
+            .find(|call| {
+                call.function
+                    .as_ref()
+                    .and_then(|function| function.arguments.as_deref())
+                    == Some("more")
+            })
+            .expect("upstream continuation must be emitted");
+
+        assert_eq!(
+            passthrough_continuation.index, 1,
+            "continuation must retain the upstream call's remapped index"
+        );
+        assert_eq!(passthrough_continuation.id, None);
+        assert_eq!(passthrough_continuation.r#type, None);
+        assert_eq!(
+            passthrough_continuation
+                .function
+                .as_ref()
+                .and_then(|function| function.name.as_deref()),
+            None
         );
     }
 
@@ -4721,12 +6377,229 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn late_tool_metadata_and_fragmented_name_survive_index_open() {
+        fn call_chunk(
+            id: Option<&str>,
+            call_type: Option<FunctionType>,
+            name: Option<&str>,
+            arguments: Option<&str>,
+            finish: Option<FinishReason>,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let mut response = chunk("", false);
+            let choice = &mut response.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: id.map(str::to_string),
+                r#type: call_type,
+                function: Some(FunctionCallStream {
+                    name: name.map(str::to_string),
+                    arguments: arguments.map(str::to_string),
+                }),
+            }]);
+            choice.finish_reason = finish;
+            response
+        }
+
+        let responses = apply_stream(
+            stream::iter([
+                call_chunk(None, None, None, Some(""), None),
+                call_chunk(
+                    Some("call-late"),
+                    Some(FunctionType::Function),
+                    Some("get_"),
+                    None,
+                    None,
+                ),
+                call_chunk(
+                    None,
+                    None,
+                    Some("weather"),
+                    Some("{}"),
+                    Some(FinishReason::ToolCalls),
+                ),
+            ]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let calls: Vec<_> = choices
+            .iter()
+            .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+            .collect();
+
+        assert_eq!(
+            calls
+                .iter()
+                .filter_map(|call| call.id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["call-late"],
+            "an ID supplied after its tool index opens must be forwarded once"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter_map(|call| call.r#type.clone())
+                .collect::<Vec<_>>(),
+            vec![FunctionType::Function],
+            "a type supplied after its tool index opens must be forwarded once"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["get_", "weather"],
+            "name fragments must remain separate deltas so clients can reassemble them"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["", "{}"]
+        );
+    }
+
+    #[tokio::test]
+    async fn late_name_fragments_survive_raw_content_and_reasoning_detour() {
+        let mut first = chunk("visible", false);
+        first.data.as_mut().unwrap().inner.choices[0]
+            .delta
+            .tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call-once".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_".to_string()),
+                arguments: Some(r#"{"city":"Pa"#.to_string()),
+            }),
+        }]);
+        let mut gap = chunk("", false);
+        let gap_choice = &mut gap.data.as_mut().unwrap().inner.choices[0];
+        gap_choice.delta.content = None;
+        gap_choice.delta.reasoning_content = Some("reasoning gap".to_string());
+
+        let mut resumed = chunk("", true);
+        let resumed_choice = &mut resumed.data.as_mut().unwrap().inner.choices[0];
+        resumed_choice.delta.content = None;
+        resumed_choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("duplicate-id".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("weather".to_string()),
+                arguments: Some("ris\"}".to_string()),
+            }),
+        }]);
+        resumed_choice.finish_reason = Some(FinishReason::ToolCalls);
+
+        let responses = apply_stream(
+            stream::iter([first, gap, resumed]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let calls: Vec<_> = choices
+            .iter()
+            .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+            .collect();
+
+        assert_eq!(
+            calls
+                .iter()
+                .filter_map(|call| call.id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["call-once"],
+            "an already emitted ID must not be repeated after a detour"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter_map(|call| call.r#type.clone())
+                .collect::<Vec<_>>(),
+            vec![FunctionType::Function],
+            "an already emitted type must not be repeated after a detour"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["get_", "weather"],
+            "a later name fragment must survive the parsed detour"
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect::<Vec<_>>(),
+            vec![FinishReason::ToolCalls]
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_upstream_call_stays_pending_across_reasoning_detour_at_eof() {
+        let mut first = chunk("visible", false);
+        first.data.as_mut().unwrap().inner.choices[0]
+            .delta
+            .tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call-pending".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(r#"{"city":"Pa"#.to_string()),
+            }),
+        }]);
+        let mut gap = chunk("", false);
+        let gap_choice = &mut gap.data.as_mut().unwrap().inner.choices[0];
+        gap_choice.delta.content = None;
+        gap_choice.delta.reasoning_content = Some("reasoning gap".to_string());
+
+        let responses = apply_stream(
+            stream::iter([first, gap]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+
+        assert!(
+            choices.iter().any(|choice| choice
+                .delta
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())),
+            "the partial upstream tool-call delta must remain visible"
+        );
+        assert!(
+            choices.iter().all(|choice| choice.finish_reason.is_none()),
+            "EOF must not claim tool-call completion when upstream arguments remain partial"
+        );
+    }
+
+    #[tokio::test]
     #[allow(deprecated)]
     async fn legacy_function_call_choice_gets_no_synthetic_terminal_after_a_gap() {
         // The legacy `function_call` field is a distinct signal from `tool_calls`
         // (it has its own `FinishReason::FunctionCall`, never `ToolCalls`) and, like
-        // plain text, is never treated as `tool_emitted` anywhere in this file (only
-        // actual parsed tool-call events and non-empty `delta.tool_calls` are). An
+        // plain text, is never treated as a completed tool call anywhere in this file
+        // (only complete parser events and terminal parsed deltas are). An
         // already-parsed chunk that only carries `function_call` must therefore get
         // the same "no synthetic terminal" treatment after a gap as plain text does,
         // matching the pre-existing live-`ChoiceState` precedent, not a new gap.
@@ -4762,7 +6635,7 @@ mod tests {
         // The live ChoiceState never emits a tool call itself (raw reasoning-only
         // content), but the already-parsed TERMINAL chunk that follows carries its
         // own `delta.tool_calls` together with `finish_reason: Stop` in the same
-        // chunk. The state's own `tool_emitted()` is false, but the record must still
+        // chunk. The state's own completed-call state is false, but the record must still
         // pick up this chunk's own tool call and normalize Stop -> ToolCalls.
         let mut terminal = chunk("", true);
         let choice = &mut terminal.data.as_mut().unwrap().inner.choices[0];
@@ -4801,8 +6674,397 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn already_parsed_first_chunk_with_no_prior_raw_still_terminates_correctly() {
-        let mut already_parsed = chunk("", false);
+    async fn terminal_already_parsed_call_keeps_index_separate_from_raw_call() {
+        let raw_call = concat!(
+            "<tool_call>\n<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n</function>\n</tool_call>"
+        );
+        let mut terminal = chunk("", true);
+        let choice = &mut terminal.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call-complete".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("upstream".to_string()),
+                arguments: Some("{\"city\":\"Paris\"}".to_string()),
+            }),
+        }]);
+
+        let responses = apply_stream(
+            stream::iter([chunk(raw_call, false), terminal]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let tool_call_chunks: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .flatten()
+            .collect();
+        assert_eq!(tool_call_chunks.len(), 2);
+        assert_eq!(tool_call_chunks[0].index, 0);
+        assert!(tool_call_chunks[0].id.is_some());
+        assert_eq!(tool_call_chunks[1].index, 1);
+        assert_eq!(tool_call_chunks[1].id.as_deref(), Some("call-complete"));
+        assert_eq!(
+            tool_call_chunks[1]
+                .function
+                .as_ref()
+                .and_then(|function| function.name.as_deref()),
+            Some("upstream")
+        );
+        let finish_reasons: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice.finish_reason)
+            .collect();
+        assert_eq!(
+            finish_reasons,
+            vec![FinishReason::ToolCalls],
+            "the already-parsed completion must clear the matching raw provisional call"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_recovery_during_reasoning_detour_clears_pending_tool_call() {
+        let complete_json_without_call_end = concat!(
+            "<|tool_calls_section_begin|><|tool_call_begin|>",
+            "functions.get_weather:0<|tool_call_argument_begin|>",
+            r#"{"city":"Paris"}"#
+        );
+        for terminal in [false, true] {
+            let mut parsed_reasoning = chunk("", terminal);
+            let choice = &mut parsed_reasoning.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some("already parsed reasoning".to_string());
+
+            let responses = apply_stream(
+                stream::iter([
+                    chunk(complete_json_without_call_end, false),
+                    parsed_reasoning,
+                ]),
+                Some(weather_tools()),
+                None,
+                false,
+                UnifiedParserStartingState::None,
+                "kimi_k2",
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let choices = collect_choices(&responses);
+
+            assert!(
+                choices
+                    .iter()
+                    .any(|choice| choice.delta.tool_calls.is_some()),
+                "finish must recover the valid JSON body when Kimi omits the call-end marker"
+            );
+            assert_eq!(
+                choices
+                    .iter()
+                    .filter_map(|choice| choice.finish_reason)
+                    .collect::<Vec<_>>(),
+                vec![FinishReason::ToolCalls],
+                "finish-recovered calls must clear the pending index before EOF (terminal={terminal})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn qwen_call_start_marker_inside_parameter_value_survives_reasoning_detour_at_every_split()
+     {
+        async fn run(
+            split: usize,
+            continuation: &str,
+        ) -> (
+            String,
+            String,
+            bool,
+            String,
+            Vec<FinishReason>,
+            Vec<u32>,
+            usize,
+            bool,
+        ) {
+            let mut reasoning_detour = chunk("", false);
+            let choice = &mut reasoning_detour.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some("interleaved thought".to_string());
+
+            let responses = apply_stream(
+                stream::iter([
+                    chunk("<tool_call><function=get_weather><parameter=city>Pa", false),
+                    reasoning_detour,
+                    chunk(&continuation[..split], false),
+                    chunk(&continuation[split..], true),
+                ]),
+                Some(weather_tools()),
+                None,
+                false,
+                UnifiedParserStartingState::None,
+                QWEN3_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+            let choices = collect_choices(&responses);
+            let calls: Vec<_> = choices
+                .iter()
+                .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                .collect();
+            let arguments = calls
+                .iter()
+                .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                .collect();
+            let name = calls
+                .iter()
+                .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                .collect();
+            let reasoning = choices.iter().any(|choice| {
+                choice.delta.reasoning_content.as_deref() == Some("interleaved thought")
+            });
+            let content = choices
+                .iter()
+                .filter_map(|choice| match &choice.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let finish_reasons = choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect();
+            let mut indices: Vec<_> = calls.iter().map(|call| call.index).collect();
+            indices.sort_unstable();
+            indices.dedup();
+            let call_ids: HashSet<_> = calls.iter().filter_map(|call| call.id.as_deref()).collect();
+            let reasoning_position = choices
+                .iter()
+                .position(|choice| choice.delta.reasoning_content.is_some())
+                .expect("the reasoning detour must be emitted");
+            let streamed_before_reasoning = choices[..reasoning_position].iter().any(|choice| {
+                choice.delta.tool_calls.as_ref().is_some_and(|calls| {
+                    calls.iter().any(|call| {
+                        call.function
+                            .as_ref()
+                            .and_then(|function| function.arguments.as_deref())
+                            .is_some_and(|arguments| !arguments.is_empty())
+                    })
+                })
+            });
+            (
+                arguments,
+                name,
+                reasoning,
+                content,
+                finish_reasons,
+                indices,
+                call_ids.len(),
+                streamed_before_reasoning,
+            )
+        }
+
+        let continuation = "<tool_call>after</parameter></function></tool_call>";
+        let whole = run(continuation.len(), continuation).await;
+        assert_eq!(whole.0, r#"{"city":"Pa<tool_call>after"}"#);
+        assert_eq!(whole.1, "get_weather");
+        assert!(whole.2, "the reasoning detour must stay visible");
+        assert_eq!(whole.3, "", "native markup must not leak into content");
+        assert_eq!(whole.4, vec![FinishReason::ToolCalls]);
+        assert_eq!(whole.5, vec![0]);
+        assert_eq!(whole.6, 1, "exactly one call ID must be emitted");
+        assert!(whole.7, "argument bytes must stream before the detour");
+
+        for split in 0..=continuation.len() {
+            assert_eq!(
+                run(split, continuation).await,
+                whole,
+                "splitting the continuation at byte {split} changed the result"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn kimi_call_start_marker_inside_json_string_survives_reasoning_detour_at_every_split() {
+        async fn run(
+            split: usize,
+            continuation: &str,
+        ) -> (String, bool, String, Vec<FinishReason>) {
+            let mut reasoning_detour = chunk("", false);
+            let choice = &mut reasoning_detour.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some("interleaved thought".to_string());
+
+            let responses = apply_stream(
+                stream::iter([
+                    chunk(
+                        "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\":\"Pa",
+                        false,
+                    ),
+                    reasoning_detour,
+                    chunk(&continuation[..split], false),
+                    chunk(&continuation[split..], true),
+                ]),
+                Some(weather_tools()),
+                None,
+                false,
+                UnifiedParserStartingState::None,
+                "kimi_k2",
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+            let choices = collect_choices(&responses);
+            let arguments = choices
+                .iter()
+                .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                .flatten()
+                .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                .collect();
+            let reasoning = choices.iter().any(|choice| {
+                choice.delta.reasoning_content.as_deref() == Some("interleaved thought")
+            });
+            let content = choices
+                .iter()
+                .filter_map(|choice| match &choice.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let finish_reasons = choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect();
+            (arguments, reasoning, content, finish_reasons)
+        }
+
+        let continuation = "<|tool_call_begin|>after\"}<|tool_call_end|><|tool_calls_section_end|>";
+        let whole = run(continuation.len(), continuation).await;
+        assert_eq!(whole.0, "{\"city\":\"Pa<|tool_call_begin|>after\"}");
+        assert!(whole.1, "the reasoning detour must stay visible");
+        assert_eq!(whole.2, "", "no native markup may leak into content");
+        assert_eq!(whole.3, vec![FinishReason::ToolCalls]);
+
+        for split in 0..=continuation.len() {
+            assert_eq!(
+                run(split, continuation).await,
+                whole,
+                "splitting the continuation at byte {split} changed the result"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nonterminal_already_parsed_tool_fragment_does_not_complete_pending_call() {
+        let first_partial = concat!(
+            "<tool_call>\n<function=get_weather>\n",
+            "<parameter=city>Paris"
+        );
+        let mut parsed_fragment = chunk("", false);
+        let choice = &mut parsed_fragment.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call-parsed".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(r#"{"city":"Paris""#.to_string()),
+            }),
+        }]);
+
+        let responses = apply_stream(
+            stream::iter([chunk(first_partial, false), parsed_fragment]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "both the raw and already-parsed partial fragments should be emitted"
+        );
+        assert!(
+            choices.iter().all(|choice| choice.finish_reason.is_none()),
+            "nonterminal parsed argument fragments must not synthesize a completed-call terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_terminal_chunk_closes_parsed_fragments_for_all_indices() {
+        for tool_calls_finish in [false, true] {
+            let mut parsed_fragments = chunk("", false);
+            let choice = &mut parsed_fragments.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.tool_calls = Some(vec![
+                ChatCompletionMessageToolCallChunk {
+                    index: 0,
+                    id: Some("call-first".to_string()),
+                    r#type: Some(FunctionType::Function),
+                    function: Some(FunctionCallStream {
+                        name: Some("get_weather".to_string()),
+                        arguments: Some(r#"{"city":"Par"#.to_string()),
+                    }),
+                },
+                ChatCompletionMessageToolCallChunk {
+                    index: 1,
+                    id: Some("call-second".to_string()),
+                    r#type: Some(FunctionType::Function),
+                    function: Some(FunctionCallStream {
+                        name: Some("get_weather".to_string()),
+                        arguments: Some(r#"{"city":"Tok"#.to_string()),
+                    }),
+                },
+            ]);
+
+            let mut terminal = chunk("", false);
+            let choice = &mut terminal.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some("terminal reasoning".to_string());
+            choice.finish_reason = Some(if tool_calls_finish {
+                FinishReason::ToolCalls
+            } else {
+                FinishReason::Stop
+            });
+
+            let responses = apply_stream(
+                stream::iter([parsed_fragments, terminal]),
+                Some(weather_tools()),
+                None,
+                false,
+                UnifiedParserStartingState::None,
+                QWEN3_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let choices = collect_choices(&responses);
+            assert_eq!(
+                choices
+                    .iter()
+                    .filter_map(|choice| choice.finish_reason)
+                    .collect::<Vec<_>>(),
+                vec![FinishReason::ToolCalls],
+                "a separate terminal reason must close all parsed fragments (tool_calls_finish={tool_calls_finish})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn already_parsed_first_terminal_chunk_normalizes_stop() {
+        let mut already_parsed = chunk("", true);
         let choice = &mut already_parsed.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
@@ -4816,7 +7078,7 @@ mod tests {
         }]);
 
         // This choice index never has a raw chunk at all — no ChoiceState is ever
-        // constructed for it — then the stream ends immediately.
+        // constructed for it — but the parsed chunk carries the terminal Stop signal.
         let responses = apply_stream(
             stream::iter([already_parsed]),
             Some(weather_tools()),
@@ -4835,8 +7097,7 @@ mod tests {
                 .filter_map(|choice| choice.finish_reason)
                 .collect::<Vec<_>>(),
             vec![FinishReason::ToolCalls],
-            "a choice whose only-ever chunk was already-parsed and carried a tool \
-             call must still get exactly one ToolCalls terminal at EOF"
+            "an already-parsed tool call on the terminal chunk must normalize Stop to ToolCalls"
         );
     }
 
@@ -4986,7 +7247,7 @@ mod tests {
     async fn raw_gap_resume_second_gap_then_eof_finishes_once_in_order() {
         // Distinct from `three_consecutive_already_parsed_gaps_then_eof_finishes_once`
         // (which never resumes with a raw chunk in between): this drives raw -> gap ->
-        // raw-resumed (a fresh `ChoiceState`, `tool_emitted` reseeded from the
+        // raw-resumed (a fresh `ChoiceState`, completed-call state reseeded from the
         // `ChoiceRecord`) -> a SECOND gap on that resumed instance -> EOF, so the
         // fold-into-record step at removal runs twice on two different `ChoiceState`
         // instances for the same choice index.
@@ -5113,7 +7374,19 @@ mod tests {
             parser: Box::new(PartialCommitParser {
                 recovered: "<broken>".to_string(),
             }),
+            tool_output_mode: UnifiedToolOutputMode::Native,
+            qwen_native_lexical_state: QwenNativeLexicalState::default(),
+            pending_qwen_opener_text: String::new(),
+            pending_qwen_opener_reasoning: Vec::new(),
             opened_calls: HashSet::new(),
+            tool_ids_emitted: HashSet::new(),
+            tool_types_emitted: HashSet::new(),
+            parser_tool_indices: HashMap::new(),
+            passthrough_tool_indices: HashMap::new(),
+            tool_index_offset: 0,
+            next_tool_index: 0,
+            pending_tool_calls: HashSet::new(),
+            pending_parsed_tool_calls: HashSet::new(),
             tool_emitted: false,
             failed: false,
         };
