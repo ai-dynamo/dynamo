@@ -55,3 +55,8 @@
 # The v1.4.0 release entry lands with the current-release promotion; the tag
 # URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
+
+# Motif-3 recipe files land on the release/1.5.0-motif-3-post.1 branch, so their
+# canonical blob/main and tree/main links 404 from CI until they reach main.
+# Remove this entry once the recipe is on main.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/(recipes/motif-3|docs/fern/pages/recipes/model-recipes/motif-3\.mdx)
