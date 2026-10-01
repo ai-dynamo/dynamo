@@ -258,6 +258,1846 @@ spec:
                     - minSafeServingReplicas
                     - podsPerReplica
                   type: object
+                reconciliation:
+                  description: |-
+                    reconciliation is the controller's durable desired, accepted, and observed journal.
+                    It is persisted before external effects so the same transition can resume after restart.
+                  properties:
+                    capacity:
+                      description: capacity records the newest desired target, the last accepted target, and physical observation.
+                      properties:
+                        accepted:
+                          description: accepted is the last exact target durably acknowledged by the capacity adapter.
+                          properties:
+                            controlRevision:
+                              description: controlRevision orders this target within the Engine Group.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            processLifecycleOwner:
+                              description: processLifecycleOwner identifies who starts and stops engine processes.
+                              enum:
+                                - Engine
+                                - Orchestrator
+                              type: string
+                            profileFingerprint:
+                              description: profileFingerprint binds the target to immutable engine and workload geometry.
+                              minLength: 1
+                              type: string
+                            releaseFences:
+                              description: releaseFences authorize removal of exact Pod UIDs from exact stable slots.
+                              items:
+                                description: EngineGroupReleaseAuthorization permits removal of only named concrete Pod incarnations.
+                                properties:
+                                  capacityRefs:
+                                    description: capacityRefs is the complete set of concrete Pod UIDs authorized for deletion.
+                                    items:
+                                      description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+                                      properties:
+                                        name:
+                                          description: name is the Pod name.
+                                          minLength: 1
+                                          type: string
+                                        uid:
+                                          description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+                                          type: string
+                                      required:
+                                        - name
+                                        - uid
+                                      type: object
+                                      x-kubernetes-validations:
+                                        - message: uid must not be empty
+                                          rule: size(self.uid) > 0
+                                    minItems: 1
+                                    type: array
+                                  operationID:
+                                    description: operationID identifies the membership result authorizing release.
+                                    minLength: 1
+                                    type: string
+                                  replicaID:
+                                    description: replicaID is the stable logical replica being released.
+                                    minLength: 1
+                                    type: string
+                                  slotID:
+                                    description: slotID is the stable workload-manager position being fenced.
+                                    minLength: 1
+                                    type: string
+                                  topologyGeneration:
+                                    description: topologyGeneration identifies the exact committed topology authorizing release.
+                                    format: int64
+                                    minimum: 1
+                                    type: integer
+                                required:
+                                  - capacityRefs
+                                  - operationID
+                                  - replicaID
+                                  - slotID
+                                  - topologyGeneration
+                                type: object
+                              type: array
+                            replicas:
+                              description: replicas is the complete desired set of physical replica allocations.
+                              items:
+                                description: EngineGroupCapacityReplicaTargetStatus describes one allocation required by an absolute target.
+                                properties:
+                                  bootstrap:
+                                    description: bootstrap authorizes creation of a new orchestrator-owned incarnation.
+                                    properties:
+                                      baseTopologyGeneration:
+                                        description: baseTopologyGeneration binds bootstrap to the topology from which the change starts.
+                                        format: int64
+                                        minimum: 1
+                                        type: integer
+                                      mode:
+                                        description: mode distinguishes fresh joining capacity from fixed-slot restoration.
+                                        enum:
+                                          - Join
+                                          - RestoreFixedSlot
+                                        type: string
+                                      nativeMembers:
+                                        description: nativeMembers names the fixed backend identities when the bootstrap mode requires them.
+                                        items:
+                                          minLength: 1
+                                          type: string
+                                        type: array
+                                    required:
+                                      - baseTopologyGeneration
+                                      - mode
+                                    type: object
+                                  incarnation:
+                                    description: incarnation asserts the exact existing capacity that must remain assigned.
+                                    properties:
+                                      capacityRefs:
+                                        description: capacityRefs contains every concrete Pod in this replica allocation.
+                                        items:
+                                          description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+                                          properties:
+                                            name:
+                                              description: name is the Pod name.
+                                              minLength: 1
+                                              type: string
+                                            uid:
+                                              description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+                                              type: string
+                                          required:
+                                            - name
+                                            - uid
+                                          type: object
+                                          x-kubernetes-validations:
+                                            - message: uid must not be empty
+                                              rule: size(self.uid) > 0
+                                        minItems: 1
+                                        type: array
+                                      replicaID:
+                                        description: replicaID is the stable logical identity.
+                                        minLength: 1
+                                        type: string
+                                      runtimeIncarnation:
+                                        description: runtimeIncarnation identifies the concrete engine process incarnation.
+                                        minLength: 1
+                                        type: string
+                                      slotID:
+                                        description: slotID is the stable workload-manager position.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                      - capacityRefs
+                                      - replicaID
+                                      - runtimeIncarnation
+                                      - slotID
+                                    type: object
+                                  replicaID:
+                                    description: replicaID is the stable logical identity.
+                                    minLength: 1
+                                    type: string
+                                  slotID:
+                                    description: slotID identifies the stable workload-manager position.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - replicaID
+                                  - slotID
+                                type: object
+                              type: array
+                              x-kubernetes-list-map-keys:
+                                - replicaID
+                              x-kubernetes-list-type: map
+                            transitionID:
+                              description: transitionID correlates this target with one membership transition.
+                              minLength: 1
+                              type: string
+                          required:
+                            - controlRevision
+                            - processLifecycleOwner
+                            - profileFingerprint
+                            - transitionID
+                          type: object
+                        desired:
+                          description: desired is the newest persisted absolute target, including one that may later be rejected.
+                          properties:
+                            controlRevision:
+                              description: controlRevision orders this target within the Engine Group.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            processLifecycleOwner:
+                              description: processLifecycleOwner identifies who starts and stops engine processes.
+                              enum:
+                                - Engine
+                                - Orchestrator
+                              type: string
+                            profileFingerprint:
+                              description: profileFingerprint binds the target to immutable engine and workload geometry.
+                              minLength: 1
+                              type: string
+                            releaseFences:
+                              description: releaseFences authorize removal of exact Pod UIDs from exact stable slots.
+                              items:
+                                description: EngineGroupReleaseAuthorization permits removal of only named concrete Pod incarnations.
+                                properties:
+                                  capacityRefs:
+                                    description: capacityRefs is the complete set of concrete Pod UIDs authorized for deletion.
+                                    items:
+                                      description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+                                      properties:
+                                        name:
+                                          description: name is the Pod name.
+                                          minLength: 1
+                                          type: string
+                                        uid:
+                                          description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+                                          type: string
+                                      required:
+                                        - name
+                                        - uid
+                                      type: object
+                                      x-kubernetes-validations:
+                                        - message: uid must not be empty
+                                          rule: size(self.uid) > 0
+                                    minItems: 1
+                                    type: array
+                                  operationID:
+                                    description: operationID identifies the membership result authorizing release.
+                                    minLength: 1
+                                    type: string
+                                  replicaID:
+                                    description: replicaID is the stable logical replica being released.
+                                    minLength: 1
+                                    type: string
+                                  slotID:
+                                    description: slotID is the stable workload-manager position being fenced.
+                                    minLength: 1
+                                    type: string
+                                  topologyGeneration:
+                                    description: topologyGeneration identifies the exact committed topology authorizing release.
+                                    format: int64
+                                    minimum: 1
+                                    type: integer
+                                required:
+                                  - capacityRefs
+                                  - operationID
+                                  - replicaID
+                                  - slotID
+                                  - topologyGeneration
+                                type: object
+                              type: array
+                            replicas:
+                              description: replicas is the complete desired set of physical replica allocations.
+                              items:
+                                description: EngineGroupCapacityReplicaTargetStatus describes one allocation required by an absolute target.
+                                properties:
+                                  bootstrap:
+                                    description: bootstrap authorizes creation of a new orchestrator-owned incarnation.
+                                    properties:
+                                      baseTopologyGeneration:
+                                        description: baseTopologyGeneration binds bootstrap to the topology from which the change starts.
+                                        format: int64
+                                        minimum: 1
+                                        type: integer
+                                      mode:
+                                        description: mode distinguishes fresh joining capacity from fixed-slot restoration.
+                                        enum:
+                                          - Join
+                                          - RestoreFixedSlot
+                                        type: string
+                                      nativeMembers:
+                                        description: nativeMembers names the fixed backend identities when the bootstrap mode requires them.
+                                        items:
+                                          minLength: 1
+                                          type: string
+                                        type: array
+                                    required:
+                                      - baseTopologyGeneration
+                                      - mode
+                                    type: object
+                                  incarnation:
+                                    description: incarnation asserts the exact existing capacity that must remain assigned.
+                                    properties:
+                                      capacityRefs:
+                                        description: capacityRefs contains every concrete Pod in this replica allocation.
+                                        items:
+                                          description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+                                          properties:
+                                            name:
+                                              description: name is the Pod name.
+                                              minLength: 1
+                                              type: string
+                                            uid:
+                                              description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+                                              type: string
+                                          required:
+                                            - name
+                                            - uid
+                                          type: object
+                                          x-kubernetes-validations:
+                                            - message: uid must not be empty
+                                              rule: size(self.uid) > 0
+                                        minItems: 1
+                                        type: array
+                                      replicaID:
+                                        description: replicaID is the stable logical identity.
+                                        minLength: 1
+                                        type: string
+                                      runtimeIncarnation:
+                                        description: runtimeIncarnation identifies the concrete engine process incarnation.
+                                        minLength: 1
+                                        type: string
+                                      slotID:
+                                        description: slotID is the stable workload-manager position.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                      - capacityRefs
+                                      - replicaID
+                                      - runtimeIncarnation
+                                      - slotID
+                                    type: object
+                                  replicaID:
+                                    description: replicaID is the stable logical identity.
+                                    minLength: 1
+                                    type: string
+                                  slotID:
+                                    description: slotID identifies the stable workload-manager position.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - replicaID
+                                  - slotID
+                                type: object
+                              type: array
+                              x-kubernetes-list-map-keys:
+                                - replicaID
+                              x-kubernetes-list-type: map
+                            transitionID:
+                              description: transitionID correlates this target with one membership transition.
+                              minLength: 1
+                              type: string
+                          required:
+                            - controlRevision
+                            - processLifecycleOwner
+                            - profileFingerprint
+                            - transitionID
+                          type: object
+                        observed:
+                          description: observed is the workload manager's authoritative allocation and release-fence state.
+                          properties:
+                            allocations:
+                              description: allocations contains every concrete logical-replica allocation currently owned by the group.
+                              items:
+                                description: EngineGroupCapacityAllocationStatus is one complete physical allocation and its availability.
+                                properties:
+                                  available:
+                                    description: available reports whether the complete allocation satisfies profile-required readiness.
+                                    type: boolean
+                                  incarnation:
+                                    description: incarnation binds the allocation to stable and concrete identities.
+                                    properties:
+                                      capacityRefs:
+                                        description: capacityRefs contains every concrete Pod in this replica allocation.
+                                        items:
+                                          description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+                                          properties:
+                                            name:
+                                              description: name is the Pod name.
+                                              minLength: 1
+                                              type: string
+                                            uid:
+                                              description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+                                              type: string
+                                          required:
+                                            - name
+                                            - uid
+                                          type: object
+                                          x-kubernetes-validations:
+                                            - message: uid must not be empty
+                                              rule: size(self.uid) > 0
+                                        minItems: 1
+                                        type: array
+                                      replicaID:
+                                        description: replicaID is the stable logical identity.
+                                        minLength: 1
+                                        type: string
+                                      runtimeIncarnation:
+                                        description: runtimeIncarnation identifies the concrete engine process incarnation.
+                                        minLength: 1
+                                        type: string
+                                      slotID:
+                                        description: slotID is the stable workload-manager position.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                      - capacityRefs
+                                      - replicaID
+                                      - runtimeIncarnation
+                                      - slotID
+                                    type: object
+                                  replicaID:
+                                    description: replicaID duplicates incarnation.replicaID as the list-map key.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - available
+                                  - incarnation
+                                  - replicaID
+                                type: object
+                              type: array
+                              x-kubernetes-list-map-keys:
+                                - replicaID
+                              x-kubernetes-list-type: map
+                            appliedRevision:
+                              description: appliedRevision is the last capacity target revision durably accepted by the adapter.
+                              format: int64
+                              minimum: 0
+                              type: integer
+                            releaseFences:
+                              description: releaseFences are the exact release authorizations durably enforced by the adapter.
+                              items:
+                                description: EngineGroupReleaseAuthorization permits removal of only named concrete Pod incarnations.
+                                properties:
+                                  capacityRefs:
+                                    description: capacityRefs is the complete set of concrete Pod UIDs authorized for deletion.
+                                    items:
+                                      description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+                                      properties:
+                                        name:
+                                          description: name is the Pod name.
+                                          minLength: 1
+                                          type: string
+                                        uid:
+                                          description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+                                          type: string
+                                      required:
+                                        - name
+                                        - uid
+                                      type: object
+                                      x-kubernetes-validations:
+                                        - message: uid must not be empty
+                                          rule: size(self.uid) > 0
+                                    minItems: 1
+                                    type: array
+                                  operationID:
+                                    description: operationID identifies the membership result authorizing release.
+                                    minLength: 1
+                                    type: string
+                                  replicaID:
+                                    description: replicaID is the stable logical replica being released.
+                                    minLength: 1
+                                    type: string
+                                  slotID:
+                                    description: slotID is the stable workload-manager position being fenced.
+                                    minLength: 1
+                                    type: string
+                                  topologyGeneration:
+                                    description: topologyGeneration identifies the exact committed topology authorizing release.
+                                    format: int64
+                                    minimum: 1
+                                    type: integer
+                                required:
+                                  - capacityRefs
+                                  - operationID
+                                  - replicaID
+                                  - slotID
+                                  - topologyGeneration
+                                type: object
+                              type: array
+                          required:
+                            - appliedRevision
+                          type: object
+                      required:
+                        - observed
+                      type: object
+                    controlRevision:
+                      description: controlRevision orders every capacity, traffic, and membership target within this group.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    membership:
+                      description: membership records the exact desired transition and adapter-owned correlated observation.
+                      properties:
+                        desired:
+                          description: desired is one exact immutable membership compare-and-apply target.
+                          properties:
+                            baseTopology:
+                              description: baseTopology is the complete topology against which the target is atomically compared.
+                              properties:
+                                generation:
+                                  description: generation is the engine's topology generation.
+                                  format: int64
+                                  minimum: 1
+                                  type: integer
+                                replicas:
+                                  description: replicas is the complete logical-to-native membership mapping at this generation.
+                                  items:
+                                    description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                                    properties:
+                                      nativeMembers:
+                                        description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                        items:
+                                          minLength: 1
+                                          type: string
+                                        minItems: 1
+                                        type: array
+                                      replicaID:
+                                        description: replicaID is the stable logical identity.
+                                        minLength: 1
+                                        type: string
+                                      runtimeIncarnation:
+                                        description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                      - nativeMembers
+                                      - replicaID
+                                      - runtimeIncarnation
+                                    type: object
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                    - replicaID
+                                  x-kubernetes-list-type: map
+                              required:
+                                - generation
+                              type: object
+                            controlRevision:
+                              description: controlRevision orders this target within the Engine Group.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            joining:
+                              description: joining freezes exact runtime identities supplied to the membership transaction.
+                              items:
+                                description: EngineGroupJoiningReplicaStatus identifies one concrete process joining engine membership.
+                                properties:
+                                  replicaID:
+                                    description: replicaID is the stable logical identity.
+                                    minLength: 1
+                                    type: string
+                                  runtimeIncarnation:
+                                    description: runtimeIncarnation identifies the concrete engine process.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - replicaID
+                                  - runtimeIncarnation
+                                type: object
+                              type: array
+                              x-kubernetes-list-map-keys:
+                                - replicaID
+                              x-kubernetes-list-type: map
+                            plan:
+                              description: plan is the immutable profile-resolved semantic change.
+                              properties:
+                                change:
+                                  description: change is the serializable tagged union of exact membership semantics.
+                                  properties:
+                                    grow:
+                                      description: grow adds previously unknown logical replicas.
+                                      properties:
+                                        replicas:
+                                          description: replicas contains every new logical, slot, bootstrap, and native identity.
+                                          items:
+                                            description: EngineGroupReplicaTargetStatus is the resolved physical and native identity for one joining replica.
+                                            properties:
+                                              bootstrap:
+                                                description: bootstrap distinguishes a new logical member from restoration of a fixed slot.
+                                                enum:
+                                                  - Join
+                                                  - RestoreFixedSlot
+                                                type: string
+                                              nativeMembers:
+                                                description: nativeMembers contains backend-native identities required by the resolved plan.
+                                                items:
+                                                  minLength: 1
+                                                  type: string
+                                                type: array
+                                              replicaID:
+                                                description: replicaID is the stable logical identity.
+                                                minLength: 1
+                                                type: string
+                                              slotID:
+                                                description: slotID is the stable workload-manager position.
+                                                minLength: 1
+                                                type: string
+                                            required:
+                                              - bootstrap
+                                              - replicaID
+                                              - slotID
+                                            type: object
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-map-keys:
+                                            - replicaID
+                                          x-kubernetes-list-type: map
+                                      required:
+                                        - replicas
+                                      type: object
+                                    kind:
+                                      description: kind selects the populated semantic variant.
+                                      enum:
+                                        - Grow
+                                        - Retire
+                                        - ReduceToSurvivors
+                                        - Restore
+                                        - Remap
+                                      type: string
+                                    reduceToSurvivors:
+                                      description: reduceToSurvivors removes base members absent from an authoritative survivor set.
+                                      properties:
+                                        survivors:
+                                          description: survivors is the exact authoritative survivor set.
+                                          items:
+                                            minLength: 1
+                                            type: string
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-type: set
+                                      required:
+                                        - survivors
+                                      type: object
+                                    remap:
+                                      description: remap changes complete native membership without changing logical cardinality.
+                                      properties:
+                                        membership:
+                                          description: membership is the complete target logical, slot, and native-member mapping.
+                                          items:
+                                            description: EngineGroupNativeMembershipStatus is one stable logical-to-native membership mapping.
+                                            properties:
+                                              nativeMembers:
+                                                description: nativeMembers is the complete backend-native identity set for the replica.
+                                                items:
+                                                  minLength: 1
+                                                  type: string
+                                                minItems: 1
+                                                type: array
+                                              replicaID:
+                                                description: replicaID is the stable logical identity.
+                                                minLength: 1
+                                                type: string
+                                              slotID:
+                                                description: slotID is the stable workload-manager position.
+                                                minLength: 1
+                                                type: string
+                                            required:
+                                              - nativeMembers
+                                              - replicaID
+                                              - slotID
+                                            type: object
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-map-keys:
+                                            - replicaID
+                                          x-kubernetes-list-type: map
+                                      required:
+                                        - membership
+                                      type: object
+                                    restore:
+                                      description: restore recreates excluded stable identities in their original native slots.
+                                      properties:
+                                        replicas:
+                                          description: replicas contains every exact stable identity to restore.
+                                          items:
+                                            description: EngineGroupReplicaTargetStatus is the resolved physical and native identity for one joining replica.
+                                            properties:
+                                              bootstrap:
+                                                description: bootstrap distinguishes a new logical member from restoration of a fixed slot.
+                                                enum:
+                                                  - Join
+                                                  - RestoreFixedSlot
+                                                type: string
+                                              nativeMembers:
+                                                description: nativeMembers contains backend-native identities required by the resolved plan.
+                                                items:
+                                                  minLength: 1
+                                                  type: string
+                                                type: array
+                                              replicaID:
+                                                description: replicaID is the stable logical identity.
+                                                minLength: 1
+                                                type: string
+                                              slotID:
+                                                description: slotID is the stable workload-manager position.
+                                                minLength: 1
+                                                type: string
+                                            required:
+                                              - bootstrap
+                                              - replicaID
+                                              - slotID
+                                            type: object
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-map-keys:
+                                            - replicaID
+                                          x-kubernetes-list-type: map
+                                      required:
+                                        - replicas
+                                      type: object
+                                    retire:
+                                      description: retire gracefully removes selected healthy replicas.
+                                      properties:
+                                        replicas:
+                                          description: replicas contains the exact stable logical identities selected for retirement.
+                                          items:
+                                            minLength: 1
+                                            type: string
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-type: set
+                                      required:
+                                        - replicas
+                                      type: object
+                                  required:
+                                    - kind
+                                  type: object
+                                  x-kubernetes-validations:
+                                    - message: exactly one change variant must match kind
+                                      rule: (self.kind == 'Grow' && has(self.grow) && !has(self.retire) && !has(self.reduceToSurvivors) && !has(self.restore) && !has(self.remap)) || (self.kind == 'Retire' && !has(self.grow) && has(self.retire) && !has(self.reduceToSurvivors) && !has(self.restore) && !has(self.remap)) || (self.kind == 'ReduceToSurvivors' && !has(self.grow) && !has(self.retire) && has(self.reduceToSurvivors) && !has(self.restore) && !has(self.remap)) || (self.kind == 'Restore' && !has(self.grow) && !has(self.retire) && !has(self.reduceToSurvivors) && has(self.restore) && !has(self.remap)) || (self.kind == 'Remap' && !has(self.grow) && !has(self.retire) && !has(self.reduceToSurvivors) && !has(self.restore) && has(self.remap))
+                                id:
+                                  description: id is the caller-selected stable plan identity.
+                                  minLength: 1
+                                  type: string
+                                processLifecycleOwner:
+                                  description: processLifecycleOwner identifies who starts and stops joining engine processes.
+                                  enum:
+                                    - Engine
+                                    - Orchestrator
+                                  type: string
+                                profileFingerprint:
+                                  description: profileFingerprint binds the plan to immutable engine and workload geometry.
+                                  minLength: 1
+                                  type: string
+                                trafficRequirement:
+                                  description: trafficRequirement declares whether retained members may serve during the mutation.
+                                  enum:
+                                    - KeepServing
+                                    - QuiesceGroup
+                                  type: string
+                                verificationRequirement:
+                                  description: verificationRequirement declares whether serving progress must be proven before admission.
+                                  enum:
+                                    - None
+                                    - Required
+                                  type: string
+                              required:
+                                - change
+                                - id
+                                - processLifecycleOwner
+                                - profileFingerprint
+                                - trafficRequirement
+                                - verificationRequirement
+                              type: object
+                            targetDigest:
+                              description: targetDigest is the shared-code canonical digest of this exact normalized target.
+                              minLength: 1
+                              type: string
+                            transitionID:
+                              description: transitionID uniquely identifies this target and its durable adapter transaction.
+                              minLength: 1
+                              type: string
+                            validation:
+                              description: validation is the durable adapter evidence for this exact target.
+                              properties:
+                                capabilityGeneration:
+                                  description: capabilityGeneration identifies the adapter capability snapshot used for validation.
+                                  minLength: 1
+                                  type: string
+                                planDigest:
+                                  description: planDigest is the canonical digest of the normalized resolved plan.
+                                  minLength: 1
+                                  type: string
+                                profileFingerprint:
+                                  description: profileFingerprint binds validation to immutable engine and workload geometry.
+                                  minLength: 1
+                                  type: string
+                                targetDigest:
+                                  description: targetDigest is the canonical digest of the exact membership target, when known.
+                                  type: string
+                              required:
+                                - capabilityGeneration
+                                - planDigest
+                                - profileFingerprint
+                              type: object
+                          required:
+                            - baseTopology
+                            - controlRevision
+                            - plan
+                            - targetDigest
+                            - transitionID
+                            - validation
+                          type: object
+                        observed:
+                          description: observed contains authoritative committed topology and the correlated transition result.
+                          properties:
+                            committedTopology:
+                              description: committedTopology is the engine's current authoritative complete topology.
+                              properties:
+                                generation:
+                                  description: generation is the engine's topology generation.
+                                  format: int64
+                                  minimum: 1
+                                  type: integer
+                                replicas:
+                                  description: replicas is the complete logical-to-native membership mapping at this generation.
+                                  items:
+                                    description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                                    properties:
+                                      nativeMembers:
+                                        description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                        items:
+                                          minLength: 1
+                                          type: string
+                                        minItems: 1
+                                        type: array
+                                      replicaID:
+                                        description: replicaID is the stable logical identity.
+                                        minLength: 1
+                                        type: string
+                                      runtimeIncarnation:
+                                        description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                      - nativeMembers
+                                      - replicaID
+                                      - runtimeIncarnation
+                                    type: object
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                    - replicaID
+                                  x-kubernetes-list-type: map
+                              required:
+                                - generation
+                              type: object
+                            requestedTransitionID:
+                              description: requestedTransitionID records the exact identity requested from the adapter observer.
+                              type: string
+                            transition:
+                              description: transition is the adapter's durable state for the requested transition; absence is authoritative.
+                              properties:
+                                controlRevision:
+                                  description: controlRevision echoes the requested controller revision.
+                                  format: int64
+                                  minimum: 1
+                                  type: integer
+                                failure:
+                                  description: failure describes an authoritative rejection or unknown outcome.
+                                  properties:
+                                    classification:
+                                      description: classification states whether the same external intent may be retried.
+                                      enum:
+                                        - Retryable
+                                        - Terminal
+                                      type: string
+                                    message:
+                                      description: message explains the failure for a human reader.
+                                      type: string
+                                    reason:
+                                      description: reason is a stable machine-readable failure reason.
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                    - classification
+                                    - reason
+                                  type: object
+                                phase:
+                                  description: phase is the adapter-owned durable transaction state.
+                                  enum:
+                                    - Pending
+                                    - Committed
+                                    - Rejected
+                                    - Unknown
+                                  type: string
+                                resultTopology:
+                                  description: resultTopology is the immutable topology produced by a committed transition.
+                                  properties:
+                                    generation:
+                                      description: generation is the engine's topology generation.
+                                      format: int64
+                                      minimum: 1
+                                      type: integer
+                                    replicas:
+                                      description: replicas is the complete logical-to-native membership mapping at this generation.
+                                      items:
+                                        description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                                        properties:
+                                          nativeMembers:
+                                            description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                            items:
+                                              minLength: 1
+                                              type: string
+                                            minItems: 1
+                                            type: array
+                                          replicaID:
+                                            description: replicaID is the stable logical identity.
+                                            minLength: 1
+                                            type: string
+                                          runtimeIncarnation:
+                                            description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                            minLength: 1
+                                            type: string
+                                        required:
+                                          - nativeMembers
+                                          - replicaID
+                                          - runtimeIncarnation
+                                        type: object
+                                      type: array
+                                      x-kubernetes-list-map-keys:
+                                        - replicaID
+                                      x-kubernetes-list-type: map
+                                  required:
+                                    - generation
+                                  type: object
+                                targetDigest:
+                                  description: targetDigest echoes the requested canonical target digest.
+                                  minLength: 1
+                                  type: string
+                                transitionID:
+                                  description: transitionID echoes the requested transition identity.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - controlRevision
+                                - phase
+                                - targetDigest
+                                - transitionID
+                              type: object
+                          required:
+                            - committedTopology
+                          type: object
+                      required:
+                        - observed
+                      type: object
+                    registry:
+                      description: registry preserves stable logical-replica and capacity-slot identities across replacement.
+                      items:
+                        description: EngineGroupReplicaRecordStatus is the canonical durable record for one logical replica and stable slot.
+                        properties:
+                          current:
+                            description: current is the concrete physical and runtime incarnation currently assigned to the slot.
+                            properties:
+                              capacityRefs:
+                                description: capacityRefs contains every concrete Pod in this replica allocation.
+                                items:
+                                  description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+                                  properties:
+                                    name:
+                                      description: name is the Pod name.
+                                      minLength: 1
+                                      type: string
+                                    uid:
+                                      description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+                                      type: string
+                                  required:
+                                    - name
+                                    - uid
+                                  type: object
+                                  x-kubernetes-validations:
+                                    - message: uid must not be empty
+                                      rule: size(self.uid) > 0
+                                minItems: 1
+                                type: array
+                              replicaID:
+                                description: replicaID is the stable logical identity.
+                                minLength: 1
+                                type: string
+                              runtimeIncarnation:
+                                description: runtimeIncarnation identifies the concrete engine process incarnation.
+                                minLength: 1
+                                type: string
+                              slotID:
+                                description: slotID is the stable workload-manager position.
+                                minLength: 1
+                                type: string
+                            required:
+                              - capacityRefs
+                              - replicaID
+                              - runtimeIncarnation
+                              - slotID
+                            type: object
+                          history:
+                            description: history retains excluded incarnations and their exact native membership.
+                            items:
+                              description: EngineGroupReplicaHistoryStatus retains one excluded incarnation and its exact native membership.
+                              properties:
+                                incarnation:
+                                  description: incarnation is the concrete allocation and runtime identity that was excluded.
+                                  properties:
+                                    capacityRefs:
+                                      description: capacityRefs contains every concrete Pod in this replica allocation.
+                                      items:
+                                        description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+                                        properties:
+                                          name:
+                                            description: name is the Pod name.
+                                            minLength: 1
+                                            type: string
+                                          uid:
+                                            description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+                                            type: string
+                                        required:
+                                          - name
+                                          - uid
+                                        type: object
+                                        x-kubernetes-validations:
+                                          - message: uid must not be empty
+                                            rule: size(self.uid) > 0
+                                      minItems: 1
+                                      type: array
+                                    replicaID:
+                                      description: replicaID is the stable logical identity.
+                                      minLength: 1
+                                      type: string
+                                    runtimeIncarnation:
+                                      description: runtimeIncarnation identifies the concrete engine process incarnation.
+                                      minLength: 1
+                                      type: string
+                                    slotID:
+                                      description: slotID is the stable workload-manager position.
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                    - capacityRefs
+                                    - replicaID
+                                    - runtimeIncarnation
+                                    - slotID
+                                  type: object
+                                nativeMembers:
+                                  description: nativeMembers are the backend-native identities formerly correlated with this replica.
+                                  items:
+                                    minLength: 1
+                                    type: string
+                                  minItems: 1
+                                  type: array
+                                topologyGeneration:
+                                  description: topologyGeneration identifies the topology that excluded this incarnation.
+                                  format: int64
+                                  minimum: 1
+                                  type: integer
+                              required:
+                                - incarnation
+                                - nativeMembers
+                                - topologyGeneration
+                              type: object
+                            type: array
+                          replicaID:
+                            description: replicaID is stable across physical and runtime replacement.
+                            minLength: 1
+                            type: string
+                          slotID:
+                            description: slotID identifies the stable workload-manager position backing this replica.
+                            minLength: 1
+                            type: string
+                        required:
+                          - replicaID
+                          - slotID
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - replicaID
+                      x-kubernetes-list-type: map
+                    topologyHistory:
+                      description: topologyHistory retains the current topology and snapshots referenced by durable evidence.
+                      properties:
+                        currentGeneration:
+                          description: currentGeneration identifies the engine's current authoritative topology snapshot.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        snapshots:
+                          description: snapshots contains the current topology and any snapshot still referenced by controller state.
+                          items:
+                            description: EngineGroupTopologyStatus is one immutable engine-authoritative committed topology snapshot.
+                            properties:
+                              generation:
+                                description: generation is the engine's topology generation.
+                                format: int64
+                                minimum: 1
+                                type: integer
+                              replicas:
+                                description: replicas is the complete logical-to-native membership mapping at this generation.
+                                items:
+                                  description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                                  properties:
+                                    nativeMembers:
+                                      description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                      items:
+                                        minLength: 1
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                    replicaID:
+                                      description: replicaID is the stable logical identity.
+                                      minLength: 1
+                                      type: string
+                                    runtimeIncarnation:
+                                      description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                    - nativeMembers
+                                    - replicaID
+                                    - runtimeIncarnation
+                                  type: object
+                                type: array
+                                x-kubernetes-list-map-keys:
+                                  - replicaID
+                                x-kubernetes-list-type: map
+                            required:
+                              - generation
+                            type: object
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-map-keys:
+                            - generation
+                          x-kubernetes-list-type: map
+                      required:
+                        - currentGeneration
+                        - snapshots
+                      type: object
+                    traffic:
+                      description: traffic records the newest desired target, the last accepted target, and routing observation.
+                      properties:
+                        accepted:
+                          description: accepted is the last exact target durably acknowledged by the traffic adapter.
+                          properties:
+                            admitted:
+                              description: admitted is the exact set of member incarnations eligible for new work.
+                              items:
+                                description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                                properties:
+                                  nativeMembers:
+                                    description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                    items:
+                                      minLength: 1
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                  replicaID:
+                                    description: replicaID is the stable logical identity.
+                                    minLength: 1
+                                    type: string
+                                  runtimeIncarnation:
+                                    description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - nativeMembers
+                                  - replicaID
+                                  - runtimeIncarnation
+                                type: object
+                              type: array
+                            controlRevision:
+                              description: controlRevision orders this target within the Engine Group.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            drain:
+                              description: drain contains the exact terminal non-serving evidence requested for each member.
+                              items:
+                                description: EngineGroupTrafficDrainTargetStatus requests terminal non-serving evidence for one member.
+                                properties:
+                                  membership:
+                                    description: membership is the exact member incarnation to withdraw and drain.
+                                    properties:
+                                      nativeMembers:
+                                        description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                        items:
+                                          minLength: 1
+                                          type: string
+                                        minItems: 1
+                                        type: array
+                                      replicaID:
+                                        description: replicaID is the stable logical identity.
+                                        minLength: 1
+                                        type: string
+                                      runtimeIncarnation:
+                                        description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                      - nativeMembers
+                                      - replicaID
+                                      - runtimeIncarnation
+                                    type: object
+                                  mode:
+                                    description: mode distinguishes graceful drain from confirmation that a failed member is inactive.
+                                    enum:
+                                      - Graceful
+                                      - ConfirmInactive
+                                    type: string
+                                required:
+                                  - membership
+                                  - mode
+                                type: object
+                              type: array
+                            topologyGeneration:
+                              description: topologyGeneration binds the target to one authoritative membership snapshot.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            transitionID:
+                              description: transitionID correlates this target with one membership transition.
+                              minLength: 1
+                              type: string
+                          required:
+                            - controlRevision
+                            - topologyGeneration
+                            - transitionID
+                          type: object
+                        desired:
+                          description: desired is the newest persisted absolute routing and drain target.
+                          properties:
+                            admitted:
+                              description: admitted is the exact set of member incarnations eligible for new work.
+                              items:
+                                description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                                properties:
+                                  nativeMembers:
+                                    description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                    items:
+                                      minLength: 1
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                  replicaID:
+                                    description: replicaID is the stable logical identity.
+                                    minLength: 1
+                                    type: string
+                                  runtimeIncarnation:
+                                    description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - nativeMembers
+                                  - replicaID
+                                  - runtimeIncarnation
+                                type: object
+                              type: array
+                            controlRevision:
+                              description: controlRevision orders this target within the Engine Group.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            drain:
+                              description: drain contains the exact terminal non-serving evidence requested for each member.
+                              items:
+                                description: EngineGroupTrafficDrainTargetStatus requests terminal non-serving evidence for one member.
+                                properties:
+                                  membership:
+                                    description: membership is the exact member incarnation to withdraw and drain.
+                                    properties:
+                                      nativeMembers:
+                                        description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                        items:
+                                          minLength: 1
+                                          type: string
+                                        minItems: 1
+                                        type: array
+                                      replicaID:
+                                        description: replicaID is the stable logical identity.
+                                        minLength: 1
+                                        type: string
+                                      runtimeIncarnation:
+                                        description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                      - nativeMembers
+                                      - replicaID
+                                      - runtimeIncarnation
+                                    type: object
+                                  mode:
+                                    description: mode distinguishes graceful drain from confirmation that a failed member is inactive.
+                                    enum:
+                                      - Graceful
+                                      - ConfirmInactive
+                                    type: string
+                                required:
+                                  - membership
+                                  - mode
+                                type: object
+                              type: array
+                            topologyGeneration:
+                              description: topologyGeneration binds the target to one authoritative membership snapshot.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            transitionID:
+                              description: transitionID correlates this target with one membership transition.
+                              minLength: 1
+                              type: string
+                          required:
+                            - controlRevision
+                            - topologyGeneration
+                            - transitionID
+                          type: object
+                        observed:
+                          description: observed is the runtime's authoritative routing and drain state.
+                          properties:
+                            admitted:
+                              description: admitted is the exact set of member incarnations eligible for new work.
+                              items:
+                                description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                                properties:
+                                  nativeMembers:
+                                    description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                    items:
+                                      minLength: 1
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                  replicaID:
+                                    description: replicaID is the stable logical identity.
+                                    minLength: 1
+                                    type: string
+                                  runtimeIncarnation:
+                                    description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - nativeMembers
+                                  - replicaID
+                                  - runtimeIncarnation
+                                type: object
+                              type: array
+                            appliedRevision:
+                              description: appliedRevision is the last traffic target revision durably accepted by the adapter.
+                              format: int64
+                              minimum: 0
+                              type: integer
+                            drained:
+                              description: drained is durable terminal non-serving evidence for exact member incarnations.
+                              items:
+                                description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                                properties:
+                                  nativeMembers:
+                                    description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                    items:
+                                      minLength: 1
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                  replicaID:
+                                    description: replicaID is the stable logical identity.
+                                    minLength: 1
+                                    type: string
+                                  runtimeIncarnation:
+                                    description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - nativeMembers
+                                  - replicaID
+                                  - runtimeIncarnation
+                                type: object
+                              type: array
+                            draining:
+                              description: draining contains member incarnations whose graceful drain has not completed.
+                              items:
+                                description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+                                properties:
+                                  nativeMembers:
+                                    description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                                    items:
+                                      minLength: 1
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                  replicaID:
+                                    description: replicaID is the stable logical identity.
+                                    minLength: 1
+                                    type: string
+                                  runtimeIncarnation:
+                                    description: runtimeIncarnation identifies the concrete engine process in this topology.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                  - nativeMembers
+                                  - replicaID
+                                  - runtimeIncarnation
+                                type: object
+                              type: array
+                          required:
+                            - appliedRevision
+                          type: object
+                      required:
+                        - observed
+                      type: object
+                    transition:
+                      description: transition owns the immutable plan and cross-subsystem progress for one active or terminal change.
+                      properties:
+                        failure:
+                          description: failure describes the reason an otherwise durable transition is blocked or reverting.
+                          properties:
+                            classification:
+                              description: classification states whether the same external intent may be retried.
+                              enum:
+                                - Retryable
+                                - Terminal
+                              type: string
+                            message:
+                              description: message explains the failure for a human reader.
+                              type: string
+                            reason:
+                              description: reason is a stable machine-readable failure reason.
+                              minLength: 1
+                              type: string
+                          required:
+                            - classification
+                            - reason
+                          type: object
+                        outcome:
+                          description: outcome summarizes cross-subsystem workflow progress without duplicating adapter phases.
+                          enum:
+                            - Progressing
+                            - Reverting
+                            - RolledBack
+                            - Blocked
+                            - Completed
+                          type: string
+                        planPreflight:
+                          description: planPreflight is durable adapter evidence captured before capacity or traffic prework.
+                          properties:
+                            controlRevision:
+                              description: |-
+                                controlRevision is the controller revision at which validation completed.
+                                Plan preflight runs before the first external target and therefore uses revision zero.
+                              format: int64
+                              minimum: 0
+                              type: integer
+                            evidence:
+                              description: evidence is authoritative approval for the validated subject.
+                              properties:
+                                capabilityGeneration:
+                                  description: capabilityGeneration identifies the adapter capability snapshot used for validation.
+                                  minLength: 1
+                                  type: string
+                                planDigest:
+                                  description: planDigest is the canonical digest of the normalized resolved plan.
+                                  minLength: 1
+                                  type: string
+                                profileFingerprint:
+                                  description: profileFingerprint binds validation to immutable engine and workload geometry.
+                                  minLength: 1
+                                  type: string
+                                targetDigest:
+                                  description: targetDigest is the canonical digest of the exact membership target, when known.
+                                  type: string
+                              required:
+                                - capabilityGeneration
+                                - planDigest
+                                - profileFingerprint
+                              type: object
+                            rejection:
+                              description: rejection is an authoritative terminal rejection of the validated subject.
+                              properties:
+                                classification:
+                                  description: classification states whether the same external intent may be retried.
+                                  enum:
+                                    - Retryable
+                                    - Terminal
+                                  type: string
+                                message:
+                                  description: message explains the failure for a human reader.
+                                  type: string
+                                reason:
+                                  description: reason is a stable machine-readable failure reason.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - classification
+                                - reason
+                              type: object
+                            subjectDigest:
+                              description: subjectDigest identifies the exact normalized plan or target that was validated.
+                              minLength: 1
+                              type: string
+                            transitionID:
+                              description: transitionID correlates this validation with the immutable transition.
+                              minLength: 1
+                              type: string
+                          required:
+                            - controlRevision
+                            - subjectDigest
+                            - transitionID
+                          type: object
+                        spec:
+                          description: spec is the immutable transition identity, base topology, and resolved plan.
+                          properties:
+                            baseTopologyGeneration:
+                              description: baseTopologyGeneration is the exact topology from which the change starts.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            id:
+                              description: id uniquely identifies this transition.
+                              minLength: 1
+                              type: string
+                            plan:
+                              description: plan is the complete normalized semantic operation.
+                              properties:
+                                change:
+                                  description: change is the serializable tagged union of exact membership semantics.
+                                  properties:
+                                    grow:
+                                      description: grow adds previously unknown logical replicas.
+                                      properties:
+                                        replicas:
+                                          description: replicas contains every new logical, slot, bootstrap, and native identity.
+                                          items:
+                                            description: EngineGroupReplicaTargetStatus is the resolved physical and native identity for one joining replica.
+                                            properties:
+                                              bootstrap:
+                                                description: bootstrap distinguishes a new logical member from restoration of a fixed slot.
+                                                enum:
+                                                  - Join
+                                                  - RestoreFixedSlot
+                                                type: string
+                                              nativeMembers:
+                                                description: nativeMembers contains backend-native identities required by the resolved plan.
+                                                items:
+                                                  minLength: 1
+                                                  type: string
+                                                type: array
+                                              replicaID:
+                                                description: replicaID is the stable logical identity.
+                                                minLength: 1
+                                                type: string
+                                              slotID:
+                                                description: slotID is the stable workload-manager position.
+                                                minLength: 1
+                                                type: string
+                                            required:
+                                              - bootstrap
+                                              - replicaID
+                                              - slotID
+                                            type: object
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-map-keys:
+                                            - replicaID
+                                          x-kubernetes-list-type: map
+                                      required:
+                                        - replicas
+                                      type: object
+                                    kind:
+                                      description: kind selects the populated semantic variant.
+                                      enum:
+                                        - Grow
+                                        - Retire
+                                        - ReduceToSurvivors
+                                        - Restore
+                                        - Remap
+                                      type: string
+                                    reduceToSurvivors:
+                                      description: reduceToSurvivors removes base members absent from an authoritative survivor set.
+                                      properties:
+                                        survivors:
+                                          description: survivors is the exact authoritative survivor set.
+                                          items:
+                                            minLength: 1
+                                            type: string
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-type: set
+                                      required:
+                                        - survivors
+                                      type: object
+                                    remap:
+                                      description: remap changes complete native membership without changing logical cardinality.
+                                      properties:
+                                        membership:
+                                          description: membership is the complete target logical, slot, and native-member mapping.
+                                          items:
+                                            description: EngineGroupNativeMembershipStatus is one stable logical-to-native membership mapping.
+                                            properties:
+                                              nativeMembers:
+                                                description: nativeMembers is the complete backend-native identity set for the replica.
+                                                items:
+                                                  minLength: 1
+                                                  type: string
+                                                minItems: 1
+                                                type: array
+                                              replicaID:
+                                                description: replicaID is the stable logical identity.
+                                                minLength: 1
+                                                type: string
+                                              slotID:
+                                                description: slotID is the stable workload-manager position.
+                                                minLength: 1
+                                                type: string
+                                            required:
+                                              - nativeMembers
+                                              - replicaID
+                                              - slotID
+                                            type: object
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-map-keys:
+                                            - replicaID
+                                          x-kubernetes-list-type: map
+                                      required:
+                                        - membership
+                                      type: object
+                                    restore:
+                                      description: restore recreates excluded stable identities in their original native slots.
+                                      properties:
+                                        replicas:
+                                          description: replicas contains every exact stable identity to restore.
+                                          items:
+                                            description: EngineGroupReplicaTargetStatus is the resolved physical and native identity for one joining replica.
+                                            properties:
+                                              bootstrap:
+                                                description: bootstrap distinguishes a new logical member from restoration of a fixed slot.
+                                                enum:
+                                                  - Join
+                                                  - RestoreFixedSlot
+                                                type: string
+                                              nativeMembers:
+                                                description: nativeMembers contains backend-native identities required by the resolved plan.
+                                                items:
+                                                  minLength: 1
+                                                  type: string
+                                                type: array
+                                              replicaID:
+                                                description: replicaID is the stable logical identity.
+                                                minLength: 1
+                                                type: string
+                                              slotID:
+                                                description: slotID is the stable workload-manager position.
+                                                minLength: 1
+                                                type: string
+                                            required:
+                                              - bootstrap
+                                              - replicaID
+                                              - slotID
+                                            type: object
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-map-keys:
+                                            - replicaID
+                                          x-kubernetes-list-type: map
+                                      required:
+                                        - replicas
+                                      type: object
+                                    retire:
+                                      description: retire gracefully removes selected healthy replicas.
+                                      properties:
+                                        replicas:
+                                          description: replicas contains the exact stable logical identities selected for retirement.
+                                          items:
+                                            minLength: 1
+                                            type: string
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-type: set
+                                      required:
+                                        - replicas
+                                      type: object
+                                  required:
+                                    - kind
+                                  type: object
+                                  x-kubernetes-validations:
+                                    - message: exactly one change variant must match kind
+                                      rule: (self.kind == 'Grow' && has(self.grow) && !has(self.retire) && !has(self.reduceToSurvivors) && !has(self.restore) && !has(self.remap)) || (self.kind == 'Retire' && !has(self.grow) && has(self.retire) && !has(self.reduceToSurvivors) && !has(self.restore) && !has(self.remap)) || (self.kind == 'ReduceToSurvivors' && !has(self.grow) && !has(self.retire) && has(self.reduceToSurvivors) && !has(self.restore) && !has(self.remap)) || (self.kind == 'Restore' && !has(self.grow) && !has(self.retire) && !has(self.reduceToSurvivors) && has(self.restore) && !has(self.remap)) || (self.kind == 'Remap' && !has(self.grow) && !has(self.retire) && !has(self.reduceToSurvivors) && !has(self.restore) && has(self.remap))
+                                id:
+                                  description: id is the caller-selected stable plan identity.
+                                  minLength: 1
+                                  type: string
+                                processLifecycleOwner:
+                                  description: processLifecycleOwner identifies who starts and stops joining engine processes.
+                                  enum:
+                                    - Engine
+                                    - Orchestrator
+                                  type: string
+                                profileFingerprint:
+                                  description: profileFingerprint binds the plan to immutable engine and workload geometry.
+                                  minLength: 1
+                                  type: string
+                                trafficRequirement:
+                                  description: trafficRequirement declares whether retained members may serve during the mutation.
+                                  enum:
+                                    - KeepServing
+                                    - QuiesceGroup
+                                  type: string
+                                verificationRequirement:
+                                  description: verificationRequirement declares whether serving progress must be proven before admission.
+                                  enum:
+                                    - None
+                                    - Required
+                                  type: string
+                              required:
+                                - change
+                                - id
+                                - processLifecycleOwner
+                                - profileFingerprint
+                                - trafficRequirement
+                                - verificationRequirement
+                              type: object
+                          required:
+                            - baseTopologyGeneration
+                            - id
+                            - plan
+                          type: object
+                        startedAt:
+                          description: startedAt is when the controller first persisted the immutable transition.
+                          format: date-time
+                          type: string
+                        targetPreflight:
+                          description: targetPreflight is durable adapter evidence for the exact frozen membership target.
+                          properties:
+                            controlRevision:
+                              description: |-
+                                controlRevision is the controller revision at which validation completed.
+                                Plan preflight runs before the first external target and therefore uses revision zero.
+                              format: int64
+                              minimum: 0
+                              type: integer
+                            evidence:
+                              description: evidence is authoritative approval for the validated subject.
+                              properties:
+                                capabilityGeneration:
+                                  description: capabilityGeneration identifies the adapter capability snapshot used for validation.
+                                  minLength: 1
+                                  type: string
+                                planDigest:
+                                  description: planDigest is the canonical digest of the normalized resolved plan.
+                                  minLength: 1
+                                  type: string
+                                profileFingerprint:
+                                  description: profileFingerprint binds validation to immutable engine and workload geometry.
+                                  minLength: 1
+                                  type: string
+                                targetDigest:
+                                  description: targetDigest is the canonical digest of the exact membership target, when known.
+                                  type: string
+                              required:
+                                - capabilityGeneration
+                                - planDigest
+                                - profileFingerprint
+                              type: object
+                            rejection:
+                              description: rejection is an authoritative terminal rejection of the validated subject.
+                              properties:
+                                classification:
+                                  description: classification states whether the same external intent may be retried.
+                                  enum:
+                                    - Retryable
+                                    - Terminal
+                                  type: string
+                                message:
+                                  description: message explains the failure for a human reader.
+                                  type: string
+                                reason:
+                                  description: reason is a stable machine-readable failure reason.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - classification
+                                - reason
+                              type: object
+                            subjectDigest:
+                              description: subjectDigest identifies the exact normalized plan or target that was validated.
+                              minLength: 1
+                              type: string
+                            transitionID:
+                              description: transitionID correlates this validation with the immutable transition.
+                              minLength: 1
+                              type: string
+                          required:
+                            - controlRevision
+                            - subjectDigest
+                            - transitionID
+                          type: object
+                        updatedAt:
+                          description: updatedAt is when the controller last changed durable transition state.
+                          format: date-time
+                          type: string
+                        verification:
+                          description: verification records the topology-bound serving proof or conclusive failure.
+                          properties:
+                            failure:
+                              description: failure is a conclusive verification failure.
+                              properties:
+                                classification:
+                                  description: classification states whether the same external intent may be retried.
+                                  enum:
+                                    - Retryable
+                                    - Terminal
+                                  type: string
+                                message:
+                                  description: message explains the failure for a human reader.
+                                  type: string
+                                reason:
+                                  description: reason is a stable machine-readable failure reason.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - classification
+                                - reason
+                              type: object
+                            phase:
+                              description: phase is the durable serving-verification state.
+                              enum:
+                                - Pending
+                                - Passed
+                                - Failed
+                              type: string
+                            proof:
+                              description: proof is a positive result bound to one immutable topology.
+                              properties:
+                                observedAt:
+                                  description: observedAt records when serving progress was proven.
+                                  format: date-time
+                                  type: string
+                                runtimeDigest:
+                                  description: runtimeDigest identifies the runtime-observed membership and serving path.
+                                  minLength: 1
+                                  type: string
+                                topologyGeneration:
+                                  description: topologyGeneration identifies the verified topology.
+                                  format: int64
+                                  minimum: 1
+                                  type: integer
+                              required:
+                                - observedAt
+                                - runtimeDigest
+                                - topologyGeneration
+                              type: object
+                          required:
+                            - phase
+                          type: object
+                      required:
+                        - outcome
+                        - spec
+                        - startedAt
+                        - updatedAt
+                      type: object
+                  required:
+                    - capacity
+                    - controlRevision
+                    - membership
+                    - topologyHistory
+                    - traffic
+                  type: object
                 releaseAuthorizations:
                   description: releaseAuthorizations names the exact Pod UIDs that may be removed from stable replica slots.
                   items:

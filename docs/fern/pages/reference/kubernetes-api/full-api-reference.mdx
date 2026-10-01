@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 166 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 228 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">69 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">131 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">28 types</Card>
 </CardGroup>
 
@@ -2141,6 +2141,7 @@ Package v1beta1 contains API Schema definitions for the nvidia.com v1beta1 API g
 <CardGroup cols={3}>
 <Card title="DynamoComponentDeployment" href="#v1beta1-dynamocomponentdeployment" />
 <Card title="DynamoGraphDeployment" href="#v1beta1-dynamographdeployment" />
+<Card title="DynamoGraphDeploymentEngineGroup" href="#dynamographdeploymentenginegroup" />
 <Card title="DynamoGraphDeploymentRequest" href="#v1beta1-dynamographdeploymentrequest" />
 <Card title="DynamoGraphDeploymentScalingAdapter" href="#v1beta1-dynamographdeploymentscalingadapter" />
 </CardGroup>
@@ -2876,6 +2877,148 @@ componentName is the `componentName` of the entry within the target DGD's `spec.
 </ParamField>
 </Accordion>
 
+<Accordion id="dynamographdeploymentenginegroup" title="DynamoGraphDeploymentEngineGroup">
+DynamoGraphDeploymentEngineGroup represents one independently resizable distributed engine world.
+The scale subresource counts logical replicas, while status keeps physical allocation, engine
+membership, and traffic admission separately observable.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1beta1`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoGraphDeploymentEngineGroup`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoGraphDeploymentEngineGroupSpec">
+See [DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec).
+</ParamField>
+
+<ParamField path="status" type="DynamoGraphDeploymentEngineGroupStatus">
+See [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentenginegroupspec" title="DynamoGraphDeploymentEngineGroupSpec">
+DynamoGraphDeploymentEngineGroupSpec defines the desired capacity of one independently
+resizable distributed engine world.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+<ParamField path="replicas" type="integer" required={true}>
+replicas is the absolute desired number of logical engine replicas in this group. For Elastic EP, one replica maps to one data-parallel replica through the resolved profile.
+**Validation:** Minimum: 1  Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="policy" type="EngineGroupScalingPolicy">
+policy constrains user- or autoscaler-selected replica targets independently from hard engine capability bounds reported in status.profile.
+See [EngineGroupScalingPolicy](#enginegroupscalingpolicy).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentenginegroupstatus" title="DynamoGraphDeploymentEngineGroupStatus">
+DynamoGraphDeploymentEngineGroupStatus defines the observed state of one Engine Group.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+<ParamField path="observedGeneration" type="integer">
+observedGeneration is the most recent object generation observed by the controller.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="replicas" type="integer">
+replicas is the number of logical replicas with complete physical allocations. It is the current replica count exposed through the scale subresource.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="availableReplicas" type="integer">
+availableReplicas is the number of allocated replicas whose complete physical allocation and profile-required runtime checks are available.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="activeReplicas" type="integer">
+activeReplicas is the number of replicas in the engine's authoritative committed topology.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="selector" type="string">
+selector matches exactly one representative Pod for every allocated logical replica. It represents allocation, not availability or engine admission.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="scaleUnit" type="EngineGroupScaleUnit">
+scaleUnit names the logical unit counted by spec.replicas and status.replicas.
+See [EngineGroupScaleUnit](#enginegroupscaleunit).
+**Validation:** Enum: [replicas]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="profile" type="EngineGroupProfileStatus">
+profile is the immutable resolved mapping between logical replicas and physical capacity.
+See [EngineGroupProfileStatus](#enginegroupprofilestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="topology" type="EngineGroupTopologyStatus">
+topology is the engine's current authoritative committed topology.
+See [EngineGroupTopologyStatus](#enginegrouptopologystatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lastStableReplicas" type="integer">
+lastStableReplicas is the most recent membership count that reached its desired target without degradation.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="replicaStates" type="EngineGroupReplicaStatus array">
+replicaStates contains the stable identity and independently observed physical and engine state of each known logical replica.
+See [EngineGroupReplicaStatus](#enginegroupreplicastatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="traffic" type="EngineGroupTrafficStatus">
+traffic is the runtime's authoritative routing and drain observation.
+See [EngineGroupTrafficStatus](#enginegrouptrafficstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="releaseAuthorizations" type="EngineGroupReleaseAuthorization array">
+releaseAuthorizations names the exact Pod UIDs that may be removed from stable replica slots.
+See [EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="targetValidation" type="EngineGroupTargetValidationStatus">
+targetValidation describes a desired replica target rejected from reconciliation-time profile or capability information.
+See [EngineGroupTargetValidationStatus](#enginegrouptargetvalidationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="reconciliation" type="EngineGroupReconciliationStatus">
+reconciliation is the controller's durable desired, accepted, and observed journal. It is persisted before external effects so the same transition can resume after restart.
+See [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+conditions contains the latest observations of group availability, progress, degradation, target convergence, target validity, and topology authority.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="v1beta1-dynamographdeploymentexperimentalspec" title="DynamoGraphDeploymentExperimentalSpec">
 DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
 features whose API shape and behavior may change in breaking ways between
@@ -3287,6 +3430,1501 @@ See [ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubern
 <ParamField path="config" type="EndpointPickerConfig">
 config allows specifying EPP `EndpointPickerConfig` directly as a structured object. The operator marshals this to YAML and creates a ConfigMap automatically. Mutually exclusive with `configMapRef`. One of `configMapRef` or `config` must be specified.
 **Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupbootstrapmode" title="EngineGroupBootstrapMode">
+EngineGroupBootstrapMode describes how one new incarnation joins the engine world.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Join RestoreFixedSlot]
+**Appears in:** [EngineGroupCapacityBootstrapStatus](#enginegroupcapacitybootstrapstatus), [EngineGroupReplicaTargetStatus](#enginegroupreplicatargetstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Join</Badge> EngineGroupBootstrapModeJoin creates a previously unknown logical member.
+- <Badge intent="note" minimal>RestoreFixedSlot</Badge> EngineGroupBootstrapModeRestoreFixedSlot restores a known logical and native-member identity.
+</Accordion>
+
+<Accordion id="enginegroupcapacityallocationstatus" title="EngineGroupCapacityAllocationStatus">
+EngineGroupCapacityAllocationStatus is one complete physical allocation and its availability.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupCapacityObservationStatus](#enginegroupcapacityobservationstatus)
+
+<ParamField path="replicaID" type="string">
+replicaID duplicates incarnation.replicaID as the list-map key.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="incarnation" type="EngineGroupControlIncarnationStatus">
+incarnation binds the allocation to stable and concrete identities.
+See [EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus).
+</ParamField>
+
+<ParamField path="available" type="boolean">
+available reports whether the complete allocation satisfies profile-required readiness.
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupcapacitybootstrapstatus" title="EngineGroupCapacityBootstrapStatus">
+EngineGroupCapacityBootstrapStatus is the profile-resolved creation intent for one allocation.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupCapacityReplicaTargetStatus](#enginegroupcapacityreplicatargetstatus)
+
+<ParamField path="mode" type="EngineGroupBootstrapMode">
+mode distinguishes fresh joining capacity from fixed-slot restoration.
+See [EngineGroupBootstrapMode](#enginegroupbootstrapmode).
+**Validation:** Enum: [Join RestoreFixedSlot]
+</ParamField>
+
+<ParamField path="baseTopologyGeneration" type="integer">
+baseTopologyGeneration binds bootstrap to the topology from which the change starts.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="nativeMembers" type="string array">
+nativeMembers names the fixed backend identities when the bootstrap mode requires them.
+**Validation:** items:MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupcapacityobservationstatus" title="EngineGroupCapacityObservationStatus">
+EngineGroupCapacityObservationStatus is the workload manager's authoritative capacity state.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupCapacityReconciliationStatus](#enginegroupcapacityreconciliationstatus)
+
+<ParamField path="appliedRevision" type="integer">
+appliedRevision is the last capacity target revision durably accepted by the adapter.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="allocations" type="EngineGroupCapacityAllocationStatus array">
+allocations contains every concrete logical-replica allocation currently owned by the group.
+See [EngineGroupCapacityAllocationStatus](#enginegroupcapacityallocationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="releaseFences" type="EngineGroupReleaseAuthorization array">
+releaseFences are the exact release authorizations durably enforced by the adapter.
+See [EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupcapacityreconciliationstatus" title="EngineGroupCapacityReconciliationStatus">
+EngineGroupCapacityReconciliationStatus records desired, accepted, and observed capacity levels.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+<ParamField path="desired" type="EngineGroupCapacityTargetStatus">
+desired is the newest persisted absolute target, including one that may later be rejected.
+See [EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="accepted" type="EngineGroupCapacityTargetStatus">
+accepted is the last exact target durably acknowledged by the capacity adapter.
+See [EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="observed" type="EngineGroupCapacityObservationStatus">
+observed is the workload manager's authoritative allocation and release-fence state.
+See [EngineGroupCapacityObservationStatus](#enginegroupcapacityobservationstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupcapacityref" title="EngineGroupCapacityRef">
+EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus), [EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization), [EngineGroupReplicaIncarnation](#enginegroupreplicaincarnation), [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+<ParamField path="name" type="string">
+name is the Pod name.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="uid" type="UID">
+uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupcapacityreplicatargetstatus" title="EngineGroupCapacityReplicaTargetStatus">
+EngineGroupCapacityReplicaTargetStatus describes one allocation required by an absolute target.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is the stable logical identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="slotID" type="string">
+slotID identifies the stable workload-manager position.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="incarnation" type="EngineGroupControlIncarnationStatus">
+incarnation asserts the exact existing capacity that must remain assigned.
+See [EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="bootstrap" type="EngineGroupCapacityBootstrapStatus">
+bootstrap authorizes creation of a new orchestrator-owned incarnation.
+See [EngineGroupCapacityBootstrapStatus](#enginegroupcapacitybootstrapstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupcapacitytargetstatus" title="EngineGroupCapacityTargetStatus">
+EngineGroupCapacityTargetStatus is one group-ordered absolute physical-capacity projection.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupCapacityReconciliationStatus](#enginegroupcapacityreconciliationstatus)
+
+<ParamField path="controlRevision" type="integer">
+controlRevision orders this target within the Engine Group.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="transitionID" type="string">
+transitionID correlates this target with one membership transition.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="profileFingerprint" type="string">
+profileFingerprint binds the target to immutable engine and workload geometry.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="processLifecycleOwner" type="EngineGroupProcessLifecycleOwner">
+processLifecycleOwner identifies who starts and stops engine processes.
+See [EngineGroupProcessLifecycleOwner](#enginegroupprocesslifecycleowner).
+**Validation:** Enum: [Engine Orchestrator]
+</ParamField>
+
+<ParamField path="replicas" type="EngineGroupCapacityReplicaTargetStatus array">
+replicas is the complete desired set of physical replica allocations.
+See [EngineGroupCapacityReplicaTargetStatus](#enginegroupcapacityreplicatargetstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="releaseFences" type="EngineGroupReleaseAuthorization array">
+releaseFences authorize removal of exact Pod UIDs from exact stable slots.
+See [EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupcontrolincarnationstatus" title="EngineGroupControlIncarnationStatus">
+EngineGroupControlIncarnationStatus binds stable logical and slot identities to concrete capacity.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupCapacityAllocationStatus](#enginegroupcapacityallocationstatus), [EngineGroupCapacityReplicaTargetStatus](#enginegroupcapacityreplicatargetstatus), [EngineGroupReplicaHistoryStatus](#enginegroupreplicahistorystatus), [EngineGroupReplicaRecordStatus](#enginegroupreplicarecordstatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is the stable logical identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="slotID" type="string">
+slotID is the stable workload-manager position.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="runtimeIncarnation" type="string">
+runtimeIncarnation identifies the concrete engine process incarnation.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="capacityRefs" type="EngineGroupCapacityRef array">
+capacityRefs contains every concrete Pod in this replica allocation.
+See [EngineGroupCapacityRef](#enginegroupcapacityref).
+**Validation:** MinItems: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupfailureclassification" title="EngineGroupFailureClassification">
+EngineGroupFailureClassification states whether reconciliation may retry the same external intent.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Retryable Terminal]
+**Appears in:** [EngineGroupFailureStatus](#enginegroupfailurestatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Retryable</Badge> EngineGroupFailureClassificationRetryable permits retrying the same intent.
+- <Badge intent="note" minimal>Terminal</Badge> EngineGroupFailureClassificationTerminal means the same intent cannot safely make progress.
+</Accordion>
+
+<Accordion id="enginegroupfailurestatus" title="EngineGroupFailureStatus">
+EngineGroupFailureStatus is one structured subsystem or transition failure.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupMembershipTransitionObservationStatus](#enginegroupmembershiptransitionobservationstatus), [EngineGroupPreflightStatus](#enginegrouppreflightstatus), [EngineGroupTransitionStatus](#enginegrouptransitionstatus), [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+<ParamField path="classification" type="EngineGroupFailureClassification">
+classification states whether the same external intent may be retried.
+See [EngineGroupFailureClassification](#enginegroupfailureclassification).
+**Validation:** Enum: [Retryable Terminal]
+</ParamField>
+
+<ParamField path="reason" type="string">
+reason is a stable machine-readable failure reason.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="message" type="string">
+message explains the failure for a human reader.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupgrowchangestatus" title="EngineGroupGrowChangeStatus">
+EngineGroupGrowChangeStatus adds named fresh logical replicas.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+<ParamField path="replicas" type="EngineGroupReplicaTargetStatus array">
+replicas contains every new logical, slot, bootstrap, and native identity.
+See [EngineGroupReplicaTargetStatus](#enginegroupreplicatargetstatus).
+**Validation:** MinItems: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupjoiningreplicastatus" title="EngineGroupJoiningReplicaStatus">
+EngineGroupJoiningReplicaStatus identifies one concrete process joining engine membership.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is the stable logical identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="runtimeIncarnation" type="string">
+runtimeIncarnation identifies the concrete engine process.
+**Validation:** MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupmemberstatus" title="EngineGroupMemberStatus">
+EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupTopologyStatus](#enginegrouptopologystatus), [EngineGroupTrafficDrainTargetStatus](#enginegrouptrafficdraintargetstatus), [EngineGroupTrafficObservationStatus](#enginegrouptrafficobservationstatus), [EngineGroupTrafficStatus](#enginegrouptrafficstatus), [EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is the stable logical identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="runtimeIncarnation" type="string">
+runtimeIncarnation identifies the concrete engine process in this topology.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="nativeMembers" type="string array">
+nativeMembers are the backend-specific ranks or member identities committed for the replica.
+**Validation:** MinItems: 1  items:MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupmembershipobservationstatus" title="EngineGroupMembershipObservationStatus">
+EngineGroupMembershipObservationStatus separates current topology from one correlated transaction result.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupMembershipReconciliationStatus](#enginegroupmembershipreconciliationstatus)
+
+<ParamField path="committedTopology" type="EngineGroupTopologyStatus">
+committedTopology is the engine's current authoritative complete topology.
+See [EngineGroupTopologyStatus](#enginegrouptopologystatus).
+</ParamField>
+
+<ParamField path="requestedTransitionID" type="string">
+requestedTransitionID records the exact identity requested from the adapter observer.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="transition" type="EngineGroupMembershipTransitionObservationStatus">
+transition is the adapter's durable state for the requested transition; absence is authoritative.
+See [EngineGroupMembershipTransitionObservationStatus](#enginegroupmembershiptransitionobservationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupmembershipreconciliationstatus" title="EngineGroupMembershipReconciliationStatus">
+EngineGroupMembershipReconciliationStatus records one desired transition and adapter observation.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+<ParamField path="desired" type="EngineGroupMembershipTargetStatus">
+desired is one exact immutable membership compare-and-apply target.
+See [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="observed" type="EngineGroupMembershipObservationStatus">
+observed contains authoritative committed topology and the correlated transition result.
+See [EngineGroupMembershipObservationStatus](#enginegroupmembershipobservationstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupmembershiptargetstatus" title="EngineGroupMembershipTargetStatus">
+EngineGroupMembershipTargetStatus is one exact immutable membership transition target.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupMembershipReconciliationStatus](#enginegroupmembershipreconciliationstatus)
+
+<ParamField path="controlRevision" type="integer">
+controlRevision orders this target within the Engine Group.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="transitionID" type="string">
+transitionID uniquely identifies this target and its durable adapter transaction.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="targetDigest" type="string">
+targetDigest is the shared-code canonical digest of this exact normalized target.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="validation" type="EngineGroupValidationEvidenceStatus">
+validation is the durable adapter evidence for this exact target.
+See [EngineGroupValidationEvidenceStatus](#enginegroupvalidationevidencestatus).
+</ParamField>
+
+<ParamField path="baseTopology" type="EngineGroupTopologyStatus">
+baseTopology is the complete topology against which the target is atomically compared.
+See [EngineGroupTopologyStatus](#enginegrouptopologystatus).
+</ParamField>
+
+<ParamField path="plan" type="EngineGroupResolvedPlanStatus">
+plan is the immutable profile-resolved semantic change.
+See [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus).
+</ParamField>
+
+<ParamField path="joining" type="EngineGroupJoiningReplicaStatus array">
+joining freezes exact runtime identities supplied to the membership transaction.
+See [EngineGroupJoiningReplicaStatus](#enginegroupjoiningreplicastatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupmembershiptransitionobservationstatus" title="EngineGroupMembershipTransitionObservationStatus">
+EngineGroupMembershipTransitionObservationStatus is the durable result for one exact target.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupMembershipObservationStatus](#enginegroupmembershipobservationstatus)
+
+<ParamField path="transitionID" type="string">
+transitionID echoes the requested transition identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="controlRevision" type="integer">
+controlRevision echoes the requested controller revision.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="targetDigest" type="string">
+targetDigest echoes the requested canonical target digest.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="phase" type="EngineGroupMembershipTransitionPhase">
+phase is the adapter-owned durable transaction state.
+See [EngineGroupMembershipTransitionPhase](#enginegroupmembershiptransitionphase).
+**Validation:** Enum: [Pending Committed Rejected Unknown]
+</ParamField>
+
+<ParamField path="resultTopology" type="EngineGroupTopologyStatus">
+resultTopology is the immutable topology produced by a committed transition.
+See [EngineGroupTopologyStatus](#enginegrouptopologystatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="failure" type="EngineGroupFailureStatus">
+failure describes an authoritative rejection or unknown outcome.
+See [EngineGroupFailureStatus](#enginegroupfailurestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupmembershiptransitionphase" title="EngineGroupMembershipTransitionPhase">
+EngineGroupMembershipTransitionPhase is adapter-owned durable state for one exact target.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Pending Committed Rejected Unknown]
+**Appears in:** [EngineGroupMembershipTransitionObservationStatus](#enginegroupmembershiptransitionobservationstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Pending</Badge> EngineGroupMembershipTransitionPhasePending means the adapter accepted and is applying the target.
+- <Badge intent="note" minimal>Committed</Badge> EngineGroupMembershipTransitionPhaseCommitted means the target produced its result topology.
+- <Badge intent="note" minimal>Rejected</Badge> EngineGroupMembershipTransitionPhaseRejected means the target definitively cannot mutate membership.
+- <Badge intent="note" minimal>Unknown</Badge> EngineGroupMembershipTransitionPhaseUnknown means the adapter cannot establish the target's outcome.
+</Accordion>
+
+<Accordion id="enginegroupnativemembershipstatus" title="EngineGroupNativeMembershipStatus">
+EngineGroupNativeMembershipStatus is one stable logical-to-native membership mapping.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupRemapChangeStatus](#enginegroupremapchangestatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is the stable logical identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="slotID" type="string">
+slotID is the stable workload-manager position.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="nativeMembers" type="string array">
+nativeMembers is the complete backend-native identity set for the replica.
+**Validation:** MinItems: 1  items:MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupplankind" title="EngineGroupPlanKind">
+EngineGroupPlanKind identifies exact membership-change semantics.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Grow Retire ReduceToSurvivors Restore Remap]
+**Appears in:** [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Grow</Badge> EngineGroupPlanKindGrow adds previously unknown logical replicas.
+- <Badge intent="note" minimal>Retire</Badge> EngineGroupPlanKindRetire gracefully removes selected healthy replicas.
+- <Badge intent="note" minimal>ReduceToSurvivors</Badge> EngineGroupPlanKindReduceToSurvivors removes identities absent from an authoritative survivor set.
+- <Badge intent="note" minimal>Restore</Badge> EngineGroupPlanKindRestore recreates excluded stable identities.
+- <Badge intent="note" minimal>Remap</Badge> EngineGroupPlanKindRemap changes native membership without changing logical cardinality.
+</Accordion>
+
+<Accordion id="enginegrouppreflightstatus" title="EngineGroupPreflightStatus">
+EngineGroupPreflightStatus durably records one side-effect-free validation result.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupTransitionStatus](#enginegrouptransitionstatus)
+
+<ParamField path="transitionID" type="string">
+transitionID correlates this validation with the immutable transition.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="controlRevision" type="integer">
+controlRevision is the controller revision at which validation completed. Plan preflight runs before the first external target and therefore uses revision zero.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="subjectDigest" type="string">
+subjectDigest identifies the exact normalized plan or target that was validated.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="evidence" type="EngineGroupValidationEvidenceStatus">
+evidence is authoritative approval for the validated subject.
+See [EngineGroupValidationEvidenceStatus](#enginegroupvalidationevidencestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="rejection" type="EngineGroupFailureStatus">
+rejection is an authoritative terminal rejection of the validated subject.
+See [EngineGroupFailureStatus](#enginegroupfailurestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupprocesslifecycleowner" title="EngineGroupProcessLifecycleOwner">
+EngineGroupProcessLifecycleOwner identifies who starts and stops engine processes.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Engine Orchestrator]
+**Appears in:** [EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus), [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Engine</Badge> EngineGroupProcessLifecycleOwnerEngine means the inference engine owns process lifecycle.
+- <Badge intent="note" minimal>Orchestrator</Badge> EngineGroupProcessLifecycleOwnerOrchestrator means Kubernetes-side orchestration owns process lifecycle.
+</Accordion>
+
+<Accordion id="enginegroupprofilestatus" title="EngineGroupProfileStatus">
+EngineGroupProfileStatus records immutable geometry and hard capability bounds resolved for a group.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="backend" type="string">
+backend is the inference engine that owns native membership.
+**Validation:** Enum: [sglang vllm trtllm]
+</ParamField>
+
+<ParamField path="fingerprint" type="string">
+fingerprint identifies the immutable engine and workload geometry used by this group.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="gpusPerReplica" type="integer">
+gpusPerReplica is the accelerator requirement of one logical replica.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="podsPerReplica" type="integer">
+podsPerReplica is the number of physically disjoint capacity Pods allocated and released together for one logical replica.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="minSafeServingReplicas" type="integer">
+minSafeServingReplicas is the lowest committed replica count at which this profile may continue serving while degraded or recovering.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="minReplicas" type="integer">
+minReplicas is the hard lower bound for live membership operations other than terminal group retirement.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="maxReplicas" type="integer">
+maxReplicas is the hard upper bound for live membership operations.
+**Validation:** Minimum: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreconciliationstatus" title="EngineGroupReconciliationStatus">
+EngineGroupReconciliationStatus is the complete restart journal consumed by the Engine Group controller.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="controlRevision" type="integer">
+controlRevision orders every capacity, traffic, and membership target within this group.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="registry" type="EngineGroupReplicaRecordStatus array">
+registry preserves stable logical-replica and capacity-slot identities across replacement.
+See [EngineGroupReplicaRecordStatus](#enginegroupreplicarecordstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="topologyHistory" type="EngineGroupTopologyHistoryStatus">
+topologyHistory retains the current topology and snapshots referenced by durable evidence.
+See [EngineGroupTopologyHistoryStatus](#enginegrouptopologyhistorystatus).
+</ParamField>
+
+<ParamField path="capacity" type="EngineGroupCapacityReconciliationStatus">
+capacity records the newest desired target, the last accepted target, and physical observation.
+See [EngineGroupCapacityReconciliationStatus](#enginegroupcapacityreconciliationstatus).
+</ParamField>
+
+<ParamField path="traffic" type="EngineGroupTrafficReconciliationStatus">
+traffic records the newest desired target, the last accepted target, and routing observation.
+See [EngineGroupTrafficReconciliationStatus](#enginegrouptrafficreconciliationstatus).
+</ParamField>
+
+<ParamField path="membership" type="EngineGroupMembershipReconciliationStatus">
+membership records the exact desired transition and adapter-owned correlated observation.
+See [EngineGroupMembershipReconciliationStatus](#enginegroupmembershipreconciliationstatus).
+</ParamField>
+
+<ParamField path="transition" type="EngineGroupTransitionStatus">
+transition owns the immutable plan and cross-subsystem progress for one active or terminal change.
+See [EngineGroupTransitionStatus](#enginegrouptransitionstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreducetosurvivorschangestatus" title="EngineGroupReduceToSurvivorsChangeStatus">
+EngineGroupReduceToSurvivorsChangeStatus removes every base member absent from survivors.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+<ParamField path="survivors" type="string array">
+survivors is the exact authoritative survivor set.
+**Validation:** MinItems: 1  items:MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreleaseauthorization" title="EngineGroupReleaseAuthorization">
+EngineGroupReleaseAuthorization permits removal of only named concrete Pod incarnations.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus), [EngineGroupCapacityObservationStatus](#enginegroupcapacityobservationstatus), [EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus)
+
+<ParamField path="operationID" type="string">
+operationID identifies the membership result authorizing release.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="topologyGeneration" type="integer">
+topologyGeneration identifies the exact committed topology authorizing release.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="replicaID" type="string">
+replicaID is the stable logical replica being released.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="slotID" type="string">
+slotID is the stable workload-manager position being fenced.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="capacityRefs" type="EngineGroupCapacityRef array">
+capacityRefs is the complete set of concrete Pod UIDs authorized for deletion.
+See [EngineGroupCapacityRef](#enginegroupcapacityref).
+**Validation:** MinItems: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupremapchangestatus" title="EngineGroupRemapChangeStatus">
+EngineGroupRemapChangeStatus replaces complete logical-to-native membership at one cardinality.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+<ParamField path="membership" type="EngineGroupNativeMembershipStatus array">
+membership is the complete target logical, slot, and native-member mapping.
+See [EngineGroupNativeMembershipStatus](#enginegroupnativemembershipstatus).
+**Validation:** MinItems: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreplicaavailability" title="EngineGroupReplicaAvailability">
+EngineGroupReplicaAvailability reports physical and runtime availability independently from membership.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Available Unavailable Unknown]
+**Appears in:** [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Available</Badge> EngineGroupReplicaAvailabilityAvailable means every capacity Pod and required runtime check is ready.
+- <Badge intent="note" minimal>Unavailable</Badge> EngineGroupReplicaAvailabilityUnavailable means at least one required capacity or runtime check failed.
+- <Badge intent="note" minimal>Unknown</Badge> EngineGroupReplicaAvailabilityUnknown means availability cannot currently be established.
+</Accordion>
+
+<Accordion id="enginegroupreplicahistorystatus" title="EngineGroupReplicaHistoryStatus">
+EngineGroupReplicaHistoryStatus retains one excluded incarnation and its exact native membership.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReplicaRecordStatus](#enginegroupreplicarecordstatus)
+
+<ParamField path="topologyGeneration" type="integer">
+topologyGeneration identifies the topology that excluded this incarnation.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="incarnation" type="EngineGroupControlIncarnationStatus">
+incarnation is the concrete allocation and runtime identity that was excluded.
+See [EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus).
+</ParamField>
+
+<ParamField path="nativeMembers" type="string array">
+nativeMembers are the backend-native identities formerly correlated with this replica.
+**Validation:** MinItems: 1  items:MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreplicaincarnation" title="EngineGroupReplicaIncarnation">
+EngineGroupReplicaIncarnation binds one logical replica and stable slot to concrete capacity.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+<ParamField path="runtimeIncarnation" type="string">
+runtimeIncarnation identifies one concrete engine process incarnation.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="capacityRefs" type="EngineGroupCapacityRef array">
+capacityRefs contains every concrete Pod incarnation in this replica allocation.
+See [EngineGroupCapacityRef](#enginegroupcapacityref).
+**Validation:** MinItems: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreplicamembership" title="EngineGroupReplicaMembership">
+EngineGroupReplicaMembership reports committed engine state or current orchestration intent.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Active Masked Joining Retiring Unknown]
+**Appears in:** [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Active</Badge> EngineGroupReplicaMembershipActive means the engine has committed this replica.
+- <Badge intent="note" minimal>Masked</Badge> EngineGroupReplicaMembershipMasked means the engine committed a survivor topology excluding this replica.
+- <Badge intent="note" minimal>Joining</Badge> EngineGroupReplicaMembershipJoining means orchestration intends this replica to join.
+- <Badge intent="note" minimal>Retiring</Badge> EngineGroupReplicaMembershipRetiring means orchestration intends this replica to leave.
+- <Badge intent="note" minimal>Unknown</Badge> EngineGroupReplicaMembershipUnknown means authoritative engine membership is unavailable.
+</Accordion>
+
+<Accordion id="enginegroupreplicarecordstatus" title="EngineGroupReplicaRecordStatus">
+EngineGroupReplicaRecordStatus is the canonical durable record for one logical replica and stable slot.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is stable across physical and runtime replacement.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="slotID" type="string">
+slotID identifies the stable workload-manager position backing this replica.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="current" type="EngineGroupControlIncarnationStatus">
+current is the concrete physical and runtime incarnation currently assigned to the slot.
+See [EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="history" type="EngineGroupReplicaHistoryStatus array">
+history retains excluded incarnations and their exact native membership.
+See [EngineGroupReplicaHistoryStatus](#enginegroupreplicahistorystatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreplicastatus" title="EngineGroupReplicaStatus">
+EngineGroupReplicaStatus preserves one stable logical identity across physical replacement.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is stable across physical and runtime replacement.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="slotID" type="string">
+slotID identifies the stable workload-manager position backing this replica.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="representativeRef" type="EngineGroupCapacityRef">
+representativeRef identifies the Pod selected by status.selector for this allocation.
+See [EngineGroupCapacityRef](#enginegroupcapacityref).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="current" type="EngineGroupReplicaIncarnation">
+current is the currently allocated physical and runtime incarnation.
+See [EngineGroupReplicaIncarnation](#enginegroupreplicaincarnation).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="previousIncarnations" type="EngineGroupReplicaIncarnation array">
+previousIncarnations retain identities required for recovery or exact release.
+See [EngineGroupReplicaIncarnation](#enginegroupreplicaincarnation).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="nativeMembers" type="string array">
+nativeMembers are the engine identities currently correlated with this logical replica.
+**Validation:** items:MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="availability" type="EngineGroupReplicaAvailability">
+availability reports complete physical and profile-required runtime readiness.
+See [EngineGroupReplicaAvailability](#enginegroupreplicaavailability).
+**Validation:** Enum: [Available Unavailable Unknown]
+</ParamField>
+
+<ParamField path="membership" type="EngineGroupReplicaMembership">
+membership reports committed engine state or current orchestration intent.
+See [EngineGroupReplicaMembership](#enginegroupreplicamembership).
+**Validation:** Enum: [Active Masked Joining Retiring Unknown]
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreplicatargetstatus" title="EngineGroupReplicaTargetStatus">
+EngineGroupReplicaTargetStatus is the resolved physical and native identity for one joining replica.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupGrowChangeStatus](#enginegroupgrowchangestatus), [EngineGroupRestoreChangeStatus](#enginegrouprestorechangestatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is the stable logical identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="slotID" type="string">
+slotID is the stable workload-manager position.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="bootstrap" type="EngineGroupBootstrapMode">
+bootstrap distinguishes a new logical member from restoration of a fixed slot.
+See [EngineGroupBootstrapMode](#enginegroupbootstrapmode).
+**Validation:** Enum: [Join RestoreFixedSlot]
+</ParamField>
+
+<ParamField path="nativeMembers" type="string array">
+nativeMembers contains backend-native identities required by the resolved plan.
+**Validation:** items:MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupresolvedchangestatus" title="EngineGroupResolvedChangeStatus">
+EngineGroupResolvedChangeStatus is the tagged union of membership changes understood by the coordinator.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)
+
+<ParamField path="kind" type="EngineGroupPlanKind">
+kind selects the populated semantic variant.
+See [EngineGroupPlanKind](#enginegroupplankind).
+**Validation:** Enum: [Grow Retire ReduceToSurvivors Restore Remap]
+</ParamField>
+
+<ParamField path="grow" type="EngineGroupGrowChangeStatus">
+grow adds previously unknown logical replicas.
+See [EngineGroupGrowChangeStatus](#enginegroupgrowchangestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="retire" type="EngineGroupRetireChangeStatus">
+retire gracefully removes selected healthy replicas.
+See [EngineGroupRetireChangeStatus](#enginegroupretirechangestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="reduceToSurvivors" type="EngineGroupReduceToSurvivorsChangeStatus">
+reduceToSurvivors removes base members absent from an authoritative survivor set.
+See [EngineGroupReduceToSurvivorsChangeStatus](#enginegroupreducetosurvivorschangestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="restore" type="EngineGroupRestoreChangeStatus">
+restore recreates excluded stable identities in their original native slots.
+See [EngineGroupRestoreChangeStatus](#enginegrouprestorechangestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="remap" type="EngineGroupRemapChangeStatus">
+remap changes complete native membership without changing logical cardinality.
+See [EngineGroupRemapChangeStatus](#enginegroupremapchangestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupresolvedplanstatus" title="EngineGroupResolvedPlanStatus">
+EngineGroupResolvedPlanStatus is one immutable, profile-resolved membership transition.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus), [EngineGroupTransitionSpecStatus](#enginegrouptransitionspecstatus)
+
+<ParamField path="id" type="string">
+id is the caller-selected stable plan identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="profileFingerprint" type="string">
+profileFingerprint binds the plan to immutable engine and workload geometry.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="processLifecycleOwner" type="EngineGroupProcessLifecycleOwner">
+processLifecycleOwner identifies who starts and stops joining engine processes.
+See [EngineGroupProcessLifecycleOwner](#enginegroupprocesslifecycleowner).
+**Validation:** Enum: [Engine Orchestrator]
+</ParamField>
+
+<ParamField path="trafficRequirement" type="EngineGroupTrafficRequirement">
+trafficRequirement declares whether retained members may serve during the mutation.
+See [EngineGroupTrafficRequirement](#enginegrouptrafficrequirement).
+**Validation:** Enum: [KeepServing QuiesceGroup]
+</ParamField>
+
+<ParamField path="verificationRequirement" type="EngineGroupVerificationRequirement">
+verificationRequirement declares whether serving progress must be proven before admission.
+See [EngineGroupVerificationRequirement](#enginegroupverificationrequirement).
+**Validation:** Enum: [None Required]
+</ParamField>
+
+<ParamField path="change" type="EngineGroupResolvedChangeStatus">
+change is the serializable tagged union of exact membership semantics.
+See [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouprestorechangestatus" title="EngineGroupRestoreChangeStatus">
+EngineGroupRestoreChangeStatus restores stable logical and native-member identities.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+<ParamField path="replicas" type="EngineGroupReplicaTargetStatus array">
+replicas contains every exact stable identity to restore.
+See [EngineGroupReplicaTargetStatus](#enginegroupreplicatargetstatus).
+**Validation:** MinItems: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupretirechangestatus" title="EngineGroupRetireChangeStatus">
+EngineGroupRetireChangeStatus removes selected healthy logical replicas after drain.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+<ParamField path="replicas" type="string array">
+replicas contains the exact stable logical identities selected for retirement.
+**Validation:** MinItems: 1  items:MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupscaleunit" title="EngineGroupScaleUnit">
+EngineGroupScaleUnit names the logical unit exposed through the Scale subresource.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [replicas]
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>replicas</Badge> EngineGroupScaleUnitReplicas means Scale counts logical engine replicas within one world.
+</Accordion>
+
+<Accordion id="enginegroupscalingpolicy" title="EngineGroupScalingPolicy">
+EngineGroupScalingPolicy defines operator-selected scaling bounds for one Engine Group.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec)
+
+<ParamField path="minReplicas" type="integer">
+minReplicas is the minimum ordinary scaling target. Terminal group retirement is driven by deletion and may retire membership below this bound without writing an out-of-policy target.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="maxReplicas" type="integer">
+maxReplicas is the maximum target selected by policy. It cannot exceed the resolved hard engine capability bound.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupservingproofstatus" title="EngineGroupServingProofStatus">
+EngineGroupServingProofStatus binds successful verification to an immutable topology.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+<ParamField path="topologyGeneration" type="integer">
+topologyGeneration identifies the verified topology.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="runtimeDigest" type="string">
+runtimeDigest identifies the runtime-observed membership and serving path.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="observedAt" type="Time">
+observedAt records when serving progress was proven.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptargetvalidationstatus" title="EngineGroupTargetValidationStatus">
+EngineGroupTargetValidationStatus records a reconcile-time target rejection without silently
+changing the requested target.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="requestedReplicas" type="integer">
+requestedReplicas is the rejected desired target.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="effectiveReplicas" type="integer">
+effectiveReplicas is the last valid target still in force.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="minReplicas" type="integer">
+minReplicas is the effective lower bound used for validation.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="maxReplicas" type="integer">
+maxReplicas is the effective upper bound used for validation.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="reason" type="string">
+reason is a stable machine-readable rejection reason.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="message" type="string">
+message explains the rejection for a human reader.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptopologyhistorystatus" title="EngineGroupTopologyHistoryStatus">
+EngineGroupTopologyHistoryStatus retains immutable topology snapshots needed by durable evidence.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+<ParamField path="currentGeneration" type="integer">
+currentGeneration identifies the engine's current authoritative topology snapshot.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="snapshots" type="EngineGroupTopologyStatus array">
+snapshots contains the current topology and any snapshot still referenced by controller state.
+See [EngineGroupTopologyStatus](#enginegrouptopologystatus).
+**Validation:** MinItems: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptopologystatus" title="EngineGroupTopologyStatus">
+EngineGroupTopologyStatus is one immutable engine-authoritative committed topology snapshot.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus), [EngineGroupMembershipObservationStatus](#enginegroupmembershipobservationstatus), [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus), [EngineGroupMembershipTransitionObservationStatus](#enginegroupmembershiptransitionobservationstatus), [EngineGroupTopologyHistoryStatus](#enginegrouptopologyhistorystatus)
+
+<ParamField path="generation" type="integer">
+generation is the engine's topology generation.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="replicas" type="EngineGroupMemberStatus array">
+replicas is the complete logical-to-native membership mapping at this generation.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptrafficdrainmode" title="EngineGroupTrafficDrainMode">
+EngineGroupTrafficDrainMode distinguishes planned drain from failed-member withdrawal evidence.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Graceful ConfirmInactive]
+**Appears in:** [EngineGroupTrafficDrainTargetStatus](#enginegrouptrafficdraintargetstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Graceful</Badge> EngineGroupTrafficDrainModeGraceful waits for a reachable member's in-flight work to finish.
+- <Badge intent="note" minimal>ConfirmInactive</Badge> EngineGroupTrafficDrainModeConfirmInactive proves a failed member is no longer routable.
+</Accordion>
+
+<Accordion id="enginegrouptrafficdraintargetstatus" title="EngineGroupTrafficDrainTargetStatus">
+EngineGroupTrafficDrainTargetStatus requests terminal non-serving evidence for one member.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus)
+
+<ParamField path="membership" type="EngineGroupMemberStatus">
+membership is the exact member incarnation to withdraw and drain.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+</ParamField>
+
+<ParamField path="mode" type="EngineGroupTrafficDrainMode">
+mode distinguishes graceful drain from confirmation that a failed member is inactive.
+See [EngineGroupTrafficDrainMode](#enginegrouptrafficdrainmode).
+**Validation:** Enum: [Graceful ConfirmInactive]
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptrafficobservationstatus" title="EngineGroupTrafficObservationStatus">
+EngineGroupTrafficObservationStatus is the runtime's authoritative routing and drain state.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupTrafficReconciliationStatus](#enginegrouptrafficreconciliationstatus)
+
+<ParamField path="appliedRevision" type="integer">
+appliedRevision is the last traffic target revision durably accepted by the adapter.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="admitted" type="EngineGroupMemberStatus array">
+admitted is the exact set of member incarnations eligible for new work.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="draining" type="EngineGroupMemberStatus array">
+draining contains member incarnations whose graceful drain has not completed.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="drained" type="EngineGroupMemberStatus array">
+drained is durable terminal non-serving evidence for exact member incarnations.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptrafficreconciliationstatus" title="EngineGroupTrafficReconciliationStatus">
+EngineGroupTrafficReconciliationStatus records desired, accepted, and observed routing levels.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+<ParamField path="desired" type="EngineGroupTrafficTargetStatus">
+desired is the newest persisted absolute routing and drain target.
+See [EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="accepted" type="EngineGroupTrafficTargetStatus">
+accepted is the last exact target durably acknowledged by the traffic adapter.
+See [EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="observed" type="EngineGroupTrafficObservationStatus">
+observed is the runtime's authoritative routing and drain state.
+See [EngineGroupTrafficObservationStatus](#enginegrouptrafficobservationstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptrafficrequirement" title="EngineGroupTrafficRequirement">
+EngineGroupTrafficRequirement describes the traffic boundary around membership mutation.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [KeepServing QuiesceGroup]
+**Appears in:** [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>KeepServing</Badge> EngineGroupTrafficRequirementKeepServing permits retained replicas to continue serving.
+- <Badge intent="note" minimal>QuiesceGroup</Badge> EngineGroupTrafficRequirementQuiesceGroup drains the complete base topology before mutation.
+</Accordion>
+
+<Accordion id="enginegrouptrafficstatus" title="EngineGroupTrafficStatus">
+EngineGroupTrafficStatus is the runtime's exact routing and terminal drain state.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="operationID" type="string">
+operationID identifies the operation for which this observation was produced.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="topologyGeneration" type="integer">
+topologyGeneration binds the observation to an exact committed topology.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="admitted" type="EngineGroupMemberStatus array">
+admitted is the exact set of member incarnations eligible for new work.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="draining" type="EngineGroupMemberStatus array">
+draining is the exact set of member incarnations whose in-flight work has not completed.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="drained" type="EngineGroupMemberStatus array">
+drained is durable terminal non-serving evidence for exact member incarnations.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptraffictargetstatus" title="EngineGroupTrafficTargetStatus">
+EngineGroupTrafficTargetStatus is one group-ordered absolute routing projection.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupTrafficReconciliationStatus](#enginegrouptrafficreconciliationstatus)
+
+<ParamField path="controlRevision" type="integer">
+controlRevision orders this target within the Engine Group.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="transitionID" type="string">
+transitionID correlates this target with one membership transition.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="topologyGeneration" type="integer">
+topologyGeneration binds the target to one authoritative membership snapshot.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="admitted" type="EngineGroupMemberStatus array">
+admitted is the exact set of member incarnations eligible for new work.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="drain" type="EngineGroupTrafficDrainTargetStatus array">
+drain contains the exact terminal non-serving evidence requested for each member.
+See [EngineGroupTrafficDrainTargetStatus](#enginegrouptrafficdraintargetstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptransitionoutcome" title="EngineGroupTransitionOutcome">
+EngineGroupTransitionOutcome summarizes the cross-subsystem workflow.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Progressing Reverting RolledBack Blocked Completed]
+**Appears in:** [EngineGroupTransitionStatus](#enginegrouptransitionstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Progressing</Badge> EngineGroupTransitionOutcomeProgressing means safe work remains.
+- <Badge intent="note" minimal>Reverting</Badge> EngineGroupTransitionOutcomeReverting means a provably uncommitted target is restoring base state.
+- <Badge intent="note" minimal>RolledBack</Badge> EngineGroupTransitionOutcomeRolledBack means base capacity and traffic were restored.
+- <Badge intent="note" minimal>Blocked</Badge> EngineGroupTransitionOutcomeBlocked means safety evidence cannot progress automatically.
+- <Badge intent="note" minimal>Completed</Badge> EngineGroupTransitionOutcomeCompleted means all subsystems reached the resolved plan.
+</Accordion>
+
+<Accordion id="enginegrouptransitionspecstatus" title="EngineGroupTransitionSpecStatus">
+EngineGroupTransitionSpecStatus is the immutable input to one membership transition.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupTransitionStatus](#enginegrouptransitionstatus)
+
+<ParamField path="id" type="string">
+id uniquely identifies this transition.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="baseTopologyGeneration" type="integer">
+baseTopologyGeneration is the exact topology from which the change starts.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="plan" type="EngineGroupResolvedPlanStatus">
+plan is the complete normalized semantic operation.
+See [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptransitionstatus" title="EngineGroupTransitionStatus">
+EngineGroupTransitionStatus owns one immutable semantic transition across all subsystems.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+<ParamField path="spec" type="EngineGroupTransitionSpecStatus">
+spec is the immutable transition identity, base topology, and resolved plan.
+See [EngineGroupTransitionSpecStatus](#enginegrouptransitionspecstatus).
+</ParamField>
+
+<ParamField path="planPreflight" type="EngineGroupPreflightStatus">
+planPreflight is durable adapter evidence captured before capacity or traffic prework.
+See [EngineGroupPreflightStatus](#enginegrouppreflightstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="targetPreflight" type="EngineGroupPreflightStatus">
+targetPreflight is durable adapter evidence for the exact frozen membership target.
+See [EngineGroupPreflightStatus](#enginegrouppreflightstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="verification" type="EngineGroupVerificationStatus">
+verification records the topology-bound serving proof or conclusive failure.
+See [EngineGroupVerificationStatus](#enginegroupverificationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="outcome" type="EngineGroupTransitionOutcome">
+outcome summarizes cross-subsystem workflow progress without duplicating adapter phases.
+See [EngineGroupTransitionOutcome](#enginegrouptransitionoutcome).
+**Validation:** Enum: [Progressing Reverting RolledBack Blocked Completed]
+</ParamField>
+
+<ParamField path="failure" type="EngineGroupFailureStatus">
+failure describes the reason an otherwise durable transition is blocked or reverting.
+See [EngineGroupFailureStatus](#enginegroupfailurestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="startedAt" type="Time">
+startedAt is when the controller first persisted the immutable transition.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+</ParamField>
+
+<ParamField path="updatedAt" type="Time">
+updatedAt is when the controller last changed durable transition state.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupvalidationevidencestatus" title="EngineGroupValidationEvidenceStatus">
+EngineGroupValidationEvidenceStatus binds approval to exact plan, target, profile, and capabilities.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus), [EngineGroupPreflightStatus](#enginegrouppreflightstatus)
+
+<ParamField path="planDigest" type="string">
+planDigest is the canonical digest of the normalized resolved plan.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="targetDigest" type="string">
+targetDigest is the canonical digest of the exact membership target, when known.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="profileFingerprint" type="string">
+profileFingerprint binds validation to immutable engine and workload geometry.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="capabilityGeneration" type="string">
+capabilityGeneration identifies the adapter capability snapshot used for validation.
+**Validation:** MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupverificationphase" title="EngineGroupVerificationPhase">
+EngineGroupVerificationPhase is the independent serving-verification state.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Pending Passed Failed]
+**Appears in:** [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Pending</Badge> EngineGroupVerificationPhasePending means a proof is required for the committed topology.
+- <Badge intent="note" minimal>Passed</Badge> EngineGroupVerificationPhasePassed means the exact topology produced serving progress.
+- <Badge intent="note" minimal>Failed</Badge> EngineGroupVerificationPhaseFailed means a conclusive serving check failed.
+</Accordion>
+
+<Accordion id="enginegroupverificationrequirement" title="EngineGroupVerificationRequirement">
+EngineGroupVerificationRequirement states whether commit needs a serving-progress proof.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [None Required]
+**Appears in:** [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>None</Badge> EngineGroupVerificationRequirementNone permits admission after authoritative membership commit.
+- <Badge intent="note" minimal>Required</Badge> EngineGroupVerificationRequirementRequired requires a matching serving proof before admission.
+</Accordion>
+
+<Accordion id="enginegroupverificationstatus" title="EngineGroupVerificationStatus">
+EngineGroupVerificationStatus records serving progress independently from membership commit.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupTransitionStatus](#enginegrouptransitionstatus)
+
+<ParamField path="phase" type="EngineGroupVerificationPhase">
+phase is the durable serving-verification state.
+See [EngineGroupVerificationPhase](#enginegroupverificationphase).
+**Validation:** Enum: [Pending Passed Failed]
+</ParamField>
+
+<ParamField path="proof" type="EngineGroupServingProofStatus">
+proof is a positive result bound to one immutable topology.
+See [EngineGroupServingProofStatus](#enginegroupservingproofstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="failure" type="EngineGroupFailureStatus">
+failure is a conclusive verification failure.
+See [EngineGroupFailureStatus](#enginegroupfailurestatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

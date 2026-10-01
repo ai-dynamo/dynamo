@@ -1505,6 +1505,7 @@ Package v1beta1 contains API Schema definitions for the nvidia.com v1beta1 API g
 ### Resource Types
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
+- [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
 - [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
 - [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
 
@@ -1983,6 +1984,75 @@ _Appears in:_
 | `componentName` _string_ | componentName is the `componentName` of the entry within the target<br />DGD's `spec.components` list to scale. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
+#### DynamoGraphDeploymentEngineGroup
+
+
+
+DynamoGraphDeploymentEngineGroup represents one independently resizable distributed engine world.
+The scale subresource counts logical replicas, while status keeps physical allocation, engine
+membership, and traffic admission separately observable.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
+| `kind` _string_ | `DynamoGraphDeploymentEngineGroup` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec)_ |  |  |  |
+| `status` _[DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)_ |  |  |  |
+
+
+#### DynamoGraphDeploymentEngineGroupSpec
+
+
+
+DynamoGraphDeploymentEngineGroupSpec defines the desired capacity of one independently
+resizable distributed engine world.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | replicas is the absolute desired number of logical engine replicas in this group.<br />For Elastic EP, one replica maps to one data-parallel replica through the resolved profile. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `policy` _[EngineGroupScalingPolicy](#enginegroupscalingpolicy)_ | policy constrains user- or autoscaler-selected replica targets independently from hard<br />engine capability bounds reported in status.profile. |  | Optional: \{\} <br /> |
+
+
+#### DynamoGraphDeploymentEngineGroupStatus
+
+
+
+DynamoGraphDeploymentEngineGroupStatus defines the observed state of one Engine Group.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | observedGeneration is the most recent object generation observed by the controller. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replicas` _integer_ | replicas is the number of logical replicas with complete physical allocations. It is the<br />current replica count exposed through the scale subresource. |  | Minimum: 0 <br /> |
+| `availableReplicas` _integer_ | availableReplicas is the number of allocated replicas whose complete physical allocation<br />and profile-required runtime checks are available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `activeReplicas` _integer_ | activeReplicas is the number of replicas in the engine's authoritative committed topology. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `selector` _string_ | selector matches exactly one representative Pod for every allocated logical replica.<br />It represents allocation, not availability or engine admission. |  | Optional: \{\} <br /> |
+| `scaleUnit` _[EngineGroupScaleUnit](#enginegroupscaleunit)_ | scaleUnit names the logical unit counted by spec.replicas and status.replicas. |  | Enum: [replicas] <br />Optional: \{\} <br /> |
+| `profile` _[EngineGroupProfileStatus](#enginegroupprofilestatus)_ | profile is the immutable resolved mapping between logical replicas and physical capacity. |  | Optional: \{\} <br /> |
+| `topology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | topology is the engine's current authoritative committed topology. |  | Optional: \{\} <br /> |
+| `lastStableReplicas` _integer_ | lastStableReplicas is the most recent membership count that reached its desired target<br />without degradation. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replicaStates` _[EngineGroupReplicaStatus](#enginegroupreplicastatus) array_ | replicaStates contains the stable identity and independently observed physical and engine<br />state of each known logical replica. |  | Optional: \{\} <br /> |
+| `traffic` _[EngineGroupTrafficStatus](#enginegrouptrafficstatus)_ | traffic is the runtime's authoritative routing and drain observation. |  | Optional: \{\} <br /> |
+| `releaseAuthorizations` _[EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization) array_ | releaseAuthorizations names the exact Pod UIDs that may be removed from stable replica slots. |  | Optional: \{\} <br /> |
+| `targetValidation` _[EngineGroupTargetValidationStatus](#enginegrouptargetvalidationstatus)_ | targetValidation describes a desired replica target rejected from reconciliation-time<br />profile or capability information. |  | Optional: \{\} <br /> |
+| `reconciliation` _[EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)_ | reconciliation is the controller's durable desired, accepted, and observed journal.<br />It is persisted before external effects so the same transition can resume after restart. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | conditions contains the latest observations of group availability, progress, degradation,<br />target convergence, target validity, and topology authority. |  | Optional: \{\} <br /> |
+
+
 #### DynamoGraphDeploymentExperimentalSpec
 
 
@@ -2219,6 +2289,1138 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | configMapRef references a user-provided ConfigMap containing EPP<br />configuration. Mutually exclusive with `config`. |  | Optional: \{\} <br /> |
 | `config` _EndpointPickerConfig_ | config allows specifying EPP `EndpointPickerConfig` directly as a<br />structured object. The operator marshals this to YAML and creates a<br />ConfigMap automatically. Mutually exclusive with `configMapRef`. One of<br />`configMapRef` or `config` must be specified. |  | Type: object <br />Optional: \{\} <br /> |
+
+
+#### EngineGroupBootstrapMode
+
+_Underlying type:_ _string_
+
+EngineGroupBootstrapMode describes how one new incarnation joins the engine world.
+
+_Validation:_
+- Enum: [Join RestoreFixedSlot]
+
+_Appears in:_
+- [EngineGroupCapacityBootstrapStatus](#enginegroupcapacitybootstrapstatus)
+- [EngineGroupReplicaTargetStatus](#enginegroupreplicatargetstatus)
+
+| Field | Description |
+| --- | --- |
+| `Join` | EngineGroupBootstrapModeJoin creates a previously unknown logical member.<br /> |
+| `RestoreFixedSlot` | EngineGroupBootstrapModeRestoreFixedSlot restores a known logical and native-member identity.<br /> |
+
+
+#### EngineGroupCapacityAllocationStatus
+
+
+
+EngineGroupCapacityAllocationStatus is one complete physical allocation and its availability.
+
+
+
+_Appears in:_
+- [EngineGroupCapacityObservationStatus](#enginegroupcapacityobservationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID duplicates incarnation.replicaID as the list-map key. |  | MinLength: 1 <br /> |
+| `incarnation` _[EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus)_ | incarnation binds the allocation to stable and concrete identities. |  |  |
+| `available` _boolean_ | available reports whether the complete allocation satisfies profile-required readiness. |  |  |
+
+
+#### EngineGroupCapacityBootstrapStatus
+
+
+
+EngineGroupCapacityBootstrapStatus is the profile-resolved creation intent for one allocation.
+
+
+
+_Appears in:_
+- [EngineGroupCapacityReplicaTargetStatus](#enginegroupcapacityreplicatargetstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `mode` _[EngineGroupBootstrapMode](#enginegroupbootstrapmode)_ | mode distinguishes fresh joining capacity from fixed-slot restoration. |  | Enum: [Join RestoreFixedSlot] <br /> |
+| `baseTopologyGeneration` _integer_ | baseTopologyGeneration binds bootstrap to the topology from which the change starts. |  | Minimum: 1 <br /> |
+| `nativeMembers` _string array_ | nativeMembers names the fixed backend identities when the bootstrap mode requires them. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+
+
+#### EngineGroupCapacityObservationStatus
+
+
+
+EngineGroupCapacityObservationStatus is the workload manager's authoritative capacity state.
+
+
+
+_Appears in:_
+- [EngineGroupCapacityReconciliationStatus](#enginegroupcapacityreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `appliedRevision` _integer_ | appliedRevision is the last capacity target revision durably accepted by the adapter. |  | Minimum: 0 <br /> |
+| `allocations` _[EngineGroupCapacityAllocationStatus](#enginegroupcapacityallocationstatus) array_ | allocations contains every concrete logical-replica allocation currently owned by the group. |  | Optional: \{\} <br /> |
+| `releaseFences` _[EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization) array_ | releaseFences are the exact release authorizations durably enforced by the adapter. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupCapacityReconciliationStatus
+
+
+
+EngineGroupCapacityReconciliationStatus records desired, accepted, and observed capacity levels.
+
+
+
+_Appears in:_
+- [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `desired` _[EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus)_ | desired is the newest persisted absolute target, including one that may later be rejected. |  | Optional: \{\} <br /> |
+| `accepted` _[EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus)_ | accepted is the last exact target durably acknowledged by the capacity adapter. |  | Optional: \{\} <br /> |
+| `observed` _[EngineGroupCapacityObservationStatus](#enginegroupcapacityobservationstatus)_ | observed is the workload manager's authoritative allocation and release-fence state. |  |  |
+
+
+#### EngineGroupCapacityRef
+
+
+
+EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+
+
+
+_Appears in:_
+- [EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus)
+- [EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization)
+- [EngineGroupReplicaIncarnation](#enginegroupreplicaincarnation)
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name is the Pod name. |  | MinLength: 1 <br /> |
+| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | uid is the concrete Pod incarnation and prevents name reuse from inheriting authority. |  |  |
+
+
+#### EngineGroupCapacityReplicaTargetStatus
+
+
+
+EngineGroupCapacityReplicaTargetStatus describes one allocation required by an absolute target.
+
+
+
+_Appears in:_
+- [EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID identifies the stable workload-manager position. |  | MinLength: 1 <br /> |
+| `incarnation` _[EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus)_ | incarnation asserts the exact existing capacity that must remain assigned. |  | Optional: \{\} <br /> |
+| `bootstrap` _[EngineGroupCapacityBootstrapStatus](#enginegroupcapacitybootstrapstatus)_ | bootstrap authorizes creation of a new orchestrator-owned incarnation. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupCapacityTargetStatus
+
+
+
+EngineGroupCapacityTargetStatus is one group-ordered absolute physical-capacity projection.
+
+
+
+_Appears in:_
+- [EngineGroupCapacityReconciliationStatus](#enginegroupcapacityreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `controlRevision` _integer_ | controlRevision orders this target within the Engine Group. |  | Minimum: 1 <br /> |
+| `transitionID` _string_ | transitionID correlates this target with one membership transition. |  | MinLength: 1 <br /> |
+| `profileFingerprint` _string_ | profileFingerprint binds the target to immutable engine and workload geometry. |  | MinLength: 1 <br /> |
+| `processLifecycleOwner` _[EngineGroupProcessLifecycleOwner](#enginegroupprocesslifecycleowner)_ | processLifecycleOwner identifies who starts and stops engine processes. |  | Enum: [Engine Orchestrator] <br /> |
+| `replicas` _[EngineGroupCapacityReplicaTargetStatus](#enginegroupcapacityreplicatargetstatus) array_ | replicas is the complete desired set of physical replica allocations. |  | Optional: \{\} <br /> |
+| `releaseFences` _[EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization) array_ | releaseFences authorize removal of exact Pod UIDs from exact stable slots. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupControlIncarnationStatus
+
+
+
+EngineGroupControlIncarnationStatus binds stable logical and slot identities to concrete capacity.
+
+
+
+_Appears in:_
+- [EngineGroupCapacityAllocationStatus](#enginegroupcapacityallocationstatus)
+- [EngineGroupCapacityReplicaTargetStatus](#enginegroupcapacityreplicatargetstatus)
+- [EngineGroupReplicaHistoryStatus](#enginegroupreplicahistorystatus)
+- [EngineGroupReplicaRecordStatus](#enginegroupreplicarecordstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID is the stable workload-manager position. |  | MinLength: 1 <br /> |
+| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the concrete engine process incarnation. |  | MinLength: 1 <br /> |
+| `capacityRefs` _[EngineGroupCapacityRef](#enginegroupcapacityref) array_ | capacityRefs contains every concrete Pod in this replica allocation. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupFailureClassification
+
+_Underlying type:_ _string_
+
+EngineGroupFailureClassification states whether reconciliation may retry the same external intent.
+
+_Validation:_
+- Enum: [Retryable Terminal]
+
+_Appears in:_
+- [EngineGroupFailureStatus](#enginegroupfailurestatus)
+
+| Field | Description |
+| --- | --- |
+| `Retryable` | EngineGroupFailureClassificationRetryable permits retrying the same intent.<br /> |
+| `Terminal` | EngineGroupFailureClassificationTerminal means the same intent cannot safely make progress.<br /> |
+
+
+#### EngineGroupFailureStatus
+
+
+
+EngineGroupFailureStatus is one structured subsystem or transition failure.
+
+
+
+_Appears in:_
+- [EngineGroupMembershipTransitionObservationStatus](#enginegroupmembershiptransitionobservationstatus)
+- [EngineGroupPreflightStatus](#enginegrouppreflightstatus)
+- [EngineGroupTransitionStatus](#enginegrouptransitionstatus)
+- [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `classification` _[EngineGroupFailureClassification](#enginegroupfailureclassification)_ | classification states whether the same external intent may be retried. |  | Enum: [Retryable Terminal] <br /> |
+| `reason` _string_ | reason is a stable machine-readable failure reason. |  | MinLength: 1 <br /> |
+| `message` _string_ | message explains the failure for a human reader. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupGrowChangeStatus
+
+
+
+EngineGroupGrowChangeStatus adds named fresh logical replicas.
+
+
+
+_Appears in:_
+- [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _[EngineGroupReplicaTargetStatus](#enginegroupreplicatargetstatus) array_ | replicas contains every new logical, slot, bootstrap, and native identity. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupJoiningReplicaStatus
+
+
+
+EngineGroupJoiningReplicaStatus identifies one concrete process joining engine membership.
+
+
+
+_Appears in:_
+- [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
+| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the concrete engine process. |  | MinLength: 1 <br /> |
+
+
+#### EngineGroupMemberStatus
+
+
+
+EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+
+
+
+_Appears in:_
+- [EngineGroupTopologyStatus](#enginegrouptopologystatus)
+- [EngineGroupTrafficDrainTargetStatus](#enginegrouptrafficdraintargetstatus)
+- [EngineGroupTrafficObservationStatus](#enginegrouptrafficobservationstatus)
+- [EngineGroupTrafficStatus](#enginegrouptrafficstatus)
+- [EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
+| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the concrete engine process in this topology. |  | MinLength: 1 <br /> |
+| `nativeMembers` _string array_ | nativeMembers are the backend-specific ranks or member identities committed for the replica. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
+
+
+#### EngineGroupMembershipObservationStatus
+
+
+
+EngineGroupMembershipObservationStatus separates current topology from one correlated transaction result.
+
+
+
+_Appears in:_
+- [EngineGroupMembershipReconciliationStatus](#enginegroupmembershipreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `committedTopology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | committedTopology is the engine's current authoritative complete topology. |  |  |
+| `requestedTransitionID` _string_ | requestedTransitionID records the exact identity requested from the adapter observer. |  | Optional: \{\} <br /> |
+| `transition` _[EngineGroupMembershipTransitionObservationStatus](#enginegroupmembershiptransitionobservationstatus)_ | transition is the adapter's durable state for the requested transition; absence is authoritative. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupMembershipReconciliationStatus
+
+
+
+EngineGroupMembershipReconciliationStatus records one desired transition and adapter observation.
+
+
+
+_Appears in:_
+- [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `desired` _[EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus)_ | desired is one exact immutable membership compare-and-apply target. |  | Optional: \{\} <br /> |
+| `observed` _[EngineGroupMembershipObservationStatus](#enginegroupmembershipobservationstatus)_ | observed contains authoritative committed topology and the correlated transition result. |  |  |
+
+
+#### EngineGroupMembershipTargetStatus
+
+
+
+EngineGroupMembershipTargetStatus is one exact immutable membership transition target.
+
+
+
+_Appears in:_
+- [EngineGroupMembershipReconciliationStatus](#enginegroupmembershipreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `controlRevision` _integer_ | controlRevision orders this target within the Engine Group. |  | Minimum: 1 <br /> |
+| `transitionID` _string_ | transitionID uniquely identifies this target and its durable adapter transaction. |  | MinLength: 1 <br /> |
+| `targetDigest` _string_ | targetDigest is the shared-code canonical digest of this exact normalized target. |  | MinLength: 1 <br /> |
+| `validation` _[EngineGroupValidationEvidenceStatus](#enginegroupvalidationevidencestatus)_ | validation is the durable adapter evidence for this exact target. |  |  |
+| `baseTopology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | baseTopology is the complete topology against which the target is atomically compared. |  |  |
+| `plan` _[EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)_ | plan is the immutable profile-resolved semantic change. |  |  |
+| `joining` _[EngineGroupJoiningReplicaStatus](#enginegroupjoiningreplicastatus) array_ | joining freezes exact runtime identities supplied to the membership transaction. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupMembershipTransitionObservationStatus
+
+
+
+EngineGroupMembershipTransitionObservationStatus is the durable result for one exact target.
+
+
+
+_Appears in:_
+- [EngineGroupMembershipObservationStatus](#enginegroupmembershipobservationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `transitionID` _string_ | transitionID echoes the requested transition identity. |  | MinLength: 1 <br /> |
+| `controlRevision` _integer_ | controlRevision echoes the requested controller revision. |  | Minimum: 1 <br /> |
+| `targetDigest` _string_ | targetDigest echoes the requested canonical target digest. |  | MinLength: 1 <br /> |
+| `phase` _[EngineGroupMembershipTransitionPhase](#enginegroupmembershiptransitionphase)_ | phase is the adapter-owned durable transaction state. |  | Enum: [Pending Committed Rejected Unknown] <br /> |
+| `resultTopology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | resultTopology is the immutable topology produced by a committed transition. |  | Optional: \{\} <br /> |
+| `failure` _[EngineGroupFailureStatus](#enginegroupfailurestatus)_ | failure describes an authoritative rejection or unknown outcome. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupMembershipTransitionPhase
+
+_Underlying type:_ _string_
+
+EngineGroupMembershipTransitionPhase is adapter-owned durable state for one exact target.
+
+_Validation:_
+- Enum: [Pending Committed Rejected Unknown]
+
+_Appears in:_
+- [EngineGroupMembershipTransitionObservationStatus](#enginegroupmembershiptransitionobservationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` | EngineGroupMembershipTransitionPhasePending means the adapter accepted and is applying the target.<br /> |
+| `Committed` | EngineGroupMembershipTransitionPhaseCommitted means the target produced its result topology.<br /> |
+| `Rejected` | EngineGroupMembershipTransitionPhaseRejected means the target definitively cannot mutate membership.<br /> |
+| `Unknown` | EngineGroupMembershipTransitionPhaseUnknown means the adapter cannot establish the target's outcome.<br /> |
+
+
+#### EngineGroupNativeMembershipStatus
+
+
+
+EngineGroupNativeMembershipStatus is one stable logical-to-native membership mapping.
+
+
+
+_Appears in:_
+- [EngineGroupRemapChangeStatus](#enginegroupremapchangestatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID is the stable workload-manager position. |  | MinLength: 1 <br /> |
+| `nativeMembers` _string array_ | nativeMembers is the complete backend-native identity set for the replica. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
+
+
+#### EngineGroupPlanKind
+
+_Underlying type:_ _string_
+
+EngineGroupPlanKind identifies exact membership-change semantics.
+
+_Validation:_
+- Enum: [Grow Retire ReduceToSurvivors Restore Remap]
+
+_Appears in:_
+- [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+| Field | Description |
+| --- | --- |
+| `Grow` | EngineGroupPlanKindGrow adds previously unknown logical replicas.<br /> |
+| `Retire` | EngineGroupPlanKindRetire gracefully removes selected healthy replicas.<br /> |
+| `ReduceToSurvivors` | EngineGroupPlanKindReduceToSurvivors removes identities absent from an authoritative survivor set.<br /> |
+| `Restore` | EngineGroupPlanKindRestore recreates excluded stable identities.<br /> |
+| `Remap` | EngineGroupPlanKindRemap changes native membership without changing logical cardinality.<br /> |
+
+
+#### EngineGroupPreflightStatus
+
+
+
+EngineGroupPreflightStatus durably records one side-effect-free validation result.
+
+
+
+_Appears in:_
+- [EngineGroupTransitionStatus](#enginegrouptransitionstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `transitionID` _string_ | transitionID correlates this validation with the immutable transition. |  | MinLength: 1 <br /> |
+| `controlRevision` _integer_ | controlRevision is the controller revision at which validation completed.<br />Plan preflight runs before the first external target and therefore uses revision zero. |  | Minimum: 0 <br /> |
+| `subjectDigest` _string_ | subjectDigest identifies the exact normalized plan or target that was validated. |  | MinLength: 1 <br /> |
+| `evidence` _[EngineGroupValidationEvidenceStatus](#enginegroupvalidationevidencestatus)_ | evidence is authoritative approval for the validated subject. |  | Optional: \{\} <br /> |
+| `rejection` _[EngineGroupFailureStatus](#enginegroupfailurestatus)_ | rejection is an authoritative terminal rejection of the validated subject. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupProcessLifecycleOwner
+
+_Underlying type:_ _string_
+
+EngineGroupProcessLifecycleOwner identifies who starts and stops engine processes.
+
+_Validation:_
+- Enum: [Engine Orchestrator]
+
+_Appears in:_
+- [EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus)
+- [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)
+
+| Field | Description |
+| --- | --- |
+| `Engine` | EngineGroupProcessLifecycleOwnerEngine means the inference engine owns process lifecycle.<br /> |
+| `Orchestrator` | EngineGroupProcessLifecycleOwnerOrchestrator means Kubernetes-side orchestration owns process lifecycle.<br /> |
+
+
+#### EngineGroupProfileStatus
+
+
+
+EngineGroupProfileStatus records immutable geometry and hard capability bounds resolved for a group.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `backend` _string_ | backend is the inference engine that owns native membership. |  | Enum: [sglang vllm trtllm] <br /> |
+| `fingerprint` _string_ | fingerprint identifies the immutable engine and workload geometry used by this group. |  | MinLength: 1 <br /> |
+| `gpusPerReplica` _integer_ | gpusPerReplica is the accelerator requirement of one logical replica. |  | Minimum: 1 <br /> |
+| `podsPerReplica` _integer_ | podsPerReplica is the number of physically disjoint capacity Pods allocated and released<br />together for one logical replica. |  | Minimum: 1 <br /> |
+| `minSafeServingReplicas` _integer_ | minSafeServingReplicas is the lowest committed replica count at which this profile may<br />continue serving while degraded or recovering. |  | Minimum: 1 <br /> |
+| `minReplicas` _integer_ | minReplicas is the hard lower bound for live membership operations other than terminal<br />group retirement. |  | Minimum: 1 <br /> |
+| `maxReplicas` _integer_ | maxReplicas is the hard upper bound for live membership operations. |  | Minimum: 1 <br /> |
+
+
+#### EngineGroupReconciliationStatus
+
+
+
+EngineGroupReconciliationStatus is the complete restart journal consumed by the Engine Group controller.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `controlRevision` _integer_ | controlRevision orders every capacity, traffic, and membership target within this group. |  | Minimum: 0 <br /> |
+| `registry` _[EngineGroupReplicaRecordStatus](#enginegroupreplicarecordstatus) array_ | registry preserves stable logical-replica and capacity-slot identities across replacement. |  | Optional: \{\} <br /> |
+| `topologyHistory` _[EngineGroupTopologyHistoryStatus](#enginegrouptopologyhistorystatus)_ | topologyHistory retains the current topology and snapshots referenced by durable evidence. |  |  |
+| `capacity` _[EngineGroupCapacityReconciliationStatus](#enginegroupcapacityreconciliationstatus)_ | capacity records the newest desired target, the last accepted target, and physical observation. |  |  |
+| `traffic` _[EngineGroupTrafficReconciliationStatus](#enginegrouptrafficreconciliationstatus)_ | traffic records the newest desired target, the last accepted target, and routing observation. |  |  |
+| `membership` _[EngineGroupMembershipReconciliationStatus](#enginegroupmembershipreconciliationstatus)_ | membership records the exact desired transition and adapter-owned correlated observation. |  |  |
+| `transition` _[EngineGroupTransitionStatus](#enginegrouptransitionstatus)_ | transition owns the immutable plan and cross-subsystem progress for one active or terminal change. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupReduceToSurvivorsChangeStatus
+
+
+
+EngineGroupReduceToSurvivorsChangeStatus removes every base member absent from survivors.
+
+
+
+_Appears in:_
+- [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `survivors` _string array_ | survivors is the exact authoritative survivor set. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
+
+
+#### EngineGroupReleaseAuthorization
+
+
+
+EngineGroupReleaseAuthorization permits removal of only named concrete Pod incarnations.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+- [EngineGroupCapacityObservationStatus](#enginegroupcapacityobservationstatus)
+- [EngineGroupCapacityTargetStatus](#enginegroupcapacitytargetstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operationID` _string_ | operationID identifies the membership result authorizing release. |  | MinLength: 1 <br /> |
+| `topologyGeneration` _integer_ | topologyGeneration identifies the exact committed topology authorizing release. |  | Minimum: 1 <br /> |
+| `replicaID` _string_ | replicaID is the stable logical replica being released. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID is the stable workload-manager position being fenced. |  | MinLength: 1 <br /> |
+| `capacityRefs` _[EngineGroupCapacityRef](#enginegroupcapacityref) array_ | capacityRefs is the complete set of concrete Pod UIDs authorized for deletion. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupRemapChangeStatus
+
+
+
+EngineGroupRemapChangeStatus replaces complete logical-to-native membership at one cardinality.
+
+
+
+_Appears in:_
+- [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `membership` _[EngineGroupNativeMembershipStatus](#enginegroupnativemembershipstatus) array_ | membership is the complete target logical, slot, and native-member mapping. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupReplicaAvailability
+
+_Underlying type:_ _string_
+
+EngineGroupReplicaAvailability reports physical and runtime availability independently from membership.
+
+_Validation:_
+- Enum: [Available Unavailable Unknown]
+
+_Appears in:_
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description |
+| --- | --- |
+| `Available` | EngineGroupReplicaAvailabilityAvailable means every capacity Pod and required runtime check is ready.<br /> |
+| `Unavailable` | EngineGroupReplicaAvailabilityUnavailable means at least one required capacity or runtime check failed.<br /> |
+| `Unknown` | EngineGroupReplicaAvailabilityUnknown means availability cannot currently be established.<br /> |
+
+
+#### EngineGroupReplicaHistoryStatus
+
+
+
+EngineGroupReplicaHistoryStatus retains one excluded incarnation and its exact native membership.
+
+
+
+_Appears in:_
+- [EngineGroupReplicaRecordStatus](#enginegroupreplicarecordstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `topologyGeneration` _integer_ | topologyGeneration identifies the topology that excluded this incarnation. |  | Minimum: 1 <br /> |
+| `incarnation` _[EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus)_ | incarnation is the concrete allocation and runtime identity that was excluded. |  |  |
+| `nativeMembers` _string array_ | nativeMembers are the backend-native identities formerly correlated with this replica. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
+
+
+#### EngineGroupReplicaIncarnation
+
+
+
+EngineGroupReplicaIncarnation binds one logical replica and stable slot to concrete capacity.
+
+
+
+_Appears in:_
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `runtimeIncarnation` _string_ | runtimeIncarnation identifies one concrete engine process incarnation. |  | MinLength: 1 <br /> |
+| `capacityRefs` _[EngineGroupCapacityRef](#enginegroupcapacityref) array_ | capacityRefs contains every concrete Pod incarnation in this replica allocation. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupReplicaMembership
+
+_Underlying type:_ _string_
+
+EngineGroupReplicaMembership reports committed engine state or current orchestration intent.
+
+_Validation:_
+- Enum: [Active Masked Joining Retiring Unknown]
+
+_Appears in:_
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description |
+| --- | --- |
+| `Active` | EngineGroupReplicaMembershipActive means the engine has committed this replica.<br /> |
+| `Masked` | EngineGroupReplicaMembershipMasked means the engine committed a survivor topology excluding this replica.<br /> |
+| `Joining` | EngineGroupReplicaMembershipJoining means orchestration intends this replica to join.<br /> |
+| `Retiring` | EngineGroupReplicaMembershipRetiring means orchestration intends this replica to leave.<br /> |
+| `Unknown` | EngineGroupReplicaMembershipUnknown means authoritative engine membership is unavailable.<br /> |
+
+
+#### EngineGroupReplicaRecordStatus
+
+
+
+EngineGroupReplicaRecordStatus is the canonical durable record for one logical replica and stable slot.
+
+
+
+_Appears in:_
+- [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is stable across physical and runtime replacement. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID identifies the stable workload-manager position backing this replica. |  | MinLength: 1 <br /> |
+| `current` _[EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus)_ | current is the concrete physical and runtime incarnation currently assigned to the slot. |  | Optional: \{\} <br /> |
+| `history` _[EngineGroupReplicaHistoryStatus](#enginegroupreplicahistorystatus) array_ | history retains excluded incarnations and their exact native membership. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupReplicaStatus
+
+
+
+EngineGroupReplicaStatus preserves one stable logical identity across physical replacement.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is stable across physical and runtime replacement. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID identifies the stable workload-manager position backing this replica. |  | MinLength: 1 <br /> |
+| `representativeRef` _[EngineGroupCapacityRef](#enginegroupcapacityref)_ | representativeRef identifies the Pod selected by status.selector for this allocation. |  | Optional: \{\} <br /> |
+| `current` _[EngineGroupReplicaIncarnation](#enginegroupreplicaincarnation)_ | current is the currently allocated physical and runtime incarnation. |  | Optional: \{\} <br /> |
+| `previousIncarnations` _[EngineGroupReplicaIncarnation](#enginegroupreplicaincarnation) array_ | previousIncarnations retain identities required for recovery or exact release. |  | Optional: \{\} <br /> |
+| `nativeMembers` _string array_ | nativeMembers are the engine identities currently correlated with this logical replica. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+| `availability` _[EngineGroupReplicaAvailability](#enginegroupreplicaavailability)_ | availability reports complete physical and profile-required runtime readiness. |  | Enum: [Available Unavailable Unknown] <br /> |
+| `membership` _[EngineGroupReplicaMembership](#enginegroupreplicamembership)_ | membership reports committed engine state or current orchestration intent. |  | Enum: [Active Masked Joining Retiring Unknown] <br /> |
+
+
+#### EngineGroupReplicaTargetStatus
+
+
+
+EngineGroupReplicaTargetStatus is the resolved physical and native identity for one joining replica.
+
+
+
+_Appears in:_
+- [EngineGroupGrowChangeStatus](#enginegroupgrowchangestatus)
+- [EngineGroupRestoreChangeStatus](#enginegrouprestorechangestatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID is the stable workload-manager position. |  | MinLength: 1 <br /> |
+| `bootstrap` _[EngineGroupBootstrapMode](#enginegroupbootstrapmode)_ | bootstrap distinguishes a new logical member from restoration of a fixed slot. |  | Enum: [Join RestoreFixedSlot] <br /> |
+| `nativeMembers` _string array_ | nativeMembers contains backend-native identities required by the resolved plan. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+
+
+#### EngineGroupResolvedChangeStatus
+
+
+
+EngineGroupResolvedChangeStatus is the tagged union of membership changes understood by the coordinator.
+
+
+
+_Appears in:_
+- [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kind` _[EngineGroupPlanKind](#enginegroupplankind)_ | kind selects the populated semantic variant. |  | Enum: [Grow Retire ReduceToSurvivors Restore Remap] <br /> |
+| `grow` _[EngineGroupGrowChangeStatus](#enginegroupgrowchangestatus)_ | grow adds previously unknown logical replicas. |  | Optional: \{\} <br /> |
+| `retire` _[EngineGroupRetireChangeStatus](#enginegroupretirechangestatus)_ | retire gracefully removes selected healthy replicas. |  | Optional: \{\} <br /> |
+| `reduceToSurvivors` _[EngineGroupReduceToSurvivorsChangeStatus](#enginegroupreducetosurvivorschangestatus)_ | reduceToSurvivors removes base members absent from an authoritative survivor set. |  | Optional: \{\} <br /> |
+| `restore` _[EngineGroupRestoreChangeStatus](#enginegrouprestorechangestatus)_ | restore recreates excluded stable identities in their original native slots. |  | Optional: \{\} <br /> |
+| `remap` _[EngineGroupRemapChangeStatus](#enginegroupremapchangestatus)_ | remap changes complete native membership without changing logical cardinality. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupResolvedPlanStatus
+
+
+
+EngineGroupResolvedPlanStatus is one immutable, profile-resolved membership transition.
+
+
+
+_Appears in:_
+- [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus)
+- [EngineGroupTransitionSpecStatus](#enginegrouptransitionspecstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | id is the caller-selected stable plan identity. |  | MinLength: 1 <br /> |
+| `profileFingerprint` _string_ | profileFingerprint binds the plan to immutable engine and workload geometry. |  | MinLength: 1 <br /> |
+| `processLifecycleOwner` _[EngineGroupProcessLifecycleOwner](#enginegroupprocesslifecycleowner)_ | processLifecycleOwner identifies who starts and stops joining engine processes. |  | Enum: [Engine Orchestrator] <br /> |
+| `trafficRequirement` _[EngineGroupTrafficRequirement](#enginegrouptrafficrequirement)_ | trafficRequirement declares whether retained members may serve during the mutation. |  | Enum: [KeepServing QuiesceGroup] <br /> |
+| `verificationRequirement` _[EngineGroupVerificationRequirement](#enginegroupverificationrequirement)_ | verificationRequirement declares whether serving progress must be proven before admission. |  | Enum: [None Required] <br /> |
+| `change` _[EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)_ | change is the serializable tagged union of exact membership semantics. |  |  |
+
+
+#### EngineGroupRestoreChangeStatus
+
+
+
+EngineGroupRestoreChangeStatus restores stable logical and native-member identities.
+
+
+
+_Appears in:_
+- [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _[EngineGroupReplicaTargetStatus](#enginegroupreplicatargetstatus) array_ | replicas contains every exact stable identity to restore. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupRetireChangeStatus
+
+
+
+EngineGroupRetireChangeStatus removes selected healthy logical replicas after drain.
+
+
+
+_Appears in:_
+- [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _string array_ | replicas contains the exact stable logical identities selected for retirement. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
+
+
+#### EngineGroupScaleUnit
+
+_Underlying type:_ _string_
+
+EngineGroupScaleUnit names the logical unit exposed through the Scale subresource.
+
+_Validation:_
+- Enum: [replicas]
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description |
+| --- | --- |
+| `replicas` | EngineGroupScaleUnitReplicas means Scale counts logical engine replicas within one world.<br /> |
+
+
+#### EngineGroupScalingPolicy
+
+
+
+EngineGroupScalingPolicy defines operator-selected scaling bounds for one Engine Group.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `minReplicas` _integer_ | minReplicas is the minimum ordinary scaling target. Terminal group retirement is driven by<br />deletion and may retire membership below this bound without writing an out-of-policy target. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxReplicas` _integer_ | maxReplicas is the maximum target selected by policy. It cannot exceed the resolved hard<br />engine capability bound. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+
+
+#### EngineGroupServingProofStatus
+
+
+
+EngineGroupServingProofStatus binds successful verification to an immutable topology.
+
+
+
+_Appears in:_
+- [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `topologyGeneration` _integer_ | topologyGeneration identifies the verified topology. |  | Minimum: 1 <br /> |
+| `runtimeDigest` _string_ | runtimeDigest identifies the runtime-observed membership and serving path. |  | MinLength: 1 <br /> |
+| `observedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | observedAt records when serving progress was proven. |  |  |
+
+
+#### EngineGroupTargetValidationStatus
+
+
+
+EngineGroupTargetValidationStatus records a reconcile-time target rejection without silently
+changing the requested target.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `requestedReplicas` _integer_ | requestedReplicas is the rejected desired target. |  | Minimum: 0 <br /> |
+| `effectiveReplicas` _integer_ | effectiveReplicas is the last valid target still in force. |  | Minimum: 0 <br /> |
+| `minReplicas` _integer_ | minReplicas is the effective lower bound used for validation. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxReplicas` _integer_ | maxReplicas is the effective upper bound used for validation. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `reason` _string_ | reason is a stable machine-readable rejection reason. |  | MinLength: 1 <br /> |
+| `message` _string_ | message explains the rejection for a human reader. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTopologyHistoryStatus
+
+
+
+EngineGroupTopologyHistoryStatus retains immutable topology snapshots needed by durable evidence.
+
+
+
+_Appears in:_
+- [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `currentGeneration` _integer_ | currentGeneration identifies the engine's current authoritative topology snapshot. |  | Minimum: 1 <br /> |
+| `snapshots` _[EngineGroupTopologyStatus](#enginegrouptopologystatus) array_ | snapshots contains the current topology and any snapshot still referenced by controller state. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupTopologyStatus
+
+
+
+EngineGroupTopologyStatus is one immutable engine-authoritative committed topology snapshot.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+- [EngineGroupMembershipObservationStatus](#enginegroupmembershipobservationstatus)
+- [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus)
+- [EngineGroupMembershipTransitionObservationStatus](#enginegroupmembershiptransitionobservationstatus)
+- [EngineGroupTopologyHistoryStatus](#enginegrouptopologyhistorystatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `generation` _integer_ | generation is the engine's topology generation. |  | Minimum: 1 <br /> |
+| `replicas` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | replicas is the complete logical-to-native membership mapping at this generation. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTrafficDrainMode
+
+_Underlying type:_ _string_
+
+EngineGroupTrafficDrainMode distinguishes planned drain from failed-member withdrawal evidence.
+
+_Validation:_
+- Enum: [Graceful ConfirmInactive]
+
+_Appears in:_
+- [EngineGroupTrafficDrainTargetStatus](#enginegrouptrafficdraintargetstatus)
+
+| Field | Description |
+| --- | --- |
+| `Graceful` | EngineGroupTrafficDrainModeGraceful waits for a reachable member's in-flight work to finish.<br /> |
+| `ConfirmInactive` | EngineGroupTrafficDrainModeConfirmInactive proves a failed member is no longer routable.<br /> |
+
+
+#### EngineGroupTrafficDrainTargetStatus
+
+
+
+EngineGroupTrafficDrainTargetStatus requests terminal non-serving evidence for one member.
+
+
+
+_Appears in:_
+- [EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `membership` _[EngineGroupMemberStatus](#enginegroupmemberstatus)_ | membership is the exact member incarnation to withdraw and drain. |  |  |
+| `mode` _[EngineGroupTrafficDrainMode](#enginegrouptrafficdrainmode)_ | mode distinguishes graceful drain from confirmation that a failed member is inactive. |  | Enum: [Graceful ConfirmInactive] <br /> |
+
+
+#### EngineGroupTrafficObservationStatus
+
+
+
+EngineGroupTrafficObservationStatus is the runtime's authoritative routing and drain state.
+
+
+
+_Appears in:_
+- [EngineGroupTrafficReconciliationStatus](#enginegrouptrafficreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `appliedRevision` _integer_ | appliedRevision is the last traffic target revision durably accepted by the adapter. |  | Minimum: 0 <br /> |
+| `admitted` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | admitted is the exact set of member incarnations eligible for new work. |  | Optional: \{\} <br /> |
+| `draining` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | draining contains member incarnations whose graceful drain has not completed. |  | Optional: \{\} <br /> |
+| `drained` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | drained is durable terminal non-serving evidence for exact member incarnations. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTrafficReconciliationStatus
+
+
+
+EngineGroupTrafficReconciliationStatus records desired, accepted, and observed routing levels.
+
+
+
+_Appears in:_
+- [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `desired` _[EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus)_ | desired is the newest persisted absolute routing and drain target. |  | Optional: \{\} <br /> |
+| `accepted` _[EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus)_ | accepted is the last exact target durably acknowledged by the traffic adapter. |  | Optional: \{\} <br /> |
+| `observed` _[EngineGroupTrafficObservationStatus](#enginegrouptrafficobservationstatus)_ | observed is the runtime's authoritative routing and drain state. |  |  |
+
+
+#### EngineGroupTrafficRequirement
+
+_Underlying type:_ _string_
+
+EngineGroupTrafficRequirement describes the traffic boundary around membership mutation.
+
+_Validation:_
+- Enum: [KeepServing QuiesceGroup]
+
+_Appears in:_
+- [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)
+
+| Field | Description |
+| --- | --- |
+| `KeepServing` | EngineGroupTrafficRequirementKeepServing permits retained replicas to continue serving.<br /> |
+| `QuiesceGroup` | EngineGroupTrafficRequirementQuiesceGroup drains the complete base topology before mutation.<br /> |
+
+
+#### EngineGroupTrafficStatus
+
+
+
+EngineGroupTrafficStatus is the runtime's exact routing and terminal drain state.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operationID` _string_ | operationID identifies the operation for which this observation was produced. |  | Optional: \{\} <br /> |
+| `topologyGeneration` _integer_ | topologyGeneration binds the observation to an exact committed topology. |  | Minimum: 1 <br /> |
+| `admitted` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | admitted is the exact set of member incarnations eligible for new work. |  | Optional: \{\} <br /> |
+| `draining` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | draining is the exact set of member incarnations whose in-flight work has not completed. |  | Optional: \{\} <br /> |
+| `drained` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | drained is durable terminal non-serving evidence for exact member incarnations. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTrafficTargetStatus
+
+
+
+EngineGroupTrafficTargetStatus is one group-ordered absolute routing projection.
+
+
+
+_Appears in:_
+- [EngineGroupTrafficReconciliationStatus](#enginegrouptrafficreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `controlRevision` _integer_ | controlRevision orders this target within the Engine Group. |  | Minimum: 1 <br /> |
+| `transitionID` _string_ | transitionID correlates this target with one membership transition. |  | MinLength: 1 <br /> |
+| `topologyGeneration` _integer_ | topologyGeneration binds the target to one authoritative membership snapshot. |  | Minimum: 1 <br /> |
+| `admitted` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | admitted is the exact set of member incarnations eligible for new work. |  | Optional: \{\} <br /> |
+| `drain` _[EngineGroupTrafficDrainTargetStatus](#enginegrouptrafficdraintargetstatus) array_ | drain contains the exact terminal non-serving evidence requested for each member. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTransitionOutcome
+
+_Underlying type:_ _string_
+
+EngineGroupTransitionOutcome summarizes the cross-subsystem workflow.
+
+_Validation:_
+- Enum: [Progressing Reverting RolledBack Blocked Completed]
+
+_Appears in:_
+- [EngineGroupTransitionStatus](#enginegrouptransitionstatus)
+
+| Field | Description |
+| --- | --- |
+| `Progressing` | EngineGroupTransitionOutcomeProgressing means safe work remains.<br /> |
+| `Reverting` | EngineGroupTransitionOutcomeReverting means a provably uncommitted target is restoring base state.<br /> |
+| `RolledBack` | EngineGroupTransitionOutcomeRolledBack means base capacity and traffic were restored.<br /> |
+| `Blocked` | EngineGroupTransitionOutcomeBlocked means safety evidence cannot progress automatically.<br /> |
+| `Completed` | EngineGroupTransitionOutcomeCompleted means all subsystems reached the resolved plan.<br /> |
+
+
+#### EngineGroupTransitionSpecStatus
+
+
+
+EngineGroupTransitionSpecStatus is the immutable input to one membership transition.
+
+
+
+_Appears in:_
+- [EngineGroupTransitionStatus](#enginegrouptransitionstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | id uniquely identifies this transition. |  | MinLength: 1 <br /> |
+| `baseTopologyGeneration` _integer_ | baseTopologyGeneration is the exact topology from which the change starts. |  | Minimum: 1 <br /> |
+| `plan` _[EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)_ | plan is the complete normalized semantic operation. |  |  |
+
+
+#### EngineGroupTransitionStatus
+
+
+
+EngineGroupTransitionStatus owns one immutable semantic transition across all subsystems.
+
+
+
+_Appears in:_
+- [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `spec` _[EngineGroupTransitionSpecStatus](#enginegrouptransitionspecstatus)_ | spec is the immutable transition identity, base topology, and resolved plan. |  |  |
+| `planPreflight` _[EngineGroupPreflightStatus](#enginegrouppreflightstatus)_ | planPreflight is durable adapter evidence captured before capacity or traffic prework. |  | Optional: \{\} <br /> |
+| `targetPreflight` _[EngineGroupPreflightStatus](#enginegrouppreflightstatus)_ | targetPreflight is durable adapter evidence for the exact frozen membership target. |  | Optional: \{\} <br /> |
+| `verification` _[EngineGroupVerificationStatus](#enginegroupverificationstatus)_ | verification records the topology-bound serving proof or conclusive failure. |  | Optional: \{\} <br /> |
+| `outcome` _[EngineGroupTransitionOutcome](#enginegrouptransitionoutcome)_ | outcome summarizes cross-subsystem workflow progress without duplicating adapter phases. |  | Enum: [Progressing Reverting RolledBack Blocked Completed] <br /> |
+| `failure` _[EngineGroupFailureStatus](#enginegroupfailurestatus)_ | failure describes the reason an otherwise durable transition is blocked or reverting. |  | Optional: \{\} <br /> |
+| `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | startedAt is when the controller first persisted the immutable transition. |  |  |
+| `updatedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | updatedAt is when the controller last changed durable transition state. |  |  |
+
+
+#### EngineGroupValidationEvidenceStatus
+
+
+
+EngineGroupValidationEvidenceStatus binds approval to exact plan, target, profile, and capabilities.
+
+
+
+_Appears in:_
+- [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus)
+- [EngineGroupPreflightStatus](#enginegrouppreflightstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `planDigest` _string_ | planDigest is the canonical digest of the normalized resolved plan. |  | MinLength: 1 <br /> |
+| `targetDigest` _string_ | targetDigest is the canonical digest of the exact membership target, when known. |  | Optional: \{\} <br /> |
+| `profileFingerprint` _string_ | profileFingerprint binds validation to immutable engine and workload geometry. |  | MinLength: 1 <br /> |
+| `capabilityGeneration` _string_ | capabilityGeneration identifies the adapter capability snapshot used for validation. |  | MinLength: 1 <br /> |
+
+
+#### EngineGroupVerificationPhase
+
+_Underlying type:_ _string_
+
+EngineGroupVerificationPhase is the independent serving-verification state.
+
+_Validation:_
+- Enum: [Pending Passed Failed]
+
+_Appears in:_
+- [EngineGroupVerificationStatus](#enginegroupverificationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` | EngineGroupVerificationPhasePending means a proof is required for the committed topology.<br /> |
+| `Passed` | EngineGroupVerificationPhasePassed means the exact topology produced serving progress.<br /> |
+| `Failed` | EngineGroupVerificationPhaseFailed means a conclusive serving check failed.<br /> |
+
+
+#### EngineGroupVerificationRequirement
+
+_Underlying type:_ _string_
+
+EngineGroupVerificationRequirement states whether commit needs a serving-progress proof.
+
+_Validation:_
+- Enum: [None Required]
+
+_Appears in:_
+- [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus)
+
+| Field | Description |
+| --- | --- |
+| `None` | EngineGroupVerificationRequirementNone permits admission after authoritative membership commit.<br /> |
+| `Required` | EngineGroupVerificationRequirementRequired requires a matching serving proof before admission.<br /> |
+
+
+#### EngineGroupVerificationStatus
+
+
+
+EngineGroupVerificationStatus records serving progress independently from membership commit.
+
+
+
+_Appears in:_
+- [EngineGroupTransitionStatus](#enginegrouptransitionstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[EngineGroupVerificationPhase](#enginegroupverificationphase)_ | phase is the durable serving-verification state. |  | Enum: [Pending Passed Failed] <br /> |
+| `proof` _[EngineGroupServingProofStatus](#enginegroupservingproofstatus)_ | proof is a positive result bound to one immutable topology. |  | Optional: \{\} <br /> |
+| `failure` _[EngineGroupFailureStatus](#enginegroupfailurestatus)_ | failure is a conclusive verification failure. |  | Optional: \{\} <br /> |
 
 
 #### ExperimentalSpec
