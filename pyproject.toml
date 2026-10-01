@@ -128,6 +128,9 @@ dynamo = "dynamo.replay.simulation:DynamoReplayRunnerFactory"
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
 
+[project.entry-points."aisimulate.output_adapters"]
+dgd = "dynamo.profiler.sweeper:create_dgd_output_adapter"
+
 [dependency-groups]
 docs = [
     # Core Sphinx

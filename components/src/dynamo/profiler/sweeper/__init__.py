@@ -3,20 +3,24 @@
 
 """Dynamo composition for AI Simulate Sweeper candidates."""
 
+from dynamo.profiler.sweeper.adapter import (
+    DGDOutputAdapter,
+    DGDOutputConfig,
+    create_dgd_output_adapter,
+)
 from dynamo.profiler.sweeper.renderers import (
     CandidateMaterializationError,
     DGDGenerationOptions,
     DGDRenderer,
     render_dgd,
 )
-from dynamo.profiler.sweeper.runner import SweepResult, load_sweep_config, run_sweep
 
 __all__ = [
     "CandidateMaterializationError",
     "DGDGenerationOptions",
+    "DGDOutputAdapter",
+    "DGDOutputConfig",
     "DGDRenderer",
-    "SweepResult",
-    "load_sweep_config",
+    "create_dgd_output_adapter",
     "render_dgd",
-    "run_sweep",
 ]
