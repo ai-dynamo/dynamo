@@ -129,7 +129,6 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	if err != nil {
 		return ReconcileResult{}, err
 	}
-
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
 		dgd,

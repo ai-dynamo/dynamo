@@ -138,6 +138,14 @@ func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (map[string]string, error) {
+	return getExistingRestartAnnotationsDCD(ctx, r.syncer, dgd)
+}
+
+func getExistingRestartAnnotationsDCD(
+	ctx context.Context,
+	reader client.Reader,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (map[string]string, error) {
 	logger := log.FromContext(ctx)
 	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
@@ -151,7 +159,7 @@ func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 		existingDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
 		for _, workerHash := range workerHashes {
 			dcdName := dynamo.GetDCDResourceName(dgd, componentName, workerHash)
-			err := r.syncer.Get(
+			err := reader.Get(
 				ctx,
 				types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace},
 				existingDCD,
@@ -181,39 +189,49 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) error {
-	if dcd == nil || checkpointInfo == nil || !checkpointInfo.Enabled {
+	if dcd == nil {
+		return nil
+	}
+	return applyCheckpointStartupPolicy(&dcd.Spec.DynamoComponentDeploymentSharedSpec, checkpointInfo)
+}
+
+func applyCheckpointStartupPolicy(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) error {
+	if component == nil || checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
 	}
 
 	if checkpointInfo.Exists && checkpointInfo.CheckpointName != "" {
-		if dcd.Spec.Experimental == nil {
-			dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{}
+		if component.Experimental == nil {
+			component.Experimental = &nvidiacomv1beta1.ExperimentalSpec{}
 		}
-		if dcd.Spec.Experimental.Checkpoint == nil {
-			dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{}
+		if component.Experimental.Checkpoint == nil {
+			component.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{}
 		}
 		checkpointName := checkpointInfo.CheckpointName
-		dcd.Spec.Experimental.Checkpoint.Enabled = true
-		dcd.Spec.Experimental.Checkpoint.CheckpointRef = &checkpointName
-		dcd.Spec.Experimental.Checkpoint.Identity = nil
-		dcd.Spec.Experimental.Checkpoint.Job = nil
+		component.Experimental.Checkpoint.Enabled = true
+		component.Experimental.Checkpoint.CheckpointRef = &checkpointName
+		component.Experimental.Checkpoint.Identity = nil
+		component.Experimental.Checkpoint.Job = nil
 		startupPolicy := checkpointInfo.StartupPolicy
 		if startupPolicy == "" {
 			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 		}
-		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
+		component.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
 	// Artifact identity is independent of startup policy. Preserve the automatic
 	// SnapshotJob handoff even while WaitForCheckpoint keeps replicas gated.
 	if checkpointInfo.AutomaticSnapshotJob != nil {
-		if err := applyRestoreCandidateMetadataToDCD(dcd, checkpointInfo); err != nil {
+		if err := applyRestoreCandidateMetadataToComponent(component, checkpointInfo); err != nil {
 			return err
 		}
 	}
 
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
-		dcd.Spec.Replicas = ptr.To(int32(0))
+		component.Replicas = ptr.To(int32(0))
 		return nil
 	}
 	if checkpointInfo.StartupPolicy != "" &&
@@ -223,22 +241,22 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 	if checkpointInfo.AutomaticSnapshotJob != nil {
 		return nil
 	}
-	return applyRestoreCandidateMetadataToDCD(dcd, checkpointInfo)
+	return applyRestoreCandidateMetadataToComponent(component, checkpointInfo)
 }
 
-func applyRestoreCandidateMetadataToDCD(
-	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+func applyRestoreCandidateMetadataToComponent(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) error {
-	annotations := dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	annotations := dynamo.GetPodTemplateAnnotations(component)
 	if annotations == nil {
-		if dcd.Spec.PodTemplate == nil {
-			dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
+		if component.PodTemplate == nil {
+			component.PodTemplate = &corev1.PodTemplateSpec{}
 		}
-		if dcd.Spec.PodTemplate.Annotations == nil {
-			dcd.Spec.PodTemplate.Annotations = map[string]string{}
+		if component.PodTemplate.Annotations == nil {
+			component.PodTemplate.Annotations = map[string]string{}
 		}
-		annotations = dcd.Spec.PodTemplate.Annotations
+		annotations = component.PodTemplate.Annotations
 	}
 	return checkpoint.ApplyRestoreCandidateMetadata(annotations, checkpointInfo)
 }
@@ -249,8 +267,16 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	ctx context.Context,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
 ) error {
+	return preserveExistingBackendFramework(ctx, r.syncer, desired)
+}
+
+func preserveExistingBackendFramework(
+	ctx context.Context,
+	reader client.Reader,
+	desired *nvidiacomv1beta1.DynamoComponentDeployment,
+) error {
 	existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
-	err := r.syncer.Get(
+	err := reader.Get(
 		ctx,
 		types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace},
 		existing,
