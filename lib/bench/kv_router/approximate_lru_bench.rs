@@ -11,9 +11,7 @@ use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::issuer::{pin_current_thread, pin_current_thread_to_cpus};
-use dynamo_bench::kv_router_common::replay::{
-    WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace,
-};
+use dynamo_bench::kv_router_common::replay::{WorkerReplayArtifacts, generate_replay_artifacts};
 use dynamo_kv_router::indexer::{
     ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, ApproximateLruStats,
     ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics,
@@ -1069,14 +1067,7 @@ async fn async_main(args: Args, backend_cpus: Option<Vec<usize>>) -> anyhow::Res
         .mooncake_trace_path
         .as_deref()
         .context("mooncake trace path is required")?;
-    let traces = process_mooncake_trace(
-        trace_path,
-        args.common.block_size,
-        args.common.trace_length_factor,
-        args.common.trace_duplication_factor,
-        args.common.num_unique_inference_workers,
-        args.common.seed,
-    )?;
+    let traces = args.common.load_mooncake_trace(trace_path)?;
     let artifacts = generate_replay_artifacts(
         &traces,
         args.common.num_gpu_blocks,
@@ -1320,6 +1311,7 @@ mod tests {
                 test: false,
                 num_gpu_blocks: 16,
                 block_size: 4,
+                trace_block_size: 8,
                 trace_simulation_duration_ms: None,
                 benchmark_duration_ms: 1_000,
                 num_unique_inference_workers: 1,

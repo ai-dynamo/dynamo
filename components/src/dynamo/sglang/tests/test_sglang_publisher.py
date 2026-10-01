@@ -489,6 +489,23 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
     assert metrics_task.cancelled()
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("tcp://*:5557", "127.0.0.1"),
+        ("tcp://0.0.0.0:5557", "127.0.0.1"),
+        ("tcp://[::]:5557", "127.0.0.1"),
+        ("tcp://192.0.2.10:5557", "2001:db8::7"),
+    ],
+)
+def test_kv_event_connect_ip_uses_loopback_for_wildcard_binds(
+    monkeypatch, endpoint, expected
+):
+    monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "2001:db8::7")
+
+    assert publisher_mod.kv_event_connect_ip(endpoint) == expected
+
+
 def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     calls = []
 

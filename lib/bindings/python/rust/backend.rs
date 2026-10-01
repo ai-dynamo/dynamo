@@ -60,6 +60,13 @@ fn sidecar_startup_to_pyerr(error: SidecarStartupError) -> PyErr {
     }
 }
 
+fn sidecar_run_to_pyerr(error: anyhow::Error) -> PyErr {
+    match error.downcast::<SidecarStartupError>() {
+        Ok(error) => sidecar_startup_to_pyerr(error),
+        Err(error) => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
+    }
+}
+
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
@@ -101,12 +108,11 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
-    let (engine, config) = py
-        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args(cli_argv))
+    let bootstrap = dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args_async(cli_argv)
         .map_err(sidecar_startup_to_pyerr)?;
 
-    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
+        .map_err(sidecar_run_to_pyerr)
 }
 
 const VLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-vllm-sidecar";
@@ -127,12 +133,11 @@ fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = vllm_sidecar_argv(argv.unwrap_or_default());
-    let (engine, config) = py
-        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args(cli_argv))
+    let bootstrap = dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args_async(cli_argv)
         .map_err(sidecar_startup_to_pyerr)?;
 
-    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
+        .map_err(sidecar_run_to_pyerr)
 }
 
 const TRTLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-trtllm-sidecar";
@@ -153,12 +158,11 @@ fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
-    let (engine, config) = py
-        .allow_threads(move || dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args(cli_argv))
+    let bootstrap = dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args_async(cli_argv)
         .map_err(sidecar_startup_to_pyerr)?;
 
-    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
+        .map_err(sidecar_run_to_pyerr)
 }
 
 // ---------------------------------------------------------------------------

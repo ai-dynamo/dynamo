@@ -163,4 +163,4 @@ cargo bench --package dynamo-bench --bench offline_replay_bench \
 
 See [kv_router/INDEXER_BENCH.md](kv_router/INDEXER_BENCH.md) for trace
 acquisition, benchmark commands, and results for the `mooncake_bench` suite:
-`concurrent-radix-tree-compressed` and `branch-sharded-crtc`.
+`concurrent-radix-tree-compressed` and `nested-map`.
