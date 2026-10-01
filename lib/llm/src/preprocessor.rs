@@ -1666,6 +1666,8 @@ pub struct OpenAIPreprocessor {
     /// variants are initialized independently on demand.
     embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
+    /// Exclusive bound for `nvext.token_data` ids, from `token_id_bound`.
+    token_id_bound: Option<usize>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
@@ -1726,17 +1728,28 @@ pub struct OpenAIPreprocessor {
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
 
-/// Reject token ids `>= vocab_size` (client 400). `None` vocab is unenforceable.
+/// Exclusive bound for client token ids: the larger known vocab size, so ids
+/// that only the model or only the tokenizer has (e.g. an image placeholder)
+/// stay valid. A zero size counts as unknown. `None` means no check.
+fn token_id_bound(model_vocab: Option<usize>, tokenizer_vocab: Option<usize>) -> Option<usize> {
+    model_vocab
+        .into_iter()
+        .chain(tokenizer_vocab)
+        .filter(|&size| size > 0)
+        .max()
+}
+
+/// Reject token ids `>= bound` (client 400). `None` means no check.
 fn ensure_token_ids_in_vocab(
     tokens: &[crate::protocols::TokenIdType],
-    vocab_size: Option<usize>,
+    bound: Option<usize>,
 ) -> anyhow::Result<()> {
-    if let Some(vocab_size) = vocab_size {
-        if let Some(&bad) = tokens.iter().find(|&&t| t as usize >= vocab_size) {
-            return Err(invalid_argument_error(format!(
-                "nvext.token_data token id {bad} is out of range (must be < vocab_size {vocab_size})"
-            )));
-        }
+    if let Some(bound) = bound
+        && let Some(&bad) = tokens.iter().find(|&&t| t as usize >= bound)
+    {
+        return Err(invalid_argument_error(format!(
+            "nvext.token_data token id {bad} is out of range (must be < {bound})"
+        )));
     }
     Ok(())
 }
@@ -2444,6 +2457,8 @@ impl OpenAIPreprocessor {
             );
         };
         let model_info = model_info.get_model_info()?;
+        // Once per preprocessor: the HF tokenizer clones its vocab to count it.
+        let token_id_bound = token_id_bound(model_info.vocab_size(), tokenizer.vocab_size());
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
@@ -2763,6 +2778,7 @@ impl OpenAIPreprocessor {
             tokenizer,
             embedding_tokenizers,
             model_info,
+            token_id_bound,
             mdcsum,
             lora_name,
             runtime_config,
@@ -4558,9 +4574,8 @@ impl OpenAIPreprocessor {
                             let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
                                 token_data
                             {
-                                // token_data skips the tokenizer; re-check the vocab bound
-                                // it enforces (an out-of-range id crashes the backend).
-                                ensure_token_ids_in_vocab(tokens, self.model_info.vocab_size())?;
+                                // token_data skips the tokenizer, so bound its ids here.
+                                ensure_token_ids_in_vocab(tokens, self.token_id_bound)?;
                                 tracing::info!(
                                     token_count = tokens.len(),
                                     first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
@@ -7588,19 +7603,90 @@ impl
 
 #[cfg(test)]
 mod token_data_tests {
-    use super::ensure_token_ids_in_vocab;
+    use super::*;
+    use crate::common::checked_file::CheckedFile;
+    use crate::model_card::{ModelDeploymentCard, ModelInfoType};
 
-    #[test]
-    fn rejects_out_of_range_token() {
-        // UINT32_MAX (the reported payload) is far past any vocab -> rejected.
-        assert!(ensure_token_ids_in_vocab(&[1, 2, u32::MAX], Some(1000)).is_err());
-        assert!(ensure_token_ids_in_vocab(&[1000], Some(1000)).is_err());
+    /// `config.json` has `vocab_size` 128256; the mock tokenizer is smaller.
+    const LLAMA_DIR: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    /// The tokenizer has 32000 ids.
+    const TINYLLAMA_DIR: &str = "tests/data/sample-models/TinyLlama_v1.1";
+
+    /// TinyLlama's tokenizer with the given `config.json`.
+    fn tinyllama_with_config(config: &str) -> (Arc<OpenAIPreprocessor>, tempfile::TempDir) {
+        let mut mdc = ModelDeploymentCard::load_from_disk(TINYLLAMA_DIR, None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, config).unwrap();
+        mdc.model_info = Some(ModelInfoType::HfConfigJson(
+            CheckedFile::from_disk(&path).unwrap(),
+        ));
+        (OpenAIPreprocessor::new(mdc).unwrap(), dir)
+    }
+
+    fn request(token_data: &[u32]) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {"token_data": token_data}
+        }))
+        .unwrap()
+    }
+
+    async fn assert_rejected(preprocessor: &OpenAIPreprocessor, token_data: &[u32]) {
+        let error = preprocessor
+            .preprocess_request(&request(token_data), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::InvalidArgument),
+            "{error:#}"
+        );
+    }
+
+    async fn assert_forwarded(preprocessor: &OpenAIPreprocessor, token_data: &[u32]) {
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request(token_data), None)
+            .await
+            .unwrap();
+        assert_eq!(preprocessed.token_ids.as_slice(), token_data);
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_model_vocab() {
+        let mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert_rejected(&preprocessor, &[1, 128256]).await;
+        assert_rejected(&preprocessor, &[u32::MAX]).await;
+        assert_forwarded(&preprocessor, &[1, 128255]).await;
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_tokenizer_vocab() {
+        // No `vocab_size` in config.json: the tokenizer sets the bound.
+        let (preprocessor, _dir) =
+            tinyllama_with_config(r#"{"architectures":[],"model_type":"","eos_token_id":2}"#);
+        assert_rejected(&preprocessor, &[1, 32000]).await;
+        assert_forwarded(&preprocessor, &[1, 31999]).await;
+
+        // A tokenizer id at or above the model's `vocab_size` stays valid.
+        let (preprocessor, _dir) = tinyllama_with_config(
+            r#"{"architectures":[],"model_type":"","eos_token_id":2,"vocab_size":31999}"#,
+        );
+        assert_forwarded(&preprocessor, &[1, 31999]).await;
+        assert_rejected(&preprocessor, &[1, 32000]).await;
     }
 
     #[test]
-    fn accepts_in_range_or_unknown_vocab() {
-        assert!(ensure_token_ids_in_vocab(&[0, 999], Some(1000)).is_ok());
-        // No vocab size on the card -> unenforceable, must not reject.
+    fn token_id_bound_ignores_unknown_and_zero_sizes() {
+        assert_eq!(token_id_bound(Some(151936), Some(151669)), Some(151936));
+        assert_eq!(token_id_bound(Some(128256), Some(128257)), Some(128257));
+        assert_eq!(token_id_bound(None, Some(32000)), Some(32000));
+        assert_eq!(token_id_bound(Some(0), Some(0)), None);
+        assert_eq!(token_id_bound(None, None), None);
         assert!(ensure_token_ids_in_vocab(&[u32::MAX], None).is_ok());
     }
 }
