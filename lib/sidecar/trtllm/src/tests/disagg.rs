@@ -101,11 +101,6 @@ async fn decode_request_replays_the_prefill_session() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
 
     let mut agent_request = request();
-    agent_request.routing = Some(dynamo_backend_common::engine::RoutingHints {
-        dp_rank: Some(0),
-        prefill_dp_rank: Some(0),
-        ..Default::default()
-    });
     agent_request.agent_context = Some(
         serde_json::from_value(json!({"session_id": "agentx-session"}))
             .expect("valid agent context"),
