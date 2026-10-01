@@ -584,22 +584,28 @@ if sys.argv[1] == "true":
 PY
 
 # Use the packaged binary to match the installed vLLM version.
+# Upstream may put a symlink on PATH. Rename the wrapper over that directory
+# entry instead of following the symlink and overwriting the packaged binary.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
         if [ "{{ vllm_rs_allowlist }}" = "1" ]; then \
+            wrapper="$(mktemp "{{ vllm_rs_link }}.XXXXXX")"; \
+            trap 'rm -f "${wrapper}"' EXIT; \
             printf '%s\n' \
                 '#!/bin/sh' \
                 '# Keep Omni from changing the EngineCore output schema.' \
                 'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
                 'export VLLM_PLUGINS' \
                 "exec \"${pkg}/vllm-rs\" \"\$@\"" \
-                > {{ vllm_rs_link }}; \
-            chmod 755 {{ vllm_rs_link }}; \
+                > "${wrapper}"; \
+            chmod 755 "${wrapper}"; \
+            mv -f "${wrapper}" {{ vllm_rs_link }}; \
+            trap - EXIT; \
         else \
             ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
         fi; \
-        vllm-rs --help >/dev/null; \
+        timeout 30s vllm-rs --help >/dev/null; \
     elif [ "{{ vllm_rs_required }}" = "1" ]; then \
         echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
         exit 1; \
