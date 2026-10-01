@@ -68,6 +68,11 @@ optimizer:
   parallelism: 2
   candidate_timeout_seconds: 30
   seed: 42
+dgd:
+  name: qwen
+  format: manifest
+  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+  num_gpus_per_node: 8
 ```
 
 Each parallelism preset is a complete mapping and becomes one categorical choice. Router and
@@ -80,11 +85,19 @@ scheduler domains add independent search dimensions.
 aisimulate recommend \
   --stack dynamo \
   --config /tmp/dynosim-recommend.yaml \
+  --output dgd \
   --output-dir /tmp/dynosim-recommendations
 ```
 
 The command prints ranked candidates and writes concrete files under
-`/tmp/dynosim-recommendations/recommendations/`.
+`/tmp/dynosim-recommendations/recommendations/`. The Dynamo-owned `dgd` output adapter also writes
+the best scalar recommendation to `/tmp/dynosim-recommendations/qwen.yaml`. The `--stack` option
+selects the simulation implementation; `--output dgd` independently selects DGD generation.
+
+The `dgd.renderer` field defaults to `aic`. Set it to `direct` to compare the direct Dynamo renderer.
+For a Pareto optimization, replace `dgd.name` with `dgd.name_prefix`; the adapter writes one numbered
+DGD for each selected Pareto candidate. Set `dgd.format: kustomize` to write Kustomize sources rather
+than one manifest per candidate.
 
 </Step>
 <Step title="Predict the best candidate" id="predict-the-best-candidate">

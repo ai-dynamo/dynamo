@@ -110,7 +110,7 @@ def patch_dgd_manifest(
     dgd_name: str,
     evaluation_context: dict[str, Any] | None = None,
 ) -> str:
-    """Apply shared v1 finalization and CLI-owned fields to one rendered DGD."""
+    """Apply shared v1 finalization and adapter-owned fields to one rendered DGD."""
     documents = [document for document in yaml.safe_load_all(rendered) if document]
     indexed_dgds = [
         (index, document)

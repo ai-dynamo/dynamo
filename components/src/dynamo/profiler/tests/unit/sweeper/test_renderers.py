@@ -33,11 +33,14 @@ def test_renderer_contract_import_does_not_load_runtime_modifiers() -> None:
         [
             sys.executable,
             "-c",
-            "import sys; import dynamo.profiler.sweeper.renderers.base; "
-            "assert 'dynamo.profiler.utils.dgd_materialization' not in sys.modules; "
-            "assert 'dynamo.planner' not in sys.modules",
+            (
+                "import sys; import dynamo.profiler.sweeper.renderers.base; "
+                "assert 'dynamo.profiler.utils.dgd_materialization' not in sys.modules; "
+                "assert 'dynamo.planner' not in sys.modules"
+            ),
         ],
         capture_output=True,
+        check=False,
         text=True,
         timeout=60,
     )
@@ -135,7 +138,7 @@ spec:
 
 
 def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None:
-    from aiconfigurator.generator.request.schema import ModelFacts
+    from aisimulate.generator.request.schema import ModelFacts
 
     from dynamo.profiler.utils.config_modifiers import vllm
 
