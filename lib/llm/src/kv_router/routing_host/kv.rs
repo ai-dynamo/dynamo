@@ -198,6 +198,7 @@ impl RoutingHost {
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
     ) -> Result<RoutePreview, Error> {
+        let started_at = Instant::now();
         // The conditional route's first stage. The budget travels with the
         // preview into the plan and on into dispatch, so the whole route shares
         // one deadline.
@@ -226,6 +227,7 @@ impl RoutingHost {
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePreview {
+            started_at,
             request_id: request.context().id().to_string(),
             phase,
             signals,
@@ -280,6 +282,7 @@ impl RoutingHost {
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePlan {
+            started_at: preview.started_at,
             signals,
             cleanup: KvRequestCleanup::new(
                 Arc::clone(self.kv_router()),
@@ -299,6 +302,7 @@ impl RoutingHost {
         plan: RoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let RoutePlan {
+            started_at,
             mut selection,
             cleanup,
             mut affinity,
@@ -310,7 +314,7 @@ impl RoutingHost {
             .track_planned_selection(&request, &mut selection, cleanup, &budget)
             .await
         {
-            Ok(guard) => guard,
+            Ok(guard) => guard.with_started_at(started_at),
             Err(error) => return Err(error),
         };
         let stream = match self
@@ -499,12 +503,15 @@ impl RoutingHost {
                     chooser.worker_type(),
                 );
                 tracker.record_router_queue_depth(chooser.pending_count());
-                if let Some(hit_rate) = tracker.kv_hit_rate() {
-                    guard.request_metrics().kv_hit_rate.observe(hit_rate);
+                if isl_blocks > 0 {
+                    guard
+                        .attempt_metrics()
+                        .kv_hit_rate
+                        .observe(selection.effective_overlap_blocks / isl_blocks as f64);
                 }
             }
             guard
-                .request_metrics()
+                .attempt_metrics()
                 .input_sequence_tokens
                 .observe(request.token_ids.len() as f64);
             Ok(())
@@ -646,6 +653,7 @@ impl RoutingHost {
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
+        let started_at = Instant::now();
         let budget = CleanupBudget::default();
         let phase = RequestPhase::Prefill;
         let phase_label = phase.to_string();
@@ -658,7 +666,7 @@ impl RoutingHost {
             .track_selection(&request, &mut selection, phase, is_query_only, &budget)
             .await
         {
-            Ok(guard) => guard,
+            Ok(guard) => guard.with_started_at(started_at),
             Err(error) => return Err(error),
         };
         let selected_target = route_target(selection.worker);

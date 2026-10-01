@@ -20,7 +20,9 @@
 //! - [`RouterRequestMetrics`]: Per-request aggregate histograms and counters (TTFT, ITL,
 //!   tokens, KV hit rate, and non-max-overlap routing decisions).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
-//!   Eagerly created so they appear as zeros before any requests arrive.
+//!   Eagerly created so they appear as zeros before any requests arrive, except the
+//!   per-attempt histograms (TTFT, ITL, ISL, OSL, KV hit rate), which are labelled by
+//!   `phase` and `model` and appear once the first attempt for a pair is routed.
 //!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
@@ -63,13 +65,14 @@ use prometheus::{
 };
 
 use crate::http::service::metrics::generate_log_buckets;
-use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use crate::protocols::common::timing::{RequestPhase, WORKER_TYPE_PREFILL};
 use dynamo_kv_router::indexer::ApproximateLruStats;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
 const TARGET_COMPONENT_LABEL: &str = "target_component";
 const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
+const ROUTER_PHASE_LABEL: &str = "phase";
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -1014,6 +1017,12 @@ impl RoutingOverheadMetrics {
 /// Both the frontend pipeline and the standalone router (via Python bindings)
 /// create a `RoutingHost`, so both get these metrics registered automatically.
 ///
+/// The per-attempt histograms (TTFT, ITL, ISL, OSL, KV hit rate) are the exception:
+/// they carry `phase` and `model` labels, so a series only exists once an attempt
+/// with that pair has been routed. One process holds a single instance for every
+/// model and pool it routes, and these labels are what keep those apart. Observe
+/// them through [`RouterRequestMetrics::attempt`].
+///
 /// # Why component-scoped
 ///
 /// These metrics MUST be registered through the Component hierarchy (not a standalone
@@ -1027,16 +1036,31 @@ pub struct RouterRequestMetrics {
     /// Total requests admitted by the router scheduler.
     pub requests_started_total: prometheus::IntCounter,
     pub requests_total: prometheus::IntCounter,
-    pub time_to_first_token_seconds: prometheus::Histogram,
-    pub inter_token_latency_seconds: prometheus::Histogram,
-    pub input_sequence_tokens: prometheus::Histogram,
-    pub output_sequence_tokens: prometheus::Histogram,
-    pub kv_hit_rate: prometheus::Histogram,
+    pub time_to_first_token_seconds: HistogramVec,
+    pub inter_token_latency_seconds: HistogramVec,
+    pub input_sequence_tokens: HistogramVec,
+    pub output_sequence_tokens: HistogramVec,
+    pub kv_hit_rate: HistogramVec,
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
     pub shared_cache_hit_rate: prometheus::Histogram,
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
+}
+
+/// Per-attempt histogram children of [`RouterRequestMetrics`], resolved once for
+/// one routing attempt's `(phase, model)` pair.
+///
+/// Resolve when the attempt starts: prefill and decode attempts of one
+/// disaggregated request share a `RequestTracker` whose phase moves to `decode`
+/// while the prefill attempt may still be recording.
+#[derive(Clone)]
+pub(crate) struct AttemptMetrics {
+    pub time_to_first_token_seconds: prometheus::Histogram,
+    pub inter_token_latency_seconds: prometheus::Histogram,
+    pub input_sequence_tokens: prometheus::Histogram,
+    pub output_sequence_tokens: prometheus::Histogram,
+    pub kv_hit_rate: prometheus::Histogram,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -1057,65 +1081,76 @@ impl RouterRequestMetrics {
         ROUTER_REQUEST_METRICS
             .get_or_init(|| {
                 let instance_id = component.drt().discovery().instance_id();
-                let router_id = instance_id.to_string();
-                let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
+                Arc::new(Self::build(component, &instance_id.to_string()))
+            })
+            .clone()
+    }
 
-                let metrics = component.metrics();
-                let requests_started_total = metrics
-                    .create_intcounter(
-                        &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
-                        "Total number of requests admitted by the router scheduler",
-                        extra_labels,
-                    )
-                    .expect("failed to create router_requests_started_total");
-                let requests_total = metrics
-                    .create_intcounter(
-                        &router_metric(frontend_service::REQUESTS_TOTAL),
-                        "Total number of requests processed by the router",
-                        extra_labels,
-                    )
-                    .expect("failed to create router_requests_total");
-                let time_to_first_token_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
-                        "Time to first token observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 480.0, 18)),
-                    )
-                    .expect("failed to create router_time_to_first_token_seconds");
-                let inter_token_latency_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
-                        "Average inter-token latency observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 2.0, 13)),
-                    )
-                    .expect("failed to create router_inter_token_latency_seconds");
-                let input_sequence_tokens = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
-                        "Input sequence length in tokens observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(50.0, 128000.0, 12)),
-                    )
-                    .expect("failed to create router_input_sequence_tokens");
-                let output_sequence_tokens = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
-                        "Output sequence length in tokens observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(50.0, 32000.0, 10)),
-                    )
-                    .expect("failed to create router_output_sequence_tokens");
-                let kv_hit_rate = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::KV_HIT_RATE),
-                        "Predicted KV cache hit rate at routing time (0.0-1.0)",
-                        extra_labels,
-                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-                    )
-                    .expect("failed to create router_kv_hit_rate");
-                let kv_transfer_estimated_latency_seconds = metrics
+    fn build<H: MetricsHierarchy>(hierarchy: &H, router_id: &str) -> Self {
+        let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, router_id)];
+        let attempt_labels = &[ROUTER_PHASE_LABEL, labels::MODEL];
+
+        let metrics = hierarchy.metrics();
+        let requests_started_total = metrics
+            .create_intcounter(
+                &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
+                "Total number of requests admitted by the router scheduler",
+                extra_labels,
+            )
+            .expect("failed to create router_requests_started_total");
+        let requests_total = metrics
+            .create_intcounter(
+                &router_metric(frontend_service::REQUESTS_TOTAL),
+                "Total number of requests processed by the router",
+                extra_labels,
+            )
+            .expect("failed to create router_requests_total");
+        let time_to_first_token_seconds = metrics
+            .create_histogramvec(
+                &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
+                "Time to first token observed at the router",
+                attempt_labels,
+                extra_labels,
+                Some(generate_log_buckets(0.001, 480.0, 18)),
+            )
+            .expect("failed to create router_time_to_first_token_seconds");
+        let inter_token_latency_seconds = metrics
+            .create_histogramvec(
+                &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
+                "Average inter-token latency observed at the router",
+                attempt_labels,
+                extra_labels,
+                Some(generate_log_buckets(0.001, 2.0, 13)),
+            )
+            .expect("failed to create router_inter_token_latency_seconds");
+        let input_sequence_tokens = metrics
+            .create_histogramvec(
+                &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
+                "Input sequence length in tokens observed at the router",
+                attempt_labels,
+                extra_labels,
+                Some(generate_log_buckets(50.0, 128000.0, 12)),
+            )
+            .expect("failed to create router_input_sequence_tokens");
+        let output_sequence_tokens = metrics
+            .create_histogramvec(
+                &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
+                "Output sequence length in tokens observed at the router",
+                attempt_labels,
+                extra_labels,
+                Some(generate_log_buckets(50.0, 32000.0, 10)),
+            )
+            .expect("failed to create router_output_sequence_tokens");
+        let kv_hit_rate = metrics
+            .create_histogramvec(
+                &router_metric(frontend_service::KV_HIT_RATE),
+                "Predicted KV cache hit rate at routing time (0.0-1.0)",
+                attempt_labels,
+                extra_labels,
+                Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+            )
+            .expect("failed to create router_kv_hit_rate");
+        let kv_transfer_estimated_latency_seconds = metrics
                     .create_histogram(
                         &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
                         "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
@@ -1123,23 +1158,23 @@ impl RouterRequestMetrics {
                         Some(generate_log_buckets(0.001, 10.0, 15)),
                     )
                     .expect("failed to create router_kv_transfer_estimated_latency_seconds");
-                let shared_cache_hit_rate = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
-                        "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
-                        extra_labels,
-                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-                    )
-                    .expect("failed to create router_shared_cache_hit_rate");
-                let shared_cache_beyond_blocks = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
-                        "Shared cache blocks beyond device overlap for the selected worker",
-                        extra_labels,
-                        Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
-                    )
-                    .expect("failed to create router_shared_cache_beyond_blocks");
-                let non_max_overlap_selections_total = metrics
+        let shared_cache_hit_rate = metrics
+            .create_histogram(
+                &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
+                "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
+                extra_labels,
+                Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+            )
+            .expect("failed to create router_shared_cache_hit_rate");
+        let shared_cache_beyond_blocks = metrics
+            .create_histogram(
+                &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
+                "Shared cache blocks beyond device overlap for the selected worker",
+                extra_labels,
+                Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
+            )
+            .expect("failed to create router_shared_cache_beyond_blocks");
+        let non_max_overlap_selections_total = metrics
                     .create_intcountervec(
                         &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
                         "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
@@ -1147,7 +1182,7 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_non_max_overlap_selections_total");
-                let overlap_blocks_lost = metrics
+        let overlap_blocks_lost = metrics
                     .create_histogramvec(
                         &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
                         "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
@@ -1156,24 +1191,38 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
                     )
                     .expect("failed to create router_overlap_blocks_lost");
-                non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
-                overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
-                Arc::new(Self {
-                    requests_started_total,
-                    requests_total,
-                    time_to_first_token_seconds,
-                    inter_token_latency_seconds,
-                    input_sequence_tokens,
-                    output_sequence_tokens,
-                    kv_hit_rate,
-                    kv_transfer_estimated_latency_seconds,
-                    shared_cache_hit_rate,
-                    shared_cache_beyond_blocks,
-                    non_max_overlap_selections_total,
-                    overlap_blocks_lost,
-                })
-            })
-            .clone()
+        non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
+        overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+        Self {
+            requests_started_total,
+            requests_total,
+            time_to_first_token_seconds,
+            inter_token_latency_seconds,
+            input_sequence_tokens,
+            output_sequence_tokens,
+            kv_hit_rate,
+            kv_transfer_estimated_latency_seconds,
+            shared_cache_hit_rate,
+            shared_cache_beyond_blocks,
+            non_max_overlap_selections_total,
+            overlap_blocks_lost,
+        }
+    }
+
+    pub(crate) fn attempt(&self, phase: RequestPhase, model: &str) -> AttemptMetrics {
+        let phase = phase.to_string();
+        let labels = [phase.as_str(), model];
+        AttemptMetrics {
+            time_to_first_token_seconds: self
+                .time_to_first_token_seconds
+                .with_label_values(&labels),
+            inter_token_latency_seconds: self
+                .inter_token_latency_seconds
+                .with_label_values(&labels),
+            input_sequence_tokens: self.input_sequence_tokens.with_label_values(&labels),
+            output_sequence_tokens: self.output_sequence_tokens.with_label_values(&labels),
+            kv_hit_rate: self.kv_hit_rate.with_label_values(&labels),
+        }
     }
 
     /// Use fresh, unregistered lifecycle counters and retain all other metric handles.
@@ -1899,5 +1948,50 @@ mod kv_publisher_registration_tests {
                 .contains("conflicts with auto-injected const label"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn router_request_metrics_separate_phase_and_model() {
+        let hierarchy = FakeHierarchy::component("dynamo", "frontend", 0x7f3a1c);
+        let metrics = RouterRequestMetrics::build(&hierarchy, "1");
+
+        for (phase, model) in [
+            (RequestPhase::Prefill, "model-a"),
+            (RequestPhase::Decode, "model-b"),
+        ] {
+            let attempt = metrics.attempt(phase, model);
+            attempt.time_to_first_token_seconds.observe(0.1);
+            attempt.inter_token_latency_seconds.observe(0.01);
+            attempt.input_sequence_tokens.observe(100.0);
+            attempt.output_sequence_tokens.observe(10.0);
+            attempt.kv_hit_rate.observe(0.5);
+        }
+
+        let expfmt = hierarchy.expfmt();
+        for suffix in [
+            frontend_service::TIME_TO_FIRST_TOKEN_SECONDS,
+            frontend_service::INTER_TOKEN_LATENCY_SECONDS,
+            frontend_service::INPUT_SEQUENCE_TOKENS,
+            frontend_service::OUTPUT_SEQUENCE_TOKENS,
+            frontend_service::KV_HIT_RATE,
+        ] {
+            let name = format!("{}_count", exported_name(&router_metric(suffix)));
+            let counts: Vec<&str> = expfmt
+                .lines()
+                .filter(|line| line.starts_with(&format!("{name}{{")))
+                .collect();
+            assert_eq!(counts.len(), 2, "{name} series: {counts:?}");
+            for (model, phase) in [("model-a", "prefill"), ("model-b", "decode")] {
+                let model_label = format!(r#"model="{model}""#);
+                let phase_label = format!(r#"phase="{phase}""#);
+                assert!(
+                    counts.iter().any(|line| line.contains(&model_label)
+                        && line.contains(&phase_label)
+                        && line.contains(r#"router_id="1""#)
+                        && line.ends_with(" 1")),
+                    "{name} has no {model_label},{phase_label} series with count 1: {counts:?}"
+                );
+            }
+        }
     }
 }

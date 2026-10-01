@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::HashMap, sync::Arc};
+use tokio::time::Instant;
 
 use crate::{
     kv_router::{
-        KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
-        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION, request_lease::RequestAttemptLease,
+        KvRouter,
+        indexer::ApproximateRequestLease,
+        metrics::{AttemptMetrics, RouterRequestMetrics},
+        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
+        request_lease::RequestAttemptLease,
     },
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -244,31 +248,38 @@ impl CanonicalOutputTracker {
 struct RequestObservability {
     tracker: Option<Arc<RequestTracker>>,
     request_metrics: Arc<RouterRequestMetrics>,
+    attempt_metrics: AttemptMetrics,
+    started_at: Instant,
+    first_token_at: Option<Instant>,
     cumulative_osl: usize,
     metrics_recorded: bool,
-    first_token_recorded: bool,
     dispatch_guard: Option<StageGuard>,
     dispatched: bool,
 }
 
 impl RequestObservability {
-    fn new(
-        tracker: Option<Arc<RequestTracker>>,
-        request_metrics: Arc<RouterRequestMetrics>,
-    ) -> Self {
+    fn new(request: &PreprocessedRequest, request_metrics: Arc<RouterRequestMetrics>) -> Self {
+        let tracker = request.tracker.clone();
+        let phase = tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or(RequestPhase::Aggregated);
+        let attempt_metrics = request_metrics.attempt(phase, &request.model);
         Self {
             tracker,
             request_metrics,
+            attempt_metrics,
+            started_at: Instant::now(),
+            first_token_at: None,
             cumulative_osl: 0,
             metrics_recorded: false,
-            first_token_recorded: false,
             dispatch_guard: None,
             dispatched: false,
         }
     }
 
-    fn request_metrics(&self) -> &RouterRequestMetrics {
-        &self.request_metrics
+    fn attempt_metrics(&self) -> &AttemptMetrics {
+        &self.attempt_metrics
     }
 
     fn start_dispatch(&mut self, phase_label: &str) {
@@ -305,19 +316,18 @@ impl RequestObservability {
     }
 
     fn observe_tokens(&mut self, new_tokens: usize) {
-        if !self.first_token_recorded && new_tokens > 0 {
+        if self.first_token_at.is_none() && new_tokens > 0 {
+            let now = Instant::now();
+            self.first_token_at = Some(now);
+            self.attempt_metrics
+                .time_to_first_token_seconds
+                .observe(now.duration_since(self.started_at).as_secs_f64());
             if let Some(tracker) = &self.tracker {
                 tracker.record_first_token();
                 if tracker.phase() == RequestPhase::Decode {
                     tracker.record_decode_first_token();
                 }
-                if let Some(ttft) = tracker.ttft_ms() {
-                    self.request_metrics
-                        .time_to_first_token_seconds
-                        .observe(ttft / 1000.0);
-                }
             }
-            self.first_token_recorded = true;
         }
 
         self.cumulative_osl += new_tokens;
@@ -328,17 +338,21 @@ impl RequestObservability {
     }
 
     fn observe_output_block_boundary(&self) {
-        let Some(tracker) = &self.tracker else {
-            return;
-        };
-
         // Refresh finish time at block boundaries so the streaming ITL sample stays current.
-        tracker.record_osl(self.cumulative_osl);
-        tracker.record_finish();
-        if let Some(avg_itl) = tracker.avg_itl_ms() {
-            self.request_metrics
+        if let Some(tracker) = &self.tracker {
+            tracker.record_osl(self.cumulative_osl);
+            tracker.record_finish();
+        }
+        self.observe_itl();
+    }
+
+    fn observe_itl(&self) {
+        if self.cumulative_osl > 1
+            && let Some(first_token_at) = self.first_token_at
+        {
+            self.attempt_metrics
                 .inter_token_latency_seconds
-                .observe(avg_itl / 1000.0);
+                .observe(first_token_at.elapsed().as_secs_f64() / (self.cumulative_osl - 1) as f64);
         }
     }
 
@@ -352,19 +366,17 @@ impl RequestObservability {
         if let Some(tracker) = &self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
-            if record_itl_at_completion && let Some(avg_itl) = tracker.avg_itl_ms() {
-                self.request_metrics
-                    .inter_token_latency_seconds
-                    .observe(avg_itl / 1000.0);
-            }
             if let Some(latency) = tracker.kv_transfer_estimated_latency_secs() {
                 self.request_metrics
                     .kv_transfer_estimated_latency_seconds
                     .observe(latency);
             }
         }
+        if record_itl_at_completion {
+            self.observe_itl();
+        }
         if self.cumulative_osl > 0 {
-            self.request_metrics
+            self.attempt_metrics
                 .output_sequence_tokens
                 .observe(self.cumulative_osl as f64);
         }
@@ -578,6 +590,11 @@ pub(super) struct RequestGuard {
 }
 
 impl RequestGuard {
+    pub(super) fn with_started_at(mut self, started_at: Instant) -> Self {
+        self.observability.started_at = started_at;
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn booking_for_test(
         &self,
@@ -636,7 +653,7 @@ impl RequestGuard {
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
         Self {
             cleanup: RequestCleanup::Kv(cleanup),
-            observability: RequestObservability::new(request.tracker.clone(), request_metrics),
+            observability: RequestObservability::new(request, request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
                 isl_tokens,
@@ -668,7 +685,7 @@ impl RequestGuard {
                 },
                 None => RequestCleanup::Stateless { worker_id },
             },
-            observability: RequestObservability::new(request.tracker.clone(), request_metrics),
+            observability: RequestObservability::new(request, request_metrics),
             // Builtin policies do not track scheduler blocks. Emit one final ITL sample
             // when the request completes rather than observing every streamed token.
             output_blocks: OutputBlockTracker::new(false, request.token_ids.len(), 1, None),
@@ -691,8 +708,8 @@ impl RequestGuard {
         }
     }
 
-    pub(super) fn request_metrics(&self) -> &RouterRequestMetrics {
-        self.observability.request_metrics()
+    pub(super) fn attempt_metrics(&self) -> &AttemptMetrics {
+        self.observability.attempt_metrics()
     }
 
     pub(super) fn start_dispatch(&mut self, phase_label: &str) {
@@ -1099,15 +1116,22 @@ mod prefill_start_tests {
             prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
                 .unwrap()
         }
+        fn attempt_vec(name: &str) -> prometheus::HistogramVec {
+            prometheus::HistogramVec::new(
+                prometheus::HistogramOpts::new(name, name),
+                &["phase", "model"],
+            )
+            .unwrap()
+        }
         Arc::new(RouterRequestMetrics {
             requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
                 .unwrap(),
             requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
-            time_to_first_token_seconds: hist("ttft_seconds"),
-            inter_token_latency_seconds: hist("itl_seconds"),
-            input_sequence_tokens: hist("isl_tokens"),
-            output_sequence_tokens: hist("osl_tokens"),
-            kv_hit_rate: hist("kv_hit_rate"),
+            time_to_first_token_seconds: attempt_vec("ttft_seconds"),
+            inter_token_latency_seconds: attempt_vec("itl_seconds"),
+            input_sequence_tokens: attempt_vec("isl_tokens"),
+            output_sequence_tokens: attempt_vec("osl_tokens"),
+            kv_hit_rate: attempt_vec("kv_hit_rate"),
             kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
             shared_cache_hit_rate: hist("shared_cache_hit_rate"),
             shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
@@ -1124,8 +1148,7 @@ mod prefill_start_tests {
         let tracker = Arc::new(RequestTracker::new());
         let _permit = tracker.set_phase(phase).await;
         let request = test_request(tracker.clone(), annotations);
-        RequestObservability::new(request.tracker.clone(), test_metrics())
-            .record_prefill_start(&request);
+        RequestObservability::new(&request, test_metrics()).record_prefill_start(&request);
         tracker
     }
 
@@ -1169,14 +1192,126 @@ mod prefill_start_tests {
         let request = test_request(tracker.clone(), Vec::new());
 
         let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
-        RequestObservability::new(Some(tracker.clone()), metrics.clone())
-            .record_prefill_start(&request);
+        RequestObservability::new(&request, metrics.clone()).record_prefill_start(&request);
         let recorded_by_prefill = tracker.prefill_wait_time_ms();
         assert!(recorded_by_prefill.is_some());
         drop(prefill_permit);
 
         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
-        RequestObservability::new(Some(tracker.clone()), metrics).record_prefill_start(&request);
+        RequestObservability::new(&request, metrics).record_prefill_start(&request);
         assert_eq!(tracker.prefill_wait_time_ms(), recorded_by_prefill);
+    }
+
+    /// The prefill and decode attempts of one disaggregated request share a tracker,
+    /// and the prefill attempt can still be streaming after the phase moves to
+    /// decode. Each attempt's samples must stay under the phase it was routed with.
+    #[tokio::test]
+    async fn attempt_metrics_are_labelled_by_routed_phase_and_model() {
+        fn request_for(model: &str, tracker: Arc<RequestTracker>) -> PreprocessedRequest {
+            PreprocessedRequest::builder()
+                .model(model.to_string())
+                .token_ids(vec![1])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .tracker(Some(tracker))
+                .build()
+                .unwrap()
+        }
+        fn complete(observability: &mut RequestObservability, tokens: usize) {
+            observability.mark_dispatched();
+            observability.observe_tokens(tokens);
+            observability.record_metrics(false);
+        }
+
+        let metrics = test_metrics();
+
+        let disagg_tracker = Arc::new(RequestTracker::new());
+        let disagg_request = request_for("model-a", disagg_tracker.clone());
+        let prefill_permit = disagg_tracker.set_phase(RequestPhase::Prefill).await;
+        let mut prefill = RequestObservability::new(&disagg_request, metrics.clone());
+        drop(prefill_permit);
+        let _decode_permit = disagg_tracker.set_phase(RequestPhase::Decode).await;
+        let mut decode = RequestObservability::new(&disagg_request, metrics.clone());
+        complete(&mut prefill, 1);
+        complete(&mut decode, 3);
+
+        let agg_request = request_for("model-b", Arc::new(RequestTracker::new()));
+        complete(
+            &mut RequestObservability::new(&agg_request, metrics.clone()),
+            5,
+        );
+
+        for (phase, model, osl) in [
+            ("prefill", "model-a", 1.0),
+            ("decode", "model-a", 3.0),
+            ("aggregated", "model-b", 5.0),
+        ] {
+            let labels = [phase, model];
+            let ttft = metrics
+                .time_to_first_token_seconds
+                .with_label_values(&labels);
+            let output = metrics.output_sequence_tokens.with_label_values(&labels);
+            assert_eq!(ttft.get_sample_count(), 1, "ttft for {phase}/{model}");
+            assert_eq!(output.get_sample_count(), 1, "osl for {phase}/{model}");
+            assert_eq!(output.get_sample_sum(), osl, "osl sum for {phase}/{model}");
+        }
+        assert_eq!(
+            metrics
+                .output_sequence_tokens
+                .with_label_values(&["decode", "model-b"])
+                .get_sample_count(),
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attempt_timing_is_independent_of_shared_tracker_updates() {
+        use std::time::Duration;
+
+        let tracker = Arc::new(RequestTracker::new());
+        let request = test_request(tracker.clone(), Vec::new());
+        let metrics = test_metrics();
+        let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
+        let mut prefill = RequestObservability::new(&request, metrics.clone());
+        prefill.mark_dispatched();
+        prefill.observe_tokens(0);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        prefill.observe_tokens(1);
+        let traced_ttft = tracker.ttft_ms();
+        drop(prefill_permit);
+
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+        let mut decode = RequestObservability::new(&request, metrics);
+        decode.mark_dispatched();
+        tokio::time::advance(Duration::from_millis(30)).await;
+        decode.observe_tokens(1);
+        tokio::time::advance(Duration::from_millis(20)).await;
+        decode.observe_tokens(2);
+        decode.observe_output_block_boundary();
+
+        // Prefill finishes after decode starts and overwrites the shared finish/OSL fields.
+        prefill.record_metrics(true);
+        tokio::time::advance(Duration::from_millis(20)).await;
+        decode.record_metrics(true);
+        decode.record_metrics(true);
+
+        for (attempt, ttft) in [(&prefill, 0.01), (&decode, 0.03)] {
+            let histogram = &attempt.attempt_metrics.time_to_first_token_seconds;
+            assert_eq!(histogram.get_sample_count(), 1);
+            assert_eq!(histogram.get_sample_sum(), ttft);
+        }
+        assert_eq!(
+            prefill
+                .attempt_metrics
+                .inter_token_latency_seconds
+                .get_sample_count(),
+            0
+        );
+        let decode_itl = &decode.attempt_metrics.inter_token_latency_seconds;
+        assert_eq!(decode_itl.get_sample_count(), 2);
+        assert!((decode_itl.get_sample_sum() - 0.03).abs() < 1e-9);
+        assert_eq!(tracker.ttft_ms(), traced_ttft);
     }
 }

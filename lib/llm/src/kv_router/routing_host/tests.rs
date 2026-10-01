@@ -298,6 +298,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 #[derive(Default)]
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    token_ids: Vec<u32>,
 }
 
 #[async_trait]
@@ -315,6 +316,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .unwrap()
             .push(instance.expect("selected worker instance").id());
         let output = Annotated::from_data(LLMEngineOutput {
+            token_ids: self.token_ids.clone(),
             finish_reason: Some(FinishReason::Stop),
             ..Default::default()
         });
@@ -1256,6 +1258,45 @@ async fn output_block_accounting_tracks_grouped_chunks() {
 
 async fn router(session_affinity_ttl: Option<Duration>) -> (RoutingHost, Runtime) {
     router_with_workers(session_affinity_ttl, &[7]).await
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_hit_metrics_use_each_attempt_selection() {
+    let (router, runtime) = router(None).await;
+    let tracker = Arc::new(RequestTracker::new());
+    let mut content = request();
+    content.model = "attempt-kv-hit-metrics".to_string();
+    content.token_ids = vec![1; 64].into();
+    content.tracker = Some(Arc::clone(&tracker));
+    let request = Context::new(content);
+    let budget = CleanupBudget::default();
+
+    for (phase, overlap, expected) in [
+        (RequestPhase::Prefill, 2.0, 0.5),
+        (RequestPhase::Decode, 0.5, 0.125),
+    ] {
+        let _permit = tracker.set_phase(phase).await;
+        let (mut selection, _) = router
+            .select_with_affinity(&request, phase, false, &budget)
+            .await
+            .unwrap();
+        selection.effective_overlap_blocks = overlap;
+        let mut guard = router
+            .track_selection(&request, &mut selection, phase, false, &budget)
+            .await
+            .unwrap();
+
+        let hit_rate = &guard.attempt_metrics().kv_hit_rate;
+        assert_eq!(hit_rate.get_sample_count(), 1);
+        assert_eq!(hit_rate.get_sample_sum(), expected);
+        // Request tracing retains the first selection while each pool reports its own.
+        assert_eq!(tracker.kv_hit_rate(), Some(0.5));
+        guard.abort().await;
+    }
+
+    drop(router);
+    runtime.shutdown();
 }
 
 async fn router_with_workers(
@@ -3822,6 +3863,80 @@ async fn conditional_route_stages_share_one_cleanup_budget() {
     plan.abort().await;
     drop(router);
     runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn ttft_includes_session_affinity_wait() {
+    for is_kv in [true, false] {
+        let (mut router, _, _, runtime) = router_with_recorded_dispatch_and_affinity(
+            "ttft-affinity-wait",
+            Some(Duration::from_secs(10)),
+        )
+        .await;
+        let client = router.inner.client.clone();
+        let dispatch = Arc::new(CompletedBuiltinDispatch {
+            token_ids: vec![1],
+            ..Default::default()
+        });
+        let mode = if is_kv {
+            RouterMode::KV
+        } else {
+            RouterMode::RoundRobin
+        };
+        let inner = PushRouter::from_client_with_dispatch(client.clone(), mode, dispatch)
+            .await
+            .unwrap();
+        if is_kv {
+            router.inner = inner;
+        } else {
+            router = RoutingHost::new_builtin_with_coordinator(
+                inner,
+                test_load_context(&client).await,
+                router.affinity.clone(),
+            )
+            .unwrap();
+        }
+
+        let model = if is_kv {
+            "ttft-kv-wait"
+        } else {
+            "ttft-builtin-wait"
+        };
+        let metrics = router.request_metrics.clone();
+        let coordinator = router.affinity.as_ref().unwrap().clone();
+        let session_id = SessionAffinityId::new("ttft-contended-session");
+        let Hold::Initialize(holder) = coordinator.acquire(&session_id, None).await.unwrap() else {
+            panic!("the first acquisition must initialize the session");
+        };
+        let mut content = request();
+        content.model = model.to_string();
+        content.tracker = Some(Arc::new(RequestTracker::new()));
+        let mut request = Context::new(content);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+        tokio::time::pause();
+        let router = Arc::new(router);
+        let generate_router = Arc::clone(&router);
+        let generate = tokio::spawn(async move { generate_router.generate(request).await });
+        coordinator.wait_for_initializing_waiter().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        drop(holder);
+        let mut stream = generate.await.unwrap().unwrap();
+        while stream.next().await.is_some() {}
+
+        let ttft = metrics
+            .time_to_first_token_seconds
+            .with_label_values(&["aggregated", model]);
+        assert_eq!(ttft.get_sample_count(), 1);
+        assert!(
+            ttft.get_sample_sum() >= 0.1,
+            "TTFT must include the affinity wait"
+        );
+        drop(router);
+        runtime.shutdown();
+        tokio::time::resume();
+    }
 }
 
 /// The session-affinity wait runs upstream of every stage the cleanup policy
