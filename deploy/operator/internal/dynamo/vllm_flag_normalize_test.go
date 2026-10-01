@@ -20,6 +20,21 @@ func vllmContainer(args ...string) *corev1.Container {
 	}
 }
 
+// parsedSize returns the vllmLaunchArgs size field that flag sets.
+func parsedSize(t *testing.T, args vllmLaunchArgs, flag string) int64 {
+	t.Helper()
+	switch flag {
+	case tensorParallelSizeFlag:
+		return args.TensorParallelSize
+	case pipelineParallelSizeFlag:
+		return args.PipelineParallelSize
+	case dataParallelSizeFlag:
+		return args.DataParallelSize
+	}
+	t.Fatalf("%s is not a size flag", flag)
+	return 0
+}
+
 func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 	for _, tc := range []struct {
 		flag  string
@@ -36,7 +51,7 @@ func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 		}
 		for name, args := range spellings {
 			t.Run(fmt.Sprintf("%s/%s", tc.flag, name), func(t *testing.T) {
-				got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tc.flag)
+				got := parsedSize(t, parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(args...))), tc.flag)
 				if got != 4 {
 					t.Errorf("%s spelled %q read as %d, want 4 -- vLLM accepts all of these forms, "+
 						"so every reader in this package must too", tc.flag, args, got)
@@ -60,7 +75,7 @@ func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
 			if !IsElasticEPRayLaunch(container) {
 				t.Fatalf("spelling %q should qualify as an elastic-EP Ray launch", args)
 			}
-			got := getFlagValue(getExpandedCommandLine(container), dataParallelSizeFlag)
+			got := parseVLLMLaunchArgs(getExpandedCommandLine(container)).DataParallelSize
 			if got != 4 {
 				t.Errorf("qualified as elastic EP but its declared width read as %d, want 4. A shape "+
 					"that qualifies must also size correctly, or the leader renders with no width "+
@@ -115,16 +130,16 @@ func TestNormalizeVLLMFlags_DoesNotSpoofFlagsFromUnrelatedValues(t *testing.T) {
 }
 
 // TestNormalizeVLLMFlags_UnderscoreSpellingReadsTheSame covers the underscore spelling of a
-// sizing flag, which getFlagValue otherwise silently falls back to 1 on.
+// sizing flag, which would otherwise silently read as vLLM's default of 1.
 func TestNormalizeVLLMFlags_UnderscoreSpellingReadsTheSame(t *testing.T) {
 	for name, args := range map[string][]string{
 		"separated": {"--tensor_parallel_size", "4"},
 		"equals":    {"--tensor_parallel_size=4"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+			got := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(args...))).TensorParallelSize
 			if got != 4 {
-				t.Errorf("getFlagValue(%q) = %d, want 4 -- vLLM treats \"_\" and \"-\" as "+
+				t.Errorf("TensorParallelSize for %q = %d, want 4 -- vLLM treats \"_\" and \"-\" as "+
 					"interchangeable in long option names", args, got)
 			}
 		})
@@ -150,23 +165,32 @@ func TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched(t *testing.T) {
 	}
 }
 
-// TestGetFlagValue_RepeatedFlagUsesLastOccurrence pins the numeric readers to vLLM's
-// FlexibleArgumentParser precedence: a repeated flag resolves to its final occurrence.
-// Reading the first one makes the operator size a topology the engine will not use --
-// "--tensor-parallel-size 1 --tensor-parallel-size 4" launches 4 ranks but would be read as 1.
-func TestGetFlagValue_RepeatedFlagUsesLastOccurrence(t *testing.T) {
-	args := []string{tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"}
-	got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
-	if got != 4 {
-		t.Errorf("getFlagValue(%q) = %d, want 4 (last occurrence) -- vLLM's argparse "+
-			"applies the last value when a flag is repeated", args, got)
+// TestParseVLLMLaunchArgs_RepeatedSizeFlagUsesLastOccurrence pins the size fields to vLLM's
+// argparse precedence: a repeated flag resolves to its final occurrence, whichever value is
+// larger. Reading any other one makes the operator size a topology the engine will not use --
+// "--tensor-parallel-size 1 --tensor-parallel-size 4" launches 4 ranks.
+func TestParseVLLMLaunchArgs_RepeatedSizeFlagUsesLastOccurrence(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want int64
+	}{
+		"larger value last":  {[]string{tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"}, 4},
+		"smaller value last": {[]string{tensorParallelSizeFlag, "4", tensorParallelSizeFlag, "1"}, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(tc.args...))).TensorParallelSize
+			if got != tc.want {
+				t.Errorf("TensorParallelSize for %q = %d, want %d (last occurrence) -- vLLM's "+
+					"argparse applies the last value when a flag is repeated", tc.args, got, tc.want)
+			}
+		})
 	}
 }
 
 // TestParseVLLMLaunchArgs_EnumFlagsUseLastOccurrence extends the same precedence to the
-// enum-valued flags. hasArg reports true when ANY occurrence matches the sought value, so
-// "--data-parallel-backend ray --data-parallel-backend mp" was read as ray even though vLLM
-// resolves it to mp -- which would front the engine with a Ray head it never asked for.
+// enum-valued flags. An any-occurrence match would read "--data-parallel-backend ray
+// --data-parallel-backend mp" as ray even though vLLM resolves it to mp -- which would front
+// the engine with a Ray head it never asked for.
 func TestParseVLLMLaunchArgs_EnumFlagsUseLastOccurrence(t *testing.T) {
 	t.Run("data-parallel-backend resolves to the final occurrence", func(t *testing.T) {
 		container := vllmContainer("--enable-elastic-ep",
@@ -300,9 +324,9 @@ func TestNormalizeVLLMFlags_SizingFlagValuesAreNotTrimmed(t *testing.T) {
 		"separated": tensorParallelSizeFlag + " 4;",
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := getFlagValue(getExpandedCommandLine(vllmShellContainer(flags)), tensorParallelSizeFlag)
+			got := parseVLLMLaunchArgs(getExpandedCommandLine(vllmShellContainer(flags))).TensorParallelSize
 			if got != 1 {
-				t.Errorf("getFlagValue(%q) = %d, want vLLM's default of 1 -- trimming a sizing "+
+				t.Errorf("TensorParallelSize for %q = %d, want vLLM's default of 1 -- trimming a sizing "+
 					"value changes a resolved size and is out of scope here", flags, got)
 			}
 		})

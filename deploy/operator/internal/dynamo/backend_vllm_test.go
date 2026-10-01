@@ -99,12 +99,12 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 				Args: []string{
 					"--model", "test", tensorParallelSizeFlag, "8",
 					"--kv-transfer-config",
-					`{"kv_connector": "NixlConnector", "kv_role": "kv_both"}`,
+					`{"kv_connector": "NixlConnector", "kv_role": "kv_producer"}`,
 				},
 			},
 			containerGPUs: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s && python3 -m dynamo.vllm --model test %s 8 --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\"}" --distributed-executor-backend ray`,
+				`ray start --head --port=%s && python3 -m dynamo.vllm --model test %s 8 --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_producer\"}" --distributed-executor-backend ray`,
 				VLLMPort, tensorParallelSizeFlag,
 			)},
 			expectProbesRemoved: true,
@@ -415,11 +415,6 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			expectProbesRemoved: true,
 		},
 		{
-			// updateVLLMMultinodeArgs reads the container through getExpandedArgs, a
-			// separate entry point from the getExpandedCommandLine one the detection
-			// helpers use. These two rows are the only coverage that the sizing path
-			// normalizes at all: without them, deleting normalizeVLLMFlags from
-			// getExpandedArgs leaves the whole suite green.
 			name:          "multinode leader sizes from short -tp alias",
 			numberOfNodes: 2,
 			role:          RoleLeader,
@@ -551,13 +546,6 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	}
 }
 
-// TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand pins the multinode
-// decision to the same argv vLLM is launched with. Kubernetes concatenates Command and
-// Args into one argv and does not care which field a flag sits in, and the detection
-// paths (IsElasticEPRayLaunch, shouldInjectVLLMMpWaitLeaderInit) already parse both.
-// Parsing Args alone here meant a Command-borne "--tensor-parallel-size 16" was read as
-// the default of 1, so the operator skipped the multinode launch the engine needs.
-//
 // Args stays non-empty independently of the injection, so the assertion cannot be
 // satisfied by the unrelated "container Args cannot be empty for LWS pod" precondition.
 func TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand(t *testing.T) {

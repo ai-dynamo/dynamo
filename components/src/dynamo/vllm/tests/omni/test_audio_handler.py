@@ -365,12 +365,16 @@ class TestAudexModelDetection:
         handler = _make_audex_handler("qwen3_tts")
         assert handler.audex.model_type() is None
 
-    def test_stage_configs_shapes(self):
-        """model_stage is read from nested engine_args and from dict configs."""
+    @pytest.mark.parametrize("is_typed", [False, True])
+    def test_stage_configs_shapes(self, is_typed):
         handler = _make_audio_handler()
         handler.engine_client.stage_list = []
         handler.engine_client.stage_configs = [
-            SimpleNamespace(engine_args={"model_stage": "audex_thinker"}),
+            (
+                SimpleNamespace(model_stage="audex_thinker")
+                if is_typed
+                else SimpleNamespace(engine_args={"model_stage": "audex_thinker"})
+            ),
             {"engine_args": {"model_stage": "audex_code2wav"}},
         ]
         assert handler.audex.model_type() == "audex"
