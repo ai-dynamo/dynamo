@@ -186,7 +186,9 @@ jobs:
           "${k[@]}" create -f "$ARTIFACTS/prerequisites.yaml"
       - name: Deploy and wait for readiness
         if: ${{ !inputs.preflight_only }}
-        timeout-minutes: 105
+        # DeepSeek V4 Pro disagg needs extra margin for four-node scheduling
+        # and loading its 805 GiB checkpoint from the shared Lustre volume.
+        timeout-minutes: ${{ inputs.recipe == 'deepseek-v4-pro-disagg' && 180 || 105 }}
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           selector=nvidia.com/dynamo-graph-deployment-name=$DGD
@@ -227,6 +229,12 @@ jobs:
           if [[ -n "$("${k[@]}" get dgd -l "$selector" -o name)" ]]; then
             "${k[@]}" logs -l "nvidia.com/dynamo-graph-deployment-name=$DGD" \
               --all-containers --prefix --tail=1000 > "$ARTIFACTS/deployment.log" 2>&1 || true
+            for worker_pod in $("${k[@]}" get pods \
+              -l "nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component-type=worker" \
+              -o name); do
+              "${k[@]}" logs "$worker_pod" --all-containers --prefix --previous --tail=1000 \
+                >> "$ARTIFACTS/deployment-previous.log" 2>&1 || true
+            done
           fi
           for job in $("${k[@]}" get job -l "$selector" -o name); do
             "${k[@]}" logs "$job" --all-containers > "$ARTIFACTS/${job##*/}.log" 2>&1 || true
@@ -239,7 +247,7 @@ jobs:
           fi
           pod=$("${k[@]}" get pods -l "$pod_selector" -o json |
             jq -r 'first(.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")) | .metadata.name // empty')
-          if [[ -n "$pod" ]]; then
+          if [[ -n "$pod" ]] && "${k[@]}" exec -c "$container" "$pod" -- test -d "$directory"; then
             mkdir -p "$ARTIFACTS/perf"
             "${k[@]}" exec -c "$container" "$pod" -- \
               tar -C "$directory" --exclude=inputs.json -cf - . | tar -C "$ARTIFACTS/perf" -xf -
