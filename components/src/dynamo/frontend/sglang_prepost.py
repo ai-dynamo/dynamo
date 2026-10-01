@@ -1068,7 +1068,12 @@ class SglangStreamingPostProcessor:
         )
         # Parsers must see their closing delimiters before display trimming.
         # Prefer the complete declaration over the legacy single-tool closer.
-        detector = getattr(tool_call_parser, "detector", None)
+        if isinstance(tool_call_parser, JsonArrayParser):
+            detector = tool_call_parser
+        elif tool_call_parser is not None:
+            detector = tool_call_parser.detector
+        else:
+            detector = None
         closers = getattr(detector, "tool_close_literals", None)
         if closers is None:
             eot_token = getattr(detector, "eot_token", "")

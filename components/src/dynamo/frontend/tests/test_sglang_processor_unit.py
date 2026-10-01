@@ -4396,9 +4396,53 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             assert post.local_stop_reason == closer
             assert post.process_output({"token_ids": list(b"later")}) is None
 
+    @pytest.mark.parametrize(
+        ("tool_choice", "stop_kind"),
+        [("required", "string"), ("named", "token"), ("required", "eos")],
+    )
+    def test_json_array_retains_stop_closer(self, tool_choice, stop_kind):
+        tools = convert_tools([parity_tool()])
+        parser, _ = create_parsers(
+            {"tool_choice": tool_choice_value(tool_choice)},
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+            sglang_tools=tools,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=parser,
+            reasoning_parser=None,
+            sglang_tools=tools,
+            eos_token_ids=[ord("]")] if stop_kind == "eos" else [],
+            stop_token_ids={ord("]")} if stop_kind == "token" else set(),
+            stop_strings={"]"} if stop_kind == "string" else set(),
+        )
+        wire = '[{"name":"get_weather","arguments":{"city":"Paris"}}]'
+        # One batch leaves argument recovery to finish-time JSON parsing.
+        token_ids = list((wire + ("ignored" if stop_kind == "string" else "")).encode())
+        result = post.process_output(
+            {
+                "token_ids": token_ids,
+                "finish_reason": None if stop_kind == "string" else "stop",
+                "stop_reason": ord("]") if stop_kind == "token" else None,
+                "log_probs": [-0.25] * len(token_ids),
+            }
+        )
+        assert result["finish_reason"] == "tool_calls"
+        calls = result["delta"]["tool_calls"]
+        assert len(calls) == 1
+        assert calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
+        assert not result["delta"].get("content")
+        assert (
+            "".join(entry["token"] for entry in result["logprobs"]["content"]) == wire
+        )
+        if stop_kind == "string":
+            assert post.local_stop_reason == "]"
+            assert post.process_output({"token_ids": list(b"later")}) is None
+
     @pytest.mark.parametrize("keep", [False, True])
     def test_reasoning_only_explicit_retention(self, keep):
-        # No tool parser exists to declare a tool closer.
         reasoner = types.SimpleNamespace(
             detector=types.SimpleNamespace(no_stop_trim=keep),
             parse_stream_chunk=lambda text: (text, ""),
