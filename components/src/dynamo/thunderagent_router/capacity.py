@@ -100,6 +100,16 @@ class WorkerCapacityProvider:
             logger.debug("WorkerCapacityProvider liveness snapshot error: %s", exc)
             return set()
 
+    def get_model_cards(self) -> dict[str, str]:
+        """Snapshot of backend MDC JSON bodies keyed by worker id."""
+        if self._subscriber is None:
+            return {}
+        try:
+            return dict(self._subscriber.get_model_cards())
+        except Exception as exc:
+            logger.debug("WorkerCapacityProvider model-card snapshot error: %s", exc)
+            return {}
+
     def _parse_card(self, card_json: str) -> _Card:
         """Parse one card body, memoised on the body itself."""
         cached = self._parsed.get(card_json)

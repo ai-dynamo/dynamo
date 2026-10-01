@@ -156,3 +156,16 @@ def test_live_worker_ids_uses_endpoint_client():
         client=_FakeClient([1, 2]),
     )
     assert provider.live_worker_ids() == {1, 2}
+
+
+def test_get_model_cards_returns_subscriber_snapshot():
+    cards = {"1": _card(16, 1000)}
+    provider, subscriber = _make_provider(cards)
+    assert provider.get_model_cards() == cards
+    assert subscriber is not None
+    assert subscriber.get_calls == 1
+
+
+def test_get_model_cards_returns_empty_when_subscriber_unset():
+    provider, _ = _make_provider(None)
+    assert provider.get_model_cards() == {}
