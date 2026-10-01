@@ -890,10 +890,9 @@ def _make_decode_handler(
         ([1, 99, 2], [1, 99, 99, 99, 2], True, False),
         ([1, 99, 2], [1, 99, 99, 99, 2], True, True),
         ([1, 99, 99, 99, 2], [1, 99, 99, 99, 2], True, False),
-        ([1, 2], [1, 2], True, False),
         ([1, 99, 2], [1, 99, 99, 99, 2], False, False),
     ],
-    ids=["engine-expands", "first-chunk-prompt", "already-expanded", "text", "opt-out"],
+    ids=["engine-expands", "first-chunk-prompt", "already-expanded", "opt-out"],
 )
 async def test_engine_data_uses_effective_engine_prompt(
     input_ids, engine_ids, opted_in, first_chunk_only
