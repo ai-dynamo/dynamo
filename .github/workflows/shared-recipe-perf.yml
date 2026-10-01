@@ -1,0 +1,284 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Shared Recipe Perf
+
+on:
+  workflow_call:
+    inputs:
+      recipe:
+        description: 'Kustomize overlay: kimi-k25-agg or deepseek-v4-pro-agg'
+        type: string
+        required: true
+      source_ref:
+        type: string
+        required: true
+      image_tag:
+        type: string
+        required: true
+      preflight_only:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    runs-on: prod-deploy-tester-v1
+    # Allow model loading and cleanup around each recipe's AIPerf run.
+    timeout-minutes: ${{ inputs.recipe == 'kimi-k25-agg' && 180 || 960 }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Read tbot's renewed credentials; every kubectl command selects its context.
+      KUBECONFIG: /teleport/kubeconfig.yaml
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-gcp-dev-02
+      NAMESPACE: dynamo-nightly-dsv4
+      RECIPE: ${{ inputs.recipe }}
+      OVERLAY: .github/ci/${{ inputs.recipe }}
+      RUN_KEY: ci-${{ inputs.recipe }}-${{ github.run_id }}-${{ github.run_attempt }}
+      # Per-recipe concurrency makes these recoverable without listing secrets.
+      HF_SECRET: hf-ci-${{ inputs.recipe }}
+      ACR_SECRET: acr-ci-${{ inputs.recipe }}
+      PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
+    steps:
+      - timeout-minutes: 5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - name: Configure recipe and artifacts
+        id: prepare
+        timeout-minutes: 5
+        run: |
+          case "$RECIPE" in
+            kimi-k25-agg)
+              dgd=kimi-k25-agg-kv-eagle
+              worker=agg
+              benchmark=kimi-k25-agg-kv-eagle-bench
+              container=perf
+              resources=dgd,job,configmap,computedomain
+              ;;
+            deepseek-v4-pro-agg)
+              dgd=dsv4-pro-agg
+              worker=worker
+              benchmark=dsv4-bench
+              container=bench
+              resources=dgd,job,computedomain
+              ;;
+            *) echo "Unsupported recipe: $RECIPE" >&2; exit 1 ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/$RUN_KEY-artifacts"
+          {
+            echo "DGD=$dgd"
+            echo "WORKER=$worker"
+            echo "BENCHMARK=$benchmark"
+            echo "PERF_CONTAINER=$container"
+            echo "RESOURCE_KINDS=$resources"
+            echo "ARTIFACTS=$RUNNER_TEMP/$RUN_KEY-artifacts"
+            echo "REGISTRY_AUTH_FILE=$RUNNER_TEMP/$RUN_KEY-registry-auth.json"
+          } >> "$GITHUB_ENV"
+      - timeout-minutes: 5
+        uses: ./.github/actions/skopeo-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Render deployment and benchmark
+        timeout-minutes: 5
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ACR_HOST: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+          PERF_CLEANUP: |
+            trap 'find "$ARTIFACT_ROOT" -type f -name inputs.json -delete || true' EXIT
+        run: |
+          image="${ACR_HOST}/${ACR_REPOSITORY}:${IMAGE_TAG}"
+          digest=$(skopeo inspect --raw "docker://$image" | jq -er '
+            .manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest')
+          export RUNTIME_IMAGE="$image@$digest"
+          yq -i '.spec.services[].extraPodSpec.mainContainer.image = strenv(RUNTIME_IMAGE) |
+            .spec.services[].extraPodSpec.imagePullSecrets = [{"name": strenv(ACR_SECRET)}] |
+            .spec.services[strenv(WORKER)].envFromSecret = strenv(HF_SECRET)' "$OVERLAY/patch-deploy.yaml"
+          yq -i '.commonLabels.ci-run = strenv(RUN_KEY) |
+            .commonLabels.ci-workflow = strenv(RECIPE)' "$OVERLAY/kustomization.yaml"
+          kubectl kustomize "$OVERLAY" --load-restrictor LoadRestrictionsNone > "$ARTIFACTS/rendered.yaml"
+          yq -i 'with(select(.kind == "Job");
+            (.spec.template.spec.containers[].envFrom[]? | select(.secretRef.name == "hf-token-secret").secretRef.name) = strenv(HF_SECRET) |
+            (.spec.template.spec.containers[].env[]? | select(.name == "HF_TOKEN").valueFrom.secretKeyRef.name) = strenv(HF_SECRET) |
+            (.spec.template.spec.containers[].env[]? | select(.name == "ARTIFACT_ROOT").value) = "/opt/models/perf/" + strenv(RUN_KEY))' "$ARTIFACTS/rendered.yaml"
+          if [[ "$RECIPE" == kimi-k25-agg ]]; then
+            yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
+              (.spec.template.spec.containers[].env[] | select(.name == "ROOT_ARTIFACT_DIR").value) = "/model-cache/perf/" + strenv(RUN_KEY))' "$ARTIFACTS/rendered.yaml"
+          elif [[ "$RECIPE" == deepseek-v4-pro-agg ]]; then
+            yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
+              .spec.template.spec.containers[0].command[2] = strenv(PERF_CLEANUP) + "\n" + .spec.template.spec.containers[0].command[2])' "$ARTIFACTS/rendered.yaml"
+          fi
+          yq 'select(.kind == "DynamoGraphDeployment")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/deploy.yaml"
+          yq 'select(.kind == "Job" and .metadata.name == strenv(BENCHMARK))' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/perf.yaml"
+          yq 'select(.kind != "DynamoGraphDeployment" and .metadata.name != strenv(BENCHMARK))' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/prerequisites.yaml"
+          git rev-parse HEAD > "$ARTIFACTS/source-sha.txt"
+          echo "$RUNTIME_IMAGE" | tee "$ARTIFACTS/runtime-image.txt"
+          echo "Runtime image: \`$RUNTIME_IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Recipe commit: \`$(git rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preflight and create run credentials
+        timeout-minutes: 10
+        env:
+          DRY_RUN: ${{ inputs.preflight_only && 'server' || 'none' }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ACR_HOST: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          ACR_USER: ${{ secrets.AZURE_ACR_USER }}
+          ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          if [[ "$DRY_RUN" == none ]]; then
+            # Inspect only this recipe's fixed names before recovering an interrupted run.
+            "${k[@]}" get -f "$ARTIFACTS/rendered.yaml" --ignore-not-found -o json |
+              jq -s '{items: map(if .kind == "List" then .items[] else . end)}' > "$ARTIFACTS/previous-resources.json"
+            jq -e --arg recipe "$RECIPE" 'all(.items[];
+              (.metadata.labels["ci-workflow"] == $recipe and
+                (.metadata.labels["ci-run"] // "" | test("^ci-" + $recipe + "-[0-9]+-[0-9]+$"))) or
+              (.metadata.labels["ci-workflow"] == null and
+                (.metadata.labels["ci-run"] // "" | test("^ci-[0-9]+-[0-9]+$"))))' "$ARTIFACTS/previous-resources.json" >/dev/null || {
+              echo "Refusing to replace resources without this recipe's CI ownership" >&2
+              exit 1
+            }
+            mapfile -t stale_resources < <(jq -r '.items[] | (.kind | ascii_downcase) + "/" + .metadata.name' "$ARTIFACTS/previous-resources.json")
+            if (( ${#stale_resources[@]} )); then
+              "${k[@]}" delete --request-timeout=0 "${stale_resources[@]}" --cascade=foreground --wait=true --timeout=5m
+            fi
+            for secret in "$HF_SECRET" "$ACR_SECRET"; do
+              owner=$("${k[@]}" get secret "$secret" --ignore-not-found -o 'jsonpath={.metadata.name}{" "}{.metadata.labels.ci-workflow}')
+              if [[ -n "$owner" && "$owner" != "$secret $RECIPE" ]]; then
+                echo "Refusing to replace secret $secret owned outside $RECIPE" >&2
+                exit 1
+              fi
+            done
+            "${k[@]}" delete secret "$HF_SECRET" "$ACR_SECRET" --ignore-not-found --wait=false
+          fi
+          [[ "$("${k[@]}" get pvc shared-model-cache -o jsonpath='{.status.phase}')" == Bound ]]
+          "${k[@]}" create --dry-run=server -f "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/dry-run.txt"
+          "${k[@]}" create secret generic "$HF_SECRET" --dry-run=client -o json \
+            --from-literal=HF_TOKEN="${HF_TOKEN:?Missing HF_TOKEN}" |
+            jq --arg recipe "$RECIPE" --arg run "$RUN_KEY" '.metadata.labels = {"ci-workflow": $recipe, "ci-run": $run}' |
+            "${k[@]}" create --dry-run="$DRY_RUN" -f - -o name
+          "${k[@]}" create secret docker-registry "$ACR_SECRET" --dry-run=client -o json \
+            --docker-server="$ACR_HOST" --docker-username="$ACR_USER" --docker-password="$ACR_PASSWORD" |
+            jq --arg recipe "$RECIPE" --arg run "$RUN_KEY" '.metadata.labels = {"ci-workflow": $recipe, "ci-run": $run}' |
+            "${k[@]}" create --dry-run="$DRY_RUN" -f - -o name
+      - name: Prepare recipe prerequisites
+        if: ${{ !inputs.preflight_only }}
+        timeout-minutes: 5
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          "${k[@]}" create -f "$ARTIFACTS/prerequisites.yaml"
+      - name: Deploy and wait for readiness
+        if: ${{ !inputs.preflight_only }}
+        timeout-minutes: 105
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          selector=nvidia.com/dynamo-graph-deployment-name=$DGD
+          "${k[@]}" create -f "$ARTIFACTS/deploy.yaml"
+          # Reconnect to discover new pods and reload tbot certificates.
+          until "${k[@]}" wait "dgd/$DGD" --for=condition=Ready --timeout=5s; do
+            "${k[@]}" get dgd "$DGD"
+            "${k[@]}" get pods -l "$selector" -o wide
+            timeout 120s "${k[@]}" logs --request-timeout=0 -f -l "$selector" -c main \
+              --prefix --timestamps --since=1m --tail=20 --ignore-errors --max-log-requests=7 || true
+            sleep 5
+          done
+      - name: Run AIPerf
+        if: ${{ !inputs.preflight_only }}
+        # The Kubernetes Job deadline bounds the run.
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          "${k[@]}" create -f "$ARTIFACTS/perf.yaml"
+          while true; do
+            if "${k[@]}" wait "job/$BENCHMARK" --for=condition=Complete --timeout=5s; then
+              break
+            fi
+            "${k[@]}" get job "$BENCHMARK" -o json |
+              jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null
+            "${k[@]}" get pods -l "job-name=$BENCHMARK" -o wide
+            timeout 120s "${k[@]}" logs --request-timeout=0 -f "job/$BENCHMARK" -c "$PERF_CONTAINER" \
+              --prefix --timestamps --since=1m --tail=20 --ignore-errors || true
+            sleep 5
+          done
+      - name: Collect logs and perf artifacts
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        timeout-minutes: 5
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s)
+          selector="ci-workflow=$RECIPE,ci-run=$RUN_KEY"
+          "${k[@]}" get "$RESOURCE_KINDS" -l "$selector" -o yaml > "$ARTIFACTS/resources.yaml" || true
+          "${k[@]}" get events --sort-by=.lastTimestamp > "$ARTIFACTS/events.txt" || true
+          if [[ -n "$("${k[@]}" get dgd -l "$selector" -o name)" ]]; then
+            "${k[@]}" logs -l "nvidia.com/dynamo-graph-deployment-name=$DGD" \
+              --all-containers --prefix --tail=1000 > "$ARTIFACTS/deployment.log" 2>&1 || true
+          fi
+          for job in $("${k[@]}" get job -l "$selector" -o name); do
+            "${k[@]}" logs "$job" --all-containers > "$ARTIFACTS/${job##*/}.log" 2>&1 || true
+          done
+          pod_selector="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component-type=frontend"
+          container=main
+          directory="/opt/models/perf/$RUN_KEY"
+          if [[ -z "$("${k[@]}" get dgd -l "$selector" -o name)" ]]; then
+            exit 0
+          fi
+          pod=$("${k[@]}" get pods -l "$pod_selector" -o json |
+            jq -r 'first(.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")) | .metadata.name // empty')
+          if [[ -n "$pod" ]]; then
+            mkdir -p "$ARTIFACTS/perf"
+            "${k[@]}" exec -c "$container" "$pod" -- \
+              tar -C "$directory" --exclude=inputs.json -cf - . | tar -C "$ARTIFACTS/perf" -xf -
+          fi
+      - name: Verify AIPerf results
+        if: ${{ success() && !inputs.preflight_only }}
+        timeout-minutes: 5
+        run: |
+          if [[ "$RECIPE" == kimi-k25-agg ]]; then
+            shopt -s nullglob
+            profiles=("$ARTIFACTS"/perf/*/*_trace_c1_*/profile_export_aiperf.json)
+            (( ${#profiles[@]} == 1 ))
+            jq -e '.request_count.avg > 0 and (.error_request_count.avg // 0) == 0 and
+              .output_sequence_length.avg > 0 and .was_cancelled != true' "${profiles[0]}"
+            exit 0
+          fi
+          concurrencies=$(yq -er '.spec.template.spec.containers[] | select(.name == strenv(PERF_CONTAINER)).env[] | select(.name == "CONCURRENCIES").value' "$ARTIFACTS/perf.yaml")
+          for concurrency in $concurrencies; do
+            jq -e --argjson requests "$((concurrency * 3))" '
+              .request_count.avg == $requests and (.error_request_count.avg // 0) == 0 and
+              .output_sequence_length.avg > 0' "$ARTIFACTS/perf/c$concurrency/profile_export_aiperf.json"
+          done
+      - name: Clean up recipe resources
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        timeout-minutes: 20
+        run: |
+          trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
+          if [[ "$PREFLIGHT_ONLY" == true ]]; then
+            exit 0
+          fi
+          failed=0
+          kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=0 \
+            delete "$RESOURCE_KINDS" -l "ci-workflow=$RECIPE,ci-run=$RUN_KEY" --cascade=foreground --wait=true --timeout=15m || failed=1
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s)
+          for secret in "$HF_SECRET" "$ACR_SECRET"; do
+            owner=$("${k[@]}" get secret "$secret" --ignore-not-found -o 'jsonpath={.metadata.name}{" "}{.metadata.labels.ci-workflow}') || { failed=1; continue; }
+            if [[ "$owner" == "$secret $RECIPE" ]]; then
+              "${k[@]}" delete secret "$secret" --ignore-not-found --wait=false || failed=1
+            elif [[ -n "$owner" ]]; then
+              echo "Refusing to delete secret $secret owned outside $RECIPE" >&2
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - timeout-minutes: 5
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        with:
+          name: ${{ inputs.recipe }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ARTIFACTS }}
+          retention-days: 14
+          if-no-files-found: error

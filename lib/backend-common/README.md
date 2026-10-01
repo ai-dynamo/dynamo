@@ -171,7 +171,7 @@ Roles and `Worker` behavior:
 | --- | --- | --- |
 | `Aggregated` | Self-contained inference (default) | Standard registration; KV indexer enabled |
 | `Prefill`    | Run prompt → emit 1 token + KV handoff | Registers with `ModelType::empty()` + `WorkerType::Prefill`; advertises `bootstrap_host`/`port` if set in `EngineConfig` |
-| `Decode`     | Resume from a prefill peer's KV | Disables the local indexer (KV is owned by the prefill peer) |
+| `Decode`     | Resume from a prefill peer's KV | Honors `enable_local_indexer` for declared KV event sources |
 
 The crate re-exports `PrefillResult` and `BootstrapInfo` from
 [`dynamo-llm`'s protocol types](../llm/src/protocols/common/preprocessor.rs);

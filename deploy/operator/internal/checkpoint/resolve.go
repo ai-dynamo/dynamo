@@ -27,6 +27,9 @@ type CheckpointInfo struct {
 	CheckpointName   string
 	Ready            bool
 	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
+	// SnapshotCompatibilityHash is the independently rendered identity expected
+	// by both pending automatic captures and resolved explicit references.
+	SnapshotCompatibilityHash string
 	// Empty means the restore pod targets the default main container.
 	RestoreTargetContainers []string
 	// NativeSnapshot is non-nil once CheckpointName resolves to a standalone
