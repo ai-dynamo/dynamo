@@ -78,6 +78,50 @@ def _read_model_config(
         return serialized_config
 
 
+def _collect_classify_dependency_models(
+    server: TritonServer,
+    model_names: list[str],
+    repository_path: str,
+) -> set[str]:
+    """Return names of models referenced as a step inside another model's ensemble.
+
+    Invoked only on the ``--task classify`` path. A typical classify
+    ensemble in Triton pairs one ``ensemble`` model with a Python
+    tokenizer dependency and a numeric classifier dependency; Triton
+    loads all three as ready, but only the ensemble carries the
+    STRING-in / FP32-out contract the OpenAI ``/v1/classify`` adapter
+    needs. Constructing a ``ClassifyWorkerHandler`` for the tokenizer or
+    numeric stage raises, which cancels the entire TaskGroup and aborts
+    the valid ensemble with it.
+
+    Dependency models remain loaded in Triton so their ensembles can
+    call them, but are not exposed as Dynamo endpoints.
+    """
+    deps: set[str] = set()
+    for name in model_names:
+        try:
+            model = server.model(name)
+            cfg = mc.ModelConfig.FromString(
+                _read_model_config(model, name, repository_path)
+            )
+        except (OSError, text_format.ParseError, mc.DecodeError) as exc:
+            # A config we cannot read also cannot declare dependencies; let
+            # the model fall through to registration, where the same read
+            # path raises with the full error context.
+            logger.warning(
+                "Could not read config for model %r while scanning for "
+                "ensemble dependencies: %s",
+                name,
+                exc,
+            )
+            continue
+        if cfg.HasField("ensemble_scheduling"):
+            for step in cfg.ensemble_scheduling.step:
+                if step.model_name:
+                    deps.add(step.model_name)
+    return deps
+
+
 async def _register_and_serve(
     runtime: DistributedRuntime,
     config: DynamoTritonConfig,
@@ -231,6 +275,40 @@ async def init_worker(
         raise RuntimeError(f"No ready models found in repository '{model_repository}'.")
 
     logger.info(f"Auto-discovered {len(model_names)} model(s): {model_names}")
+
+    # Only user-facing classify models get a Dynamo endpoint. In a typical
+    # Triton classify ensemble (ensemble + Python tokenizer + numeric stage),
+    # the tokenizer has no FP32 output and the numeric stage has no STRING
+    # input, so constructing a ClassifyWorkerHandler for either raises and
+    # cancels every sibling task in the TaskGroup below. Dependency models
+    # stay loaded in Triton to serve their ensembles but are not exposed as
+    # Dynamo endpoints.
+    #
+    # The tensor path registers everything: a dependency model may still be
+    # useful to call directly over KServe gRPC for debugging.
+    if config.task == "classify":
+        deps = _collect_classify_dependency_models(
+            server, model_names, model_repository
+        )
+        skipped = sorted(set(model_names) & deps)
+        exposed = [n for n in model_names if n not in deps]
+        if skipped:
+            logger.info(
+                "Skipping %d ensemble dependency model(s) from "
+                "/v1/classify registration (still loaded in Triton for use "
+                "by their ensembles): %s",
+                len(skipped),
+                skipped,
+            )
+        if not exposed:
+            raise RuntimeError(
+                "No user-facing classify models found in "
+                f"'{model_repository}'. Every ready model is referenced "
+                "as an ensemble step of another model. Add a user-facing "
+                "ensemble (STRING in, FP32 out) that wires these "
+                "together, or run with --task tensor."
+            )
+        model_names = exposed
 
     logger.info(f"Serving {len(model_names)} model(s): {model_names}")
 
