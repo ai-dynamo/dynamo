@@ -199,6 +199,10 @@ def materialize_dgd_from_candidate(
     backend = candidate_config.get("backend")
     mode = candidate_config.get("deployment_mode")
 
+    if not isinstance(backend, str):
+        raise MaterializationError(
+            f"candidate backend must be a string, got {backend!r}"
+        )
     modifier = CONFIG_MODIFIERS.get(backend)
     if modifier is None:
         raise MaterializationError(f"no CONFIG_MODIFIERS entry for backend {backend!r}")
