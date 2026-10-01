@@ -22,14 +22,15 @@ import urllib.request
 
 import pytest
 
-try:
-    from aiperf.common.config import PromptConfig
-    from aiperf.common.exceptions import ConfigurationError
-    from aiperf.common.tokenizer import Tokenizer
-    from aiperf.dataset.generator import PromptGenerator
-    from aiperf.dataset.synthesis.rolling_hasher import RollingHasher
-except ImportError:
-    pytest.skip("aiperf not installed; skipping tests", allow_module_level=True)
+# Skip only when aiperf is absent; a moved aiperf module must fail, not skip.
+pytest.importorskip("aiperf")
+
+from aiperf.common import random_generator as rng  # noqa: E402
+from aiperf.common.exceptions import ConfigurationError  # noqa: E402
+from aiperf.common.tokenizer import Tokenizer  # noqa: E402
+from aiperf.config.dataset import PromptConfig  # noqa: E402
+from aiperf.dataset.generator import PromptGenerator  # noqa: E402
+from aiperf.dataset.synthesis.rolling_hasher import RollingHasher  # noqa: E402
 
 # Mooncake trace URL
 MOONCAKE_TRACE_URL = "https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/arxiv-trace/mooncake_trace.jsonl"
@@ -49,11 +50,19 @@ def download_mooncake_trace(output_path: str, num_lines: int = 100) -> None:
                 lines_written += 1
 
 
+@pytest.fixture
+def seeded_rng():
+    """PromptGenerator needs aiperf's global RNG; reset it so it does not leak."""
+    rng.init(0)
+    yield
+    rng.reset()
+
+
 class TestRoundtripHashes:
     """Test hash consistency through aiperf's PromptGenerator."""
 
     @pytest.mark.timeout(120)
-    def test_hash_roundtrip_direct(self):
+    def test_hash_roundtrip_direct(self, seeded_rng):
         """
         Direct test using PromptGenerator:
         1. Download mooncake trace (first 100 requests)
@@ -82,9 +91,10 @@ class TestRoundtripHashes:
             print(f"Loading tokenizer: {DEFAULT_TOKENIZER}")
             tokenizer = Tokenizer.from_pretrained(DEFAULT_TOKENIZER)
 
-            config = PromptConfig()
-            config.input_tokens.block_size = DEFAULT_BLOCK_SIZE
-            prompt_generator = PromptGenerator(config=config, tokenizer=tokenizer)
+            config = PromptConfig(block_size=DEFAULT_BLOCK_SIZE)
+            prompt_generator = PromptGenerator(
+                prompts=config, prefix_prompts=None, tokenizer=tokenizer
+            )
 
             # Phase 1: Normalize original hash_ids through a hasher
             original_hasher = RollingHasher(block_size=DEFAULT_BLOCK_SIZE)
