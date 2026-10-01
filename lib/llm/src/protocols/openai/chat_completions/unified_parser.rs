@@ -592,6 +592,7 @@ impl QwenNativeLexicalState {
         const BLOCK_END: &str = "</tool_call>";
         const PARAMETER_START: &str = "<parameter=";
         const PARAMETER_END: &str = "</parameter>";
+        const FUNCTION_END: &str = "</function>";
 
         let mut input = std::mem::take(&mut self.marker_tail);
         input.push_str(text);
@@ -629,20 +630,33 @@ impl QwenNativeLexicalState {
                     }
                 }
                 QwenNativeLexicalMode::ParameterHeader => {
-                    if let Some(header_end) = input.find('>') {
+                    let header_end = input.find('>');
+                    if let Some(function_end) = input.find(FUNCTION_END)
+                        && header_end.is_none_or(|end| function_end < end)
+                    {
+                        input.drain(..function_end + FUNCTION_END.len());
+                        self.mode = QwenNativeLexicalMode::InsideBlock;
+                    } else if let Some(header_end) = header_end {
                         input.drain(..header_end + 1);
                         self.mode = QwenNativeLexicalMode::ParameterValue;
                     } else {
-                        input.clear();
+                        self.retain_partial_suffix(&input, &[FUNCTION_END]);
                         return;
                     }
                 }
                 QwenNativeLexicalMode::ParameterValue => {
-                    if let Some(parameter_end) = input.find(PARAMETER_END) {
-                        input.drain(..parameter_end + PARAMETER_END.len());
+                    // The native scanner can recover a function whose last
+                    // parameter omitted its close. Mirror that literal boundary so
+                    // later partial block openers still retain their event order.
+                    let close = [PARAMETER_END, FUNCTION_END]
+                        .into_iter()
+                        .filter_map(|marker| input.find(marker).map(|at| (at, marker.len())))
+                        .min_by_key(|(at, _)| *at);
+                    if let Some((at, length)) = close {
+                        input.drain(..at + length);
                         self.mode = QwenNativeLexicalMode::InsideBlock;
                     } else {
-                        self.retain_partial_suffix(&input, &[PARAMETER_END]);
+                        self.retain_partial_suffix(&input, &[PARAMETER_END, FUNCTION_END]);
                         return;
                     }
                 }
@@ -663,10 +677,6 @@ impl QwenNativeLexicalState {
 
     fn can_start_call(&self) -> bool {
         self.mode != QwenNativeLexicalMode::ParameterValue
-    }
-
-    fn has_open_call(&self) -> bool {
-        self.mode != QwenNativeLexicalMode::OutsideBlock || !self.marker_tail.is_empty()
     }
 }
 
@@ -710,6 +720,8 @@ pub(crate) struct ChoiceState {
     /// They must follow recovered opener text on mismatch and precede call events
     /// when the opener completes.
     pending_qwen_opener_reasoning: Vec<String>,
+    qwen_reasoning_event_positions: HashSet<usize>,
+    qwen_reasoning_choice_positions: HashSet<usize>,
     /// Tool indices that have emitted at least one `tool_calls` delta.
     opened_calls: HashSet<usize>,
     /// Upstream IDs and types may arrive after an index opens. Names remain fragments.
@@ -767,6 +779,8 @@ impl ChoiceState {
             qwen_native_lexical_state: QwenNativeLexicalState::default(),
             pending_qwen_opener_text: String::new(),
             pending_qwen_opener_reasoning: Vec::new(),
+            qwen_reasoning_event_positions: HashSet::new(),
+            qwen_reasoning_choice_positions: HashSet::new(),
             opened_calls: HashSet::new(),
             tool_ids_emitted: HashSet::new(),
             tool_types_emitted: HashSet::new(),
@@ -789,6 +803,8 @@ impl ChoiceState {
             qwen_native_lexical_state: QwenNativeLexicalState::default(),
             pending_qwen_opener_text: String::new(),
             pending_qwen_opener_reasoning: Vec::new(),
+            qwen_reasoning_event_positions: HashSet::new(),
+            qwen_reasoning_choice_positions: HashSet::new(),
             opened_calls: HashSet::new(),
             tool_ids_emitted: HashSet::new(),
             tool_types_emitted: HashSet::new(),
@@ -886,11 +902,15 @@ impl ChoiceState {
             .into_iter()
             .map(UnifiedParserEvent::Reasoning)
             .collect::<Vec<_>>();
+        self.qwen_reasoning_event_positions
+            .extend(0..reasoning.len());
         reasoning.append(events);
         *events = reasoning;
     }
 
     fn append_pending_qwen_reasoning(&mut self, events: &mut Vec<UnifiedParserEvent>) {
+        self.qwen_reasoning_event_positions
+            .extend(events.len()..events.len() + self.pending_qwen_opener_reasoning.len());
         events.extend(
             std::mem::take(&mut self.pending_qwen_opener_reasoning)
                 .into_iter()
@@ -907,24 +927,27 @@ impl ChoiceState {
         let mut ordered = Vec::new();
         let mut inserted = false;
         for event in std::mem::take(events) {
-            if !inserted {
-                if let UnifiedParserEvent::Text(text) = &event {
-                    if let Some(remainder) = text.strip_prefix(held) {
-                        if !held.is_empty() {
-                            ordered.push(UnifiedParserEvent::Text(held.to_string()));
-                        }
-                        ordered.extend(pending.iter().cloned().map(UnifiedParserEvent::Reasoning));
-                        if !remainder.is_empty() {
-                            ordered.push(UnifiedParserEvent::Text(remainder.to_string()));
-                        }
-                        inserted = true;
-                        continue;
-                    }
+            if !inserted
+                && let UnifiedParserEvent::Text(text) = &event
+                && let Some(remainder) = text.strip_prefix(held)
+            {
+                if !held.is_empty() {
+                    ordered.push(UnifiedParserEvent::Text(held.to_string()));
                 }
+                self.qwen_reasoning_event_positions
+                    .extend(ordered.len()..ordered.len() + pending.len());
+                ordered.extend(pending.iter().cloned().map(UnifiedParserEvent::Reasoning));
+                if !remainder.is_empty() {
+                    ordered.push(UnifiedParserEvent::Text(remainder.to_string()));
+                }
+                inserted = true;
+                continue;
             }
             ordered.push(event);
         }
         if !inserted {
+            self.qwen_reasoning_event_positions
+                .extend(ordered.len()..ordered.len() + pending.len());
             ordered.extend(pending.into_iter().map(UnifiedParserEvent::Reasoning));
         }
         *events = ordered;
@@ -1026,9 +1049,9 @@ impl ChoiceState {
 
     /// Convert an ordered delta run into the streaming choices it becomes.
     ///
-    /// `role` / `refusal` ride on the first emitted choice and the terminating
-    /// `finish_reason` on the last, so a client that reassembles the stream sees the
-    /// same envelope it would have without this path.
+    /// `role` / `refusal` ride on the first choice owned by the current source
+    /// response; queued reasoning keeps its earlier source envelope. The terminating
+    /// `finish_reason` stays after every emitted delta.
     pub(crate) fn choices_for(
         &mut self,
         original: &ChatChoiceStream,
@@ -1040,14 +1063,28 @@ impl ChoiceState {
         if terminal_tool_call_delta {
             self.pending_parsed_tool_calls.clear();
         }
-        let deltas = coalesce(
-            deltas
-                .into_iter()
-                .filter(|delta| {
-                    emit_tool_calls || !matches!(delta, UnifiedParserEvent::ToolCall(_))
-                })
-                .collect(),
-        );
+        // Queued reasoning belongs to its earlier source response. Coalescing it
+        // with parser reasoning would erase the source envelope's event boundary.
+        let source_positions = std::mem::take(&mut self.qwen_reasoning_event_positions);
+        self.qwen_reasoning_choice_positions.clear();
+        let mut run = Vec::new();
+        let mut projected = Vec::new();
+        for (position, delta) in deltas.into_iter().enumerate() {
+            if !emit_tool_calls && matches!(delta, UnifiedParserEvent::ToolCall(_)) {
+                continue;
+            }
+            if source_positions.contains(&position) {
+                projected.extend(coalesce(std::mem::take(&mut run)));
+                self.qwen_reasoning_choice_positions.insert(projected.len());
+                projected.push(delta);
+            } else {
+                run.push(delta);
+            }
+        }
+        projected.extend(coalesce(run));
+        let deltas = projected;
+        let envelope_position = (0..deltas.len())
+            .find(|position| !self.qwen_reasoning_choice_positions.contains(position));
         let mut original = original.clone();
         if let Some(original_calls) = original.delta.tool_calls.as_mut() {
             for call in original_calls {
@@ -1071,7 +1108,7 @@ impl ChoiceState {
 
         for (position, delta) in deltas.into_iter().enumerate() {
             let mut choice = self.delta_to_choice(index, delta);
-            if position == 0 {
+            if Some(position) == envelope_position {
                 choice.delta.role = original.delta.role;
                 choice.delta.refusal = original.delta.refusal.clone();
                 choice.delta.function_call = original.delta.function_call.clone();
@@ -1089,9 +1126,26 @@ impl ChoiceState {
                     choice.delta.tool_calls = Some(original_calls);
                 }
             }
-            if position + 1 == count {
+            if position + 1 == count && !self.qwen_reasoning_choice_positions.contains(&position) {
                 choice.finish_reason = self.normalize_finish_reason(finish_reason);
             }
+            choices.push(choice);
+        }
+
+        if !choices.is_empty()
+            && (envelope_position.is_none()
+                || (finish_reason.is_some()
+                    && self.qwen_reasoning_choice_positions.contains(&(count - 1))))
+        {
+            let mut choice = empty_choice(index);
+            if envelope_position.is_none() {
+                choice.delta.role = original.delta.role;
+                choice.delta.refusal = original.delta.refusal.clone();
+                choice.delta.reasoning_content = original.delta.reasoning_content.clone();
+                choice.delta.tool_calls = original.delta.tool_calls.clone();
+                choice.delta.function_call = original.delta.function_call.clone();
+            }
+            choice.finish_reason = self.normalize_finish_reason(finish_reason);
             choices.push(choice);
         }
 
@@ -1155,9 +1209,10 @@ impl ChoiceState {
     fn should_preserve_reasoning_only_state(&self) -> bool {
         self.is_guided_named()
             || self.tool_emitted()
+            // Reasoning is an out-of-band event even when malformed native bytes
+            // look closed to the opener tracker. Only the parser owns recovery.
             || (self.family == QWEN3_UNIFIED_FAMILY
-                && (self.qwen_native_lexical_state.has_open_call()
-                    || !self.pending_qwen_opener_text.is_empty()))
+                && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native))
             || self.family == "kimi_k2"
     }
 
@@ -1361,46 +1416,51 @@ struct ChoiceRecord {
 
 struct PendingQwenReasoningResponse {
     text: String,
+    choice: ChatChoiceStream,
     response: Annotated<NvCreateChatCompletionStreamResponse>,
 }
 
 enum FinishedStreamChunk {
     Choice(ChatChoiceStream),
-    Source(Annotated<NvCreateChatCompletionStreamResponse>),
+    Source(Annotated<Box<NvCreateChatCompletionStreamResponse>>),
 }
 
-fn take_qwen_reasoning_responses(
+fn take_qwen_reasoning_response(
     record: &mut ChoiceRecord,
-    reasoning: &ChatChoiceStream,
-) -> Option<Vec<Annotated<NvCreateChatCompletionStreamResponse>>> {
-    let pending_reasoning: String = record
+) -> Annotated<Box<NvCreateChatCompletionStreamResponse>> {
+    let pending = record
         .pending_qwen_opener_responses
-        .iter()
-        .map(|pending| pending.text.as_str())
-        .collect();
-    if pending_reasoning.is_empty()
-        || reasoning.delta.reasoning_content.as_deref() != Some(pending_reasoning.as_str())
-    {
-        return None;
-    }
+        .pop_front()
+        .expect("queued reasoning event must have a source response");
+    let mut response = pending.response;
+    let mut source_reasoning = pending.choice;
+    source_reasoning.delta.reasoning_content = Some(pending.text);
+    source_reasoning.finish_reason = None;
+    response
+        .data
+        .as_mut()
+        .expect("queued source response has data")
+        .inner
+        .choices = vec![source_reasoning];
+    response.map_data(|data| Ok(Box::new(data)))
+}
 
-    Some(
-        std::iter::from_fn(|| record.pending_qwen_opener_responses.pop_front())
-            .map(|pending| {
-                let mut response = pending.response;
-                let mut source_reasoning = reasoning.clone();
-                source_reasoning.delta.reasoning_content = Some(pending.text);
-                source_reasoning.finish_reason = None;
-                response
-                    .data
-                    .as_mut()
-                    .expect("queued source response has data")
-                    .inner
-                    .choices = vec![source_reasoning];
-                response
-            })
-            .collect(),
-    )
+fn qwen_chunks_for_choices(
+    state: &ChoiceState,
+    record: &mut ChoiceRecord,
+    choices: Vec<ChatChoiceStream>,
+) -> Vec<FinishedStreamChunk> {
+    choices
+        .into_iter()
+        .enumerate()
+        .map(|(position, choice)| {
+            if state.qwen_reasoning_choice_positions.contains(&position) {
+                FinishedStreamChunk::Source(take_qwen_reasoning_response(record))
+            } else {
+                FinishedStreamChunk::Choice(choice)
+            }
+        })
+        .collect()
 }
 
 impl ChoiceRecord {
@@ -1460,8 +1520,17 @@ fn finish_unterminated_choices(
                 // provisional parser or pass-through fragments must stay provisional.
                 let mut flushed = state.choices_for(&base, deltas, true, None);
                 if state.has_terminal_tool_calls() {
-                    if let Some(last) = flushed.last_mut() {
-                        last.finish_reason = Some(FinishReason::ToolCalls);
+                    if let Some(last_position) = flushed.len().checked_sub(1) {
+                        if state
+                            .qwen_reasoning_choice_positions
+                            .contains(&last_position)
+                        {
+                            let mut terminal = empty_choice(index);
+                            terminal.finish_reason = Some(FinishReason::ToolCalls);
+                            flushed.push(terminal);
+                        } else {
+                            flushed[last_position].finish_reason = Some(FinishReason::ToolCalls);
+                        }
                     } else {
                         flushed.extend(state.choices_for(
                             &base,
@@ -1471,26 +1540,13 @@ fn finish_unterminated_choices(
                         ));
                     }
                 }
-                for choice in flushed {
-                    if let Some(responses) = take_qwen_reasoning_responses(record, &choice) {
-                        chunks.extend(responses.into_iter().map(FinishedStreamChunk::Source));
-                    } else {
-                        chunks.push(FinishedStreamChunk::Choice(choice));
-                    }
-                }
+                chunks.extend(qwen_chunks_for_choices(state, record, flushed));
             }
             None => {
-                while let Some(pending) = record.pending_qwen_opener_responses.pop_front() {
-                    let mut choice = base.clone();
-                    choice.delta.reasoning_content = Some(pending.text);
-                    let mut response = pending.response;
-                    response
-                        .data
-                        .as_mut()
-                        .expect("queued source response has data")
-                        .inner
-                        .choices = vec![choice];
-                    chunks.push(FinishedStreamChunk::Source(response));
+                while !record.pending_qwen_opener_responses.is_empty() {
+                    chunks.push(FinishedStreamChunk::Source(take_qwen_reasoning_response(
+                        record,
+                    )));
                 }
                 if record.tool_emitted
                     && record.pending_tool_calls.is_empty()
@@ -1654,7 +1710,7 @@ where
                             FinishedStreamChunk::Choice(choice) => {
                                 yield response_with_choice(template, choice);
                             }
-                            FinishedStreamChunk::Source(response) => yield response,
+                            FinishedStreamChunk::Source(response) => yield response.map_data(|data| Ok(*data)),
                         }
                     }
                 }
@@ -1733,6 +1789,11 @@ where
                             .get(&original.index)
                             .is_some_and(ChoiceState::should_preserve_reasoning_only_state);
                     let queue_qwen_opener_reasoning = preserve_reasoning_only_state
+                        && original
+                            .delta
+                            .reasoning_content
+                            .as_ref()
+                            .is_some_and(|reasoning| !reasoning.is_empty())
                         && family == QWEN3_UNIFIED_FAMILY
                         && states.get(&original.index).is_some_and(|state| {
                             state.qwen_native_lexical_state.mode
@@ -1767,6 +1828,7 @@ where
                             record.pending_qwen_opener_responses.push_back(
                                 PendingQwenReasoningResponse {
                                     text: reasoning,
+                                    choice: original.clone(),
                                     response: Annotated {
                                         data: Some(source_data),
                                         id: if keep_source_metadata {
@@ -1853,16 +1915,12 @@ where
                             true,
                             None,
                         );
-                        let emitted_position = emitted.len();
-                        for (position, choice) in flushed.into_iter().enumerate() {
-                            if let Some(responses) = take_qwen_reasoning_responses(record, &choice) {
-                                deferred_qwen_responses.extend(
-                                    responses
-                                        .into_iter()
-                                        .map(|response| (emitted_position + position, response)),
-                                );
-                            } else {
-                                emitted.push(choice);
+                        for output in qwen_chunks_for_choices(&state, record, flushed) {
+                            match output {
+                                FinishedStreamChunk::Source(response) => {
+                                    deferred_qwen_responses.push((emitted.len(), response));
+                                }
+                                FinishedStreamChunk::Choice(choice) => emitted.push(choice),
                             }
                         }
                         record.remember_state(&state);
@@ -1922,20 +1980,23 @@ where
                         }
                         _ => false,
                     };
-                if new_native_call_after_detour {
-                    if let Some(mut state) = states.remove(&original.index) {
+                if new_native_call_after_detour
+                    && let Some(mut state) = states.remove(&original.index)
+                {
                         let deltas = state.finish();
-                        records
-                            .entry(original.index)
-                            .or_default()
-                            .remember_state(&state);
-                        emitted.extend(state.choices_for(
-                            &empty_choice(original.index),
-                            deltas,
-                            true,
-                            None,
-                        ));
-                    }
+                        let flushed = state.choices_for(
+                            &empty_choice(original.index), deltas, true, None,
+                        );
+                        let record = records.entry(original.index).or_default();
+                        for output in qwen_chunks_for_choices(&state, record, flushed) {
+                            match output {
+                                FinishedStreamChunk::Source(response) => {
+                                    deferred_qwen_responses.push((emitted.len(), response));
+                                }
+                                FinishedStreamChunk::Choice(choice) => emitted.push(choice),
+                            }
+                        }
+                        record.remember_state(&state);
                 }
 
                 let state = match states.entry(original.index) {
@@ -2032,26 +2093,15 @@ where
                     records.entry(original.index).or_default().finished = true;
                 }
 
-                let mut parsed = state.choices_for(&original, deltas, true, terminal);
-                if let Some(record) = records.get_mut(&original.index) {
-                    if let Some(position) = parsed.iter().position(|choice| {
-                        let queued_text: String = record
-                            .pending_qwen_opener_responses
-                            .iter()
-                            .map(|pending| pending.text.as_str())
-                            .collect();
-                        !queued_text.is_empty()
-                            && choice.delta.reasoning_content.as_deref()
-                                == Some(queued_text.as_str())
-                    }) {
-                        let reasoning = parsed.remove(position);
-                        if let Some(responses) = take_qwen_reasoning_responses(record, &reasoning) {
-                            deferred_qwen_responses.extend(
-                                responses
-                                    .into_iter()
-                                    .map(|response| (emitted.len() + position, response)),
-                            );
+                let choices = state.choices_for(&original, deltas, true, terminal);
+                let mut parsed = Vec::new();
+                let record = records.entry(original.index).or_default();
+                for output in qwen_chunks_for_choices(state, record, choices) {
+                    match output {
+                        FinishedStreamChunk::Source(response) => {
+                            deferred_qwen_responses.push((emitted.len() + parsed.len(), response));
                         }
+                        FinishedStreamChunk::Choice(choice) => parsed.push(choice),
                     }
                 }
                 if parsed.is_empty() {
@@ -2092,7 +2142,7 @@ where
                     let (_, response) = deferred_qwen_responses
                         .next()
                         .expect("peeked Qwen response should be present");
-                    yield response;
+                    yield response.map_data(|data| Ok(*data));
                 }
                 let Some(choice) = emitted.get(position).cloned() else {
                     continue;
@@ -2124,7 +2174,7 @@ where
                     FinishedStreamChunk::Choice(choice) => {
                         yield response_with_choice(template, choice);
                     }
-                    FinishedStreamChunk::Source(response) => yield response,
+                    FinishedStreamChunk::Source(response) => yield response.map_data(|data| Ok(*data)),
                 }
             }
         }
@@ -3214,106 +3264,185 @@ mod tests {
 
     #[tokio::test]
     async fn qwen_delayed_reasoning_keeps_source_envelope_and_continuation_metadata() {
-        let mut reasoning = chunk("", false);
-        let choice = &mut reasoning.data.as_mut().unwrap().inner.choices[0];
-        choice.delta.content = None;
-        choice.delta.reasoning_content = Some("held thought".to_string());
-        let source = reasoning.data.as_mut().unwrap();
-        source.nvext = Some(serde_json::json!({"source": "reasoning"}));
-        source.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
-            chunk_tokens: 7,
-            ..Default::default()
-        });
-        reasoning.id = Some("reasoning-source-id".to_string());
-        reasoning.event = Some("reasoning-source-event".to_string());
-        reasoning.comment = Some(vec!["reasoning-source-comment".to_string()]);
+        for (opening, continuation_prefix) in [
+            ("before <tool_c", "all>"),
+            ("before <", "<think>raw</think><tool_call>"),
+        ] {
+            for reasoning_text in ["", "held thought"] {
+                let mut reasoning = chunk("", false);
+                let choice = &mut reasoning.data.as_mut().unwrap().inner.choices[0];
+                choice.delta.content = None;
+                choice.delta.reasoning_content = Some(reasoning_text.to_string());
+                let source = reasoning.data.as_mut().unwrap();
+                source.nvext = Some(serde_json::json!({"source": "reasoning"}));
+                source.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+                    chunk_tokens: 7,
+                    ..Default::default()
+                });
+                reasoning.id = Some("reasoning-source-id".to_string());
+                reasoning.event = Some("reasoning-source-event".to_string());
+                reasoning.comment = Some(vec!["reasoning-source-comment".to_string()]);
 
-        let mut continuation = chunk(
-            "all>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n</tool_call>answer",
-            true,
-        );
-        let continuation_data = continuation.data.as_mut().unwrap();
-        continuation_data.nvext = Some(serde_json::json!({"source": "continuation"}));
-        continuation.id = Some("continuation-id".to_string());
-        continuation.event = Some("continuation-event".to_string());
-        continuation.comment = Some(vec!["continuation-comment".to_string()]);
+                let continuation_text = format!(
+                    "{continuation_prefix}\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n</tool_call>answer"
+                );
+                let mut continuation = chunk(&continuation_text, true);
+                let continuation_data = continuation.data.as_mut().unwrap();
+                continuation_data.nvext = Some(serde_json::json!({"source": "continuation"}));
+                continuation.id = Some("continuation-id".to_string());
+                continuation.event = Some("continuation-event".to_string());
+                continuation.comment = Some(vec!["continuation-comment".to_string()]);
 
-        let responses = apply_stream(
-            stream::iter([chunk("before <tool_c", false), reasoning, continuation]),
-            Some(weather_tools()),
-            None,
-            false,
-            UnifiedParserStartingState::None,
-            QWEN3_UNIFIED_FAMILY,
-        )
-        .collect::<Vec<_>>()
-        .await;
+                let responses = apply_stream(
+                    stream::iter([chunk(opening, false), reasoning, continuation]),
+                    Some(weather_tools()),
+                    None,
+                    false,
+                    UnifiedParserStartingState::None,
+                    QWEN3_UNIFIED_FAMILY,
+                )
+                .collect::<Vec<_>>()
+                .await;
 
-        let delayed_reasoning = responses
-            .iter()
-            .find(|response| {
-                response.data.as_ref().is_some_and(|data| {
-                    data.inner.choices.iter().any(|choice| {
-                        choice.delta.reasoning_content.as_deref() == Some("held thought")
+                let delayed_reasoning = responses
+                    .iter()
+                    .find(|response| {
+                        response.data.as_ref().is_some_and(|data| {
+                            data.inner.choices.iter().any(|choice| {
+                                choice.delta.reasoning_content.as_deref() == Some(reasoning_text)
+                            })
+                        })
+                    })
+                    .expect("queued reasoning should be released when the opener resolves");
+                let delayed_data = delayed_reasoning.data.as_ref().unwrap();
+                assert_eq!(delayed_reasoning.id.as_deref(), Some("reasoning-source-id"));
+                assert_eq!(
+                    delayed_reasoning.event.as_deref(),
+                    Some("reasoning-source-event")
+                );
+                assert_eq!(
+                    delayed_reasoning.comment.as_deref(),
+                    Some(["reasoning-source-comment".to_string()].as_slice())
+                );
+                assert_eq!(
+                    delayed_data.nvext,
+                    Some(serde_json::json!({"source": "reasoning"}))
+                );
+                assert_eq!(delayed_data.llm_metrics.as_ref().unwrap().chunk_tokens, 7);
+                assert_eq!(delayed_data.inner.choices.len(), 1);
+                assert!(delayed_data.inner.choices[0].delta.tool_calls.is_none());
+
+                let continuation_answer = responses
+                .iter()
+                .find(|response| {
+                    response.data.as_ref().is_some_and(|data| {
+                        data.inner.choices.iter().any(|choice| {
+                            matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if text == "answer")
+                        })
                     })
                 })
-            })
-            .expect("queued reasoning should be released when the opener resolves");
-        let delayed_data = delayed_reasoning.data.as_ref().unwrap();
-        assert_eq!(delayed_reasoning.id.as_deref(), Some("reasoning-source-id"));
-        assert_eq!(
-            delayed_reasoning.event.as_deref(),
-            Some("reasoning-source-event")
-        );
-        assert_eq!(
-            delayed_reasoning.comment.as_deref(),
-            Some(["reasoning-source-comment".to_string()].as_slice())
-        );
-        assert_eq!(
-            delayed_data.nvext,
-            Some(serde_json::json!({"source": "reasoning"}))
-        );
-        assert_eq!(delayed_data.llm_metrics.as_ref().unwrap().chunk_tokens, 7);
-        assert_eq!(delayed_data.inner.choices.len(), 1);
-        assert!(delayed_data.inner.choices[0].delta.tool_calls.is_none());
-
-        let continuation_answer = responses
-            .iter()
-            .find(|response| {
-                response.data.as_ref().is_some_and(|data| {
-                    data.inner.choices.iter().any(|choice| {
-                        matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if text == "answer")
+                .expect("continuation answer should keep the resolving chunk envelope");
+                let continuation_data = continuation_answer.data.as_ref().unwrap();
+                assert_eq!(continuation_answer.id.as_deref(), Some("continuation-id"));
+                assert_eq!(
+                    continuation_answer.event.as_deref(),
+                    Some("continuation-event")
+                );
+                assert_eq!(
+                    continuation_answer.comment.as_deref(),
+                    Some(["continuation-comment".to_string()].as_slice())
+                );
+                assert_eq!(
+                    continuation_data.nvext,
+                    Some(serde_json::json!({"source": "continuation"}))
+                );
+                let content_chunks: Vec<_> = responses
+                    .iter()
+                    .flat_map(|response| response.data.iter())
+                    .flat_map(|data| data.inner.choices.iter())
+                    .filter_map(|choice| match &choice.delta.content {
+                        Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                        _ => None,
                     })
-                })
-            })
-            .expect("continuation answer should keep the resolving chunk envelope");
-        let continuation_data = continuation_answer.data.as_ref().unwrap();
-        assert_eq!(continuation_answer.id.as_deref(), Some("continuation-id"));
-        assert_eq!(
-            continuation_answer.event.as_deref(),
-            Some("continuation-event")
-        );
-        assert_eq!(
-            continuation_answer.comment.as_deref(),
-            Some(["continuation-comment".to_string()].as_slice())
-        );
-        assert_eq!(
-            continuation_data.nvext,
-            Some(serde_json::json!({"source": "continuation"}))
-        );
-        let content_chunks: Vec<_> = responses
-            .iter()
-            .flat_map(|response| response.data.iter())
-            .flat_map(|data| data.inner.choices.iter())
-            .filter_map(|choice| match &choice.delta.content {
-                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            content_chunks.iter().all(|text| !text.contains("<tool_c")),
-            "a partial native opener must not leak into visible content: {content_chunks:?}"
-        );
+                    .collect();
+                assert!(
+                    content_chunks.iter().all(|text| !text.contains("<tool_c")),
+                    "a partial native opener must not leak into visible content: {content_chunks:?}"
+                );
+            }
+        }
+    }
+
+    // Unified corpus input is raw model text; it cannot express upstream parsed
+    // reasoning or source response annotations, whose ownership this adapter adds.
+    #[tokio::test]
+    async fn qwen_queued_sources_keep_identity_beside_mixed_and_raw_reasoning() {
+        for finish in [false, true] {
+            let mut inputs = vec![chunk("before <", false)];
+            for (source_id, tokens) in [("first-source", 3), ("second-source", 5)] {
+                let mut response = chunk("", false);
+                let data = response.data.as_mut().unwrap();
+                data.inner.choices[0].delta.content = None;
+                data.inner.choices[0].delta.reasoning_content = Some("same".to_string());
+                data.nvext = Some(serde_json::json!({"source": source_id}));
+                data.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+                    chunk_tokens: tokens,
+                    ..Default::default()
+                });
+                response.id = Some(source_id.to_string());
+                inputs.push(response);
+            }
+            let mut continuation = chunk("<think>raw</think>answer", finish);
+            let data = continuation.data.as_mut().unwrap();
+            data.inner.choices[0].delta.reasoning_content = Some("mixed".to_string());
+            data.nvext = Some(serde_json::json!({"source": "continuation"}));
+            continuation.id = Some("continuation".to_string());
+            inputs.push(continuation);
+            let responses = apply_stream(
+                stream::iter(inputs),
+                Some(weather_tools()),
+                None,
+                false,
+                UnifiedParserStartingState::None,
+                QWEN3_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            for (source_id, tokens) in [("first-source", 3), ("second-source", 5)] {
+                let sources: Vec<_> = responses
+                    .iter()
+                    .filter(|response| response.id.as_deref() == Some(source_id))
+                    .collect();
+                assert_eq!(sources.len(), 1);
+                let data = sources[0].data.as_ref().unwrap();
+                assert_eq!(
+                    data.inner.choices[0].delta.reasoning_content.as_deref(),
+                    Some("same")
+                );
+                assert!(data.inner.choices[0].delta.content.is_none());
+                assert_eq!(data.llm_metrics.as_ref().unwrap().chunk_tokens, tokens);
+                assert_eq!(data.nvext, Some(serde_json::json!({"source": source_id})));
+            }
+            let reasoning: Vec<_> = collect_choices(&responses)
+                .into_iter()
+                .filter_map(|choice| choice.delta.reasoning_content.clone())
+                .collect();
+            assert_eq!(reasoning, ["mixed", "same", "same", "raw"]);
+            assert_eq!(
+                responses
+                    .iter()
+                    .filter(|response| response.id.as_deref() == Some("continuation"))
+                    .count(),
+                1,
+            );
+            assert_eq!(
+                collect_choices(&responses)
+                    .iter()
+                    .filter(|choice| choice.finish_reason.is_some())
+                    .count(),
+                usize::from(finish),
+            );
+        }
     }
 
     #[tokio::test]
@@ -5852,106 +5981,113 @@ mod tests {
             }
         }
 
-        let mut opening = chunk("", false);
-        opening.data.as_mut().unwrap().inner.choices = vec![
-            choice(0, Some("before <tool_c"), None),
-            choice(1, Some("before <tool_c"), None),
-        ];
-        let mut reasoning = chunk("", false);
-        let data = reasoning.data.as_mut().unwrap();
-        data.inner.choices = vec![
-            choice(0, None, Some("thought zero")),
-            choice(1, None, Some("thought one")),
-        ];
-        data.nvext = Some(serde_json::json!({"source": "reasoning"}));
-        data.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
-            chunk_tokens: 11,
-            ..Default::default()
-        });
-        reasoning.id = Some("shared-reasoning-id".to_string());
-        reasoning.event = Some("shared-reasoning-event".to_string());
-        reasoning.comment = Some(vec!["shared-reasoning-comment".to_string()]);
+        for (reasoning_zero, reasoning_one) in [
+            ("thought zero", "thought one"),
+            ("", ""),
+            ("", "thought one"),
+            ("thought zero", ""),
+        ] {
+            let mut opening = chunk("", false);
+            opening.data.as_mut().unwrap().inner.choices = vec![
+                choice(0, Some("before <tool_c"), None),
+                choice(1, Some("before <tool_c"), None),
+            ];
+            let mut reasoning = chunk("", false);
+            let data = reasoning.data.as_mut().unwrap();
+            data.inner.choices = vec![
+                choice(0, None, Some(reasoning_zero)),
+                choice(1, None, Some(reasoning_one)),
+            ];
+            data.nvext = Some(serde_json::json!({"source": "reasoning"}));
+            data.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+                chunk_tokens: 11,
+                ..Default::default()
+            });
+            reasoning.id = Some("shared-reasoning-id".to_string());
+            reasoning.event = Some("shared-reasoning-event".to_string());
+            reasoning.comment = Some(vec!["shared-reasoning-comment".to_string()]);
 
-        let mut continuation = chunk("", true);
-        continuation.data.as_mut().unwrap().inner.choices = vec![
-            choice(
-                0,
-                Some(
-                    "all>\n<function=get_weather>\n<parameter=city>NY</parameter>\n</function>\n</tool_call>",
+            let mut continuation = chunk("", true);
+            continuation.data.as_mut().unwrap().inner.choices = vec![
+                choice(
+                    0,
+                    Some(
+                        "all>\n<function=get_weather>\n<parameter=city>NY</parameter>\n</function>\n</tool_call>",
+                    ),
+                    None,
                 ),
-                None,
-            ),
-            choice(
-                1,
-                Some(
-                    "all>\n<function=get_weather>\n<parameter=city>SF</parameter>\n</function>\n</tool_call>",
+                choice(
+                    1,
+                    Some(
+                        "all>\n<function=get_weather>\n<parameter=city>SF</parameter>\n</function>\n</tool_call>",
+                    ),
+                    None,
                 ),
+            ];
+            let responses = apply_stream(
+                stream::iter([opening, reasoning, continuation]),
+                Some(weather_tools()),
                 None,
-            ),
-        ];
-        let responses = apply_stream(
-            stream::iter([opening, reasoning, continuation]),
-            Some(weather_tools()),
-            None,
-            false,
-            UnifiedParserStartingState::None,
-            QWEN3_UNIFIED_FAMILY,
-        )
-        .collect::<Vec<_>>()
-        .await;
+                false,
+                UnifiedParserStartingState::None,
+                QWEN3_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
 
-        let choices = collect_choices(&responses);
-        for (index, expected) in [(0, "thought zero"), (1, "thought one")] {
+            let choices = collect_choices(&responses);
+            for (index, expected) in [(0, reasoning_zero), (1, reasoning_one)] {
+                assert_eq!(
+                    choices
+                        .iter()
+                        .filter(|choice| {
+                            choice.index == index
+                                && choice.delta.reasoning_content.as_deref() == Some(expected)
+                        })
+                        .count(),
+                    1,
+                    "choice {index} reasoning must remain attached to the correct choice once"
+                );
+            }
             assert_eq!(
-                choices
+                responses
                     .iter()
-                    .filter(|choice| {
-                        choice.index == index
-                            && choice.delta.reasoning_content.as_deref() == Some(expected)
-                    })
+                    .filter(|response| response.id.as_deref() == Some("shared-reasoning-id"))
                     .count(),
                 1,
-                "choice {index} reasoning must remain attached to the correct choice once"
+                "the source response id must be emitted once across the two queued choices"
+            );
+            assert_eq!(
+                responses
+                    .iter()
+                    .filter(|response| response.event.as_deref() == Some("shared-reasoning-event"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                responses
+                    .iter()
+                    .filter(|response| response.comment.is_some())
+                    .count(),
+                1
+            );
+            assert_eq!(
+                responses
+                    .iter()
+                    .filter_map(|response| response.data.as_ref())
+                    .filter(|data| data.nvext.is_some())
+                    .count(),
+                1
+            );
+            assert_eq!(
+                responses
+                    .iter()
+                    .filter_map(|response| response.data.as_ref())
+                    .filter(|data| data.llm_metrics.is_some())
+                    .count(),
+                1
             );
         }
-        assert_eq!(
-            responses
-                .iter()
-                .filter(|response| response.id.as_deref() == Some("shared-reasoning-id"))
-                .count(),
-            1,
-            "the source response id must be emitted once across the two queued choices"
-        );
-        assert_eq!(
-            responses
-                .iter()
-                .filter(|response| response.event.as_deref() == Some("shared-reasoning-event"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            responses
-                .iter()
-                .filter(|response| response.comment.is_some())
-                .count(),
-            1
-        );
-        assert_eq!(
-            responses
-                .iter()
-                .filter_map(|response| response.data.as_ref())
-                .filter(|data| data.nvext.is_some())
-                .count(),
-            1
-        );
-        assert_eq!(
-            responses
-                .iter()
-                .filter_map(|response| response.data.as_ref())
-                .filter(|data| data.llm_metrics.is_some())
-                .count(),
-            1
-        );
     }
 
     #[tokio::test]
@@ -6329,6 +6465,8 @@ mod tests {
             qwen_native_lexical_state: QwenNativeLexicalState::default(),
             pending_qwen_opener_text: String::new(),
             pending_qwen_opener_reasoning: Vec::new(),
+            qwen_reasoning_event_positions: HashSet::new(),
+            qwen_reasoning_choice_positions: HashSet::new(),
             opened_calls: HashSet::new(),
             tool_ids_emitted: HashSet::new(),
             tool_types_emitted: HashSet::new(),
@@ -6906,5 +7044,269 @@ mod tests {
              schema, matching what the streaming path already produces for the same \
              input"
         );
+    }
+    #[tokio::test]
+    async fn qwen_reasoning_detours_preserve_native_grammar_at_every_utf8_split() {
+        async fn observe(
+            input: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+            tools: Vec<ToolDefinition>,
+        ) -> (
+            String,
+            Vec<(u32, String, String)>,
+            Vec<FinishReason>,
+            String,
+        ) {
+            let responses = apply_stream(
+                stream::iter(input),
+                Some(tools),
+                None,
+                false,
+                UnifiedParserStartingState::None,
+                QWEN3_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let choices = collect_choices(&responses);
+            let mut calls = std::collections::BTreeMap::<u32, (String, String)>::new();
+            let mut text = String::new();
+            let mut reasoning = String::new();
+            let mut finishes = Vec::new();
+            for choice in choices {
+                if let Some(ChatCompletionMessageContent::Text(value)) = &choice.delta.content {
+                    text.push_str(&value);
+                }
+                if let Some(value) = &choice.delta.reasoning_content {
+                    reasoning.push_str(&value);
+                }
+                if let Some(value) = choice.finish_reason {
+                    finishes.push(value);
+                }
+                for call in choice.delta.tool_calls.iter().flatten() {
+                    let entry = calls.entry(call.index).or_default();
+                    if let Some(function) = &call.function {
+                        if let Some(name) = &function.name {
+                            entry.0.push_str(&name);
+                        }
+                        if let Some(arguments) = &function.arguments {
+                            entry.1.push_str(&arguments);
+                        }
+                    }
+                }
+            }
+            (
+                text,
+                calls
+                    .into_iter()
+                    .map(|(index, (name, arguments))| (index, name, arguments))
+                    .collect(),
+                finishes,
+                reasoning,
+            )
+        }
+        let cases = [
+            (
+                serde_json::json!({"type":"string"}),
+                "quote \\\" é <tool_call> literal",
+            ),
+            (
+                serde_json::json!({"type":"object"}),
+                r#"{"a":"é <tool_call> literal"}"#,
+            ),
+            (
+                serde_json::json!({"type":"array"}),
+                r#"["é <tool_call>", {"a":true}]"#,
+            ),
+            (serde_json::json!({"type":"integer"}), "42"),
+            (serde_json::json!({"$ref":"#/$defs/value"}), r#"{"a":"é"}"#),
+            (
+                serde_json::json!({"type":["object","null"]}),
+                r#"{"a":"é"}"#,
+            ),
+            (serde_json::json!({}), r#"{"a":"é"}"#),
+            // Qwen closes parameters literally even inside JSON-looking text.
+            // Pin its whole-input recovery rather than inventing a JSON boundary.
+            (
+                serde_json::json!({"type":"object"}),
+                r#"{"a":"</parameter></tool_call><tool_call>literal"}"#,
+            ),
+        ];
+        for (schema, value) in cases {
+            let tools = vec![ToolDefinition {
+                name: "f".into(),
+                parameters: Some(
+                    serde_json::json!({"type":"object","properties":{"x":schema},"$defs":{"value":{"type":"object"}}}),
+                ),
+                strict: None,
+            }];
+            let input = format!(
+                "<tool_call><function=f><parameter=x>{value}</parameter></function></tool_call>"
+            );
+            let whole = observe(vec![chunk(&input, true)], tools.clone()).await;
+            assert_eq!(
+                whole.1.len(),
+                1,
+                "whole-input control must emit f: {value:?}"
+            );
+            assert_eq!(whole.1[0].1, "f");
+            if value.contains("</parameter>") {
+                assert_eq!(whole.1[0].2, r#"{"x":"{\"a\":\""}"#);
+            }
+            for split in (1..input.len()).filter(|at| input.is_char_boundary(*at)) {
+                let mut detour = chunk("", false);
+                let delta = &mut detour.data.as_mut().unwrap().inner.choices[0].delta;
+                delta.content = None;
+                delta.reasoning_content = Some("detour".into());
+                let actual = observe(
+                    vec![
+                        chunk(&input[..split], false),
+                        detour,
+                        chunk(&input[split..], true),
+                    ],
+                    tools.clone(),
+                )
+                .await;
+                assert_eq!(
+                    (&actual.0, &actual.1, &actual.2),
+                    (&whole.0, &whole.1, &whole.2),
+                    "value={value:?} split={split}"
+                );
+                assert_eq!(
+                    actual.3, "detour",
+                    "reasoning must survive once at split={split}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn qwen_queued_reasoning_preserves_choice_envelope_on_resolution_and_eof() {
+        for suffix in [
+            Some(
+                "all><function=get_weather><parameter=city>Paris</parameter></function></tool_call>",
+            ),
+            Some("at literal"),
+            None,
+        ] {
+            for refusal in [None, Some("declined")] {
+                let mut opening = chunk("<tool_c", false);
+                opening.data.as_mut().unwrap().inner.choices[0].delta.role = None;
+                let mut source = chunk("", false);
+                let original = &mut source.data.as_mut().unwrap().inner.choices[0];
+                original.delta.content = None;
+                original.delta.reasoning_content = Some("detour".into());
+                original.delta.refusal = refusal.map(str::to_string);
+                original.logprobs = Some(serde_json::from_value(serde_json::json!({"content":[{"token":"detour","logprob":-0.5,"bytes":[100],"top_logprobs":[]}],"refusal":null})).unwrap());
+                let expected = original.clone();
+                let mut records = HashMap::from([(
+                    0,
+                    ChoiceRecord {
+                        pending_qwen_opener_responses: VecDeque::from([
+                            PendingQwenReasoningResponse {
+                                text: "detour".into(),
+                                choice: expected.clone(),
+                                response: source.clone(),
+                            },
+                        ]),
+                        ..ChoiceRecord::default()
+                    },
+                )]);
+                let fallback = finish_unterminated_choices(&mut HashMap::new(), &mut records);
+                assert_eq!(fallback.len(), 1);
+                let FinishedStreamChunk::Source(fallback) = &fallback[0] else {
+                    panic!("queued source must retain its source response");
+                };
+                assert_eq!(
+                    fallback.data.as_ref().unwrap().inner.choices,
+                    [expected.clone()]
+                );
+                let mut input = vec![opening, source];
+                if let Some(suffix) = suffix {
+                    let mut closing = chunk(suffix, true);
+                    closing.data.as_mut().unwrap().inner.choices[0].delta.role = None;
+                    input.push(closing);
+                }
+                let responses = apply_stream(
+                    stream::iter(input),
+                    Some(weather_tools()),
+                    None,
+                    false,
+                    UnifiedParserStartingState::None,
+                    QWEN3_UNIFIED_FAMILY,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                let choices = collect_choices(&responses);
+                let reasoning: Vec<_> = choices
+                    .iter()
+                    .filter(|choice| choice.delta.reasoning_content.as_deref() == Some("detour"))
+                    .collect();
+                assert_eq!(reasoning.len(), 1, "suffix={suffix:?} refusal={refusal:?}");
+                assert_eq!(
+                    *reasoning[0], &expected,
+                    "queued or immediate reasoning must retain its untouched choice envelope"
+                );
+                assert_eq!(
+                    choices
+                        .iter()
+                        .filter(|choice| choice.delta.role.is_some())
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    choices
+                        .iter()
+                        .filter(|choice| choice.logprobs.is_some())
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn qwen_recovered_parameter_close_restores_opener_ordering_at_every_split() {
+        for first in [
+            "<tool_call><function=get_weather><parameter=city>Paris</function></tool_call>",
+            "<tool_call><function=get_weather><parameter=city</function></tool_call>",
+        ] {
+            for split in 1..first.len() {
+                let mut reasoning = chunk("", false);
+                let delta = &mut reasoning.data.as_mut().unwrap().inner.choices[0].delta;
+                delta.content = None;
+                delta.reasoning_content = Some("thought".into());
+                let responses = apply_stream(
+                    stream::iter([
+                        chunk(&first[..split], false),
+                        chunk(&first[split..], false),
+                        chunk("before <tool_c", false),
+                        reasoning,
+                        chunk("XYZanswer", true),
+                    ]),
+                    Some(weather_tools()),
+                    None,
+                    false,
+                    UnifiedParserStartingState::None,
+                    QWEN3_UNIFIED_FAMILY,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                let choices = collect_choices(&responses);
+                let mut sides = [String::new(), String::new()];
+                let mut seen_reasoning = false;
+                for choice in choices {
+                    if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                        sides[usize::from(seen_reasoning)].push_str(text);
+                    }
+                    if choice.delta.reasoning_content.as_deref() == Some("thought") {
+                        seen_reasoning = true;
+                    }
+                }
+                assert!(seen_reasoning);
+                assert_eq!(
+                    sides,
+                    ["before <tool_c".to_string(), "XYZanswer".to_string()],
+                    "split={split}"
+                );
+            }
+        }
     }
 }
