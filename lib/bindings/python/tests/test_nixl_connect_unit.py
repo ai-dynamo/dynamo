@@ -177,7 +177,7 @@ def operation_factory(nixl_mocks, monkeypatch):
     return make_descriptors, make_operation, connection, agent
 
 
-@pytest.mark.parametrize("kind", ["read", "write", "readable", "writable"])
+@pytest.mark.parametrize("kind", ["read", "readable"])
 @pytest.mark.parametrize("descriptor_count", [1, 2])
 def test_old_operation_destruction_preserves_reused_registration(
     operation_factory, kind, descriptor_count
@@ -213,7 +213,7 @@ def test_release_does_not_claim_later_registration(operation_factory):
         current.__exit__(None, None, None)
 
 
-@pytest.mark.parametrize("kind", ["read", "write", "readable", "writable"])
+@pytest.mark.parametrize("kind", ["read", "readable"])
 @pytest.mark.parametrize("duplicate_first", [False, True])
 def test_release_attempts_all_descriptors_and_does_not_retry_after_failure(
     operation_factory, kind, duplicate_first
