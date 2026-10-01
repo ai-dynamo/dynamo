@@ -111,7 +111,10 @@ impl<W: Copy + Eq + Hash + Ord> LineageIndex<W> {
             {
                 let mut holders: Vec<W> = holders.iter().copied().collect();
                 holders.sort_unstable();
-                best = Some(LineageHit { hash: *hash, holders });
+                best = Some(LineageHit {
+                    hash: *hash,
+                    holders,
+                });
             }
         }
 
@@ -185,9 +188,10 @@ impl<W: Copy + Eq + Hash + Ord> LineageIndex<W> {
             }
 
             let bucket = {
-                let entry = self.buckets.entry(position).or_insert_with(|| {
-                    Arc::new(DashMap::with_hasher(FxBuildHasher))
-                });
+                let entry = self
+                    .buckets
+                    .entry(position)
+                    .or_insert_with(|| Arc::new(DashMap::with_hasher(FxBuildHasher)));
                 Arc::clone(entry.value())
             };
             bucket.entry(*hash).or_default().insert(holder);
@@ -296,10 +300,7 @@ mod tests {
         let hashes = sequence(10, 4)?;
         index.insert(1, &hashes);
 
-        assert_eq!(
-            index.deepest(&hashes).map(|hit| hit.hash),
-            Some(hashes[3])
-        );
+        assert_eq!(index.deepest(&hashes).map(|hit| hit.hash), Some(hashes[3]));
         let mut reversed = hashes.clone();
         reversed.reverse();
         assert_eq!(
