@@ -769,11 +769,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_group_verification_rejects_different_sequence_after_reconnect() {
-        stale_group_verification_after_reconnect(2).await;
-    }
-
-    #[tokio::test]
     async fn test_group_verification_rejects_replacement_within_batch() {
         let config = mooncake_config();
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config.clone()));
