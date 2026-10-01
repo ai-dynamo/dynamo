@@ -8,7 +8,7 @@ from __future__ import annotations
 import importlib
 from typing import Any, Literal
 
-from dynamo.profiler.sweeper.renderers.base import (
+from dynamo.aisimulate.output.dgd.renderers.base import (
     CandidateLike,
     CandidateMaterializationError,
     DGDGenerationOptions,
@@ -17,8 +17,8 @@ from dynamo.profiler.sweeper.renderers.base import (
 
 DGDRenderer = Literal["aic", "direct"]
 _RENDERER_MODULES: dict[str, str] = {
-    "aic": "dynamo.profiler.sweeper.renderers.aic.renderer",
-    "direct": "dynamo.profiler.sweeper.renderers.direct.renderer",
+    "aic": "dynamo.aisimulate.output.dgd.renderers.aic.renderer",
+    "direct": "dynamo.aisimulate.output.dgd.renderers.direct.renderer",
 }
 
 

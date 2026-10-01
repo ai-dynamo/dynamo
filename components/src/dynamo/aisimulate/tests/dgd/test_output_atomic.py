@@ -3,7 +3,7 @@
 
 import pytest
 
-from dynamo.profiler.sweeper.output import atomic as atomic_module
+from dynamo.aisimulate.output.dgd.writers import atomic as atomic_module
 
 pytestmark = [
     pytest.mark.unit,

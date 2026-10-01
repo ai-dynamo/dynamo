@@ -25,7 +25,7 @@ pytestmark = [
 ]
 
 try:
-    from dynamo.profiler.sweeper.renderers.direct import (
+    from dynamo.aisimulate.output.dgd.renderers.direct import (
         materializer as materializer_module,
     )
 except ImportError as exc:

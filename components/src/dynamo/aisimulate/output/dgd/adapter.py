@@ -14,12 +14,12 @@ from aisimulate.sweeper.config import SmartSearchConfig
 from aisimulate.sweeper.result import SweepResult
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from dynamo.profiler.sweeper.output import write_outputs
-from dynamo.profiler.sweeper.renderers import (
+from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,
     DGDGenerationOptions,
     render_dgd,
 )
+from dynamo.aisimulate.output.dgd.writers import write_outputs
 
 
 class DGDOutputConfig(BaseModel):
@@ -132,7 +132,7 @@ class DGDOutputAdapter:
         return [*(Path(artifact["path"]) for artifact in artifacts), Path("index.json")]
 
 
-def create_dgd_output_adapter() -> DGDOutputAdapter:
+def create_adapter() -> DGDOutputAdapter:
     """Create the Dynamo adapter discovered by AISimulate."""
     return DGDOutputAdapter()
 
@@ -140,5 +140,5 @@ def create_dgd_output_adapter() -> DGDOutputAdapter:
 __all__ = [
     "DGDOutputAdapter",
     "DGDOutputConfig",
-    "create_dgd_output_adapter",
+    "create_adapter",
 ]

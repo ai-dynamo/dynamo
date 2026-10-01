@@ -1,4 +1,4 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Kustomize source output."""
+"""AISimulate output adapters owned by Dynamo."""

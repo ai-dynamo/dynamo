@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from dynamo.profiler.tests.sweeper import run_cases
+from dynamo.aisimulate.tests.dgd.comparison import run_cases
 
 pytestmark = [
     pytest.mark.unit,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lazy registry and run index for Sweeper output writers."""
+"""Lazy registry and run index for DGD artifact writers."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from dynamo.profiler.sweeper.output.atomic import replace_text
+from dynamo.aisimulate.output.dgd.writers.atomic import replace_text
 
 OutputFormat = Literal["dgd", "kustomize"]
 _WRITER_MODULES: dict[str, str] = {
-    "dgd": "dynamo.profiler.sweeper.output.dgd.writer",
-    "kustomize": "dynamo.profiler.sweeper.output.kustomize.writer",
+    "dgd": "dynamo.aisimulate.output.dgd.writers.manifest",
+    "kustomize": "dynamo.aisimulate.output.dgd.writers.kustomize",
 }
 
 
