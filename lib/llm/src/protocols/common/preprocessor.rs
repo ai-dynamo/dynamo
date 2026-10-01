@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
-use super::timing::RequestTracker;
+use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
@@ -539,6 +539,13 @@ where
 }
 
 impl PreprocessedRequest {
+    pub fn phase(&self) -> RequestPhase {
+        self.tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or_default()
+    }
+
     pub fn has_annotation(&self, annotation: &str) -> bool {
         self.annotations.contains(&annotation.to_string())
     }
@@ -639,6 +646,16 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .expect("valid request")
+    }
+
+    #[tokio::test]
+    async fn phase_defaults_to_aggregated_and_follows_tracker() {
+        let mut request = request_with_tokens(vec![1]);
+        assert_eq!(request.phase(), RequestPhase::Aggregated);
+        let tracker = Arc::new(RequestTracker::new());
+        request.tracker = Some(tracker.clone());
+        let _permit = tracker.set_phase(RequestPhase::Prefill).await;
+        assert_eq!(request.phase(), RequestPhase::Prefill);
     }
 
     #[test]

@@ -450,6 +450,7 @@ class TestReasoningParserForwarding:
                 ],
                 prompt_token_ids=[1, 2],
                 prompt_logprobs=None,
+                num_cached_tokens=None,
             )
             # DELTA output_kind: each chunk carries only its own new token(s),
             # and generate_tokens passes output.token_ids through verbatim — so
@@ -466,6 +467,7 @@ class TestReasoningParserForwarding:
                 ],
                 prompt_token_ids=[1, 2],
                 prompt_logprobs=None,
+                num_cached_tokens=None,
             )
 
         handler.engine_client = MagicMock()
@@ -516,6 +518,7 @@ class TestReasoningParserForwarding:
                 ],
                 prompt_token_ids=[1, 2],
                 prompt_logprobs=None,
+                num_cached_tokens=None,
             )
             yield SimpleNamespace(
                 outputs=[
@@ -530,6 +533,7 @@ class TestReasoningParserForwarding:
                 ],
                 prompt_token_ids=[1, 2],
                 prompt_logprobs=None,
+                num_cached_tokens=None,
             )
 
         handler.engine_client = MagicMock()
@@ -565,6 +569,7 @@ class TestReasoningParserForwarding:
                 ],
                 prompt_token_ids=[1, 2],
                 prompt_logprobs=None,
+                num_cached_tokens=1,
                 kv_transfer_params={"connector": "nixl"},
             )
 
@@ -581,6 +586,10 @@ class TestReasoningParserForwarding:
         ]
 
         assert chunks[-1]["engine_data"]["kv_transfer_params"] == {"connector": "nixl"}
+        assert chunks[-1]["engine_data"]["kv_cache_hit"] == {
+            "prompt_tokens": 2,
+            "reused_tokens": 1,
+        }
 
     @pytest.mark.asyncio
     async def test_generate_tokens_rejects_sampling_mask_length_mismatch(self):
@@ -603,6 +612,7 @@ class TestReasoningParserForwarding:
                 ],
                 prompt_token_ids=[1, 2],
                 prompt_logprobs=None,
+                num_cached_tokens=None,
             )
 
         handler.engine_client = MagicMock()
@@ -651,6 +661,7 @@ class TestReasoningParserForwarding:
                 ],
                 prompt_token_ids=prompt_token_ids,
                 prompt_logprobs=None,
+                num_cached_tokens=None,
             )
 
         handler.engine_client = MagicMock()
@@ -695,6 +706,7 @@ class TestReasoningParserForwarding:
                 ],
                 prompt_token_ids=[1, 2, 3],
                 prompt_logprobs=None,
+                num_cached_tokens=None,
             )
 
         handler.engine_client = MagicMock()
@@ -1228,6 +1240,67 @@ async def test_prefill_returns_structured_error_when_multimodal_is_disabled():
             "disaggregated_params": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached_tokens", [0, 2, None])
+async def test_prefill_emits_attempt_cache_reuse(monkeypatch, cached_tokens):
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    request = {"token_ids": [1, 2, 3]}
+    response = mod.RequestOutput(
+        request_id="prefill-reuse",
+        prompt=None,
+        prompt_token_ids=request["token_ids"],
+        prompt_logprobs=None,
+        outputs=[],
+        finished=True,
+        num_cached_tokens=cached_tokens,
+    )
+
+    async def responses():
+        yield response
+
+    handler._multimodal_request_processor = SimpleNamespace(
+        prepare_input=AsyncMock(
+            return_value=PreparedMultimodalInput(
+                request=request, multi_modal_data=None, mm_processor_kwargs=None
+            )
+        ),
+        build_prefill_handoff=MagicMock(return_value=None),
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value={"prompt_token_ids": request["token_ids"]}
+    )
+    handler.default_sampling_params = {}
+    handler.model_max_len = 128
+    handler.config = SimpleNamespace(enable_rl=False)
+    handler.engine_client = MagicMock()
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+    handler._abort_monitor = MagicMock(return_value=AsyncMock())
+    handler._generate_with_lora_admission_lock = MagicMock(return_value=responses())
+    handler._log_with_lora_context = MagicMock()
+    protocol = MagicMock()
+    protocol.prefill_request_kv_transfer_params.return_value = {}
+    protocol.decode_request_kv_transfer_params.return_value = None
+    monkeypatch.setattr(mod, "make_kv_connector_protocol", lambda _: protocol)
+    monkeypatch.setattr(
+        mod, "build_sampling_params", lambda *args, **kwargs: MagicMock()
+    )
+
+    chunks = [
+        chunk
+        async for chunk in handler._generate_token_mode(
+            request, MagicMock(), "prefill-reuse"
+        )
+    ]
+
+    expected = (
+        {"prompt_tokens": 3, "reused_tokens": cached_tokens}
+        if cached_tokens is not None
+        else {}
+    )
+    assert chunks[0]["engine_data"]["kv_cache_hit"] == expected
 
 
 # ── Deferred abort (disagg decode KV-transfer safety) tests ────────
