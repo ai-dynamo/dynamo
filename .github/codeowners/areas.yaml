@@ -209,6 +209,7 @@ areas:
 - label: planner
   github_team: '@ai-dynamo/dynamo-planner-codeowners'
   path_globs:
+  - components/src/dynamo/aisimulate/
   - components/src/dynamo/global_planner/
   - components/src/dynamo/global_planner/tests/
   - components/src/dynamo/planner/
@@ -866,6 +867,10 @@ shared:
   owners:
   - performance
   - planner
+- glob: components/src/dynamo/aisimulate/output/dgd/
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner
