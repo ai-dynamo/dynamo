@@ -1664,6 +1664,7 @@ where
             let originals = std::mem::take(&mut chat.inner.choices);
             let mut emitted: Vec<ChatChoiceStream> = Vec::new();
             let mut deferred_qwen_responses = Vec::new();
+            let mut qwen_source_metadata_deferred = false;
             for mut original in originals {
                 if already_parsed(&original) {
                     // Record this index exists even if no `ChoiceState` is ever
@@ -1755,15 +1756,38 @@ where
                                 .queue_qwen_opener_reasoning(reasoning.clone());
                             let mut source_data = chat.clone();
                             source_data.inner.choices.clear();
+                            let keep_source_metadata = !qwen_source_metadata_deferred;
+                            qwen_source_metadata_deferred = true;
+                            if !keep_source_metadata {
+                                source_data.inner.usage = None;
+                                source_data.nvext = None;
+                                source_data.llm_metrics = None;
+                            }
                             record.pending_qwen_opener_responses.push_back(
                                 PendingQwenReasoningResponse {
                                     text: reasoning,
                                     response: Annotated {
                                         data: Some(source_data),
-                                        id: response_id.clone(),
-                                        event: response_event.clone(),
-                                        comment: response_comment.clone(),
-                                        error: response_error.clone(),
+                                        id: if keep_source_metadata {
+                                            response_id.clone()
+                                        } else {
+                                            None
+                                        },
+                                        event: if keep_source_metadata {
+                                            response_event.clone()
+                                        } else {
+                                            None
+                                        },
+                                        comment: if keep_source_metadata {
+                                            response_comment.clone()
+                                        } else {
+                                            None
+                                        },
+                                        error: if keep_source_metadata {
+                                            response_error.clone()
+                                        } else {
+                                            None
+                                        },
                                     },
                                 },
                             );
@@ -1822,12 +1846,24 @@ where
                             .pending_parsed_tool_calls
                             .extend(record.pending_parsed_tool_calls.iter().copied());
                         let deltas = state.finish();
-                        emitted.extend(state.choices_for(
+                        let flushed = state.choices_for(
                             &empty_choice(original.index),
                             deltas,
                             true,
                             None,
-                        ));
+                        );
+                        let emitted_position = emitted.len();
+                        for (position, choice) in flushed.into_iter().enumerate() {
+                            if let Some(responses) = take_qwen_reasoning_responses(record, &choice) {
+                                deferred_qwen_responses.extend(
+                                    responses
+                                        .into_iter()
+                                        .map(|response| (emitted_position + position, response)),
+                                );
+                            } else {
+                                emitted.push(choice);
+                            }
+                        }
                         record.remember_state(&state);
                         if original.finish_reason == Some(FinishReason::Stop)
                             && record.tool_emitted
@@ -2024,6 +2060,16 @@ where
                     parsed.push(empty_choice(original.index));
                 }
                 emitted.extend(parsed);
+            }
+
+            if qwen_source_metadata_deferred {
+                chat.inner.usage = None;
+                chat.nvext = None;
+                chat.llm_metrics = None;
+                response.id = None;
+                response.event = None;
+                response.comment = None;
+                response.error = None;
             }
 
             if emitted.is_empty() && deferred_qwen_responses.is_empty() {
@@ -5650,6 +5696,258 @@ mod tests {
         assert!(
             choices.iter().all(|choice| choice.finish_reason.is_none()),
             "nonterminal parsed argument fragments must not synthesize a completed-call terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn qwen_queued_reasoning_is_emitted_once_when_parsed_tool_call_interrupts() {
+        #[derive(Debug, PartialEq)]
+        enum OutputEvent {
+            Content(String),
+            Reasoning(String),
+            ToolCall {
+                index: u32,
+                id: Option<String>,
+                name: Option<String>,
+                arguments: Option<String>,
+            },
+            Finish(FinishReason),
+        }
+
+        for terminal in [false, true] {
+            let mut reasoning = chunk("", false);
+            let choice = &mut reasoning.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some("held thought".to_string());
+            let source = reasoning.data.as_mut().unwrap();
+            source.nvext = Some(serde_json::json!({"source": "reasoning"}));
+            source.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+                chunk_tokens: 7,
+                ..Default::default()
+            });
+            reasoning.id = Some("reasoning-source-id".to_string());
+            reasoning.event = Some("reasoning-source-event".to_string());
+            reasoning.comment = Some(vec!["reasoning-source-comment".to_string()]);
+
+            let mut parsed_call = chunk("", terminal);
+            let choice = &mut parsed_call.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: Some("parsed-call".to_string()),
+                r#type: Some(FunctionType::Function),
+                function: Some(FunctionCallStream {
+                    name: Some("get_weather".to_string()),
+                    arguments: Some(r#"{"city":"NY"}"#.to_string()),
+                }),
+            }]);
+
+            let responses = apply_stream(
+                stream::iter([chunk("before <tool_c", false), reasoning, parsed_call]),
+                Some(weather_tools()),
+                None,
+                false,
+                UnifiedParserStartingState::None,
+                QWEN3_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let choices = collect_choices(&responses);
+            let observed: Vec<_> = choices
+                .iter()
+                .flat_map(|choice| {
+                    let mut events = Vec::new();
+                    if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                        events.push(OutputEvent::Content(text.clone()));
+                    }
+                    if let Some(reasoning) = &choice.delta.reasoning_content {
+                        events.push(OutputEvent::Reasoning(reasoning.clone()));
+                    }
+                    if let Some(calls) = &choice.delta.tool_calls {
+                        events.extend(calls.iter().map(|call| {
+                            let function = call.function.as_ref();
+                            OutputEvent::ToolCall {
+                                index: call.index,
+                                id: call.id.clone(),
+                                name: function.and_then(|function| function.name.clone()),
+                                arguments: function.and_then(|function| function.arguments.clone()),
+                            }
+                        }));
+                    }
+                    if let Some(reason) = &choice.finish_reason {
+                        events.push(OutputEvent::Finish(reason.clone()));
+                    }
+                    events
+                })
+                .collect();
+            let mut expected = vec![
+                OutputEvent::Content("before ".to_string()),
+                OutputEvent::Content("<tool_c".to_string()),
+                OutputEvent::Reasoning("held thought".to_string()),
+                OutputEvent::ToolCall {
+                    index: 0,
+                    id: Some("parsed-call".to_string()),
+                    name: Some("get_weather".to_string()),
+                    arguments: Some(r#"{"city":"NY"}"#.to_string()),
+                },
+            ];
+            if terminal {
+                expected.push(OutputEvent::Finish(FinishReason::ToolCalls));
+            }
+            assert_eq!(
+                observed, expected,
+                "content, held reasoning, the parsed call, and terminal metadata must stay ordered and appear once"
+            );
+            let source_reasoning: Vec<_> = responses
+                .iter()
+                .filter(|response| {
+                    response.data.as_ref().is_some_and(|data| {
+                        data.inner.choices.iter().any(|choice| {
+                            choice.delta.reasoning_content.as_deref() == Some("held thought")
+                        })
+                    })
+                })
+                .collect();
+            assert_eq!(source_reasoning.len(), 1);
+            assert_eq!(
+                source_reasoning[0].id.as_deref(),
+                Some("reasoning-source-id")
+            );
+            assert_eq!(
+                source_reasoning[0].event.as_deref(),
+                Some("reasoning-source-event")
+            );
+            assert_eq!(
+                source_reasoning[0].comment.as_deref(),
+                Some(["reasoning-source-comment".to_string()].as_slice())
+            );
+            let source_data = source_reasoning[0].data.as_ref().unwrap();
+            assert_eq!(
+                source_data.nvext,
+                Some(serde_json::json!({"source": "reasoning"}))
+            );
+            assert_eq!(source_data.llm_metrics.as_ref().unwrap().chunk_tokens, 7);
+        }
+    }
+
+    #[tokio::test]
+    async fn qwen_multi_choice_queued_reasoning_emits_source_metadata_once() {
+        fn choice(index: u32, content: Option<&str>, reasoning: Option<&str>) -> ChatChoiceStream {
+            ChatChoiceStream {
+                index,
+                delta: ChatCompletionStreamResponseDelta {
+                    role: Some(Role::Assistant),
+                    content: content
+                        .map(|text| ChatCompletionMessageContent::Text(text.to_string())),
+                    tool_calls: None,
+                    function_call: None,
+                    refusal: None,
+                    reasoning_content: reasoning.map(str::to_string),
+                },
+                finish_reason: None,
+                logprobs: None,
+            }
+        }
+
+        let mut opening = chunk("", false);
+        opening.data.as_mut().unwrap().inner.choices = vec![
+            choice(0, Some("before <tool_c"), None),
+            choice(1, Some("before <tool_c"), None),
+        ];
+        let mut reasoning = chunk("", false);
+        let data = reasoning.data.as_mut().unwrap();
+        data.inner.choices = vec![
+            choice(0, None, Some("thought zero")),
+            choice(1, None, Some("thought one")),
+        ];
+        data.nvext = Some(serde_json::json!({"source": "reasoning"}));
+        data.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+            chunk_tokens: 11,
+            ..Default::default()
+        });
+        reasoning.id = Some("shared-reasoning-id".to_string());
+        reasoning.event = Some("shared-reasoning-event".to_string());
+        reasoning.comment = Some(vec!["shared-reasoning-comment".to_string()]);
+
+        let mut continuation = chunk("", true);
+        continuation.data.as_mut().unwrap().inner.choices = vec![
+            choice(
+                0,
+                Some(
+                    "all>\n<function=get_weather>\n<parameter=city>NY</parameter>\n</function>\n</tool_call>",
+                ),
+                None,
+            ),
+            choice(
+                1,
+                Some(
+                    "all>\n<function=get_weather>\n<parameter=city>SF</parameter>\n</function>\n</tool_call>",
+                ),
+                None,
+            ),
+        ];
+        let responses = apply_stream(
+            stream::iter([opening, reasoning, continuation]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let choices = collect_choices(&responses);
+        for (index, expected) in [(0, "thought zero"), (1, "thought one")] {
+            assert_eq!(
+                choices
+                    .iter()
+                    .filter(|choice| {
+                        choice.index == index
+                            && choice.delta.reasoning_content.as_deref() == Some(expected)
+                    })
+                    .count(),
+                1,
+                "choice {index} reasoning must remain attached to the correct choice once"
+            );
+        }
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| response.id.as_deref() == Some("shared-reasoning-id"))
+                .count(),
+            1,
+            "the source response id must be emitted once across the two queued choices"
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| response.event.as_deref() == Some("shared-reasoning-event"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| response.comment.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .filter(|data| data.nvext.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .filter(|data| data.llm_metrics.is_some())
+                .count(),
+            1
         );
     }
 
