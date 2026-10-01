@@ -7,6 +7,7 @@
 //! used only to scope relay entries; the routing PoolId is derived separately
 //! from site ID, Kubernetes namespace, and DGD name in dynamo-kv-router.
 
+pub mod credit_selection;
 pub mod http_forward;
 pub mod poc_config;
 pub mod scheduler_metrics;

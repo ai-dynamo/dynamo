@@ -20,6 +20,9 @@ use dynamo_kv_router::global_view::selection::LoadPoolSelector;
 use dynamo_kv_router::global_view::state::{FreshnessPolicy, PoolStateRepository};
 use serde_json::{Value, json};
 
+use super::credit_selection::CreditPoolSelector;
+use super::scheduler_metrics::SchedulerLoadRepository;
+
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OVERLAP_TOKEN_IDS: usize = 32 * 1024;
 const ROUTER_HOP_HEADER: &str = "x-dynamo-global-router-hop";
@@ -28,6 +31,7 @@ const ROUTER_HOP_HEADER: &str = "x-dynamo-global-router-hop";
 pub struct GlobalRouterHttp {
     selector: LoadPoolSelector,
     overlap: Option<Arc<dyn KvOverlapScorer>>,
+    credit: Option<CreditPoolSelector>,
     client: reqwest::Client,
 }
 
@@ -61,8 +65,23 @@ impl GlobalRouterHttp {
         Ok(Self {
             selector: LoadPoolSelector::new(repository, freshness),
             overlap,
+            credit: None,
             client,
         })
+    }
+
+    pub fn new_with_credit(
+        repository: Arc<dyn PoolStateRepository>,
+        freshness: FreshnessPolicy,
+        overlap: Arc<dyn KvOverlapScorer>,
+        scheduler: Arc<dyn SchedulerLoadRepository>,
+        credit: f64,
+    ) -> Result<Self, reqwest::Error> {
+        let mut router = Self::new(repository.clone(), freshness)?;
+        router.credit = Some(CreditPoolSelector::new(
+            repository, scheduler, overlap, freshness, credit,
+        ));
+        Ok(router)
     }
 
     /// The caller can merge this with Global View's optional diagnostics router.
@@ -99,16 +118,37 @@ impl GlobalRouterHttp {
             Ok(elapsed) => u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "system clock is invalid"),
         };
-        let token_ids = (path == "/v1/completions")
-            .then(|| parsed.get("prompt").and_then(single_token_id_prompt))
-            .flatten();
-        let decision = match (self.overlap.as_ref(), token_ids.as_deref()) {
-            (Some(scorer), Some(token_ids)) => {
-                self.selector
-                    .select_with_overlap(model, token_ids, scorer.as_ref(), now_unix_ms)
-            }
-            _ => self.selector.select(model, now_unix_ms),
-        };
+        // The first global cache contract is unsalted base-model token IDs.
+        // Extension-bearing requests retain the existing load-only behavior.
+        let token_ids = (path == "/v1/completions"
+            && parsed.get("nvext").is_none()
+            && parsed.get("cache_salt").is_none()
+            && parsed.get("cache_namespace").is_none())
+        .then(|| parsed.get("prompt").and_then(single_token_id_prompt))
+        .flatten();
+        let (decision, policy) =
+            if let (Some(credit), Some(tokens)) = (&self.credit, token_ids.as_deref()) {
+                match credit.select(model, tokens, now_unix_ms) {
+                    Some(decision) => (Some(decision), "dynamo_credit"),
+                    None => (
+                        self.selector.select(model, now_unix_ms),
+                        "credit_fallback_request_count",
+                    ),
+                }
+            } else {
+                match (self.overlap.as_ref(), token_ids.as_deref()) {
+                    (Some(scorer), Some(token_ids)) => (
+                        self.selector.select_with_overlap(
+                            model,
+                            token_ids,
+                            scorer.as_ref(),
+                            now_unix_ms,
+                        ),
+                        "prefix_then_load",
+                    ),
+                    _ => (self.selector.select(model, now_unix_ms), "request_count"),
+                }
+            };
         let Some(decision) = decision else {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -124,6 +164,10 @@ impl GlobalRouterHttp {
         };
         endpoint.set_path(path);
         tracing::info!(
+            request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or(""),
+            policy,
+            load_sample_age_ms = decision.load_status.received_at_unix_ms.map(|v| now_unix_ms.saturating_sub(v)),
+            assignments_since_sample = decision.assignments_since_sample,
             pool_id = %decision.pool_id,
             target_region = %decision.region,
             model,
@@ -164,6 +208,32 @@ impl GlobalRouterHttp {
         let response_headers = upstream.headers().clone();
         let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
         *response.status_mut() = status;
+        // Private POC diagnostics let concurrent clients attribute each response
+        // without inferring its destination from global counters.
+        for (name, value) in [
+            ("x-dynamo-pool-id", decision.pool_id.to_string()),
+            ("x-dynamo-target-region", decision.region.clone()),
+            ("x-dynamo-routing-cost", decision.cost.to_string()),
+            ("x-dynamo-routing-basis", policy.to_owned()),
+            (
+                "x-dynamo-load-age-ms",
+                decision
+                    .load_status
+                    .received_at_unix_ms
+                    .map(|v| now_unix_ms.saturating_sub(v).to_string())
+                    .unwrap_or_default(),
+            ),
+        ] {
+            if let Ok(value) = value.parse() {
+                response.headers_mut().insert(name, value);
+            }
+        }
+        if let Some(tokens) = decision.matched_prefix_tokens {
+            response.headers_mut().insert(
+                "x-dynamo-matched-prefix-tokens",
+                tokens.to_string().parse().unwrap(),
+            );
+        }
         for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
             if let Some(value) = response_headers.get(&name) {
                 response.headers_mut().insert(name, value.clone());
@@ -436,6 +506,123 @@ mod tests {
         ) -> Option<u64> {
             self.0.get(pool_id).copied()
         }
+    }
+
+    #[tokio::test]
+    async fn credit_ablation_and_missing_scheduler_fallback_are_observable() {
+        use super::super::scheduler_metrics::SchedulerSnapshot;
+        struct Samples(parking_lot::RwLock<HashMap<PoolId, SchedulerSnapshot>>);
+        impl SchedulerLoadRepository for Samples {
+            fn snapshot(&self, pool: &PoolId, _: &str, now: u64) -> Option<SchedulerSnapshot> {
+                let sample = *self.0.read().get(pool)?;
+                (now.saturating_sub(sample.collected_at_unix_ms) < 2_000).then_some(sample)
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/v1/completions", post(|| async { "ok" })),
+            )
+            .await
+            .unwrap();
+        });
+        let repo = repository(endpoint);
+        let now = super::super::scheduler_metrics::now_ms();
+        let mut ohio = repo.list(now, &freshness()).pop().unwrap();
+        let mut west = ohio.clone();
+        west.pool_id = V1PoolIdDeriver.derive(&PoolKey::new("west", "dynamo", "mocker").unwrap());
+        west.descriptors.location.region = "us-west-2".into();
+        let ohio_id = ohio.pool_id.clone();
+        let west_id = west.pool_id.clone();
+        for (pool, count) in [(&mut ohio, 0), (&mut west, 1)] {
+            pool.capacity.live_workers = Some(2);
+            pool.capacity.max_concurrency = Some(512);
+            pool.load.request_plane.insert(
+                "model".into(),
+                ModelRequestLoad {
+                    pending_first_output_requests: Some(count),
+                    output_generation_requests: Some(0),
+                    ..Default::default()
+                },
+            );
+            pool.signal_status.capacity = pool.signal_status.catalog.clone();
+            pool.signal_status.load = pool.signal_status.catalog.clone();
+            pool.signal_status.kv_overlap = pool.signal_status.catalog.clone();
+        }
+        repo.replace(ohio);
+        repo.replace(west);
+        let samples = Arc::new(Samples(parking_lot::RwLock::new(HashMap::from([
+            (
+                ohio_id.clone(),
+                SchedulerSnapshot {
+                    prefill_tokens: 0,
+                    decode_blocks: 0,
+                    block_size: 64,
+                    collected_at_unix_ms: now,
+                },
+            ),
+            (
+                west_id.clone(),
+                SchedulerSnapshot {
+                    prefill_tokens: 64,
+                    decode_blocks: 0,
+                    block_size: 64,
+                    collected_at_unix_ms: now,
+                },
+            ),
+        ]))));
+        let overlap = Arc::new(FixedOverlap(HashMap::from([
+            (ohio_id, 0),
+            (west_id.clone(), 1024),
+        ])));
+        let body = || {
+            Body::from(serde_json::json!({"model": "model", "prompt": vec![1; 1024]}).to_string())
+        };
+        let zero = GlobalRouterHttp::new_with_credit(
+            repo.clone(),
+            freshness(),
+            overlap.clone(),
+            samples.clone(),
+            0.0,
+        )
+        .unwrap();
+        let one =
+            GlobalRouterHttp::new_with_credit(repo, freshness(), overlap, samples.clone(), 1.0)
+                .unwrap();
+        let response = zero
+            .forward("/v1/completions", HeaderMap::new(), body())
+            .await;
+        assert_eq!(response.headers()["x-dynamo-target-region"], "us-east-2");
+        assert_eq!(
+            response.headers()["x-dynamo-routing-basis"],
+            "dynamo_credit"
+        );
+        let response = one
+            .forward("/v1/completions", HeaderMap::new(), body())
+            .await;
+        assert_eq!(response.headers()["x-dynamo-target-region"], "us-west-2");
+        assert_eq!(response.headers()["x-dynamo-matched-prefix-tokens"], "1024");
+        // Missing a ready pool's scheduler sample must not make it look idle or
+        // remove it from eligibility. The host falls back across BOTH pools.
+        samples.0.write().remove(&west_id);
+        let response = one
+            .forward("/v1/completions", HeaderMap::new(), body())
+            .await;
+        assert_eq!(
+            response.headers()["x-dynamo-routing-basis"],
+            "credit_fallback_request_count"
+        );
+        assert_eq!(response.headers()["x-dynamo-target-region"], "us-east-2");
+        let response = one.forward("/v1/completions", HeaderMap::new(), Body::from(
+            serde_json::json!({"model":"model", "prompt":[1,2], "nvext":{"cache_salt":"tenant"}}).to_string()
+        )).await;
+        assert_eq!(
+            response.headers()["x-dynamo-routing-basis"],
+            "request_count"
+        );
+        task.abort();
     }
 
     #[tokio::test]

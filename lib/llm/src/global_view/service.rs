@@ -18,6 +18,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use super::http_forward::GlobalRouterHttp;
+use super::scheduler_metrics::SchedulerMetrics;
 use crate::kv_dc_relay::global_view_consumer::GlobalViewRuntime;
 
 struct ReadinessState {
@@ -42,6 +43,7 @@ async fn readyz(State(state): State<Arc<ReadinessState>>) -> StatusCode {
 pub struct GlobalRouterService {
     view: Arc<GlobalViewRuntime>,
     forwarder: Arc<GlobalRouterHttp>,
+    scheduler_metrics: Option<Arc<SchedulerMetrics>>,
     freshness: FreshnessPolicy,
 }
 
@@ -70,8 +72,25 @@ impl GlobalRouterService {
         Ok(Self {
             view,
             forwarder,
+            scheduler_metrics: None,
             freshness,
         })
+    }
+
+    pub fn with_experimental_credit(
+        mut self,
+        metrics: Arc<SchedulerMetrics>,
+        credit: f64,
+    ) -> Result<Self> {
+        self.forwarder = Arc::new(GlobalRouterHttp::new_with_credit(
+            self.view.repository(),
+            self.freshness,
+            self.view.overlap_scorer(),
+            metrics.clone(),
+            credit,
+        )?);
+        self.scheduler_metrics = Some(metrics);
+        Ok(self)
     }
 
     /// The same listener serves routed inference and, when enabled, read-only
@@ -103,23 +122,38 @@ impl GlobalRouterService {
         tokio::pin!(view_run);
         tokio::pin!(server_run);
 
-        tokio::select! {
-            result = &mut view_run => {
-                server_cancel.cancel();
-                server_run.await.context("stop Global Router HTTP listener")?;
-                result.context("Global View subscription stopped")
+        let metrics_cancel = cancel.child_token();
+        let metrics_run = async {
+            if let Some(metrics) = &self.scheduler_metrics {
+                metrics.run(metrics_cancel.clone()).await;
             }
-            result = &mut server_run => {
-                view_cancel.cancel();
-                view_run.await.context("stop Global View subscriptions")?;
-                result.context("Global Router HTTP listener failed")?;
-                if cancel.is_cancelled() {
-                    Ok(())
-                } else {
-                    Err(anyhow!("Global Router HTTP listener stopped before shutdown"))
+        };
+        let serving = async {
+            tokio::select! {
+                result = &mut view_run => {
+                    server_cancel.cancel();
+                    server_run.await.context("stop Global Router HTTP listener")?;
+                    result.context("Global View subscription stopped")
+                }
+                result = &mut server_run => {
+                    view_cancel.cancel();
+                    view_run.await.context("stop Global View subscriptions")?;
+                    result.context("Global Router HTTP listener failed")?;
+                    if cancel.is_cancelled() {
+                        Ok(())
+                    } else {
+                        Err(anyhow!("Global Router HTTP listener stopped before shutdown"))
+                    }
                 }
             }
-        }
+        };
+        let stop_metrics = async {
+            let result = serving.await;
+            metrics_cancel.cancel();
+            result
+        };
+        let (result, ()) = tokio::join!(stop_metrics, metrics_run);
+        result
     }
 }
 
