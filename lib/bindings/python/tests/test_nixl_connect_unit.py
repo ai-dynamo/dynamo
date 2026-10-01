@@ -3,19 +3,22 @@
 
 """Unit tests for dynamo.nixl_connect
 
-Tests the ERRORED state handling in ActiveOperation._wait_for_completion_() added
-to prevent decode workers from silently consuming bad data when a prefill worker
-disappears mid-transfer (issue #7319).
+Tests transfer-error propagation and descriptor registration ownership across
+operation cleanup and reuse. Native NIXL calls are replaced; ownership tests use
+real Python operations and CPU tensor descriptors.
 
 NIXL and CUDA are mocked so these tests run on CPU-only machines.
 """
 
+import gc
 import sys
+import zlib
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
-pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
+pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
 def _make_nixl_mocks():
@@ -132,3 +135,127 @@ async def test_wait_for_completion_raises_on_errored_status(testable_active_op):
 
     with pytest.raises(RuntimeError, match=r"ERRORED|errored|error"):
         await op.wait_for_completion()
+
+
+@pytest.fixture
+def operation_factory(nixl_mocks, monkeypatch):
+    """Real Python operations/descriptors with only native NIXL calls mocked."""
+    from dynamo import nixl_connect
+
+    api, _, agent = nixl_mocks
+    monkeypatch.setattr(nixl_connect, "nixl_api", api)
+    agent.register_memory.side_effect = lambda *args: object()
+    agent.transfer.return_value = "DONE"
+    agent.check_xfer_state.return_value = "DONE"
+    connection = nixl_connect.Connection(nixl_connect.Connector(), 1)
+
+    def make_descriptors(count):
+        return [
+            nixl_connect.Descriptor(torch.zeros(4, dtype=torch.uint8))
+            for _ in range(count)
+        ]
+
+    def make_operation(kind, descriptors):
+        local = descriptors[0] if len(descriptors) == 1 else descriptors
+        if kind == "readable":
+            return nixl_connect.ReadableOperation(connection, local)
+        if kind == "writable":
+            return nixl_connect.WritableOperation(connection, local)
+        metadata = nixl_connect.RdmaMetadata(
+            descriptors=[
+                nixl_connect.SerializedDescriptor(ptr=1, size=4, device="cpu")
+                for _ in descriptors
+            ],
+            operation_kind=1 if kind == "read" else 2,
+            notification_key="release-test",
+            nixl_metadata=zlib.compress(b"mock-native-metadata").hex(),
+        )
+        if kind == "read":
+            return nixl_connect.ReadOperation(connection, metadata, local)
+        return nixl_connect.WriteOperation(connection, local, metadata)
+
+    return make_descriptors, make_operation, connection, agent
+
+
+@pytest.mark.parametrize("kind", ["read", "write", "readable", "writable"])
+@pytest.mark.parametrize("descriptor_count", [1, 2])
+def test_old_operation_destruction_preserves_reused_registration(
+    operation_factory, kind, descriptor_count
+):
+    descriptors, operation, _, agent = operation_factory
+    local = descriptors(descriptor_count)
+    old = operation(kind, local)
+    old.__exit__(None, None, None)
+    current = operation(kind, local)
+    registrations = [d._nixl_hndl for d in local]
+    try:
+        del old
+        gc.collect()
+        assert all(d.is_registered for d in local)
+        assert [d._nixl_hndl for d in local] == registrations
+        assert agent.deregister_memory.call_count == descriptor_count
+    finally:
+        current.__exit__(None, None, None)
+
+
+def test_release_does_not_claim_later_registration(operation_factory):
+    descriptors, operation, connection, _ = operation_factory
+    local = descriptors(1)
+    old = operation("readable", local)
+    local[0].deregister_with_connector(connection)
+    current = operation("readable", local)
+    registration = local[0]._nixl_hndl
+    try:
+        old.__exit__(None, None, None)
+        assert local[0].is_registered
+        assert local[0]._nixl_hndl is registration
+    finally:
+        current.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize("kind", ["read", "write", "readable", "writable"])
+@pytest.mark.parametrize("duplicate_first", [False, True])
+def test_release_attempts_all_descriptors_and_does_not_retry_after_failure(
+    operation_factory, kind, duplicate_first
+):
+    descriptors, operation, _, agent = operation_factory
+    local = descriptors(2)
+    old = operation(kind, [local[0], *local] if duplicate_first else local)
+    failed_registration = local[0]._nixl_hndl
+
+    def fail_first(registration):
+        if registration is failed_registration:
+            raise RuntimeError("deregistration failed")
+
+    agent.deregister_memory.side_effect = fail_first
+    with pytest.raises(RuntimeError, match="deregistration failed"):
+        old.__exit__(None, None, None)
+    assert agent.deregister_memory.call_count == 2
+    assert local[0].is_registered
+    assert not local[1].is_registered
+
+    agent.deregister_memory.side_effect = None
+    current = operation(kind, local)
+    registrations = [d._nixl_hndl for d in local]
+    try:
+        del old
+        gc.collect()
+        assert all(d.is_registered for d in local)
+        assert [d._nixl_hndl for d in local] == registrations
+        assert agent.deregister_memory.call_count == 2
+    finally:
+        current.__exit__(None, None, None)
+
+
+def test_release_preserves_preregistered_duplicate_descriptor_behavior(
+    operation_factory,
+):
+    descriptors, operation, connection, agent = operation_factory
+    descriptor = descriptors(1)[0]
+    descriptor.register_with_connector(connection)
+    op = operation("readable", [descriptor, descriptor])
+    op.__exit__(None, None, None)
+    op.__exit__(None, None, None)
+    assert not descriptor.is_registered
+    assert agent.register_memory.call_count == 1
+    assert agent.deregister_memory.call_count == 1
