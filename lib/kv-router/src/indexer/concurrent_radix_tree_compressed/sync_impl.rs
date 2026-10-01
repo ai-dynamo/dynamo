@@ -17,6 +17,15 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         event_receiver: flume::Receiver<WorkerTask>,
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> anyhow::Result<()> {
+        self.worker_with_retention(event_receiver.into(), metrics)
+    }
+
+    #[cfg_attr(feature = "profile", inline(never))]
+    fn worker_with_retention(
+        &self,
+        mut event_receiver: crate::indexer::WorkerTaskReceiver,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
         let mut approximate_lru = ApproximateLruLane::default();
@@ -47,21 +56,6 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     }
                     let _ = resp.send(applied);
                 }
-                WorkerTask::ApproximateTtl(task) => task.apply(|event| {
-                    let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut lookup, event, counters.as_ref());
-                    let applied = result.is_ok();
-                    if result.is_err() {
-                        tracing::warn!(
-                            "Failed to apply approximate TTL event: {:?}",
-                            result.as_ref().err()
-                        );
-                    }
-                    if let Some(ref counters) = counters {
-                        counters.inc(kind, result);
-                    }
-                    applied
-                }),
                 WorkerTask::ApproximateLru(task) => {
                     approximate_lru.observe_task(&task);
                     let ApproximateLruTask {
@@ -131,13 +125,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 }
                 WorkerTask::RemoveWorker {
                     worker_id,
-                    prune_manager,
                     sweep_tree,
                     resp,
                 } => {
-                    if let Some(manager) = prune_manager {
-                        manager.remove_worker(worker_id);
-                    }
                     approximate_lru.forget_worker(worker_id);
                     self.erase_worker_coverage(
                         &mut lookup,
@@ -149,12 +139,8 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 WorkerTask::RemoveWorkerDpRank {
                     worker_id,
                     dp_rank,
-                    prune_manager,
                     sweep_tree,
                 } => {
-                    if let Some(manager) = prune_manager {
-                        manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
-                    }
                     approximate_lru.forget_rank(WorkerWithDpRank::new(worker_id, dp_rank));
                     self.erase_worker_coverage(
                         &mut lookup,

@@ -518,7 +518,7 @@ impl WorkerPruneManager {
 /// TTL mutations applied on the same FIFO as the worker's backend events.
 /// Registration follows successful application even if the caller drops its
 /// acknowledgement; expiration is revalidated only when removal reaches the lane.
-pub struct ApproximateTtlTask {
+pub(crate) struct ApproximateTtlTask {
     manager: WorkerPruneManager,
     worker: WorkerWithDpRank,
     entries: Vec<BlockEntry>,
@@ -533,6 +533,33 @@ enum ApproximateTtlOperation {
     Remove {
         event_id: u64,
     },
+}
+
+pub(crate) struct PendingTtlStore {
+    manager: WorkerPruneManager,
+    worker: WorkerWithDpRank,
+    entries: Vec<BlockEntry>,
+    response: oneshot::Sender<bool>,
+}
+
+pub(crate) enum PreparedTtlTask {
+    Store(RouterEvent, PendingTtlStore),
+    Remove(ApproximateTtlTask),
+}
+
+impl PendingTtlStore {
+    pub(crate) fn complete(
+        self,
+        result: Result<bool, super::KvRouterError>,
+    ) -> Result<(), super::KvRouterError> {
+        let applied = result?;
+        if applied {
+            self.manager
+                .insert_worker_block_entries(self.worker, self.entries);
+        }
+        let _ = self.response.send(applied);
+        Ok(())
+    }
 }
 
 impl ApproximateTtlTask {
@@ -564,38 +591,46 @@ impl ApproximateTtlTask {
         }
     }
 
-    pub(crate) fn apply(self, mut apply_event: impl FnMut(RouterEvent) -> bool) {
-        match self.operation {
-            ApproximateTtlOperation::Store { event, response } => {
-                let applied = apply_event(event);
-                if applied {
-                    self.manager
-                        .insert_worker_block_entries(self.worker, self.entries);
-                }
-                let _ = response.send(applied);
-            }
-            ApproximateTtlOperation::Remove { event_id } => {
-                let mut entries = self
-                    .manager
-                    .take_pending_expirations(self.worker, self.entries);
-                if entries.is_empty() {
-                    return;
-                }
-                entries.sort_unstable_by_key(|entry| entry.key);
-                entries.dedup_by_key(|entry| entry.key);
-                let event = RouterEvent::new(
-                    self.worker.worker_id,
-                    KvCacheEvent {
-                        event_id,
-                        data: KvCacheEventData::Removed(KvCacheRemoveData {
-                            block_hashes: entries.into_iter().map(|entry| entry.key).collect(),
-                        }),
-                        dp_rank: self.worker.dp_rank,
-                    },
-                );
-                apply_event(event);
-            }
+    pub(crate) fn prepare(self) -> PreparedTtlTask {
+        if !matches!(self.operation, ApproximateTtlOperation::Store { .. }) {
+            return PreparedTtlTask::Remove(self);
         }
+        let ApproximateTtlOperation::Store { event, response } = self.operation else {
+            unreachable!()
+        };
+        PreparedTtlTask::Store(
+            event,
+            PendingTtlStore {
+                manager: self.manager,
+                worker: self.worker,
+                entries: self.entries,
+                response,
+            },
+        )
+    }
+
+    pub(crate) fn into_remove_event(self) -> Option<RouterEvent> {
+        let ApproximateTtlOperation::Remove { event_id } = self.operation else {
+            unreachable!("store must be extracted before removal")
+        };
+        let mut entries = self
+            .manager
+            .take_pending_expirations(self.worker, self.entries);
+        if entries.is_empty() {
+            return None;
+        }
+        entries.sort_unstable_by_key(|entry| entry.key);
+        entries.dedup_by_key(|entry| entry.key);
+        Some(RouterEvent::new(
+            self.worker.worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: entries.into_iter().map(|entry| entry.key).collect(),
+                }),
+                dp_rank: self.worker.dp_rank,
+            },
+        ))
     }
 }
 
