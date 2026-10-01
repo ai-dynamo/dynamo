@@ -164,8 +164,7 @@ impl KvSchedulerError {
         )
     }
 
-    /// Classify this error for a client-facing host. `QueueRejected` stays
-    /// distinct from `Overloaded` but is answered the same way: 429, per DEP #9755.
+    /// Classify this error for a client-facing host.
     pub fn rejection(&self) -> SchedulerRejection {
         match self {
             Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. } => {
