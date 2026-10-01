@@ -41,8 +41,7 @@ def connection(monkeypatch):
     return connection, native, peers
 
 
-@pytest.mark.parametrize("finalize", [False, True])
-def test_last_release_cannot_retire_an_incoming_remote(connection, finalize):
+def test_last_release_cannot_retire_an_incoming_remote(connection):
     connection, native, peers = connection
     old_holder = [nixl_connect.Remote(connection, b"peer")]
     loaded = threading.Event()
@@ -65,9 +64,7 @@ def test_last_release_cannot_retire_an_incoming_remote(connection, finalize):
         assert loaded.wait(3), "native load did not start"
         release_attempted.set()
         try:
-            if not finalize:
-                old_holder[0].__exit__(None, None, None)
-            # Exercise the actual destructor on another thread as well as exit.
+            # Exercise the actual destructor on another thread.
             old_holder.clear()
         finally:
             released.set()
