@@ -381,7 +381,7 @@ pub(crate) fn to_worker_selection_session_context(
         session_id,
         parent_session_id,
         session_final,
-        compaction: _,
+        agent_headers,
         input_trigger,
     } = context;
     let input_trigger = input_trigger.map(|trigger| match trigger {
@@ -395,6 +395,7 @@ pub(crate) fn to_worker_selection_session_context(
         *session_final,
         input_trigger,
     )
+    .with_agent_headers(agent_headers.clone())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2042,7 +2043,11 @@ mod tests {
             session_id: "child-session".into(),
             parent_session_id: Some("root-session".into()),
             session_final: Some(true),
-            compaction: None,
+            agent_headers: std::collections::BTreeMap::from([(
+                "x-claude-code-compaction".into(),
+                vec!["future-trigger".into()],
+            )])
+            .into(),
             input_trigger: Some(InputTrigger::ToolResult),
         };
 
@@ -2051,6 +2056,10 @@ mod tests {
         assert_eq!(selection_context.session_id(), "child-session");
         assert_eq!(selection_context.parent_session_id(), Some("root-session"));
         assert_eq!(selection_context.session_final(), Some(true));
+        assert_eq!(
+            selection_context.agent_headers(),
+            context.agent_headers.as_ref()
+        );
         assert_eq!(
             selection_context.input_trigger(),
             Some(WorkerSelectionInputTrigger::ToolResult)
