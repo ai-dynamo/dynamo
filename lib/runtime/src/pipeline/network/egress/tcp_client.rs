@@ -311,29 +311,13 @@ impl Drop for InflightGuard {
     }
 }
 
-/// RAII guard that resets the `connecting` CAS gate on drop.
+/// Owns the connect gate through connection establishment and publication.
 ///
-/// After winning the CAS (`connecting` set to `true`), two subsequent
-/// await points in `ensure_capacity_or_heal` are cancellation-unsafe:
-///
-/// 1. `connect_limiter.acquire().await` — if the enclosing Tokio future is
-///    dropped here, `connecting` stays `true` forever and the existing
-///    `map_err` closure only runs when the `Semaphore` is *closed*, not on
-///    cancellation.
-/// 2. `TcpConnection::connect(...).await` — if cancelled here, the explicit
-///    `self.connecting.store(false)` below the await is never reached.
-///
-/// In both cases callers that lost the CAS race will block on
-/// `connect_notify.notified()` until their `connect_timeout` expires, then
-/// retry the CAS — but `connecting` is still `true`, so they time out again,
-/// permanently stalling pool growth for the affected host.
-///
-/// Fix: construct this guard immediately after the CAS succeeds. Its Drop
-/// unconditionally resets `connecting` and wakes waiters, covering every exit
-/// path: normal return (Ok/Err), `?` propagation, and future cancellation.
-/// Double-reset (store false when already false) and double-notify (wake an
-/// empty waiter set) are both no-ops, so explicit cleanup calls in the success
-/// and error branches are left in place for readability without any risk.
+/// Drop releases the gate and wakes waiters on success, error, or cancellation,
+/// including cancellation while waiting for a global permit or socket connect.
+/// Keep this as the only release path: clearing the gate before publishing the
+/// connection lets another caller connect unnecessarily, and this guard could
+/// then clear that caller's gate when it drops.
 struct ConnectingGuard<'a> {
     connecting: &'a AtomicBool,
     notify: &'a tokio::sync::Notify,
@@ -1084,6 +1068,8 @@ struct HostPool {
     channel_buffer: usize,
     /// Timestamp of last use (unix millis) for idle cleanup
     last_used_ms: AtomicU64,
+    #[cfg(test)]
+    before_publish_barrier: parking_lot::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl HostPool {
@@ -1101,6 +1087,8 @@ impl HostPool {
             connect_timeout: config.connect_timeout,
             channel_buffer: config.channel_buffer,
             last_used_ms: AtomicU64::new(current_time_ms()),
+            #[cfg(test)]
+            before_publish_barrier: parking_lot::Mutex::new(None),
         }
     }
 
@@ -1239,7 +1227,14 @@ impl HostPool {
                     TcpConnection::connect(self.addr, self.connect_timeout, self.channel_buffer)
                         .await;
 
-                self.connecting.store(false, Ordering::Release);
+                #[cfg(test)]
+                {
+                    let barrier = self.before_publish_barrier.lock().take();
+                    if let Some(barrier) = barrier {
+                        barrier.wait().await;
+                        barrier.wait().await;
+                    }
+                }
 
                 match connect_result {
                     Ok(stream) => {
@@ -1268,11 +1263,9 @@ impl HostPool {
                             self.snapshot.store(Arc::new(snap));
                         }
 
-                        self.connect_notify.notify_waiters();
                         return Ok(new_conn);
                     }
                     Err(e) => {
-                        self.connect_notify.notify_waiters();
                         return Err(cannot_connect_error(self.addr, e));
                     }
                 }
@@ -2815,6 +2808,81 @@ mod tests {
             total_conns
         );
         assert!(ok_count > 0, "At least some requests should succeed");
+    }
+
+    #[tokio::test]
+    async fn connect_gate_is_held_until_connection_is_published() {
+        let (addr, _) = spawn_echo_server().await;
+        let config = TcpRequestConfig {
+            pool_size: 1,
+            ..TcpRequestConfig::default()
+        };
+        let pool = Arc::new(HostPool::new(addr, &config));
+        let limiter = Arc::new(tokio::sync::Semaphore::new(2));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        *pool.before_publish_barrier.lock() = Some(barrier.clone());
+
+        let first = {
+            let pool = pool.clone();
+            let limiter = limiter.clone();
+            tokio::spawn(async move { pool.get_connection(&limiter).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), barrier.wait())
+            .await
+            .expect("first connection should reach publication");
+        let snapshot_was_empty = pool.snapshot.load().is_empty();
+        let permits_before_contender = limiter.available_permits();
+        let mut second = Box::pin(pool.get_connection(&limiter));
+        let second_poll = futures::poll!(second.as_mut());
+        let contender_waited = second_poll.is_pending();
+        let permits_after_contender = limiter.available_permits();
+
+        // Release and join both callers before asserting, including on the
+        // regression path where the contender has started another connect.
+        barrier.wait().await;
+        let first = tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first caller should publish its connection")
+            .unwrap()
+            .unwrap();
+        let second = match second_poll {
+            std::task::Poll::Ready(result) => result.unwrap(),
+            std::task::Poll::Pending => tokio::time::timeout(Duration::from_secs(1), second)
+                .await
+                .expect("publication should wake the waiting caller")
+                .unwrap(),
+        };
+        assert!(snapshot_was_empty);
+        assert_eq!(permits_before_contender, 1);
+        assert!(contender_waited);
+        assert_eq!(
+            permits_after_contender, 1,
+            "a second caller must not start connecting before the first publishes"
+        );
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(pool.snapshot.load().len(), 1);
+        assert!(!pool.connecting.load(Ordering::Acquire));
+        assert_eq!(limiter.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_connect_releases_gate_and_wakes_waiters() {
+        let pool = HostPool::new("127.0.0.1:1".parse().unwrap(), &TcpRequestConfig::default());
+        let limiter = tokio::sync::Semaphore::new(0);
+        let mut connect = Box::pin(pool.get_connection(&limiter));
+        assert!(futures::poll!(connect.as_mut()).is_pending());
+        assert!(pool.connecting.load(Ordering::Acquire));
+
+        let notified = pool.connect_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        drop(connect);
+        assert!(!pool.connecting.load(Ordering::Acquire));
+        assert!(futures::poll!(notified.as_mut()).is_ready());
+
+        limiter.close();
+        assert!(pool.get_connection(&limiter).await.is_err());
+        assert!(!pool.connecting.load(Ordering::Acquire));
     }
 
     #[tokio::test]
