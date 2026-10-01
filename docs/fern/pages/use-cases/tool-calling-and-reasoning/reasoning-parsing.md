@@ -157,9 +157,12 @@ Models that support adaptive thinking can still select it per request:
 }
 ```
 
-Dynamo normalizes this request to `thinking_mode=adaptive`. Because adaptive is
-an explicit request control, it takes precedence over an `enabled` or
-`disabled` deployment default.
+Dynamo normalizes this request to `thinking_mode=adaptive` and removes any
+`thinking` or `enable_thinking` key, so the decision stays with the model. A
+`reasoning_effort` value still reaches models that grade on it, but under
+`adaptive` it does not turn reasoning on or off. Because adaptive is an
+explicit request control, it takes precedence over an `enabled` or `disabled`
+deployment default.
 
 > [!NOTE]
 > This option controls chat-template rendering. It does not force the inference

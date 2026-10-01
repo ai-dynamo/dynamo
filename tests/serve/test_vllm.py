@@ -7,7 +7,6 @@ import os
 import platform
 import random
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pytest
 
@@ -44,7 +43,6 @@ from tests.utils.payload_builder import (
 from tests.utils.payloads import (
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
-    LoraTestChatPayload,
     ToolCallingChatPayload,
 )
 
@@ -408,11 +406,17 @@ vllm_configs = {
             pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(720),  # 3x ~240s local runtime
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            metric_payload_default(
+                min_num_requests=1,
+                backend="vllm",
+                port=DefaultPort.SYSTEM2.value,
+            ),
         ],
     ),
     "disaggregated_same_gpu": VLLMConfig(
@@ -508,9 +512,15 @@ vllm_configs = {
             "2",
         ],
         timeout=700,
+        # Each request is bounded by BasePayload.timeout (60s, tests/utils/
+        # payloads.py), not by the readiness budget above. This deployment
+        # decodes at ~15.5 tok/s, so the 1000-token payload default needs ~65s
+        # and cannot fit; 128 tokens finishes in ~8s and leaves ~7x headroom.
+        # Keep the cap small here — a longer decode turns the read timeout back
+        # into an accidental throughput assertion.
         request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
+            chat_payload_default(max_tokens=128),
+            completion_payload_default(max_tokens=128),
         ],
     ),
     "aggregated_toolcalling": VLLMConfig(
@@ -872,7 +882,7 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [3], indirect=True)
 def test_serve_deployment(
     vllm_config_test,
     request,
@@ -885,9 +895,7 @@ def test_serve_deployment(
     """
     Test dynamo serve deployments with different graph configurations.
     """
-    assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    assert num_system_ports >= 3
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
@@ -896,40 +904,6 @@ def test_serve_deployment(
 
 # LoRA Test Directory
 lora_dir = os.path.join(vllm_dir, "launch/lora")
-
-
-def lora_chat_payload(
-    lora_name: str,
-    s3_uri: str,
-    system_port: int = DefaultPort.SYSTEM1.value,
-    repeat_count: int = 2,
-    expected_response: Optional[list] = None,
-    expected_log: Optional[list] = None,
-    max_tokens: int = 100,
-    temperature: float = 0.0,
-) -> LoraTestChatPayload:
-    """Create a LoRA-enabled chat payload for testing"""
-    return LoraTestChatPayload(
-        body={
-            "model": lora_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "What is deep learning? Answer in one sentence.",
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        },
-        lora_name=lora_name,
-        s3_uri=s3_uri,
-        system_port=system_port,
-        repeat_count=repeat_count,
-        expected_response=expected_response
-        or ["learning", "neural", "network", "AI", "model"],
-        expected_log=expected_log or [],
-    )
 
 
 @pytest.mark.vllm

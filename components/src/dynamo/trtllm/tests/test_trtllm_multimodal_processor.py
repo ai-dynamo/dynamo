@@ -4,6 +4,8 @@
 """process_openai_request must let client-error types from image loading
 propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
 
+import base64
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -35,6 +37,23 @@ pytestmark = [
 # sequential GPU stage so TensorRT-LLM initialization is shared.
 
 
+def test_image_loader_uses_trtllm_configured_limit(monkeypatch) -> None:
+    image_loader = MagicMock()
+    monkeypatch.setattr(mmp, "ImageLoader", image_loader)
+
+    MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=200,
+        tokenizer=MagicMock(),
+    )
+
+    image_loader.assert_called_once_with(
+        enable_frontend_decoding=False,
+        max_bytes=200 * 1024 * 1024,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
@@ -43,7 +62,7 @@ pytestmark = [
         HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.png"),
     ],
 )
-async def test_client_errors_propagate(error) -> None:
+async def test_client_errors_propagate(error, monkeypatch) -> None:
     # Mock tokenizer skips tokenizer_factory; mock loader forces the failure.
     processor = MultimodalRequestProcessor(
         model_type="multimodal",
@@ -53,13 +72,31 @@ async def test_client_errors_propagate(error) -> None:
     )
     processor.image_loader.load_image_batch = AsyncMock(side_effect=error)
 
+    # Images are processed before videos. A typed image error must stop the
+    # request before video validation or fetching begins.
+    video_validate = AsyncMock()
+    video_fetch = AsyncMock()
+    monkeypatch.setattr(mmp, "validate_media_url", video_validate)
+    monkeypatch.setattr(mmp, "fetch_bytes", video_fetch)
+
     request = {
-        "multi_modal_data": {"image_url": [{"Url": "https://example.com/x.png"}]}
+        "image_cache_scope": "session-42",
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/x.png"}],
+            "video_url": [{"Url": "https://example.com/x.mp4"}],
+        },
     }
-    with pytest.raises(type(error)):
+    with pytest.raises(type(error)) as exc_info:
         await processor.process_openai_request(
             request, embeddings=None, ep_disaggregated_params=None
         )
+
+    assert exc_info.value is error
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        [{"Url": "https://example.com/x.png"}], cache_scope="session-42"
+    )
+    video_validate.assert_not_awaited()
+    video_fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -86,7 +123,12 @@ async def test_internal_video_uses_dynamo_fetcher_when_allowed(monkeypatch) -> N
         ep_disaggregated_params=None,
     )
 
-    fetch.assert_awaited_once_with(url, 30.0, policy=processor._url_policy)
+    fetch.assert_awaited_once_with(
+        url,
+        30.0,
+        policy=processor._url_policy,
+        max_bytes=processor.max_file_size_bytes,
+    )
     assert load_video.await_args.args[0] != url
 
 
@@ -171,6 +213,100 @@ async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
     nvdec.assert_called_once()  # the NVDEC transform ran ...
     assert nvdec.call_args.args[0] == b"h264 bytes"
     load_video.assert_not_awaited()  # ... and the vendor decoder was bypassed
+
+
+@pytest.mark.asyncio
+async def test_malformed_video_data_uri_is_rejected() -> None:
+    uri = "data:video/mp4;base64,AAAA!!!!"
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {"multi_modal_data": {"video_url": [{"Url": uri}]}, "token_ids": [1]},
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+    assert excinfo.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_percent_escaped_base64_video_data_uri_is_accepted(monkeypatch) -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
+    monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: True)
+    nvdec = MagicMock(return_value=object())
+    monkeypatch.setattr(mmp, "_nvdec_video_data", nvdec)
+    monkeypatch.setattr(mmp, "async_load_video", AsyncMock(return_value=object()))
+
+    raw = b"\xfb\x00"  # encodes to "+wA=", whose '+' a client may send as %2B
+    encoded = base64.b64encode(raw).decode().replace("+", "%2B")
+    await processor.process_openai_request(
+        {
+            "multi_modal_data": {
+                "video_url": [{"Url": f"data:video/mp4;base64,{encoded}"}]
+            },
+            "token_ids": [1],
+        },
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+    assert nvdec.call_args.args[0] == raw
+
+
+@pytest.mark.asyncio
+async def test_video_data_uri_exactly_at_the_size_limit_is_accepted(
+    monkeypatch,
+) -> None:
+    """The bound is on the decoded length, so a payload at the limit is not
+    rejected by base64 expansion or padding."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=1,
+        tokenizer=MagicMock(),
+    )
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
+    monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: True)
+    nvdec = MagicMock(return_value=object())
+    monkeypatch.setattr(mmp, "_nvdec_video_data", nvdec)
+    monkeypatch.setattr(mmp, "async_load_video", AsyncMock(return_value=object()))
+
+    raw = b"x" * processor.max_file_size_bytes
+    uri = "data:video/mp4;base64," + base64.b64encode(raw).decode()
+    await processor.process_openai_request(
+        {"multi_modal_data": {"video_url": [{"Url": uri}]}, "token_ids": [1]},
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+    assert len(nvdec.call_args.args[0]) == processor.max_file_size_bytes
+
+
+@pytest.mark.asyncio
+async def test_oversized_video_data_uri_is_rejected() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=1,
+        tokenizer=MagicMock(),
+    )
+    uri = "data:video/mp4;base64," + base64.b64encode(b"x" * (2 * 1024 * 1024)).decode()
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {"multi_modal_data": {"video_url": [{"Url": uri}]}, "token_ids": [1]},
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+    assert excinfo.value.status == 400
+    assert "maximum allowed size" in str(excinfo.value)
 
 
 @pytest.mark.asyncio
@@ -345,3 +481,296 @@ async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
     assert "install_media_decoders trtllm" in msg
     # The vendor loader's own text survives as the cause.
     assert "OpenCV (cv2) is required for video decoding" in msg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_extra, expected",
+    [
+        ({"mm_processor_kwargs": {"num_crops": 4}}, {"num_crops": 4}),
+        ({"extra_args": {"mm_processor_kwargs": {"num_crops": 4}}}, {"num_crops": 4}),
+        ({}, {}),
+        # Explicit top-level {} wins over extra_args.
+        (
+            {
+                "mm_processor_kwargs": {},
+                "extra_args": {"mm_processor_kwargs": {"num_crops": 9}},
+            },
+            {},
+        ),
+    ],
+)
+async def test_mm_processor_kwargs_forwarded(request_extra, expected) -> None:
+    """Overrides reach the engine inputs from either location; absent yields {},
+    which TRT-LLM's processor requires instead of None."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+
+    processed = await processor.process_openai_request(
+        {"token_ids": [1, 2, 3], **request_extra},
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert processed["mm_processor_kwargs"] == expected
+
+
+@pytest.mark.asyncio
+async def test_mm_processor_kwargs_non_object_is_rejected() -> None:
+    """A non-object value is a client error, not a silently ignored field."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {"token_ids": [1, 2, 3], "mm_processor_kwargs": "invalid"},
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    assert excinfo.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_expanded_prompt_len_skipped_when_kwargs_override() -> None:
+    """Overridden requests get no sizing hint: the calculator is neither
+    override-aware nor guaranteed non-mutating."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    ip = MagicMock()
+    ip.get_mm_token_ids.return_value = None
+    ip.get_num_tokens_per_image.return_value = 4
+    processor.input_processor = ip
+
+    processed = await processor.process_openai_request(
+        {"token_ids": [1, 2, 3], "mm_processor_kwargs": {"max_pixels": 1024}},
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert "expanded_prompt_len" not in processed
+    ip.get_num_tokens_per_image.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_epd_non_object_kwargs_raises_client_error() -> None:
+    """The disaggregated path must raise the same 400 as the aggregated one.
+
+    Yielding an error payload instead reads as a normal encoder response, so the
+    caller surfaces a client mistake as an internal failure.
+    """
+    from dynamo.trtllm.encode_helper import EncodeHelper
+
+    # URLs come from the processor, not the request; the engine must report an
+    # available encoder, or the flow short-circuits before the kwargs check.
+    processor = MagicMock()
+    processor.extract_prompt_and_media_from_request.return_value = (
+        "describe",
+        ["http://example.invalid/a.png"],
+        [],
+    )
+    engine = MagicMock()
+    engine.encoder_available = True
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        async for _ in EncodeHelper.process_encode_request(
+            request={
+                "token_ids": [1, 2, 3],
+                "messages": [{"role": "user", "content": "describe"}],
+                "mm_processor_kwargs": "invalid",
+            },
+            multimodal_processor=processor,
+            connector=None,
+            tokenizer=MagicMock(),
+            model_dir="unused",
+            model_type="multimodal",
+            engine=engine,
+        ):
+            pass
+
+    assert excinfo.value.status == 400
+
+
+async def _cache_keys_for(request, url):
+    """Run the real cache path and return the key it looked up."""
+    from dynamo.trtllm.multimodal import embedding_fetcher as ef
+
+    seen = []
+    cache = MagicMock()
+    cache.get.side_effect = lambda h: seen.append(h) or None
+    cache.set = MagicMock()
+
+    async def _encode(_req):
+        raise AssertionError("encode should not run in this test")
+
+    with pytest.raises(Exception):
+        await ef._fetch_embeddings_with_cache([url], request, cache, _encode)
+    return seen[0]
+
+
+@pytest.mark.asyncio
+async def test_embedding_cache_key_does_not_collide_with_plain_url() -> None:
+    """`url + salt` collided when a URL ended with another request's overrides."""
+    overrides = {"max_soft_tokens": 70}
+    salt = json.dumps(overrides, sort_keys=True, default=str)
+    url = "http://example.invalid/a.png"
+
+    salted = await _cache_keys_for({"mm_processor_kwargs": overrides}, url)
+    lookalike = await _cache_keys_for({}, url + salt)
+
+    assert salted != lookalike
+
+
+@pytest.mark.asyncio
+async def test_embedding_cache_key_unchanged_without_overrides() -> None:
+    """No overrides must hash exactly the URL, so existing entries stay valid."""
+    from dynamo.trtllm.multimodal.hasher import MultimodalHasher
+
+    url = "http://example.invalid/a.png"
+    key = await _cache_keys_for({}, url)
+    assert key == MultimodalHasher.hash_bytes(url.encode())
+
+
+@pytest.mark.asyncio
+async def test_cached_path_rejects_non_object_kwargs_on_hit() -> None:
+    """A cache hit must not mask a malformed value with a 200."""
+    from dynamo.trtllm.multimodal import embedding_fetcher as ef
+
+    url = "http://example.invalid/a.png"
+    cache = MagicMock()
+    # Pre-seeded so a plain-URL hash would hit and return early.
+    cache.get.return_value = MagicMock(tensor=torch.zeros(1))
+
+    async def _encode(_req):
+        raise AssertionError("encode must not run")
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await ef._fetch_embeddings_with_cache(
+            [url], {"mm_processor_kwargs": "invalid"}, cache, _encode
+        )
+
+    assert excinfo.value.status == 400
+    cache.get.assert_not_called()
+
+
+def test_extract_prompt_and_media_from_request_uses_multi_modal_data() -> None:
+    """Frontend-stripped extra_args.messages still resolve images from multi_modal_data."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    data_url = "data:image/png;base64,AAAA"
+    https_url = "https://example.com/img.png"
+    text, image_urls, embedding_paths = processor.extract_prompt_and_media_from_request(
+        {
+            "extra_args": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {"type": "image_url", "image_url": {"url": ""}},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": https_url},
+                            },
+                        ],
+                    }
+                ]
+            },
+            "multi_modal_data": {"image_url": [{"Url": data_url}, {"Url": https_url}]},
+        }
+    )
+    assert text == "describe"
+    assert image_urls == [data_url, https_url]
+    assert embedding_paths == []
+
+
+def test_extract_prompt_and_media_from_request_classifies_signed_safetensors() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    signed = "https://host/embedding.SAFETENSORS?sig=abc"
+    _, image_urls, embedding_paths = processor.extract_prompt_and_media_from_request(
+        {
+            "extra_args": {"messages": []},
+            "multi_modal_data": {"image_url": [{"Url": signed}]},
+        }
+    )
+    assert image_urls == []
+    assert embedding_paths == [signed]
+
+
+def test_extract_prompt_and_media_from_request_keeps_message_fallback() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    url = "https://example.com/legacy.png"
+    _, image_urls, _ = processor.extract_prompt_and_media_from_request(
+        {
+            "extra_args": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": url}},
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+    assert image_urls == [url]
+
+
+def test_extract_prompt_and_media_from_request_empty_or_malformed_mm_data() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    fallback = "https://example.com/fallback.png"
+    request = {
+        "extra_args": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hi"},
+                        {"type": "image_url", "image_url": {"url": fallback}},
+                    ],
+                }
+            ]
+        }
+    }
+    for mm_data in ({}, {"image_url": "not-a-list"}, {"image_url": [None, 1, {}]}):
+        request["multi_modal_data"] = mm_data
+        (
+            text,
+            image_urls,
+            embedding_paths,
+        ) = processor.extract_prompt_and_media_from_request(request)
+        assert text == "hi"
+        assert image_urls == [fallback]
+        assert embedding_paths == []

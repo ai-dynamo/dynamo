@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import itertools
 import logging
+import os
 import queue
 import threading
 import uuid
@@ -140,6 +141,11 @@ class SampleLLMEngine(LLMEngine):
         parser.add_argument("--endpoint-types", default="chat,completions")
         parser.add_argument("--discovery-backend", default="etcd")
         parser.add_argument("--request-plane", default="tcp")
+        parser.add_argument(
+            "--response-plane",
+            choices=["tcp", "quic"],
+            default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
+        )
         parser.add_argument("--event-plane", default=None)
         parser.add_argument(
             "--disaggregation-mode",
@@ -176,6 +182,7 @@ class SampleLLMEngine(LLMEngine):
             endpoint_types=args.endpoint_types,
             discovery_backend=args.discovery_backend,
             request_plane=args.request_plane,
+            response_plane=args.response_plane,
             event_plane=args.event_plane,
             disaggregation_mode=mode,
             route_to_encoder=args.route_to_encoder,

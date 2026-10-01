@@ -30,7 +30,6 @@ spec:
           - --tp-size
           - "8"
           - --trust-remote-code
-          - --skip-tokenizer-init
           - --disaggregation-mode
           - decode
           - --disaggregation-transfer-backend
@@ -70,7 +69,6 @@ spec:
           - --tp-size
           - "8"
           - --trust-remote-code
-          - --skip-tokenizer-init
           - --disaggregation-mode
           - prefill
           - --disaggregation-transfer-backend

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +39,7 @@ const (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
+// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx')",message="standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment"
 type DynamoComponentDeploymentSpec struct {
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
@@ -48,11 +50,24 @@ type DynamoComponentDeploymentSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (!has(self.replicas) && has(self.componentType) && self.componentType == 'lpx') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)",message="componentType is immutable after it is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.componentType) && self.componentType == 'lpx')",message="lpx may only be set when componentType is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx') || has(self.lpx)",message="lpx is required when componentType is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx' && has(self.replicas) && self.replicas < 1)",message="replicas must be positive when componentType is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)",message="scalingAdapter is not supported when componentType is lpx"
 type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+
+	// ProviderOverride configures the primary Grove unit representing this DGD
+	// component. With apiVersion `grove.io/v1alpha1`, target is
+	// `PodCliqueTemplateSpec` for a single-node component or
+	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
+	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
 	// Annotations to add to generated Kubernetes resources for this component
 	// (such as Pod, Service, and Ingress when applicable).
@@ -64,12 +79,15 @@ type DynamoComponentDeploymentSharedSpec struct {
 	ServiceName string `json:"serviceName,omitempty"`
 
 	// ComponentType indicates the role of this component (for example, "main").
+	//
+	// The DGD-only "lpx" type is experimental, requires the operator's
+	// lpx.enabled setting, and may change incompatibly.
 	ComponentType string `json:"componentType,omitempty"`
 
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
 
-	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+	// RuntimeVersionOverride declares the Dynamo runtime version in this component's
 	// main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
 	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
 	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
@@ -151,8 +169,23 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
-	// Multinode is the configuration for multinode components.
+	// Multinode configures worker, prefill, or decode components that span
+	// multiple Pods.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
+	// Roles expose the named Pod-producing parts inside a compound component.
+	// When set for a multinode component, this list must contain exactly one
+	// leader and one worker role. Admission defaults omitted replicas to 1 for
+	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
+	// preserves the implicit multinode role layout.
+	//
+	// LPX components each require an agent role. A DGD may contain independent
+	// LPX components, each with its own conductor role, or a shared draft and
+	// target pair with a conductor role only on the target. Every LPX role
+	// requires its own podTemplate.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Roles []ComponentRoleSpec `json:"roles,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
 	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
 	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
@@ -161,8 +194,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
-	// EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.
+	// EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.
 	// Only applicable when ComponentType is "epp".
+	//
+	// Deprecated: omit this field for the native Rust EPP. Presence of eppConfig
+	// keeps the Go EPP Pod contract until migration clears it.
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
@@ -172,6 +208,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
 	// +optional
 	FrontendSidecar *FrontendSidecarSpec `json:"frontendSidecar,omitempty"`
+
+	// LPX holds LPX integration configuration. Only meaningful when
+	// ComponentType is "lpx".
+	//
+	// Experimental: requires the operator's lpx.enabled setting and may change incompatibly.
+	// +optional
+	LPX *v1beta1.LPXConfig `json:"lpx,omitempty"`
 
 	// Checkpoint configures container checkpointing for this service.
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
@@ -201,7 +244,7 @@ type MultinodeSpec struct {
 	// +kubebuilder:default=2
 	// Indicates the number of nodes to deploy for multinode components.
 	// Total number of GPUs is NumberOfNodes * GPU limit.
-	// Must be greater than 1.
+	// Must be greater than 1 and is immutable after creation.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
 }
@@ -359,11 +402,16 @@ func (s *DynamoComponentDeployment) SetDynamoDeploymentConfig(config []byte) {
 }
 
 func (s *DynamoComponentDeployment) IsMultinode() bool {
-	return s.GetNumberOfNodes() > 1
+	return s.Spec.IsMultinode()
 }
 
 func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
 	return s.Spec.GetNumberOfNodes()
+}
+
+// IsLPX reports whether this shared spec uses the LPX integration.
+func (s *DynamoComponentDeploymentSharedSpec) IsLPX() bool {
+	return s.ComponentType == string(v1beta1.ComponentTypeLPX)
 }
 
 func (s *DynamoComponentDeploymentSharedSpec) IsMultinode() bool {
@@ -473,6 +521,28 @@ type ModelReference struct {
 	Revision string `json:"revision,omitempty"`
 }
 
+// EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+//
+// Deprecated: Go EPP is deprecated. New EPP components should omit eppConfig and
+// use the native Rust EPP. Kept for round-trip and upgrade compatibility.
+type EPPConfig struct {
+	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
+	// The ConfigMap should contain EndpointPickerConfig YAML.
+	// Mutually exclusive with Config.
+	// +optional
+	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
+	// The operator will marshal this to YAML and create a ConfigMap automatically.
+	// Mutually exclusive with ConfigMapRef.
+	// One of ConfigMapRef or Config must be specified (no default configuration).
+	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
+	// +optional
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
+}
+
 // FrontendSidecarSpec configures the auto-generated frontend sidecar container.
 // The operator uses these fields together with built-in frontend defaults (command, probes, ports,
 // and Dynamo env vars) to produce a fully configured sidecar container.
@@ -496,24 +566,4 @@ type FrontendSidecarSpec struct {
 	// These are merged with (and can override) the auto-generated Dynamo env vars.
 	// +optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
-}
-
-// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
-// EPP is responsible for intelligent endpoint selection and KV-aware routing.
-type EPPConfig struct {
-	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
-	// The ConfigMap should contain EndpointPickerConfig YAML.
-	// Mutually exclusive with Config.
-	// +optional
-	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
-
-	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
-	// The operator will marshal this to YAML and create a ConfigMap automatically.
-	// Mutually exclusive with ConfigMapRef.
-	// One of ConfigMapRef or Config must be specified (no default configuration).
-	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
-	// +optional
-	// +kubebuilder:validation:Type=object
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
 }

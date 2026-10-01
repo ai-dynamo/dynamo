@@ -238,6 +238,33 @@ def test_decode_reports_whether_it_already_sampled(
     )
 
 
+@pytest.mark.parametrize(
+    "num_frames,fps,expected",
+    [
+        (10, -1, 10),  # no fps: the frame cap alone decides, as before
+        (32, 1, 3),  # floor(3s * 1fps), well under the cap
+        (2, 10, 2),  # whichever cap is lower wins
+        (32, 0.1, 1),  # a sub-frame rate still yields a decodable clip
+    ],
+)
+def test_decode_applies_the_fps_cap_against_clip_duration(
+    monkeypatch, num_frames, fps, expected
+):
+    """`fps` caps the count at floor(duration * fps).
+
+    Resolved here rather than by the caller because duration is only knowable
+    once the container is open -- 90 frames at the decoder's 30 fps is 3s.
+    """
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv(num_frames=90))
+    monkeypatch.setattr(
+        nd, "_frame_to_rgb_hwc", lambda f: np.asarray(f, dtype=np.uint8)
+    )
+    frames, meta = nd.decode_video_nvdec(b"x", num_frames=num_frames, fps=fps)
+
+    assert frames.shape[0] == expected
+    assert meta["fps"] == 30.0  # metadata reports the source rate, not the target
+
+
 def test_decode_raises_on_empty_stream(monkeypatch):
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv(num_frames=0))
     with pytest.raises(RuntimeError):

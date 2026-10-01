@@ -196,10 +196,6 @@ Once one copy fits, spare GPUs on the node can serve you in a few ways:
 - **More replicas (data parallelism)** — run a full second copy for throughput. Two replicas roughly double requests/sec.
 - **Disaggregated serving** — dedicate some GPUs to prefill and others to decode. See [disaggregated serving](../disaggregated-serving/overview.mdx).
 
-### Multiple nodes
-
-When a model's tensor-parallel size exceeds the GPUs on a single node, you can span it across nodes directly with the CLI — one head node plus headless workers joined over `torch.distributed`, no Kubernetes required. See **[Multi-Node Deployment](multi-node-deployment.mdx)**.
-
 ## Next steps
 
 - **Size the deployment** — AIConfigurator can evaluate the same model, backend, GPU system, and SLA
@@ -207,4 +203,4 @@ When a model's tensor-parallel size exceeds the GPUs on a single node, you can s
   worker commands. See the [AIConfigurator reference](../../developer-guide/additional-resources/aiconfigurator-reference.md).
 - **Deployment patterns** — add a router or split prefill and decode across workers. See the local deployment examples for [vLLM](../../recipes/cli-templates/vllm.mdx), [SGLang](../../recipes/cli-templates/sglang.mdx), and [TensorRT-LLM](../../recipes/cli-templates/tensorrt-llm.mdx). Each page provides copyable commands for the `launch/*.sh` scripts in the repository.
 - **KV cache offloading** — extend effective KV cache capacity beyond GPU memory with
-  [KVBM, LMCache, HiCache, or FlexKV](../kv-cache-offloading/overview.mdx).
+  [LMCache, HiCache, or FlexKV](../kv-cache-offloading/overview.mdx).

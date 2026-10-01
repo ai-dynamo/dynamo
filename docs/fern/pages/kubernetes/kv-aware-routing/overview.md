@@ -74,8 +74,8 @@ The EPP is not a public inference endpoint and does not run the model. The Dynam
 when a DGD contains a component with `type: epp`. In this topology, worker Frontend sidecars run with
 `--router-mode direct` because the EPP has already made the routing decision.
 
-For the full request and state flow, see
-[Gateway API Routing Architecture](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/gateway-api-routing.md).
+For the operator-managed setup and request flow, see
+[Using GAIE with Dynamo](gateway-api.mdx).
 
 ## Shared Routing Behavior
 

@@ -138,6 +138,12 @@ type DynamoComponentDeploymentSharedSpecConversionContext struct {
 // ConvertFromDynamoComponentDeploymentSharedSpec converts the shared spec from
 // v1alpha1 to v1beta1.
 func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, restored *v1beta1.DynamoComponentDeploymentSharedSpec, save *DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
+	// Convert the component provider context before the remaining shared fields.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &v1beta1.ProviderOverride{}
+		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	// ComponentType: v1beta1 promotes the legacy v1alpha1 worker subcomponent
 	// values to first-class component types.
 	dst.ComponentType = sharedComponentTypeToHub(src)
@@ -159,6 +165,12 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 		dst.Multinode = &v1beta1.MultinodeSpec{}
 		ConvertFromMultinodeSpec(src.Multinode, dst.Multinode)
 	}
+	if src.Roles != nil {
+		dst.Roles = make([]v1beta1.ComponentRoleSpec, len(src.Roles))
+		for i := range src.Roles {
+			ConvertFromComponentRoleSpec(&src.Roles[i], &dst.Roles[i])
+		}
+	}
 
 	if src.ModelRef != nil {
 		dst.ModelRef = &v1beta1.ModelReference{}
@@ -174,6 +186,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 		dst.EPPConfig = &v1beta1.EPPConfig{}
 		ConvertFromEPPConfig(src.EPPConfig, dst.EPPConfig)
 	}
+	dst.LPX = src.LPX
 
 	// sharedMemory <-> sharedMemorySize (lossy struct flatten).
 	if src.SharedMemory != nil && (src.SharedMemory.Disabled || !src.SharedMemory.Size.IsZero()) {
@@ -520,6 +533,12 @@ func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
 // ConvertToDynamoComponentDeploymentSharedSpec converts the shared spec from
 // v1beta1 to v1alpha1.
 func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec) error {
+	// Convert the component provider context before the remaining shared fields.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &ProviderOverride{}
+		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
@@ -528,6 +547,12 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	if src.Multinode != nil {
 		dst.Multinode = &MultinodeSpec{}
 		ConvertToMultinodeSpec(src.Multinode, dst.Multinode)
+	}
+	if src.Roles != nil {
+		dst.Roles = make([]ComponentRoleSpec, len(src.Roles))
+		for i := range src.Roles {
+			ConvertToComponentRoleSpec(&src.Roles[i], &dst.Roles[i])
+		}
 	}
 	if src.ModelRef != nil {
 		dst.ModelRef = &ModelReference{}
@@ -541,7 +566,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		dst.EPPConfig = &EPPConfig{}
 		ConvertToEPPConfig(src.EPPConfig, dst.EPPConfig)
 	}
-
+	dst.LPX = src.LPX
 	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	dst.ServiceName = src.ComponentName
 
@@ -565,9 +590,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 
 	// podTemplate -> mainContainer + extraPodSpec + extraPodMetadata +
 	// Resources + Envs + Probes (+ FrontendSidecar).
-	if err := decomposePodTemplateFromHub(src, dst, restored); err != nil {
-		return err
-	}
+	decomposePodTemplateFromHub(src, dst, restored)
 
 	// Restore lossy cache flags before field-origin reconstruction so every
 	// compilation-cache mount is excluded from main-container origin matching.
@@ -814,16 +837,75 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 // Simple shared-spec structs
 // ---------------------------------------------------------------------------
 
+// ConvertFromProviderOverride converts a provider-native override from
+// v1alpha1 to v1beta1 without interpreting its raw value. src and dst must not
+// be nil.
+func ConvertFromProviderOverride(src *ProviderOverride, dst *v1beta1.ProviderOverride) {
+	*dst = v1beta1.ProviderOverride{
+		APIVersion: src.APIVersion,
+		Target:     src.Target,
+		Value:      src.Value,
+	}
+}
+
+// ConvertToProviderOverride converts a provider-native override from v1beta1
+// to v1alpha1 without interpreting its raw value. src and dst must not be nil.
+func ConvertToProviderOverride(src *v1beta1.ProviderOverride, dst *ProviderOverride) {
+	*dst = ProviderOverride{
+		APIVersion: src.APIVersion,
+		Target:     src.Target,
+		Value:      src.Value,
+	}
+}
+
 // ConvertFromMultinodeSpec converts multinode settings from v1alpha1 to
-// v1beta1.
+// v1beta1. src and dst must not be nil.
 func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
 	*dst = v1beta1.MultinodeSpec{NodeCount: src.NodeCount}
 }
 
 // ConvertToMultinodeSpec converts multinode settings from v1beta1 to
-// v1alpha1.
+// v1alpha1. src and dst must not be nil.
 func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
 	*dst = MultinodeSpec{NodeCount: src.NodeCount}
+}
+
+// ConvertFromComponentRoleSpec converts one explicit component role from
+// v1alpha1 to v1beta1. src and dst must not be nil.
+func ConvertFromComponentRoleSpec(src *ComponentRoleSpec, dst *v1beta1.ComponentRoleSpec) {
+	*dst = v1beta1.ComponentRoleSpec{Name: src.Name}
+	if src.Replicas != nil {
+		replicas := *src.Replicas
+		dst.Replicas = &replicas
+	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
+	}
+
+	// Preserve the role-level provider schema and sparse value verbatim.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &v1beta1.ProviderOverride{}
+		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+}
+
+// ConvertToComponentRoleSpec converts one explicit component role from
+// v1beta1 to v1alpha1. src and dst must not be nil.
+func ConvertToComponentRoleSpec(src *v1beta1.ComponentRoleSpec, dst *ComponentRoleSpec) {
+	*dst = ComponentRoleSpec{Name: src.Name}
+	if src.Replicas != nil {
+		replicas := *src.Replicas
+		dst.Replicas = &replicas
+	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
+	}
+
+	// Preserve the role-level provider schema and sparse value verbatim.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &ProviderOverride{}
+		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
 }
 
 // ConvertFromModelReference converts model references from v1alpha1 to
@@ -1419,6 +1501,9 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	// appended the dedicated service-level mounts. Preserve that ordering rather
 	// than allowing mergo to replace the VolumeMounts slice.
 	mainBase.VolumeMounts = append(slices.Clone(main.VolumeMounts), dedicatedVolumeMounts...)
+	if main.Ports != nil {
+		mainBase.Ports = main.Ports
+	}
 	// StartupProbe has no dedicated v1alpha1 field; take it verbatim.
 	if main.StartupProbe != nil {
 		mainBase.StartupProbe = main.StartupProbe
@@ -1497,12 +1582,13 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 }
 
 // decomposePodTemplateFromHub inverts buildPodTemplateToHub.
-func decomposePodTemplateFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) error {
+func decomposePodTemplateFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) {
 	if src.PodTemplate == nil {
 		decomposeMissingPodTemplate(src, dst, restored)
-		return nil
+		return
 	}
 
+	// Split one owned copy so projected fields can be consumed without changing src.
 	podTpl := src.PodTemplate.DeepCopy()
 
 	// ExtraPodMetadata from podTemplate.metadata.
@@ -1513,8 +1599,8 @@ func decomposePodTemplateFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpe
 	other := make([]corev1.Container, 0, len(podTpl.Spec.Containers))
 	for i := range podTpl.Spec.Containers {
 		if podTpl.Spec.Containers[i].Name == mainContainerName && main == nil {
-			m := podTpl.Spec.Containers[i].DeepCopy()
-			main = m
+			m := podTpl.Spec.Containers[i]
+			main = &m
 			continue
 		}
 		other = append(other, podTpl.Spec.Containers[i])
@@ -1531,33 +1617,26 @@ func decomposePodTemplateFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpe
 	// that v1alpha1 can represent directly have already been moved into their
 	// dedicated fields and cleared from main, so ExtraPodSpec only carries the
 	// true escape-hatch remainder.
-	podSpecCopy := podTpl.Spec.DeepCopy()
-	podSpecCopy.Containers = other
+	podSpec := podTpl.Spec
+	podSpec.Containers = other
 	// The forward path (buildPodTemplateToHub) always emits a "main" container,
 	// even when v1alpha1 had no main-container fields set (e.g. only
 	// FrontendSidecar triggered hasAny). Skip recording it on the v1alpha1
 	// side when every field other than Name is zero-valued, so that
 	// ConvertFrom does not hallucinate an empty MainContainer.
-	var mainCopy *corev1.Container
 	if main != nil {
-		m := main.DeepCopy()
-		m.Name = "" // v1alpha1 MainContainer has no Name (it is always "main").
-		if !containerIsEmpty(m) {
-			mainCopy = m
+		main.Name = "" // v1alpha1 MainContainer has no Name (it is always "main").
+		if containerIsEmpty(main) {
+			main = nil
 		}
 	}
-	if !podSpecIsZero(podSpecCopy) || mainCopy != nil {
-		eps := &ExtraPodSpec{}
-		if !podSpecIsZero(podSpecCopy) {
-			eps.PodSpec = podSpecCopy
-		}
-		if mainCopy != nil {
-			eps.MainContainer = mainCopy
+	if !podSpecIsZero(&podSpec) || main != nil {
+		eps := &ExtraPodSpec{MainContainer: main}
+		if !podSpecIsZero(&podSpec) {
+			eps.PodSpec = &podSpec
 		}
 		dst.ExtraPodSpec = eps
 	}
-
-	return nil
 }
 
 func decomposeMissingPodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) {
@@ -1619,6 +1698,7 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 		return err
 	}
 	dst.PodTemplate = podTemplate
+
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
 	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
@@ -1677,6 +1757,7 @@ func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDep
 	restoreSharedPodTemplateContainerOrder(out, preserved.PodTemplate)
 	restoreSharedHubOnlyPodTemplateMetadata(&out.ObjectMeta, preserved.PodTemplate.ObjectMeta)
 	restoreSharedHubOnlyFlatVolumeMountFields(out, preserved.PodTemplate, src)
+	restoreSharedHubOnlyVolumeMountOrder(out, preserved.PodTemplate, compilationCache, src)
 	if podTemplateIsZero(preserved.PodTemplate) && podTemplateIsZero(out) {
 		return out, nil
 	}
@@ -1890,6 +1971,72 @@ func restoreSharedHubOnlyFlatVolumeMountFields(dst, preserved *corev1.PodTemplat
 		}
 		return
 	}
+}
+
+func restoreSharedHubOnlyVolumeMountOrder(dst, preserved *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) {
+	if dst == nil || preserved == nil || src == nil {
+		return
+	}
+	preservedMain, ok := findContainerByName(preserved.Spec.Containers, mainContainerName)
+	if !ok {
+		return
+	}
+
+	// Restore hub ordering only while the live alpha fields still equal the
+	// lossy cache-first projection produced by conversion from this hub payload.
+	projected := projectedAlphaVolumeMountsFromHub(preservedMain.VolumeMounts, compilationCache)
+	if !volumeMountsEqual(src.VolumeMounts, projected) {
+		return
+	}
+	for i := range dst.Spec.Containers {
+		if dst.Spec.Containers[i].Name != mainContainerName {
+			continue
+		}
+		reordered, ok := reorderNativeVolumeMounts(dst.Spec.Containers[i].VolumeMounts, preservedMain.VolumeMounts)
+		if ok {
+			dst.Spec.Containers[i].VolumeMounts = reordered
+		}
+		return
+	}
+}
+
+func projectedAlphaVolumeMountsFromHub(mounts []corev1.VolumeMount, compilationCache *v1beta1.CompilationCacheConfig) []VolumeMount {
+	projected := make([]VolumeMount, 0, len(mounts)+1)
+	if compilationCache != nil {
+		projected = append(projected, VolumeMount{
+			Name:                  compilationCache.PVCName,
+			MountPoint:            compilationCache.MountPath,
+			UseAsCompilationCache: true,
+		})
+	}
+	return appendMissingVolumeMounts(projected, volumeMountsFromNative(mounts))
+}
+
+func reorderNativeVolumeMounts(current, preserved []corev1.VolumeMount) ([]corev1.VolumeMount, bool) {
+	if len(current) != len(preserved) {
+		return current, false
+	}
+	if len(current) == 0 {
+		return current, true
+	}
+	reordered := make([]corev1.VolumeMount, 0, len(current))
+	used := make([]bool, len(current))
+	for _, preservedMount := range preserved {
+		found := false
+		for i := range current {
+			if used[i] || current[i].Name != preservedMount.Name || current[i].MountPath != preservedMount.MountPath {
+				continue
+			}
+			reordered = append(reordered, *current[i].DeepCopy())
+			used[i] = true
+			found = true
+			break
+		}
+		if !found {
+			return current, false
+		}
+	}
+	return reordered, true
 }
 
 func sourceFlatVolumeMountMatches(mounts []VolumeMount, mount corev1.VolumeMount) bool {

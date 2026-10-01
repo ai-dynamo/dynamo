@@ -26,8 +26,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"k8s.io/client-go/scale"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,6 +39,7 @@ import (
 // exposing no dependency on the top-level DGD controller.
 type groveWorkloadsReconciler struct {
 	syncer          dgdResourceSyncer
+	rollout         *dgdWorkerRolloutReconciler
 	reader          client.Reader
 	renderer        *groveWorkloadRenderer
 	scaler          *groveScaler
@@ -46,64 +49,103 @@ type groveWorkloadsReconciler struct {
 func newGroveWorkloadsReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,
+	rollout *dgdWorkerRolloutReconciler,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
 	dockerSecretRetriever DockerSecretRetriever,
-	scaleClient scale.ScalesGetter,
 ) *groveWorkloadsReconciler {
 	return &groveWorkloadsReconciler{
-		syncer: newDGDResourceSyncer(kubeClient, recorder),
-		reader: kubeClient,
+		syncer:  newDGDResourceSyncer(kubeClient, recorder),
+		rollout: rollout,
+		reader:  kubeClient,
 		renderer: newGroveWorkloadRenderer(
 			kubeClient,
 			config,
 			runtimeConfig,
 			dockerSecretRetriever,
 		),
-		scaler:          newGroveScaler(scaleClient),
+		scaler:          newGroveScaler(kubeClient),
 		stableResources: newGroveStableResourcesReconciler(kubeClient, recorder, config),
 	}
 }
 
 func (r *groveWorkloadsReconciler) Reconcile(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	req groveReconcileRequest,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
+	managedComponents := req.ManagedComponents()
+
+	// A graph with only external components still reconciles graph-wide stable resources.
+	if len(managedComponents) == 0 {
+		stableResources, err := r.stableResources.Reconcile(ctx, req, nil)
+		if err != nil {
+			return ReconcileResult{}, err
+		}
+		return checkResourcesReadiness(stableResources), nil
+	}
+
 	logger := log.FromContext(ctx)
 
-	desiredPodCliqueSet, err := r.renderer.Render(
+	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(req.DGD)
+	if err != nil {
+		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	renderedPodCliqueSet, err := r.renderer.Render(
 		ctx,
-		dgd,
+		req,
 		restartState,
 		checkpointInfos,
+		workerHashTransition.hashChanged,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	renderDeployment := groveRenderDeployment(dgd, desiredPodCliqueSet)
 
-	syncedPodCliqueSet, err := r.reconcilePodCliqueSet(ctx, dgd, desiredPodCliqueSet)
+	// Converge the ordinary PCS before rollout or readiness observation.
+	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, req.DGD, renderedPodCliqueSet)
 	if err != nil {
-		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
 
-	if err := r.scaler.Reconcile(ctx, dgd, checkpointInfos); err != nil {
+	// Defer commit if the PCS was written this reconcile; the informer hasn't caught up yet.
+	if workerHashTransition.needsCommit() && !pcsWasWritten {
+		// Pre-existing legacy PCS without a suffix is the only case where unstamped is valid.
+		isLegacyUnsuffixed := workerHashTransition.noCurrentAnnotation &&
+			renderedPodCliqueSet.existing != nil &&
+			!podCliqueSetUsesGroveWorkerHashSuffix(req, renderedPodCliqueSet.existing)
+		observed, err := podCliqueSetObservesWorkerHash(req, renderedPodCliqueSet.existing, isLegacyUnsuffixed)
+		if err != nil {
+			return ReconcileResult{}, failWorkloadProgram(
+				reasonRollingUpdateFailed,
+				fmt.Errorf("observe Grove worker hash before projection: %w", err),
+			)
+		}
+		if observed {
+			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, req.DGD, workerHashTransition, true); err != nil {
+				return ReconcileResult{}, failWorkloadProgram(
+					reasonRollingUpdateFailed,
+					fmt.Errorf("project observed Grove worker hash: %w", err),
+				)
+			}
+		}
+	}
+
+	if err := r.scaler.Reconcile(ctx, req, checkpointInfos); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
-	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderDeployment)
+	stableResources, err := r.stableResources.Reconcile(ctx, req, syncedPodCliqueSet)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
 
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
-		dgd,
+		req,
 		syncedPodCliqueSet,
 	)
 	if err != nil {
@@ -111,26 +153,53 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 
 	resources := append(stableResources, podCliqueSetResource)
-	return checkGroveResourcesReadiness(resources, readiness.Classification), nil
+	result := checkGroveResourcesReadiness(resources, readiness.Classification)
+	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
+	return result, nil
 }
 
+// reconcilePodCliqueSet returns the current PCS and whether it was created or updated.
+// The rendered desired PCS must be non-nil.
 func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	desired *grovev1alpha1.PodCliqueSet,
-) (*grovev1alpha1.PodCliqueSet, error) {
-	_, synced, err := commoncontroller.SyncResource(
+	rendered *grovePodCliqueSetRender,
+) (*grovev1alpha1.PodCliqueSet, bool, error) {
+	// Compose opaque provider fields only at the serialization boundary.
+	desiredProviderObject, err := provideroverride.ComposeGroveOverrides(dgd, rendered.desired)
+	if err != nil {
+		return nil, false, fmt.Errorf("compose Grove provider overrides: %w", err)
+	}
+
+	// Serialize the exact typed observation selected during rendering.
+	var observedProviderObject *unstructured.Unstructured
+	if rendered.existing != nil {
+		object, conversionErr := runtime.DefaultUnstructuredConverter.ToUnstructured(rendered.existing)
+		if conversionErr != nil {
+			return nil, false, fmt.Errorf("convert observed Grove PodCliqueSet to unstructured: %w", conversionErr)
+		}
+		observedProviderObject = &unstructured.Unstructured{Object: object}
+		observedProviderObject.SetGroupVersionKind(desiredProviderObject.GroupVersionKind())
+	}
+
+	// Synchronize without rereading or mutating the render observation.
+	wasWritten, synced, err := commoncontroller.SyncObservedResource(
 		ctx,
 		&r.syncer,
 		dgd,
-		func(context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
-			return desired, false, nil
-		},
+		observedProviderObject,
+		desiredProviderObject,
 	)
 	if err != nil {
-		return nil, err
+		return nil, false, fmt.Errorf("sync Grove PodCliqueSet: %w", err)
 	}
-	return synced, nil
+
+	// Adapt the synchronized wire object to the typed Grove readiness view.
+	podCliqueSet := &grovev1alpha1.PodCliqueSet{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(synced.Object, podCliqueSet); err != nil {
+		return nil, false, fmt.Errorf("convert synchronized Grove PodCliqueSet: %w", err)
+	}
+	return podCliqueSet, wasWritten, nil
 }
 
 // observePodCliqueSetReadiness takes the authoritative Grove snapshot after
@@ -138,10 +207,10 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 // readiness interface without further Kubernetes reads.
 func (r *groveWorkloadsReconciler) observePodCliqueSetReadiness(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	req groveReconcileRequest,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
 ) (*commoncontroller.Resource, dynamo.GroveReadiness, error) {
-	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, dgd)
+	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, req.DGD, req.IsDelegated, podCliqueSet)
 	if err != nil {
 		return nil, dynamo.GroveReadiness{}, err
 	}

@@ -29,6 +29,7 @@ Or view the source: [`docs/contribution-guide.md`](docs/fern/pages/community/con
 
 - [Good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue)
 - [Help wanted](https://github.com/ai-dynamo/dynamo/labels/help-wanted)
+- [Code ownership](.github/codeowners/README.md) -- who reviews my PR, fixing the `codeowners` check, earning area ownership
 - [Open a bug report](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)
 - [Propose a feature](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)
 - [Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)
@@ -39,5 +40,16 @@ Or view the source: [`docs/contribution-guide.md`](docs/fern/pages/community/con
 - [Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday)
 
 Dynamo requires all contributions to be signed off with the [Developer Certificate of Origin (DCO)](https://developercertificate.org/). This certifies that you have the right to submit your contribution under the project's [Apache 2.0 license](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE).
+
+For pull requests from forks that qualify for automatic trusted-CI approval, every commit must
+have a cryptographic signature that GitHub reports as `Verified`. A DCO sign-off from
+`git commit -s` does not sign a commit. Configure [GitHub-supported commit
+signing](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits),
+sign every commit in the PR, and confirm that GitHub marks each one as `Verified`. If any
+commit is not verified, the automatic `/ok to test` comment is not posted.
+
+Signing commits does not by itself qualify a fork pull request for automatic approval. When
+automatic approval is unavailable, a maintainer can review the current head and comment
+`/ok to test <sha>` to start CI.
 
 By contributing, you agree that your contributions will be licensed under the [Apache 2.0 License](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE).

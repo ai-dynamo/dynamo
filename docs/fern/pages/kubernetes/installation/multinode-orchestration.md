@@ -4,9 +4,7 @@
 title: Multinode Orchestration
 ---
 
-Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes. See the [Multinode Deployment Guide](../model-deployment/multinode-deployments.md) for details on orchestrator selection and configuration.
-
-
+Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes.
 
 ## Option 1: Grove + KAI Scheduler
 
@@ -17,12 +15,13 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
 
   The managed installation is recommended for development and testing. It is the simplest path, and allows Dynamo to manage the lifecycle of Grove and KAI Scheduler as bundled subcharts. Run the following command to install Dynamo with Grove and KAI Scheduler:
 
-  ```
+  ```bash
   helm upgrade --install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
   --create-namespace \
   --set "global.grove.install=true" \
-  --set "global.kai-scheduler.install=true"
+  --set "global.kai-scheduler.install=true" \
+  --set-string "kai-scheduler.scheduler.args.default-staleness-grace-period=-1s"
   ```
   </Tab>
   <Tab title="External Installation" value="external">
@@ -32,7 +31,7 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
 
   Then, run the following command to install or configure Dynamo to use the existing Grove and KAI Scheduler:
 
-  ```
+  ```bash
   helm upgrade --install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
   --create-namespace \
@@ -47,6 +46,7 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
   > |-----------------|---------------|-------|
   > | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
   > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
+  > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 
   </Tab>
 </Tabs>
@@ -76,4 +76,4 @@ helm install lws oci://registry.k8s.io/lws/charts/lws \
   --wait --timeout 300s
 ```
 
-See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options, and the [Multinode Deployment Guide](../model-deployment/multinode-deployments.md) for orchestrator selection.
+See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options.

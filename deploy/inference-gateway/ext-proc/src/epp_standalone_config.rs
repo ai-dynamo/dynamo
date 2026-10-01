@@ -13,9 +13,10 @@
 use validator::Validate;
 use validator::ValidationError;
 
-use crate::vllm_render_client::parse_tokenizer_service_base_url;
+use crate::render_http::parse_render_base_url;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
+const DEFAULT_REPLICA_SYNC_PORT: u16 = 9092;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
 const DEFAULT_TOKENIZATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -31,6 +32,10 @@ pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
 pub const STANDALONE_MODE: &str = "standalone";
 /// `DYN_EPP_MODE` value selecting the Dynamo runtime.
 pub const DYNAMO_RUNTIME_MODE: &str = "dynamo";
+
+/// Mirrors `DYN_KUBE_DISCOVERY_MODE` in `dynamo_runtime::discovery`; read
+/// directly here because standalone mode has no Dynamo runtime to read it for.
+const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 
 /// Reads an environment variable, matching the injectable getter used in tests.
 type EnvGet<'a> = dyn Fn(&str) -> Option<String> + 'a;
@@ -62,24 +67,45 @@ impl EppMode {
     }
 }
 
-/// Wire protocol exposed by the configured tokenizer service.
+/// Render protocol spoken by the configured renderer sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenizerProtocol {
+pub enum RendererProtocol {
+    /// vLLM's `/v1/chat/completions/render` endpoint; response shape `{"token_ids": [...]}`.
     VllmRender,
+    /// SGLang renderer's `/v1/chat/completions/render` endpoint; response shape `{"input_ids": [...]}`.
+    SglangRenderer,
 }
 
-impl std::str::FromStr for TokenizerProtocol {
+impl std::str::FromStr for RendererProtocol {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "vllm-render" => Ok(Self::VllmRender),
+            "sglang-renderer" => Ok(Self::SglangRenderer),
             other => anyhow::bail!(
                 "DYN_EPP_TOKENIZER_PROTOCOL has invalid value {other:?}; \
-                 expected \"vllm-render\""
+                 expected \"vllm-render\" or \"sglang-renderer\""
             ),
         }
     }
+}
+
+/// Complete replica synchronization configuration. Its presence enables
+/// replica-sync; its fields are validated together when parsing the environment.
+#[derive(Debug, Clone, Validate)]
+pub struct PeerReplicationConfig {
+    /// EPP Service used for peer discovery and state synchronization.
+    pub service_name: String,
+    /// Local EPP Pod IP from `POD_IP` (downward API), used to exclude self.
+    pub pod_ip: String,
+    /// ZMQ listener and peer dial port. Every EPP selected by `service_name`
+    /// must use the same port.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_REPLICA_SYNC_PORT must be greater than zero"
+    ))]
+    pub sync_port: u16,
 }
 
 #[derive(Debug, Clone, Validate)]
@@ -87,9 +113,9 @@ pub struct EppStandaloneConfig {
     /// KV indexer thread-pool size for the in-process selector.
     #[validate(range(min = 1))]
     pub selector_threads: usize,
-    /// EPP Service for peer discovery and state synchronization. The eventual
-    /// selector resolves its named `replica-agg` port from EndpointSlices.
-    pub peer_service: Option<String>,
+    /// Enables replica synchronization when set.
+    #[validate(nested)]
+    pub peer_replication: Option<PeerReplicationConfig>,
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
     #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]
     pub inference_pool_name: String,
@@ -103,8 +129,8 @@ pub struct EppStandaloneConfig {
     #[validate(length(min = 1, message = "DYN_EPP_TOKENIZER_SERVICE_URL is required"))]
     #[validate(custom(function = "validate_tokenizer_service_url"))]
     pub tokenizer_service_url: String,
-    /// Protocol spoken by the configured tokenizer service.
-    pub tokenizer_protocol: TokenizerProtocol,
+    /// Protocol spoken by the configured renderer sidecar.
+    pub renderer_protocol: RendererProtocol,
     /// Deadline for calls to the configured tokenization provider.
     #[validate(range(min = 1, message = "DYN_EPP_TOKENIZATION_TIMEOUT_MS must be >= 1"))]
     pub tokenization_timeout_ms: u64,
@@ -114,6 +140,17 @@ pub struct EppStandaloneConfig {
     /// KV-cache block size; MUST equal the inference engine block size.
     #[validate(range(min = 1, message = "DYN_KV_CACHE_BLOCK_SIZE must be >= 1"))]
     pub block_size: u32,
+    /// Data-parallel ranks per worker pod. Only `1` is accepted: the EPP routes
+    /// by worker and cannot convey the selected rank to the pod.
+    #[validate(range(
+        min = 1,
+        max = 1,
+        message = "DYN_EPP_DATA_PARALLEL_SIZE must be 1; multi-rank standalone serving is unsupported"
+    ))]
+    pub data_parallel_size: u32,
+    /// Port distance between consecutive data-parallel ranks' KV event ports.
+    #[validate(range(min = 1, message = "DYN_EPP_KV_EVENT_PORT_STRIDE must be >= 1"))]
+    pub kv_event_port_stride: u16,
     /// KV zmq event port.
     #[validate(range(min = 1))]
     pub kv_event_port: u16,
@@ -137,31 +174,60 @@ pub struct EppStandaloneConfig {
     /// throughput throttle). Excess requests are shed with a 503, not queued.
     #[validate(range(min = 1, message = "DYN_EPP_MAX_INFLIGHT_REQUESTS must be >= 1"))]
     pub max_inflight_requests: usize,
+    /// Pin each `x-dynamo-session-id` to the worker that served it for this
+    /// long after its last request (`DYN_EPP_SESSION_AFFINITY_TTL_SECS`).
+    /// `None` disables session affinity.
+    #[validate(range(
+        min = 1.0,
+        max = 31536000.0,
+        message = "DYN_EPP_SESSION_AFFINITY_TTL_SECS must be between 1 and 31536000 seconds"
+    ))]
+    pub session_affinity_ttl_secs: Option<f64>,
 }
 
 impl EppStandaloneConfig {
     /// Build and validate the standalone contract from the process environment.
     pub fn from_env() -> anyhow::Result<Self> {
+        reject_unsupported_container_discovery(&|k| std::env::var(k).ok())?;
         let config = Self::parse(&|k| std::env::var(k).ok())?;
         config.validate_config()?;
         Ok(config)
     }
 
     fn parse(get: &EnvGet) -> anyhow::Result<Self> {
-        let tokenizer_protocol = trimmed(get("DYN_EPP_TOKENIZER_PROTOCOL"))
+        let renderer_protocol = trimmed(get("DYN_EPP_TOKENIZER_PROTOCOL"))
             .ok_or_else(|| anyhow::anyhow!("DYN_EPP_TOKENIZER_PROTOCOL is required"))?
             .parse()?;
+        let peer_service = trimmed(get("DYN_EPP_PEER_SERVICE"));
+        let pod_ip = trimmed(get("POD_IP"));
+        let sync_port = opt_parse::<u16>(get, "DYN_EPP_REPLICA_SYNC_PORT")?
+            .unwrap_or(DEFAULT_REPLICA_SYNC_PORT);
+        let peer_replication = peer_service
+            .map(|service_name| -> anyhow::Result<_> {
+                let pod_ip = pod_ip.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid {STANDALONE_MODE} EPP config: DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; \
+                         inject POD_IP via the downward API (fieldRef status.podIP)"
+                    )
+                })?;
+                Ok(PeerReplicationConfig {
+                    service_name,
+                    pod_ip,
+                    sync_port,
+                })
+            })
+            .transpose()?;
 
         Ok(Self {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTION_INDEXER_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
-            peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
+            peer_replication,
             inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
             tokenizer_service_url: trimmed(get("DYN_EPP_TOKENIZER_SERVICE_URL"))
                 .unwrap_or_default(),
-            tokenizer_protocol,
+            renderer_protocol,
             tokenization_timeout_ms: opt_parse::<u64>(get, "DYN_EPP_TOKENIZATION_TIMEOUT_MS")?
                 .unwrap_or(DEFAULT_TOKENIZATION_TIMEOUT_MS),
             tokenizer_max_response_bytes: opt_parse::<usize>(
@@ -170,6 +236,9 @@ impl EppStandaloneConfig {
             )?
             .unwrap_or(DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES),
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
+            data_parallel_size: opt_parse::<u32>(get, "DYN_EPP_DATA_PARALLEL_SIZE")?.unwrap_or(1),
+            kv_event_port_stride: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT_STRIDE")?
+                .unwrap_or(1),
             kv_event_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT")?
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
             replay_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_REPLAY_PORT")?,
@@ -177,13 +246,49 @@ impl EppStandaloneConfig {
             max_num_batched_tokens: opt_parse::<u64>(get, "DYN_EPP_MAX_NUM_BATCHED_TOKENS")?,
             max_inflight_requests: opt_parse::<usize>(get, "DYN_EPP_MAX_INFLIGHT_REQUESTS")?
                 .unwrap_or(DEFAULT_MAX_INFLIGHT_REQUESTS),
+            session_affinity_ttl_secs: opt_parse::<f64>(get, "DYN_EPP_SESSION_AFFINITY_TTL_SECS")?,
         })
     }
 
     /// Enforce the `validator` constraints, mapping the failure to `anyhow`.
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
-            .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))
+            .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))?;
+        Ok(())
+    }
+}
+
+/// Reject `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod GMS failover)
+/// in standalone mode. Standalone support is planned rather than ruled out;
+/// see the note below for what it requires.
+///
+/// Unlike `DYN_EPP_MODE=dynamo` (which already resolves per-container worker
+/// identities; see `hash_container_name` / `pod_worker_ids` in `epp.rs`),
+/// standalone has no Dynamo runtime worker registration to fall back on:
+/// `pod_discovery.rs` selects workers purely from the K8s Pod's own aggregate
+/// `Ready` condition. An intra-pod failover pod never satisfies that
+/// condition in steady state — each engine container gets its own readiness
+/// probe, and the standby engine is intentionally `NotReady` while armed —
+/// so the whole pod, including the healthy active engine, would be silently
+/// excluded from every worker index rather than just failing to fail over.
+/// Reject it at startup instead of shipping that silent malfunction.
+///
+/// Lifting this rejection is planned work, tracked by DEP #11661 (EPP Embedded
+/// SelectionService Interface): <https://github.com/ai-dynamo/dynamo/issues/11661>.
+/// It requires replacing `pod_discovery.rs`'s pod-aggregate `pod_is_ready()`
+/// gate with a per-named-container readiness check (mirroring dynamo mode's
+/// `pod_worker_ids`), so a `WorkerIndex` entry is keyed on an individual
+/// container's own `Ready` status rather than the pod's.
+fn reject_unsupported_container_discovery(get: &EnvGet) -> anyhow::Result<()> {
+    match trimmed(get(DYN_KUBE_DISCOVERY_MODE)).as_deref() {
+        Some("container") => anyhow::bail!(
+            "standalone EPP ({STANDALONE_MODE} mode) does not yet support \
+             {DYN_KUBE_DISCOVERY_MODE}=container (e.g. intra-pod GMS failover): pod discovery \
+             selects workers from the Pod's aggregate Ready condition, which a pod with an \
+             intentionally-standby engine container never satisfies; use \
+             {DYN_EPP_MODE}={DYNAMO_RUNTIME_MODE} instead, or disable intra-pod failover for this worker"
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -192,14 +297,12 @@ fn validate_tokenizer_service_url(value: &str) -> Result<(), ValidationError> {
         return Ok(());
     }
 
-    parse_tokenizer_service_base_url(value)
-        .map(|_| ())
-        .map_err(|_| {
-            let mut error = ValidationError::new("tokenizer_service_url_invalid");
-            error.message =
-                Some("DYN_EPP_TOKENIZER_SERVICE_URL must be an absolute HTTP(S) URL".into());
-            error
-        })
+    parse_render_base_url(value).map(|_| ()).map_err(|_| {
+        let mut error = ValidationError::new("tokenizer_service_url_invalid");
+        error.message =
+            Some("DYN_EPP_TOKENIZER_SERVICE_URL must be an absolute HTTP(S) URL".into());
+        error
+    })
 }
 
 /// Trim a raw value and treat empty as absent.
@@ -278,6 +381,28 @@ mod tests {
     }
 
     #[test]
+    fn container_discovery_mode_rejected_for_standalone() {
+        assert!(
+            reject_unsupported_container_discovery(&getter(&[(
+                "DYN_KUBE_DISCOVERY_MODE",
+                "container"
+            )]))
+            .is_err(),
+            "intra-pod failover's container discovery must fail fast in standalone mode, \
+             not silently exclude every pod from the worker index"
+        );
+    }
+
+    #[test]
+    fn pod_discovery_mode_and_unset_are_fine_for_standalone() {
+        assert!(reject_unsupported_container_discovery(&getter(&[])).is_ok());
+        assert!(
+            reject_unsupported_container_discovery(&getter(&[("DYN_KUBE_DISCOVERY_MODE", "pod")]))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn parses_required_and_defaults() {
         let cfg = parse_cfg(&[
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
@@ -290,12 +415,12 @@ mod tests {
         .expect("config should parse");
         assert_eq!(cfg.selector_threads, DEFAULT_SELECTOR_THREADS);
         // No peer service => single-replica (replica sync off).
-        assert!(cfg.peer_service.is_none());
+        assert!(cfg.peer_replication.is_none());
         assert_eq!(cfg.inference_pool_name, "vllm-qwen-pool");
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
         assert_eq!(cfg.tokenizer_service_url, "http://vllm-render:8000");
-        assert_eq!(cfg.tokenizer_protocol, TokenizerProtocol::VllmRender);
+        assert_eq!(cfg.renderer_protocol, RendererProtocol::VllmRender);
         assert_eq!(cfg.tokenization_timeout_ms, DEFAULT_TOKENIZATION_TIMEOUT_MS);
         assert_eq!(
             cfg.tokenizer_max_response_bytes,
@@ -325,21 +450,92 @@ mod tests {
     }
 
     #[test]
-    fn peer_service_config_parsed() {
-        let cfg = parse_cfg(&[
-            ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
-            ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
+    fn peer_replication_config() {
+        type ExtraEnv = &'static [(&'static str, &'static str)];
+        type Expected = Result<(u16, usize), &'static str>;
+        type Case = (&'static str, ExtraEnv, Expected);
+
+        let required = [
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
             ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
-        ])
-        .expect("peer service config should parse");
-        assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"));
-        assert_eq!(cfg.selector_threads, 8);
-        assert_eq!(cfg.namespace, "inference");
+        ];
+        let cases: [Case; 6] = [
+            (
+                "default port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
+                ],
+                Ok((DEFAULT_REPLICA_SYNC_PORT, 8)),
+            ),
+            (
+                "overridden port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "9192"),
+                ],
+                Ok((9192, DEFAULT_SELECTOR_THREADS)),
+            ),
+            (
+                "missing pod ip",
+                &[("DYN_EPP_PEER_SERVICE", "dynamo-epp")],
+                Err("POD_IP"),
+            ),
+            (
+                "blank pod ip",
+                &[("DYN_EPP_PEER_SERVICE", "dynamo-epp"), ("POD_IP", " ")],
+                Err("POD_IP"),
+            ),
+            (
+                "zero port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "0"),
+                ],
+                Err("DYN_EPP_REPLICA_SYNC_PORT"),
+            ),
+            (
+                "out of range port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "65536"),
+                ],
+                Err("DYN_EPP_REPLICA_SYNC_PORT"),
+            ),
+        ];
+
+        for (name, extra, expected) in cases {
+            let mut env = required.to_vec();
+            env.extend_from_slice(extra);
+            match expected {
+                Ok((port, selector_threads)) => {
+                    let cfg = parse_cfg(&env).unwrap_or_else(|error| panic!("{name}: {error}"));
+                    let replication = cfg
+                        .peer_replication
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{name}: replication should be enabled"));
+                    assert_eq!(replication.service_name, "dynamo-epp", "{name}");
+                    assert_eq!(replication.pod_ip, "10.0.0.10", "{name}");
+                    assert_eq!(replication.sync_port, port, "{name}");
+                    assert_eq!(cfg.selector_threads, selector_threads, "{name}");
+                }
+                Err(expected_error) => {
+                    let error = parse_cfg(&env).expect_err(name);
+                    assert!(
+                        error.to_string().contains(expected_error),
+                        "{name}: {error}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -366,6 +562,21 @@ mod tests {
                 ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
                 ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "0"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn data_parallel_size_above_one_fails() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+                ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+                ("DYN_EPP_DATA_PARALLEL_SIZE", "2"),
             ])
             .is_err()
         );
@@ -527,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_protocol_is_required() {
+    fn renderer_protocol_is_required() {
         assert!(
             parse_cfg(&[
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
@@ -541,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_tokenizer_protocol_fails() {
+    fn unsupported_renderer_protocol_fails() {
         assert!(
             parse_cfg(&[
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
@@ -556,5 +767,22 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn sglang_renderer_protocol_is_accepted() {
+        let cfg = parse_cfg(&[
+            ("DYN_EPP_INFERENCE_POOL_NAME", "sglang-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            (
+                "DYN_EPP_TOKENIZER_SERVICE_URL",
+                "http://sglang-renderer:30000",
+            ),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "sglang-renderer"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+        ])
+        .expect("sglang-renderer protocol should be accepted");
+        assert_eq!(cfg.renderer_protocol, RendererProtocol::SglangRenderer);
     }
 }

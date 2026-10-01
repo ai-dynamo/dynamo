@@ -136,15 +136,40 @@ Fixed-schedule behavior is required to preserve recorded arrival times, although
 
 ### Offline simulation with DynoSim
 
-Pass the captured shards directly to simulated workers:
+Save `/tmp/agent-run/prediction.yaml` with the captured shards:
+
+```yaml
+traffic:
+  source:
+    type: trace
+    format: dynamo
+    paths: [/tmp/agent-run/request-trace.0000.jsonl.gz]
+  load: {type: trace_timestamps, speedup: 1.0}
+engine:
+  mode: aggregated
+  model: meta-llama/Meta-Llama-3.1-8B-Instruct
+  hardware: h200_sxm
+  backend: vllm
+  context_length: max
+  workers:
+    aggregated:
+      parallelism: {replicas: 4, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: default, memory_fraction: 0.9}}
+      timing: {type: default}
+router:
+  policy: kv_router
+  prefill_load_model: {type: none}
+planner: {policy: disabled}
+```
+
+Add every shard to `traffic.source.paths`, then pass the configuration to the Dynamo stack:
 
 ```bash
-python -m dynamo.replay /tmp/agent-run/request-trace.*.jsonl.gz \
-  --trace-format dynamo \
-  --replay-mode offline \
-  --router-mode kv_router \
-  --num-workers 4 \
-  --report-json /tmp/agent-run/dynosim-report.json
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/agent-run/prediction.yaml \
+  --output-dir /tmp/agent-run/dynosim-prediction
 ```
 
 DynoSim derives and validates the block size across all shards. When every request carries session identity, it also reconstructs the agent DAG and tool-wait timing. `kv_router` requires at least two simulated workers. Change worker count, routing, or engine settings to compare configurations without running the model.

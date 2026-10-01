@@ -12,7 +12,12 @@ spec:
       podTemplate:
         spec:
           containers:
-            - image: $ignore
+            - args:
+                - -m
+                - dynamo.frontend
+              command:
+                - python3
+              image: $ignore
               name: main
       replicas: 1
       runtimeVersionOverride: 1.4.0
@@ -32,20 +37,16 @@ spec:
                 - "1.0"
                 - --disaggregation-mode
                 - decode
-                - --aic-perf-model
-                - --aic-backend
+                - --ais-perf-model
+                - --ais-backend
                 - vllm
-                - --aic-backend-version
-                - 0.14.0
-                - --aic-system
+                - --ais-backend-version
+                - 0.24.0
+                - --ais-system
                 - h100_sxm
-                - --aic-tp-size
+                - --ais-tp-size
                 - "1"
-                - --aic-moe-tp-size
-                - "1"
-                - --aic-moe-ep-size
-                - "1"
-                - --aic-attention-dp-size
+                - --ais-attention-dp-size
                 - "1"
                 - --engine-type
                 - vllm
@@ -75,20 +76,16 @@ spec:
                 - "1.0"
                 - --disaggregation-mode
                 - prefill
-                - --aic-perf-model
-                - --aic-backend
+                - --ais-perf-model
+                - --ais-backend
                 - vllm
-                - --aic-backend-version
-                - 0.14.0
-                - --aic-system
+                - --ais-backend-version
+                - 0.24.0
+                - --ais-system
                 - h100_sxm
-                - --aic-tp-size
+                - --ais-tp-size
                 - "1"
-                - --aic-moe-tp-size
-                - "1"
-                - --aic-moe-ep-size
-                - "1"
-                - --aic-attention-dp-size
+                - --ais-attention-dp-size
                 - "1"
                 - --engine-type
                 - vllm
@@ -122,7 +119,7 @@ spec:
       annotations:
         nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
       labels:
-        nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
     spec:
       containers:
         - args:
@@ -134,20 +131,16 @@ spec:
             - "1.0"
             - --disaggregation-mode
             - decode
-            - --aic-perf-model
-            - --aic-backend
+            - --ais-perf-model
+            - --ais-backend
             - vllm
-            - --aic-backend-version
-            - 0.14.0
-            - --aic-system
+            - --ais-backend-version
+            - 0.24.0
+            - --ais-system
             - h100_sxm
-            - --aic-tp-size
+            - --ais-tp-size
             - "1"
-            - --aic-moe-tp-size
-            - "1"
-            - --aic-moe-ep-size
-            - "1"
-            - --aic-attention-dp-size
+            - --ais-attention-dp-size
             - "1"
             - --engine-type
             - vllm
@@ -300,7 +293,7 @@ spec:
           nvidia.com/dynamo-graph-deployment-name: aic-lws-dgd
           nvidia.com/dynamo-namespace: $glob:clusterenv-*-aic-lws-dgd
           nvidia.com/dynamo-sub-component-type: decode
-          nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
+          nvidia.com/dynamo-worker-hash: $var:worker-hash
           nvidia.com/metrics-enabled: "true"
           role: leader
       spec:
@@ -314,20 +307,16 @@ spec:
               - "1.0"
               - --disaggregation-mode
               - decode
-              - --aic-perf-model
-              - --aic-backend
+              - --ais-perf-model
+              - --ais-backend
               - vllm
-              - --aic-backend-version
-              - 0.14.0
-              - --aic-system
+              - --ais-backend-version
+              - 0.24.0
+              - --ais-system
               - h100_sxm
-              - --aic-tp-size
+              - --ais-tp-size
               - "1"
-              - --aic-moe-tp-size
-              - "1"
-              - --aic-moe-ep-size
-              - "1"
-              - --aic-attention-dp-size
+              - --ais-attention-dp-size
               - "1"
               - --engine-type
               - vllm
@@ -347,7 +336,7 @@ spec:
               - name: DYN_NAMESPACE
                 value: $glob:clusterenv-*-aic-lws-dgd
               - name: DYN_NAMESPACE_WORKER_SUFFIX
-                value: $pattern:[0-9a-f]{8}
+                value: $var:worker-hash
               - name: DYN_PARENT_DGD_K8S_NAME
                 value: aic-lws-dgd
               - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -436,7 +425,7 @@ spec:
           nvidia.com/dynamo-graph-deployment-name: aic-lws-dgd
           nvidia.com/dynamo-namespace: $glob:clusterenv-*-aic-lws-dgd
           nvidia.com/dynamo-sub-component-type: decode
-          nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
+          nvidia.com/dynamo-worker-hash: $var:worker-hash
           nvidia.com/metrics-enabled: "true"
           role: worker
       spec:
@@ -450,20 +439,16 @@ spec:
               - "1.0"
               - --disaggregation-mode
               - decode
-              - --aic-perf-model
-              - --aic-backend
+              - --ais-perf-model
+              - --ais-backend
               - vllm
-              - --aic-backend-version
-              - 0.14.0
-              - --aic-system
+              - --ais-backend-version
+              - 0.24.0
+              - --ais-system
               - h100_sxm
-              - --aic-tp-size
+              - --ais-tp-size
               - "1"
-              - --aic-moe-tp-size
-              - "1"
-              - --aic-moe-ep-size
-              - "1"
-              - --aic-attention-dp-size
+              - --ais-attention-dp-size
               - "1"
               - --engine-type
               - vllm
@@ -483,7 +468,7 @@ spec:
               - name: DYN_NAMESPACE
                 value: $glob:clusterenv-*-aic-lws-dgd
               - name: DYN_NAMESPACE_WORKER_SUFFIX
-                value: $pattern:[0-9a-f]{8}
+                value: $var:worker-hash
               - name: DYN_PARENT_DGD_K8S_NAME
                 value: aic-lws-dgd
               - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -598,7 +583,7 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: aic-lws-dgd
         nvidia.com/dynamo-namespace: $glob:clusterenv-*-aic-lws-dgd
         nvidia.com/dynamo-sub-component-type: prefill
-        nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
         nvidia.com/metrics-enabled: "true"
         nvidia.com/selector: $glob:aic-lws-dgd-prefill-*
     spec:
@@ -612,20 +597,16 @@ spec:
             - "1.0"
             - --disaggregation-mode
             - prefill
-            - --aic-perf-model
-            - --aic-backend
+            - --ais-perf-model
+            - --ais-backend
             - vllm
-            - --aic-backend-version
-            - 0.14.0
-            - --aic-system
+            - --ais-backend-version
+            - 0.24.0
+            - --ais-system
             - h100_sxm
-            - --aic-tp-size
+            - --ais-tp-size
             - "1"
-            - --aic-moe-tp-size
-            - "1"
-            - --aic-moe-ep-size
-            - "1"
-            - --aic-attention-dp-size
+            - --ais-attention-dp-size
             - "1"
             - --engine-type
             - vllm
@@ -645,7 +626,7 @@ spec:
             - name: DYN_NAMESPACE
               value: $glob:clusterenv-*-aic-lws-dgd
             - name: DYN_NAMESPACE_WORKER_SUFFIX
-              value: $pattern:[0-9a-f]{8}
+              value: $var:worker-hash
             - name: DYN_PARENT_DGD_K8S_NAME
               value: aic-lws-dgd
             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -753,7 +734,12 @@ spec:
         nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
     spec:
       containers:
-        - image: $ignore
+        - args:
+            - -m
+            - dynamo.frontend
+          command:
+            - python3
+          image: $ignore
           name: main
   replicas: 1
   runtimeVersionOverride: 1.4.0
@@ -773,7 +759,7 @@ spec:
       annotations:
         nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
       labels:
-        nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
     spec:
       containers:
         - args:
@@ -785,20 +771,16 @@ spec:
             - "1.0"
             - --disaggregation-mode
             - prefill
-            - --aic-perf-model
-            - --aic-backend
+            - --ais-perf-model
+            - --ais-backend
             - vllm
-            - --aic-backend-version
-            - 0.14.0
-            - --aic-system
+            - --ais-backend-version
+            - 0.24.0
+            - --ais-system
             - h100_sxm
-            - --aic-tp-size
+            - --ais-tp-size
             - "1"
-            - --aic-moe-tp-size
-            - "1"
-            - --aic-moe-ep-size
-            - "1"
-            - --aic-attention-dp-size
+            - --ais-attention-dp-size
             - "1"
             - --engine-type
             - vllm

@@ -408,7 +408,7 @@ def main() -> int:
     external = load_external_contributors(external_path)
 
     lines, stats = _render_codeowners(model, group=not args.no_group, external=external)
-    Path(args.out).write_text("\n".join(lines) + "\n")
+    Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
     total = (
         stats["base"]
         + stats["shared"]
@@ -423,7 +423,7 @@ def main() -> int:
     )
 
     contributors_md = render_contributors_md(external)
-    Path(args.contributors_out).write_text(contributors_md)
+    Path(args.contributors_out).write_text(contributors_md, encoding="utf-8")
     print(f"wrote {args.contributors_out} ({len(external)} external contributor(s))")
 
     return 0

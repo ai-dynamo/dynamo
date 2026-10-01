@@ -44,6 +44,7 @@ If you want to see advanced, framework-specific deployment patterns and best pra
 - **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm)** – vLLM-specific deployment and configuration
 - **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang)** – SGLang integration examples and workflows
 - **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm)** – TensorRT-LLM workflows and optimizations
+- **[TokenSpeed](backends/tokenspeed/README.md)** – LongCat-Flash prefill/decode disaggregation with KV-aware routing
 
 ## Deployment Examples
 
@@ -53,6 +54,13 @@ Platform-specific manifests and templates for production environments. Deploymen
 - **[Azure AKS](deployments/AKS/README.md)** - Helm values ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx))
 - **[Amazon ECS](deployments/ECS/README.md)** - Task definitions ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx))
 - **[Google GKE](deployments/GKE/README.md)** - DGD manifests ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx))
+
+## Integration Examples
+
+End-to-end examples that connect Dynamo to adjacent inference services:
+
+- **[llm-d Batch Gateway](deployments/llm-d-batch-gateway/README.md)** provides an experimental OpenAI Batch lifecycle on a dedicated Dynamo worker pool.
+- **[Slime External Rollouts](rl/slime/README.md)** connects a fixed Slime worker set to stock SGLang engines and Dynamo sidecars.
 
 ## Runtime Examples
 

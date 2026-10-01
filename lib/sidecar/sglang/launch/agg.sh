@@ -8,11 +8,14 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
+# Resolved relative to this script, not via $DYNAMO_HOME: some runtime images
+# (e.g. vllm_runtime.Dockerfile) bake DYNAMO_HOME to a minimal install path
+# with no examples/ directory, which would silently override this and break
+# sourcing. Matches examples/backends/sglang/launch/agg.sh's own approach.
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_sglang_gpu_mem_args
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -79,6 +82,7 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_HTTP_PORT" \
     --grpc-port "$SGLANG_GRPC_PORT" \
+    --incremental-streaming-output \
     --context-length "$MAX_MODEL_LEN" \
     --max-running-requests "$MAX_CONCURRENT_SEQS" \
     $GPU_MEM_ARGS \
@@ -86,6 +90,6 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
 
 wait_any_exit

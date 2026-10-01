@@ -13,7 +13,7 @@ use crate::protocols::WorkerWithDpRank;
 
 type SharedNode = Arc<RwLock<PromptTrieNode>>;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(super) struct PromptTrieNode {
     edge: Vec<SequenceHash>,
     worker_cutoffs: FxHashMap<WorkerWithDpRank, usize>,
@@ -22,15 +22,6 @@ pub(super) struct PromptTrieNode {
 }
 
 impl PromptTrieNode {
-    fn new() -> Self {
-        Self {
-            edge: Vec::new(),
-            worker_cutoffs: FxHashMap::default(),
-            full_edge_workers: FxHashSet::default(),
-            children: FxHashMap::default(),
-        }
-    }
-
     fn full_edge_workers_for(worker: WorkerWithDpRank) -> FxHashSet<WorkerWithDpRank> {
         let mut full_edge_workers = FxHashSet::with_capacity_and_hasher(1, FxBuildHasher);
         full_edge_workers.insert(worker);
@@ -128,15 +119,10 @@ impl CleanableNode for PromptTrieNode {
     }
 }
 
+#[derive(Default)]
 pub(super) struct PromptMembershipTrie {
     root: SharedNode,
     cleanup: CleanupState,
-}
-
-impl Default for PromptMembershipTrie {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Drop for PromptMembershipTrie {
@@ -157,13 +143,6 @@ impl Drop for PromptMembershipTrie {
 }
 
 impl PromptMembershipTrie {
-    pub(super) fn new() -> Self {
-        Self {
-            root: Arc::new(RwLock::new(PromptTrieNode::new())),
-            cleanup: CleanupState::new(),
-        }
-    }
-
     /// Run the stale-child sweep if the throttle interval has elapsed.
     ///
     /// Safe to call from any write path; the sweep is a no-op until
@@ -604,7 +583,7 @@ mod tests {
 
     #[test]
     fn full_path_continuations_extend_and_trim() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker = worker(1, 0);
 
         trie.store_path(worker, &[1, 2, 3], 0);
@@ -624,7 +603,7 @@ mod tests {
 
     #[test]
     fn branching_continuations_across_workers_match_expected_depths() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
 
@@ -643,7 +622,7 @@ mod tests {
 
     #[test]
     fn partial_suffix_removal_keeps_prefix() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker = worker(1, 0);
 
         trie.store_path(worker, &[1, 2, 3, 4, 5], 0);
@@ -657,7 +636,7 @@ mod tests {
 
     #[test]
     fn remove_worker_preserves_other_workers() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
 
@@ -674,7 +653,7 @@ mod tests {
 
     #[test]
     fn multiple_dp_ranks_with_same_worker_id_remain_isolated() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker_a = worker(1, 0);
         let worker_b = worker(1, 1);
 
@@ -689,7 +668,7 @@ mod tests {
 
     #[test]
     fn clear_worker_state_then_reuse_starts_empty() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker = worker(1, 0);
 
         trie.store_path(worker, &[1, 2, 3], 0);
@@ -705,7 +684,7 @@ mod tests {
 
     #[test]
     fn redundant_batched_remove_is_idempotent() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker = worker(1, 0);
 
         trie.store_path(worker, &[1, 2, 3, 4], 0);
@@ -720,7 +699,7 @@ mod tests {
 
     #[test]
     fn path_ending_inside_another_workers_edge_uses_a_cutoff() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
 
@@ -735,7 +714,7 @@ mod tests {
 
     #[test]
     fn full_path_mutation_follows_suffix_after_a_split() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
 
@@ -782,7 +761,7 @@ mod tests {
 
     #[test]
     fn randomized_prefix_union_matches_naive_model() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let workers = [worker(1, 0), worker(2, 0), worker(2, 1)];
         // Every hash denotes exactly one lineage position. Shared prefixes
         // reuse hashes; branches and unrelated roots use distinct hashes.
@@ -868,7 +847,7 @@ mod tests {
     #[test]
     fn concurrent_cross_worker_splits_preserve_both_paths() {
         for _ in 0..128 {
-            let trie = Arc::new(PromptMembershipTrie::new());
+            let trie = Arc::new(PromptMembershipTrie::default());
             let worker_a = worker(1, 0);
             let worker_b = worker(2, 0);
             let worker_c = worker(3, 0);
@@ -909,7 +888,7 @@ mod tests {
     #[test]
     fn concurrent_first_root_insertion_preserves_both_workers() {
         for _ in 0..128 {
-            let trie = Arc::new(PromptMembershipTrie::new());
+            let trie = Arc::new(PromptMembershipTrie::default());
             let worker_a = worker(1, 0);
             let worker_b = worker(2, 0);
             let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -943,7 +922,7 @@ mod tests {
 
     #[test]
     fn cleanup_does_not_unlink_a_pinned_child() {
-        let trie = PromptMembershipTrie::new();
+        let trie = PromptMembershipTrie::default();
         let worker = worker(1, 0);
         trie.store_path(worker, &[1, 2, 3], 0);
         let pinned = trie

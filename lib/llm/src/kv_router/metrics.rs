@@ -13,7 +13,7 @@
 //!
 //! - [`RoutingOverheadMetrics`]: Per-request routing phase latency histograms.
 //!   Registered on the frontend's own `prometheus::Registry` (default port 8000).
-//!   Populated by `KvPushRouter` in the frontend during routing decisions.
+//!   Populated by `RoutingHost` in the frontend during routing decisions.
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
 //!   - Standalone router: not created (frontend-only)
 //!
@@ -21,11 +21,11 @@
 //!   tokens, KV hit rate, and non-max-overlap routing decisions).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
 //!   Eagerly created so they appear as zeros before any requests arrive.
-//!   Populated by `KvPushRouter::generate()` and its `RequestGuard` as it observes
+//!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
-//!   - Frontend, non-KV modes (direct/random/round-robin): always zero (registered
-//!     on default port 8000, but never populated since KvPushRouter is not used)
+//!   - Frontend, builtin modes without affinity or LoRA filtering: populated by `RoutingHost`;
+//!     modes that still bypass the host remain registered as zeros
 //!   - Frontend, KV mode (aggregated and disaggregated): available on default port
 //!     8000 via the `drt_metrics` bridge, populated per-request
 //!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
@@ -64,6 +64,7 @@ use prometheus::{
 
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use dynamo_kv_router::indexer::ApproximateLruStats;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -205,7 +206,7 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 }
 
 // ---------------------------------------------------------------------------
-// Direct-ZMQ KV ingress metrics
+// ZMQ KV ingress metrics
 // ---------------------------------------------------------------------------
 
 pub(crate) struct KvZmqIngressMetrics {
@@ -224,7 +225,7 @@ impl KvZmqIngressMetrics {
                 let sources = metrics
                     .create_intgaugevec(
                         "router_kv_zmq_ingress_sources",
-                        "Number of direct-ZMQ KV ingress sources by lifecycle state",
+                        "Number of ZMQ KV ingress sources by lifecycle state",
                         &["state"],
                         &[],
                     )
@@ -232,14 +233,14 @@ impl KvZmqIngressMetrics {
                 let batches_total = metrics
                     .create_intcounter(
                         "router_kv_zmq_ingress_batches_total",
-                        "Total direct-ZMQ KV ingress batches handed to WorkerQueryClient",
+                        "Total ZMQ KV ingress batches handed to WorkerQueryClient",
                         &[],
                     )
                     .expect("failed to create router_kv_zmq_ingress_batches_total counter");
                 let lifecycle_total = metrics
                     .create_intcountervec(
                         "router_kv_zmq_ingress_lifecycle_total",
-                        "Total direct-ZMQ KV ingress lifecycle transitions and errors",
+                        "Total ZMQ KV ingress lifecycle transitions and errors",
                         &["action"],
                         &[],
                     )
@@ -268,6 +269,17 @@ impl KvZmqIngressMetrics {
     pub(crate) fn increment_lifecycle(&self, action: &'static str) {
         self.lifecycle_total.with_label_values(&[action]).inc();
     }
+
+    pub(crate) fn increment_lifecycle_by(&self, action: &'static str, value: u64) {
+        self.lifecycle_total
+            .with_label_values(&[action])
+            .inc_by(value);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lifecycle_count(&self, action: &'static str) -> u64 {
+        self.lifecycle_total.with_label_values(&[action]).get()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +296,7 @@ pub(crate) struct ActiveSequenceZmqIngressMetrics {
     payload_decode_errors_total: IntCounter,
     identity_errors_total: IntCounter,
     forced_aborts_total: IntCounter,
+    dropped_events_total: IntCounter,
 }
 
 static ACTIVE_SEQUENCE_ZMQ_INGRESS_METRICS: OnceLock<Arc<ActiveSequenceZmqIngressMetrics>> =
@@ -339,6 +352,10 @@ impl ActiveSequenceZmqIngressMetrics {
                         "router_active_sequence_zmq_ingress_forced_aborts_total",
                         "Direct-ZMQ active-sequence source tasks aborted after join timeout",
                     ),
+                    dropped_events_total: counter(
+                        "router_active_sequence_zmq_ingress_dropped_events_total",
+                        "Direct-ZMQ active-sequence events dropped because the partition's inbound channel was full or closed",
+                    ),
                 })
             })
             .clone()
@@ -382,6 +399,103 @@ impl ActiveSequenceZmqIngressMetrics {
 
     pub(crate) fn record_forced_abort(&self) {
         self.forced_aborts_total.inc();
+    }
+
+    pub(crate) fn record_dropped_event(&self) {
+        self.dropped_events_total.inc();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Active-sequence inbound funnel metrics (per partition)
+// ---------------------------------------------------------------------------
+
+const ROUTING_GROUP_LABEL: &str = "routing_group";
+
+/// Instrumentation for the per-partition inbound replica funnel: one channel
+/// and one apply task per partition, fed by every publisher's ingress source.
+/// Updated once per drain batch from the apply task.
+pub(crate) struct ActiveSequenceIngressMetrics {
+    queue_depth: IntGaugeVec,
+    events_applied_total: IntCounterVec,
+    drain_batches_total: IntCounterVec,
+}
+
+/// Per-partition handles implementing the core's drain observer.
+pub(crate) struct ActiveSequenceIngressMetricHandles {
+    queue_depth: IntGauge,
+    events_applied_total: IntCounter,
+    drain_batches_total: IntCounter,
+}
+
+static ACTIVE_SEQUENCE_INGRESS_METRICS: OnceLock<Arc<ActiveSequenceIngressMetrics>> =
+    OnceLock::new();
+
+impl ActiveSequenceIngressMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        ACTIVE_SEQUENCE_INGRESS_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let labels = [labels::MODEL, ROUTING_GROUP_LABEL, labels::WORKER_TYPE];
+                Arc::new(Self {
+                    queue_depth: metrics
+                        .create_intgaugevec(
+                            "router_active_sequence_ingress_queue_depth",
+                            "Active-sequence events waiting in the partition's inbound channel, sampled after each drain batch",
+                            &labels,
+                            &[],
+                        )
+                        .expect("failed to create router_active_sequence_ingress_queue_depth"),
+                    events_applied_total: metrics
+                        .create_intcountervec(
+                            "router_active_sequence_ingress_events_applied_total",
+                            "Active-sequence events applied from the partition's inbound channel",
+                            &labels,
+                            &[],
+                        )
+                        .expect(
+                            "failed to create router_active_sequence_ingress_events_applied_total",
+                        ),
+                    drain_batches_total: metrics
+                        .create_intcountervec(
+                            "router_active_sequence_ingress_drain_batches_total",
+                            "Drain batches applied from the partition's inbound channel",
+                            &labels,
+                            &[],
+                        )
+                        .expect(
+                            "failed to create router_active_sequence_ingress_drain_batches_total",
+                        ),
+                })
+            })
+            .clone()
+    }
+
+    /// One handle set per router partition. `worker_type` separates the
+    /// prefill and decode routers of the same model, which run separate
+    /// ingress channels.
+    pub(crate) fn handles(
+        &self,
+        model: &str,
+        routing_group: &str,
+        worker_type: &str,
+    ) -> ActiveSequenceIngressMetricHandles {
+        let labels = [model, routing_group, worker_type];
+        ActiveSequenceIngressMetricHandles {
+            queue_depth: self.queue_depth.with_label_values(&labels),
+            events_applied_total: self.events_applied_total.with_label_values(&labels),
+            drain_batches_total: self.drain_batches_total.with_label_values(&labels),
+        }
+    }
+}
+
+impl dynamo_kv_router::services::selection::ReplicaIngressObserver
+    for ActiveSequenceIngressMetricHandles
+{
+    fn observe_drain(&self, queue_depth: usize, applied: usize) {
+        self.queue_depth.set(queue_depth as i64);
+        self.events_applied_total.inc_by(applied as u64);
+        self.drain_batches_total.inc();
     }
 }
 
@@ -436,6 +550,29 @@ impl RouterWorkerStatusMetrics {
                 })
             })
             .clone()
+    }
+
+    /// Gauges on no registry, for observer tests that only read them back.
+    #[cfg(test)]
+    pub(crate) fn unregistered() -> Self {
+        Self {
+            registered: IntGaugeVec::new(
+                Opts::new(router::WORKER_REGISTERED, "registered"),
+                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .expect("valid gauge"),
+            kv_event_source_mismatch_workers: IntGaugeVec::new(
+                Opts::new(router::KV_EVENT_SOURCE_MISMATCH_WORKERS, "mismatch"),
+                &[
+                    labels::MODEL,
+                    labels::WORKER_TYPE,
+                    TARGET_NAMESPACE_LABEL,
+                    TARGET_COMPONENT_LABEL,
+                    TARGET_ENDPOINT_LABEL,
+                ],
+            )
+            .expect("valid gauge"),
+        }
     }
 
     pub fn set_registered(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
@@ -544,17 +681,17 @@ pub fn register_worker_load_metrics(
 }
 
 // ---------------------------------------------------------------------------
-// Router queue metrics (gauge)
+// Router queue and admission metrics
 // ---------------------------------------------------------------------------
 
-/// Gauge tracking the number of requests pending in the router's scheduler queue.
-/// Labeled by `worker_type` ("prefill" or "decode") to distinguish queues in
-/// disaggregated mode. At most 2 label combinations.
+/// Queue gauges and cumulative admission counters by model, worker type, and policy class.
 pub struct RouterQueueMetrics {
     pub pending_requests: IntGaugeVec,
     pub pending_isl_tokens: IntGaugeVec,
     pub pending_cached_tokens: IntGaugeVec,
     pub backpressure_total: IntCounterVec,
+    pub received_total: IntCounterVec,
+    pub deadline_rejections_total: IntCounterVec,
 }
 
 #[derive(Clone)]
@@ -565,10 +702,15 @@ pub struct RouterQueueMetricHandles {
     pub request_limit_rejections: IntCounter,
     pub raw_isl_limit_rejections: IntCounter,
     pub cached_token_limit_rejections: IntCounter,
+    pub received_total: IntCounter,
+    pub rejected_due_time_passed_total: IntCounter,
+    // Shared by clones for one scheduler; separate schedulers may share Prometheus labels.
+    reported_received: Arc<std::sync::atomic::AtomicU64>,
+    reported_due_time_passed: Arc<std::sync::atomic::AtomicU64>,
 }
 
-pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
-    LazyLock::new(|| RouterQueueMetrics {
+pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> = LazyLock::new(|| {
+    RouterQueueMetrics {
         pending_requests: IntGaugeVec::new(
             Opts::new(
                 format!(
@@ -600,6 +742,20 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
         )
         .expect("Failed to create router_queue_pending_cached_tokens gauge"),
+        received_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_router_admission_received_total", name_prefix::FRONTEND),
+                "Total attempts received by router admission; includes retries and excludes advisory probes",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+        ).expect("valid router admission received metric"),
+        deadline_rejections_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_router_admission_rejected_total", name_prefix::FRONTEND),
+                "Total router admission rejections by deadline reason",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
+        ).expect("valid router admission rejection metric"),
         backpressure_total: IntCounterVec::new(
             Opts::new(
                 format!("{}_router_queue_backpressure_total", name_prefix::FRONTEND),
@@ -608,7 +764,8 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
         )
         .expect("Failed to create router_queue_backpressure_total counter"),
-    });
+    }
+});
 
 impl RouterQueueMetrics {
     pub fn handles(
@@ -622,6 +779,13 @@ impl RouterQueueMetrics {
             self.backpressure_total
                 .with_label_values(&[model, worker_type, policy_class, reason])
         };
+        // Reserved by DEP #13891; no predicted-miss admission policy exists yet.
+        self.deadline_rejections_total.with_label_values(&[
+            model,
+            worker_type,
+            policy_class,
+            "predicted_miss",
+        ]);
         RouterQueueMetricHandles {
             pending_requests: self.pending_requests.with_label_values(&queue_labels),
             pending_isl_tokens: self.pending_isl_tokens.with_label_values(&queue_labels),
@@ -629,11 +793,37 @@ impl RouterQueueMetrics {
             request_limit_rejections: rejection("request_limit"),
             raw_isl_limit_rejections: rejection("raw_isl_token_limit"),
             cached_token_limit_rejections: rejection("cached_token_limit"),
+            received_total: self.received_total.with_label_values(&queue_labels),
+            rejected_due_time_passed_total: self.deadline_rejections_total.with_label_values(&[
+                model,
+                worker_type,
+                policy_class,
+                "due_time_passed",
+            ]),
+            reported_received: Arc::default(),
+            reported_due_time_passed: Arc::default(),
         }
     }
 }
 
-/// Register the router queue gauge with the given Prometheus registry.
+impl RouterQueueMetricHandles {
+    /// Export only unseen increments, including when concurrent updates carry older snapshots.
+    pub(super) fn update_admission(&self, received: u64, due_time_passed: u64) {
+        use std::sync::atomic::Ordering;
+        let previous = self
+            .reported_received
+            .fetch_max(received, Ordering::Relaxed);
+        self.received_total
+            .inc_by(received.saturating_sub(previous));
+        let previous = self
+            .reported_due_time_passed
+            .fetch_max(due_time_passed, Ordering::Relaxed);
+        self.rejected_due_time_passed_total
+            .inc_by(due_time_passed.saturating_sub(previous));
+    }
+}
+
+/// Register router queue gauges and admission counters with the Prometheus registry.
 /// Called during frontend HTTP service setup (`service_v2.rs`), served on port 8000.
 pub fn register_router_queue_metrics(
     registry: &prometheus::Registry,
@@ -643,6 +833,8 @@ pub fn register_router_queue_metrics(
     registry.register(Box::new(m.pending_isl_tokens.clone()))?;
     registry.register(Box::new(m.pending_cached_tokens.clone()))?;
     registry.register(Box::new(m.backpressure_total.clone()))?;
+    registry.register(Box::new(m.received_total.clone()))?;
+    registry.register(Box::new(m.deadline_rejections_total.clone()))?;
     Ok(())
 }
 
@@ -818,9 +1010,9 @@ impl RoutingOverheadMetrics {
 ///
 /// # When these metrics are created
 ///
-/// Eagerly in `KvPushRouter::new()`, so they appear as zeros before any requests.
+/// Eagerly in `RoutingHost::new()`, so they appear as zeros before any requests.
 /// Both the frontend pipeline and the standalone router (via Python bindings)
-/// create a `KvPushRouter`, so both get these metrics registered automatically.
+/// create a `RoutingHost`, so both get these metrics registered automatically.
 ///
 /// # Why component-scoped
 ///
@@ -830,7 +1022,10 @@ impl RoutingOverheadMetrics {
 /// decode pool). Component-scoped metrics let each local router emit metrics with
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
 /// independently.
+#[cfg_attr(test, derive(Clone))]
 pub struct RouterRequestMetrics {
+    /// Total requests admitted by the router scheduler.
+    pub requests_started_total: prometheus::IntCounter,
     pub requests_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
     pub inter_token_latency_seconds: prometheus::Histogram,
@@ -845,7 +1040,6 @@ pub struct RouterRequestMetrics {
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
-static ROUTER_REQUESTS_STARTED_TOTAL: OnceLock<prometheus::IntCounter> = OnceLock::new();
 
 impl RouterRequestMetrics {
     /// Returns the registered metrics if `from_component()` was called earlier.
@@ -853,19 +1047,12 @@ impl RouterRequestMetrics {
         ROUTER_REQUEST_METRICS.get().cloned()
     }
 
-    /// Total requests admitted by the router scheduler.
-    pub fn requests_started_total(&self) -> &prometheus::IntCounter {
-        ROUTER_REQUESTS_STARTED_TOTAL
-            .get()
-            .expect("router request metrics must be initialized")
-    }
-
     /// Create from a Component, memoized in a static OnceLock.
     /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
     /// injects hierarchy labels, and registers with the DRT `MetricsRegistry`.
     /// Also adds `router_id` (discovery instance_id) to distinguish router instances.
     ///
-    /// Called eagerly by `KvPushRouter::new()` so metrics appear as zeros at startup.
+    /// Called eagerly by `RoutingHost::new()` so metrics appear as zeros at startup.
     pub fn from_component(component: &Component) -> Arc<Self> {
         ROUTER_REQUEST_METRICS
             .get_or_init(|| {
@@ -881,12 +1068,6 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_requests_started_total");
-                assert!(
-                    ROUTER_REQUESTS_STARTED_TOTAL
-                        .set(requests_started_total)
-                        .is_ok(),
-                    "router_requests_started_total already initialized"
-                );
                 let requests_total = metrics
                     .create_intcounter(
                         &router_metric(frontend_service::REQUESTS_TOTAL),
@@ -978,6 +1159,7 @@ impl RouterRequestMetrics {
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 Arc::new(Self {
+                    requests_started_total,
                     requests_total,
                     time_to_first_token_seconds,
                     inter_token_latency_seconds,
@@ -994,6 +1176,17 @@ impl RouterRequestMetrics {
             .clone()
     }
 
+    /// Use fresh, unregistered lifecycle counters and retain all other metric handles.
+    #[cfg(test)]
+    pub(crate) fn with_isolated_counters_for_test(&self) -> Arc<Self> {
+        Arc::new(Self {
+            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
+                .unwrap(),
+            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
+            ..self.clone()
+        })
+    }
+
     /// Record a selection that sacrificed KV cache overlap.
     pub fn observe_non_max_overlap_selection(&self, worker_type: &str, overlap_blocks_lost: f64) {
         debug_assert!(overlap_blocks_lost > 0.0);
@@ -1003,6 +1196,189 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+    }
+}
+
+/// Process-local observability for the experimental approximate LRU.
+///
+/// NOTE: Gauges are last-router-wins. Approximate primaries are expected to be
+/// singleton/local for now; a distributed deployment first needs explicit cache
+/// synchronization, at which point metric aggregation should be designed with it.
+pub(crate) struct ApproximateLruMetrics {
+    configured_policy: IntGaugeVec,
+    effective_policy: IntGaugeVec,
+    ranks: IntGaugeVec,
+    blocks: IntGaugeVec,
+    leases: IntGauge,
+    mutation_queue_depth: IntGauge,
+    fallback_activations_total: IntCounter,
+    eviction_batches_total: IntCounter,
+    evicted_blocks_total: IntCounter,
+    output_batches_total: IntCounter,
+    messages_per_request: prometheus::Histogram,
+    mutation_wait_seconds: prometheus::Histogram,
+}
+
+static APPROXIMATE_LRU_METRICS: OnceLock<Arc<ApproximateLruMetrics>> = OnceLock::new();
+
+impl ApproximateLruMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        APPROXIMATE_LRU_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let gauge_vec = |name, help, label| {
+                    metrics
+                        .create_intgaugevec(name, help, &[label], &[])
+                        .unwrap_or_else(|error| panic!("failed to create {name}: {error}"))
+                };
+                let counter = |name, help| {
+                    metrics
+                        .create_intcounter(name, help, &[])
+                        .unwrap_or_else(|error| panic!("failed to create {name}: {error}"))
+                };
+                Arc::new(Self {
+                    configured_policy: gauge_vec(
+                        "router_approximate_cache_configured_policy",
+                        "Configured process-local approximate cache policy",
+                        "policy",
+                    ),
+                    effective_policy: gauge_vec(
+                        "router_approximate_cache_effective_policy",
+                        "Effective process-local approximate cache policy",
+                        "policy",
+                    ),
+                    ranks: gauge_vec(
+                        "router_approximate_lru_ranks",
+                        "Approximate index ranks by effective retention policy",
+                        "policy",
+                    ),
+                    blocks: gauge_vec(
+                        "router_approximate_lru_blocks",
+                        "Approximate LRU physical blocks by state",
+                        "state",
+                    ),
+                    leases: metrics
+                        .create_intgauge(
+                            "router_approximate_lru_leases",
+                            "Live approximate LRU request leases",
+                            &[],
+                        )
+                        .expect("failed to create router_approximate_lru_leases"),
+                    mutation_queue_depth: metrics
+                        .create_intgauge(
+                            "router_approximate_lru_mutation_queue_depth",
+                            "Aggregate approximate LRU FIFO depth at command enqueue",
+                            &[],
+                        )
+                        .expect("failed to create approximate LRU queue-depth gauge"),
+                    fallback_activations_total: counter(
+                        "router_approximate_lru_fallback_activations_total",
+                        "Total rank incarnations pinned to TTL because capacity was unavailable",
+                    ),
+                    eviction_batches_total: counter(
+                        "router_approximate_lru_eviction_batches_total",
+                        "Total approximate LRU mutation batches that evicted physical copies",
+                    ),
+                    evicted_blocks_total: counter(
+                        "router_approximate_lru_evicted_blocks_total",
+                        "Total physical block copies evicted by approximate LRU",
+                    ),
+                    output_batches_total: counter(
+                        "router_approximate_lru_output_batches_total",
+                        "Total completed output-block batches sent to approximate LRU",
+                    ),
+                    messages_per_request: metrics
+                        .create_histogram(
+                            "router_approximate_lru_messages_per_request",
+                            "Approximate LRU FIFO messages per request over each observation interval",
+                            &[],
+                            Some(prometheus::linear_buckets(1.0, 1.0, 16).unwrap()),
+                        )
+                        .expect("failed to create approximate LRU messages/request histogram"),
+                    mutation_wait_seconds: metrics
+                        .create_histogram(
+                            "router_approximate_lru_mutation_wait_seconds",
+                            "Mean approximate LRU FIFO wait per command over each observation interval",
+                            &[],
+                            Some(generate_log_buckets(0.000_001, 1.0, 16)),
+                        )
+                        .expect("failed to create approximate LRU mutation wait histogram"),
+                })
+            })
+            .clone()
+    }
+
+    pub(crate) fn set_policies(&self, configured: &str, effective: &str) {
+        for policy in ["ttl", "lru", "disabled"] {
+            self.configured_policy
+                .with_label_values(&[policy])
+                .set(i64::from(policy == configured));
+            self.effective_policy
+                .with_label_values(&[policy])
+                .set(i64::from(policy == effective));
+        }
+    }
+
+    pub(crate) fn observe(&self, current: ApproximateLruStats, previous: &mut ApproximateLruStats) {
+        let gauge = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+        self.ranks
+            .with_label_values(&["lru"])
+            .set(gauge(current.ranks));
+        self.ranks
+            .with_label_values(&["ttl_fallback"])
+            .set(gauge(current.fallback_ranks));
+        for (state, value) in [
+            ("resident", current.resident_blocks),
+            ("active", current.active_blocks),
+            ("inactive", current.inactive_blocks),
+            ("private", current.private_blocks),
+            ("overcapacity", current.overcapacity_blocks),
+        ] {
+            self.blocks.with_label_values(&[state]).set(gauge(value));
+        }
+        self.leases.set(gauge(current.leases));
+        self.mutation_queue_depth
+            .set(gauge(current.mutation_queue_depth));
+
+        self.fallback_activations_total.inc_by(
+            current
+                .fallback_activations
+                .saturating_sub(previous.fallback_activations),
+        );
+        self.eviction_batches_total.inc_by(
+            current
+                .eviction_batches
+                .saturating_sub(previous.eviction_batches),
+        );
+        self.evicted_blocks_total.inc_by(
+            current
+                .evicted_blocks
+                .saturating_sub(previous.evicted_blocks),
+        );
+        self.output_batches_total.inc_by(
+            current
+                .output_batches
+                .saturating_sub(previous.output_batches),
+        );
+        let requests = current.requests.saturating_sub(previous.requests);
+        if requests > 0 {
+            let messages = current
+                .request_messages
+                .saturating_sub(previous.request_messages);
+            self.messages_per_request
+                .observe(messages as f64 / requests as f64);
+        }
+        let wait_samples = current
+            .mutation_wait_samples
+            .saturating_sub(previous.mutation_wait_samples);
+        if wait_samples > 0 {
+            let wait_ns = current
+                .mutation_wait_ns
+                .saturating_sub(previous.mutation_wait_ns);
+            self.mutation_wait_seconds
+                .observe(wait_ns as f64 / wait_samples as f64 / 1_000_000_000.0);
+        }
+        *previous = current;
     }
 }
 
@@ -1232,7 +1608,21 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
             )
             .unwrap(),
-            backpressure_total: IntCounterVec::new(
+            received_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_router_admission_received_total", name_prefix::FRONTEND),
+                "Total attempts received by router admission; includes retries and excludes advisory probes",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+        ).expect("valid router admission received metric"),
+        deadline_rejections_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_router_admission_rejected_total", name_prefix::FRONTEND),
+                "Total router admission rejections by deadline reason",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
+        ).expect("valid router admission rejection metric"),
+        backpressure_total: IntCounterVec::new(
                 Opts::new(
                     format!("{}_router_queue_backpressure_total", name_prefix::FRONTEND),
                     "Total number of router scheduler queue backpressure rejections",
@@ -1254,13 +1644,33 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
             .register(Box::new(metrics.backpressure_total.clone()))
             .unwrap();
 
+        registry
+            .register(Box::new(metrics.received_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(metrics.deadline_rejections_total.clone()))
+            .unwrap();
         let handles = metrics.handles("model", "decode", "default");
+        handles.update_admission(10, 1);
+        handles.clone().update_admission(10, 1);
+        handles.update_admission(9, 0);
+        // A replacement scheduler with the same labels adds its own counts.
+        metrics
+            .handles("model", "decode", "default")
+            .update_admission(2, 1);
         handles.pending_requests.set(5);
         handles.pending_isl_tokens.set(1024);
         handles.pending_cached_tokens.set(512);
 
         let output = gather_pef(&registry);
         let expected = "\
+# HELP dynamo_frontend_router_admission_received_total Total attempts received by router admission; includes retries and excludes advisory probes
+# TYPE dynamo_frontend_router_admission_received_total counter
+dynamo_frontend_router_admission_received_total{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 12
+# HELP dynamo_frontend_router_admission_rejected_total Total router admission rejections by deadline reason
+# TYPE dynamo_frontend_router_admission_rejected_total counter
+dynamo_frontend_router_admission_rejected_total{model=\"model\",policy_class=\"default\",reason=\"due_time_passed\",worker_type=\"decode\"} 2
+dynamo_frontend_router_admission_rejected_total{model=\"model\",policy_class=\"default\",reason=\"predicted_miss\",worker_type=\"decode\"} 0
 # HELP dynamo_frontend_router_queue_backpressure_total Total number of router scheduler queue backpressure rejections
 # TYPE dynamo_frontend_router_queue_backpressure_total counter
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"cached_token_limit\",worker_type=\"decode\"} 0
@@ -1279,40 +1689,6 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
         assert_eq!(
             output, expected,
             "\nActual PEF:\n{output}\nExpected PEF:\n{expected}"
-        );
-    }
-
-    #[test]
-    fn test_routing_overhead_metric_names_pef() {
-        // Verify the overhead constants produce valid histogram names when
-        // combined with dynamo_router_ prefix.
-        let registry = prometheus::Registry::new();
-        let buckets = async_overhead_buckets();
-        let prefix = name_prefix::ROUTER;
-        let name = format!("{}_{}", prefix, routing_overhead::TOTAL_MS);
-        let total = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                name,
-                "Total routing overhead per request in milliseconds",
-            )
-            .buckets(buckets),
-        )
-        .unwrap();
-        registry.register(Box::new(total.clone())).unwrap();
-        total.observe(1.5);
-
-        let output = gather_pef(&registry);
-        assert!(
-            output.contains("# HELP dynamo_router_overhead_total_ms"),
-            "PEF missing HELP for routing overhead metric"
-        );
-        assert!(
-            output.contains("# TYPE dynamo_router_overhead_total_ms histogram"),
-            "PEF missing TYPE for routing overhead metric"
-        );
-        assert!(
-            output.contains("dynamo_router_overhead_total_ms_count 1"),
-            "PEF missing observation count"
         );
     }
 
@@ -1349,49 +1725,6 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             Duration::from_millis(1),
         );
         // Reaching here without panic confirms saturating_sub works
-    }
-
-    #[test]
-    fn test_kv_transfer_estimated_latency_metric_pef() {
-        // Verify the metric name is correctly composed from the constant
-        // and produces valid PEF when observed.
-        let registry = prometheus::Registry::new();
-        let name = format!(
-            "{}{}",
-            router_request::METRIC_PREFIX,
-            frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS,
-        );
-        let buckets = generate_log_buckets(0.001, 10.0, 15);
-        let histogram = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                &name,
-                "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
-            )
-            .buckets(buckets),
-        )
-        .unwrap();
-        registry.register(Box::new(histogram.clone())).unwrap();
-
-        // Observe a 5ms latency
-        histogram.observe(0.005);
-
-        let output = gather_pef(&registry);
-        assert!(
-            output.contains("# HELP router_kv_transfer_estimated_latency_seconds"),
-            "PEF missing HELP line. Got:\n{output}"
-        );
-        assert!(
-            output.contains("# TYPE router_kv_transfer_estimated_latency_seconds histogram"),
-            "PEF missing TYPE line. Got:\n{output}"
-        );
-        assert!(
-            output.contains("router_kv_transfer_estimated_latency_seconds_count 1"),
-            "PEF missing observation count. Got:\n{output}"
-        );
-        assert!(
-            output.contains("router_kv_transfer_estimated_latency_seconds_sum 0.005"),
-            "PEF missing observation sum. Got:\n{output}"
-        );
     }
 }
 

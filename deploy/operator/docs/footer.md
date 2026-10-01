@@ -215,7 +215,7 @@ These are injected into all components when the corresponding infrastructure ser
 | `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Endpoints whose health status is used for readiness | `["generate"]` | `string` (JSON array) |
 | `DYN_SYSTEM_PORT` | Port for the system HTTP server (health, metrics) | `9090` | `int` |
 | `DYN_HEALTH_CHECK_ENABLED` | Disables the legacy health check mechanism in favor of the system server | `false` | `string` (boolean) |
-| `NIXL_TELEMETRY_ENABLE` | Enables or disables NIXL telemetry collection | `n` | `string` | Options: `y`, `n` |
+| `NIXL_TELEMETRY_ENABLE` | Enables or disables NIXL telemetry collection. Case-insensitive options: `y`, `1`, `yes`, `on`, `true`, `enable`, `n`, `0`, `no`, `off`, `false`, `disable`. Unrecognized values fail SGLang admission or worker validation. Use `y` to opt in to SGLang operator rank port declarations. | `n` | `string` |
 | `NIXL_TELEMETRY_EXPORTER` | Telemetry exporter format for NIXL metrics | `prometheus` | `string` |
 | `NIXL_TELEMETRY_PROMETHEUS_PORT` | Port for NIXL Prometheus metrics endpoint | `19090` | `int` |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | Hash suffix appended to worker namespace for rolling updates | — | `string` | Only set during rolling update transitions |
@@ -344,7 +344,6 @@ For users who want to understand the implementation details or contribute to the
 - **Checkpoint / Restore**:
   - [`internal/checkpoint/podspec.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/podspec.go) - Checkpoint env var injection and volume setup
   - [`internal/checkpoint/resolve.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resolve.go) - Checkpoint resolution logic
-  - [`internal/checkpoint/resource.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resource.go) - Checkpoint resource management
 - **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes

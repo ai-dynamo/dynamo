@@ -87,7 +87,17 @@ pub(crate) fn engine_components(
     };
     let (timing_model, timing) = match args.perf_model.as_ref() {
         PerfModel::Polynomial => (TimingModelConfig::Polynomial, None),
-        PerfModel::Interpolated { .. } | PerfModel::Aiconfigurator { .. } => (
+        PerfModel::Fixed {
+            prefill_ms,
+            decode_ms,
+        } => (
+            TimingModelConfig::Fixed {
+                prefill_ms: *prefill_ms,
+                decode_ms: *decode_ms,
+            },
+            None,
+        ),
+        PerfModel::Interpolated { .. } | PerfModel::Ais { .. } => (
             TimingModelConfig::External {
                 provider: "dynamo_perf_model".to_string(),
                 config: Value::Null,
@@ -106,16 +116,19 @@ pub(crate) fn engine_components(
         max_num_batched_tokens: args.max_num_batched_tokens.unwrap_or(usize::MAX),
         enable_prefix_caching: args.enable_prefix_caching,
         enable_chunked_prefill: args.enable_chunked_prefill,
+        prefill_schedule_interval: args.prefill_schedule_interval,
+        prefill_decode_interval: args.prefill_decode_interval,
         speedup_ratio: args.speedup_ratio,
         decode_speedup_ratio: args.decode_speedup_ratio,
-        aic_nextn: args.aic_nextn,
-        aic_nextn_accept_rates: args.aic_nextn_accept_rates.clone(),
-        aic_mtp_seed: args.aic_mtp_seed,
+        aic_nextn: args.ais_nextn,
+        aic_nextn_accept_rates: args.ais_nextn_accept_rates.clone(),
+        aic_mtp_seed: args.ais_mtp_seed,
         worker_type,
         preemption_mode,
         emit_kv_events,
         emit_kv_token_ids,
-        kv_bytes_per_token: args.kv_bytes_per_token,
+        kv_transfer_bytes_per_token: args.kv_bytes_per_token,
+        kv_cache_bytes_per_token: args.kv_cache_bytes_per_token,
         kv_transfer_bandwidth: args.kv_transfer_bandwidth,
         kv_transfer_timing_mode,
         timing_model,
@@ -136,7 +149,7 @@ pub(crate) fn engine_factory(
 }
 
 fn replay_tensor_parallel_size(args: &MockEngineArgs) -> Result<u32> {
-    u32::try_from(args.aic_tp_size.unwrap_or(1))
+    u32::try_from(args.ais_tp_size.unwrap_or(1))
         .context("Mocker tensor-parallel size exceeds the Replay contract")
 }
 
@@ -147,8 +160,12 @@ pub(crate) fn aggregated_replay_setup(
 ) -> Result<(ReplayEngineConfig, ReplayEngineFactory)> {
     let components = engine_components(args.clone(), false, false)?;
     let config = ReplayEngineConfig {
+        kv_eviction_policy: Default::default(),
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
+        // Mocker arguments reach this boundary with a concrete capacity,
+        // whether authored directly or supplied by the Dynamo planner.
+        num_gpu_blocks_is_explicit: Some(true),
         rank: components.rank,
         prefill: None,
         decode: None,
@@ -171,16 +188,20 @@ pub(crate) fn disaggregated_replay_setup(
     let prefill_role = ReplayRoleConfig {
         dp_size: prefill.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&prefill.args)?,
+        num_gpu_blocks_is_explicit: Some(true),
         rank: prefill.rank,
     };
     let decode_role = ReplayRoleConfig {
         dp_size: decode.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&decode.args)?,
+        num_gpu_blocks_is_explicit: Some(true),
         rank: decode.rank,
     };
     let config = ReplayEngineConfig {
+        kv_eviction_policy: Default::default(),
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
+        num_gpu_blocks_is_explicit: Some(true),
         rank: prefill_role.rank.clone(),
         prefill: Some(prefill_role),
         decode: Some(decode_role),
@@ -231,7 +252,7 @@ mod tests {
     use ndarray_interp::InterpolateError;
 
     use super::*;
-    use crate::common::perf_model::{AicCallback, DecodeInterpolator, PrefillInterpolator};
+    use crate::common::perf_model::{AisCallback, DecodeInterpolator, PrefillInterpolator};
     use crate::common::protocols::{SglangArgs, TrtllmArgs};
 
     struct EchoPrefill;
@@ -250,9 +271,9 @@ mod tests {
         }
     }
 
-    struct EchoAic;
+    struct EchoAis;
 
-    impl AicCallback for EchoAic {
+    impl AisCallback for EchoAis {
         fn predict_prefill(
             &self,
             batch_size: usize,
@@ -269,16 +290,32 @@ mod tests {
 
     #[test]
     fn vllm_defaults_materialize_once_at_the_shared_boundary() {
-        let args = MockEngineArgs::builder().build().unwrap();
+        let mut args = MockEngineArgs::builder().build().unwrap();
+        args.kv_bytes_per_token = Some(4096);
+        args.kv_cache_bytes_per_token = Some(1024);
         let components = engine_components(args, true, true).unwrap();
 
         assert_eq!(components.args.block_size, 64);
         assert_eq!(components.rank.backend, Backend::Vllm);
         assert_eq!(components.rank.block_size, 64);
+        assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(1024));
         assert!(components.rank.emit_kv_events);
         assert!(components.rank.emit_kv_token_ids);
         assert_eq!(components.rank.timing_model, TimingModelConfig::Polynomial);
         assert!(components.timing.is_none());
+    }
+
+    #[test]
+    fn replay_json_keeps_transfer_and_cache_geometry_independent() {
+        let args: MockEngineArgs = serde_json::from_value(serde_json::json!({
+            "kv_transfer_bytes_per_token": 4096,
+            "kv_cache_bytes_per_token": 1024,
+        }))
+        .unwrap();
+        let components = engine_components(args, false, false).unwrap();
+        assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(1024));
     }
 
     #[test]
@@ -332,13 +369,31 @@ mod tests {
     }
 
     #[test]
-    fn npz_and_aic_models_use_the_external_timing_adapter() {
+    fn public_fixed_timing_materializes_as_builtin_engine_timing() {
+        let args = MockEngineArgs::from_json_str(
+            r#"{"timing_model":{"type":"fixed","prefill_ms":2.5,"decode_ms":0.5}}"#,
+        )
+        .unwrap();
+        let components = engine_components(args, false, false).unwrap();
+
+        assert_eq!(
+            components.rank.timing_model,
+            TimingModelConfig::Fixed {
+                prefill_ms: 2.5,
+                decode_ms: 0.5,
+            }
+        );
+        assert!(components.timing.is_none());
+    }
+
+    #[test]
+    fn npz_and_ais_models_use_the_external_timing_adapter() {
         let models = [
             PerfModel::Interpolated {
                 prefill_interp: Arc::new(EchoPrefill),
                 decode_interp: Arc::new(EchoDecode),
             },
-            PerfModel::from_aic_callback(Arc::new(EchoAic)),
+            PerfModel::from_ais_callback(Arc::new(EchoAis)),
         ];
 
         for model in models {
@@ -364,7 +419,7 @@ mod tests {
     fn disaggregated_roles_resolve_builtin_and_external_timing_independently() {
         let prefill_args = MockEngineArgs::builder().build().unwrap();
         let mut decode_args = MockEngineArgs::builder().build().unwrap();
-        decode_args.perf_model = Arc::new(PerfModel::from_aic_callback(Arc::new(EchoAic)));
+        decode_args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(EchoAis)));
 
         let (config, factory) = disaggregated_replay_setup(&prefill_args, &decode_args).unwrap();
         let prefill = config.prefill.as_ref().unwrap();

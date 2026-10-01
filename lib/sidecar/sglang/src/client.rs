@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
-use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig, format_error_chain,
+};
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::{Channel, Endpoint};
@@ -17,6 +19,8 @@ use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
 
 pub type Client = SglangServiceClient<Channel>;
+
+const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Metadata exposed by SGLang's model/server discovery RPCs.
 #[derive(Clone, Debug)]
@@ -29,15 +33,22 @@ pub struct Discovery {
     pub server_info: Value,
 }
 
+/// `bootstrap`: true for synchronous constructors before logging setup;
+/// false for deferred launcher discovery and `LLMEngine::start`.
 pub async fn connect(
     uri: &GrpcEndpoint,
     cfg: &GrpcTransportConfig,
     deadline: Instant,
+    bootstrap: bool,
 ) -> Result<Client, DynamoError> {
     let endpoint = Endpoint::from_shared(uri.to_string())
         .map_err(|err| invalid_arg(format!("invalid SGLang gRPC endpoint `{uri}`: {err}")))?;
+    let started = Instant::now();
+    let mut attempt = 0_u64;
     let mut last_err;
+    let mut last_logged_at: Option<Instant> = None;
     loop {
+        attempt += 1;
         match try_connect_once(&endpoint, cfg, deadline).await {
             Ok(client) => return Ok(client),
             Err(err) => {
@@ -48,7 +59,30 @@ pub async fn connect(
                         cfg.startup_deadline
                     )));
                 }
-                tokio::time::sleep_until((Instant::now() + cfg.retry_interval).min(deadline)).await;
+                let now = Instant::now();
+                if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
+                {
+                    // Synchronous constructors may precede logging setup;
+                    // deferred launcher discovery already has a subscriber.
+                    if bootstrap {
+                        eprintln!(
+                            "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",
+                            started.elapsed(),
+                            cfg.retry_interval,
+                        );
+                    } else {
+                        tracing::warn!(
+                            endpoint = %uri,
+                            attempt,
+                            elapsed = ?started.elapsed(),
+                            retry_interval = ?cfg.retry_interval,
+                            error = %last_err,
+                            "SGLang gRPC connection attempt failed; retrying"
+                        );
+                    }
+                    last_logged_at = Some(now);
+                }
+                tokio::time::sleep_until((now + cfg.retry_interval).min(deadline)).await;
             }
         }
     }
@@ -69,7 +103,7 @@ async fn try_connect_once(
     let channel = timeout_at(deadline, endpoint.connect())
         .await
         .map_err(|_| "startup deadline elapsed while connecting".to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format_error_chain(&e))?;
     Ok(client_from_channel(channel))
 }
 
@@ -87,6 +121,9 @@ pub struct Pool {
 }
 
 impl Pool {
+    // bootstrap=false: Pool::connect's only call site is LLMEngine::start
+    // (lib/sidecar/sglang/src/engine.rs), after the tracing subscriber is
+    // installed. See connect()'s own doc comment.
     pub async fn connect(
         uri: &GrpcEndpoint,
         cfg: &GrpcTransportConfig,
@@ -95,7 +132,7 @@ impl Pool {
         let size = cfg.connections.get();
         let mut clients = Vec::with_capacity(size);
         for _ in 0..size {
-            clients.push(connect(uri, cfg, deadline).await?);
+            clients.push(connect(uri, cfg, deadline, false).await?);
         }
         Ok(Self {
             clients,
@@ -185,6 +222,19 @@ fn parse_discovery(
 ) -> Result<Discovery, DynamoError> {
     let model_info = parse_json_object("GetModelInfo.json_info", &model.json_info)?;
     let server_info = parse_json_object("GetServerInfo.json_info", &server.json_info)?;
+    // Generate responses are forwarded as token deltas. Accepting cumulative
+    // output here would duplicate tokens and inflate completion usage.
+    if server_info
+        .get("incremental_streaming_output")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(invalid_arg(
+            "SGLang sidecar requires incremental streaming output; restart the SGLang server \
+             with --incremental-streaming-output to prevent duplicated tokens and inflated \
+             completion-token counts",
+        ));
+    }
     let model_path = if model.model_path.trim().is_empty() {
         model_info
             .get("model_path")
@@ -270,6 +320,15 @@ pub fn invalid_arg(message: impl Into<String>) -> DynamoError {
     backend(BackendError::InvalidArgument, message)
 }
 
+/// The frontend returns `message` to the client, so it takes only fixed request-validation text.
+pub(crate) fn invalid_request(message: &'static str) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+        .message(message)
+        .public_message(message)
+        .build()
+}
+
 pub fn engine_shutdown(message: impl Into<String>) -> DynamoError {
     backend(BackendError::EngineShutdown, message)
 }
@@ -278,8 +337,12 @@ pub fn cannot_connect(message: impl Into<String>) -> DynamoError {
     backend(BackendError::CannotConnect, message)
 }
 
-fn connection_timeout(message: impl Into<String>) -> DynamoError {
+pub(crate) fn connection_timeout(message: impl Into<String>) -> DynamoError {
     backend(BackendError::ConnectionTimeout, message)
+}
+
+pub(crate) fn cancelled(message: impl Into<String>) -> DynamoError {
+    backend(BackendError::Cancelled, message)
 }
 
 pub fn protocol_error(message: impl Into<String>) -> DynamoError {
@@ -330,13 +393,30 @@ mod tests {
                 json_info: json!({"tokenizer_path": "tokenizer-repo"}).to_string(),
             },
             pb::GetServerInfoResponse {
-                json_info: json!({}).to_string(),
+                json_info: json!({"incremental_streaming_output": true}).to_string(),
             },
             Vec::new(),
         )
         .unwrap();
         assert_eq!(discovery.model_path, "model-repo");
         assert_eq!(discovery.tokenizer_path, "tokenizer-repo");
+    }
+
+    #[test]
+    fn discovery_requires_incremental_streaming() {
+        let error = parse_discovery(
+            pb::GetModelInfoResponse {
+                model_path: "model-repo".to_string(),
+                json_info: "{}".to_string(),
+            },
+            pb::GetServerInfoResponse {
+                json_info: json!({"incremental_streaming_output": false}).to_string(),
+            },
+            Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--incremental-streaming-output"), "{error}");
     }
 
     #[tokio::test]

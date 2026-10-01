@@ -11,7 +11,8 @@ pub(crate) struct ConfiguredModel {
     /// HF repo name or local path used for tokenization and templates.
     pub source: String,
     /// Maximum sequence length (input + output), from the `--context-length`
-    /// argument or a server `GetModelInfo` report, if known.
+    /// argument if it was supplied, else from a server `GetModelInfo` report,
+    /// if known.
     pub context_length: Option<u32>,
 }
 
@@ -20,7 +21,7 @@ impl ConfiguredModel {
         let mut runtime_data = HashMap::new();
         runtime_data.insert(
             "grpc_service".to_string(),
-            serde_json::Value::String("trtllm.TrtllmService".to_string()),
+            serde_json::Value::String("openengine.v1.Inference".to_string()),
         );
 
         EngineConfig {

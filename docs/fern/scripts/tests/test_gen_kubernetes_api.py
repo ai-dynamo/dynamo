@@ -48,9 +48,9 @@ EXPECTED_TYPE_COUNTS = {
     # (PodReference, PodSnapshotSource/Spec/Status,
     # PodSnapshotContentSource/Spec/Status, PodSnapshotReference), which are
     # owned by github.com/ai-dynamo/snapshot.
-    "nvidia.com/v1alpha1": 73,
-    "nvidia.com/v1beta1": 66,
-    "operator.config.dynamo.nvidia.com/v1alpha1": 32,
+    "nvidia.com/v1alpha1": 69,
+    "nvidia.com/v1beta1": 71,
+    "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
     "Pod Specification Defaults",
@@ -71,6 +71,9 @@ V1BETA1_DEDUP_TYPES = (
     "DynamoGraphDeploymentRequest",
     "DynamoGraphDeploymentRequestSpec",
     "DynamoGraphDeploymentRequestStatus",
+    "DynamoGraphDeploymentStatus",
+    "DynamoGraphDeploymentSpec",
+    "DynamoComponentDeploymentSharedSpec",
 )
 
 
@@ -216,16 +219,22 @@ def test_v1beta1_shared_type_names_use_deduplicated_anchors(
         assert by_display[display].anchor == expected_anchor
 
 
-def test_dynamocheckpoint_carries_the_expected_field_set(
+def test_removed_dynamocheckpoint_types_are_absent(
     reference: kubernetes_api_discovery.KubernetesReference,
 ) -> None:
-    """DynamoCheckpoint (resource) surfaces apiVersion/kind/metadata/spec/status."""
+    """The hard cutover removes DynamoCheckpoint and its resource-only types."""
     v1alpha1 = next(p for p in reference.packages if p.name == "nvidia.com/v1alpha1")
-    by_name = {t.name: t for t in v1alpha1.types}
-    dyn_checkpoint = by_name["DynamoCheckpoint"]
-    assert dyn_checkpoint.kind == "resource"
-    field_names = [f.name for f in dyn_checkpoint.fields]
-    assert field_names == ["apiVersion", "kind", "metadata", "spec", "status"]
+    type_names = {t.name for t in v1alpha1.types}
+    assert not type_names.intersection(
+        {
+            "DynamoCheckpoint",
+            "DynamoCheckpointJobConfig",
+            "DynamoCheckpointPhase",
+            "DynamoCheckpointSpec",
+            "DynamoCheckpointStatus",
+            "DynamoCheckpointStorageType",
+        }
+    )
 
 
 def test_enum_types_expose_their_enum_values_not_fields(
@@ -377,6 +386,63 @@ def test_generator_writes_the_mdx_page(workspace: Path) -> None:
     assert (
         fern / "pages" / "reference" / "kubernetes-api" / "full-api-reference.mdx"
     ).is_file()
+
+
+def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
+    reference: kubernetes_api_discovery.KubernetesReference,
+) -> None:
+    """The generated Markdown must match the post-processed standalone DCD schema."""
+    for package_name in ("nvidia.com/v1alpha1", "nvidia.com/v1beta1"):
+        package = next(p for p in reference.packages if p.name == package_name)
+        by_name = {type_.name: type_ for type_ in package.types}
+        dcd = by_name["DynamoComponentDeploymentSpec"]
+        assert "providerOverride" not in {field.name for field in dcd.fields}
+        assert "lpx" not in {field.name for field in dcd.fields}
+        dcd_multinode = next(field for field in dcd.fields if field.name == "multinode")
+        assert "MultinodeSpec" in dcd_multinode.type
+        dcd_roles = next(field for field in dcd.fields if field.name == "roles")
+        assert dcd_roles.type == "object array"
+        if (
+            "Standalone DCD roles accept only `name` and `replicas`"
+            not in dcd_roles.description
+        ):
+            raise AssertionError(
+                "standalone DCD roles must document `name` and `replicas`"
+            )
+        for type_name in (
+            "DynamoComponentDeploymentSharedSpec",
+            "ComponentRoleSpec",
+            "ProviderOverride",
+        ):
+            assert "DynamoComponentDeploymentSpec" not in {
+                ref.name for ref in by_name[type_name].appears_in
+            }
+
+
+@pytest.mark.parametrize(
+    "name,parent",
+    (("LPXConfig", "DynamoComponentDeploymentSharedSpec"),),
+)
+def test_shared_lpx_type_links_across_api_versions(
+    source_text: str,
+    reference: kubernetes_api_discovery.KubernetesReference,
+    name: str,
+    parent: str,
+) -> None:
+    rendered = kubernetes_api_rendering.render_mdx(reference)
+    alpha = rendered.split("## nvidia.com/v1beta1", 1)[0]
+    assert f"See [{name}](#{name.lower()})." in alpha
+    expected = [f"[{parent}](#{prefix}{parent.lower()})" for prefix in ("", "v1beta1-")]
+    section = source_text.split(f"#### {name}\n", 1)[1].split("\n#### ", 1)[0]
+    backlinks = section.split("_Appears in:_\n", 1)[1].split("\n\n", 1)[0]
+    assert backlinks.splitlines() == [f"- {link}" for link in expected]
+    shared = next(type_ for type_ in _iter_types(reference) if type_.name == name)
+    assert [f"[{ref.name}](#{ref.anchor})" for ref in shared.appears_in] == expected
+    section = rendered.split(f'<Accordion id="{shared.anchor}"', 1)[1].split(
+        "</Accordion>", 1
+    )[0]
+    backlinks = section.split("**Appears in:** ", 1)[1].split("\n", 1)[0]
+    assert backlinks == ", ".join(expected)
 
 
 def test_check_mode_returns_zero_on_fresh_outputs(workspace: Path) -> None:

@@ -10,7 +10,12 @@ from typing import Optional
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.connectors.base import PlannerConnector, is_power_aware_connector
+from dynamo.planner.connectors.base import (
+    PlannerConnector,
+    PowerAwareConnector,
+    is_power_aware_connector,
+    is_startup_aware_connector,
+)
 from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.types import FpmObservations, TrafficObservation
 from dynamo.planner.environment.interface import (
@@ -23,7 +28,10 @@ from dynamo.planner.environment.metrics_provider.interface import (
 )
 from dynamo.planner.environment.state import ComponentState, DeploymentState
 from dynamo.planner.errors import DeploymentValidationError
-from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
+from dynamo.planner.monitoring.dgd_services import (
+    ComponentGPUShape,
+    ComponentPowerConfig,
+)
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -42,7 +50,7 @@ class NoopTrafficMetricsProvider:
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         return None
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
         del interval_str
         return None
 
@@ -154,8 +162,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         return await self.traffic_provider.collect_traffic()
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
-        return self.traffic_provider.collect_accept_length(interval_str)
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
+        return await self.traffic_provider.collect_accept_length(interval_str)
 
     async def collect_kv_hit_rate_observation(
         self, duration_s: float
@@ -298,8 +306,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     def _refresh_gpu_counts(self, deployment: Optional[dict] = None) -> None:
         state = self.deployment_state()
         try:
-            prefill_gpus, decode_gpus = self._call_with_optional_deployment(
-                self.controller.get_gpu_counts,
+            prefill_shape, decode_shape = self._call_with_optional_deployment(
+                self.controller.get_gpu_shapes,
                 deployment=deployment,
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
@@ -310,30 +318,50 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 "falling back to last observed or configured values",
                 exc,
             )
-            prefill_gpus = state.prefill.num_gpus
-            decode_gpus = state.decode.num_gpus
+            prefill_shape = self._fallback_gpu_shape(
+                state.prefill, self.config.prefill_engine_num_gpu
+            )
+            decode_shape = self._fallback_gpu_shape(
+                state.decode, self.config.decode_engine_num_gpu
+            )
 
-        if prefill_gpus is None:
-            prefill_gpus = state.prefill.num_gpus
-        if prefill_gpus is None:
-            prefill_gpus = self.config.prefill_engine_num_gpu
-        if decode_gpus is None:
-            decode_gpus = state.decode.num_gpus
-        if decode_gpus is None:
-            decode_gpus = self.config.decode_engine_num_gpu
+        if prefill_shape is None:
+            prefill_shape = self._fallback_gpu_shape(
+                state.prefill, self.config.prefill_engine_num_gpu
+            )
+        if decode_shape is None:
+            decode_shape = self._fallback_gpu_shape(
+                state.decode, self.config.decode_engine_num_gpu
+            )
 
         errors = []
-        if self.require_prefill and prefill_gpus is None:
+        if self.require_prefill and prefill_shape is None:
             errors.append("Missing prefill_engine_num_gpu in config")
-        if self.require_decode and decode_gpus is None:
+        if self.require_decode and decode_shape is None:
             errors.append("Missing decode_engine_num_gpu in config")
         if errors:
             raise DeploymentValidationError(errors)
 
         if self.require_prefill:
-            state.prefill.num_gpus = prefill_gpus
+            state.prefill.num_gpus = prefill_shape.gpus_per_engine
+            state.prefill.gpus_per_replica = prefill_shape.gpus_per_replica
         if self.require_decode:
-            state.decode.num_gpus = decode_gpus
+            state.decode.num_gpus = decode_shape.gpus_per_engine
+            state.decode.gpus_per_replica = decode_shape.gpus_per_replica
+
+    @staticmethod
+    def _fallback_gpu_shape(
+        component_state: ComponentState, configured: Optional[int]
+    ) -> Optional[ComponentGPUShape]:
+        engine = component_state.num_gpus
+        if engine is None:
+            engine = configured
+        if engine is None:
+            return None
+        replica = component_state.gpus_per_replica
+        if replica is None:
+            replica = engine
+        return ComponentGPUShape(engine, replica)
 
     def _load_static_power_caps_at_startup(
         self, deployment: Optional[dict] = None
@@ -484,6 +512,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             if self.require_decode and self._state.decode.info is not None
             else None
         )
+        power_controller: Optional[PowerAwareConnector] = None
         if self.config.enable_power_awareness:
             if not is_power_aware_connector(self.controller):
                 raise DeploymentValidationError(
@@ -496,7 +525,42 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                         "this connector does not."
                     ]
                 )
-            counts = await self.controller.get_power_aware_worker_counts(
+            power_controller = self.controller
+        if is_startup_aware_connector(self.controller):
+            inventory = await self.controller.get_worker_inventory(
+                prefill_component_name=prefill_name,
+                decode_component_name=decode_name,
+            )
+            if inventory is not None:
+                for required, replicas, active, expected, scaling, pending in (
+                    (
+                        self.require_prefill,
+                        self._state.prefill.replicas,
+                        inventory.ready_num_prefill,
+                        inventory.expected_num_prefill,
+                        inventory.prefill_scaling_in_progress,
+                        inventory.pending_num_prefill,
+                    ),
+                    (
+                        self.require_decode,
+                        self._state.decode.replicas,
+                        inventory.ready_num_decode,
+                        inventory.expected_num_decode,
+                        inventory.decode_scaling_in_progress,
+                        inventory.pending_num_decode,
+                    ),
+                ):
+                    if required:
+                        replicas.active = active or 0
+                        replicas.expected = expected
+                        replicas.scaling = scaling
+                        replicas.pending_startup = pending
+                return
+        # Never retain previously verified pending counts after losing access.
+        self._state.prefill.replicas.pending_startup = 0
+        self._state.decode.replicas.pending_startup = 0
+        if power_controller is not None:
+            counts = await power_controller.get_power_aware_worker_counts(
                 prefill_component_name=prefill_name,
                 decode_component_name=decode_name,
             )

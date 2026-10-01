@@ -140,6 +140,22 @@ def test_extracts_multiple_items_per_modality():
     )
 
 
+def test_extracts_tool_message_media():
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/t.png"}}
+            ],
+        }
+    ]
+    assert extract_mm_urls(messages) == (
+        {"image_url": [{"Url": "https://example.com/t.png"}]},
+        None,
+    )
+
+
 def test_ignores_non_user_messages():
     messages = [
         {"role": "system", "content": "You are helpful."},
@@ -213,14 +229,43 @@ def test_extracts_url_and_uuid_only_slots_with_alignment():
 
 
 @pytest.mark.parametrize("part_type", ["audio_url", "video_url"])
-def test_rejects_audio_video_cache_uuids(part_type: str) -> None:
-    part = {
-        "type": part_type,
-        part_type: {"url": "https://example.com/media"},
-        "uuid": "cached-media",
-    }
+def test_extracts_media_cache_uuids(part_type: str) -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": part_type,
+                    part_type: {"url": "https://example.com/media"},
+                    "uuid": "media-a",
+                },
+                {
+                    "type": part_type,
+                    part_type: {"url": "https://example.com/other-media"},
+                },
+            ],
+        }
+    ]
 
-    with pytest.raises(ValueError, match=r"supported only for image_url.*vLLM"):
+    assert extract_mm_urls(messages) == (
+        {
+            part_type: [
+                {"Url": "https://example.com/media"},
+                {"Url": "https://example.com/other-media"},
+            ]
+        },
+        {part_type: ["media-a", None]},
+    )
+
+
+@pytest.mark.parametrize("part_type", ["audio_url", "video_url"])
+def test_rejects_uuid_only_audio_video(part_type: str) -> None:
+    part = {"type": part_type, part_type: None, "uuid": "cached-media"}
+
+    with pytest.raises(
+        ValueError,
+        match=rf"UUID-only cache reuse is not supported for media modality `{part_type}`",
+    ):
         extract_mm_urls([{"role": "user", "content": [part]}])
 
 

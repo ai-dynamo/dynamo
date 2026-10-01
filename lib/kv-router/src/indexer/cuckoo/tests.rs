@@ -18,6 +18,13 @@ use super::{CanonicalSequenceBlockHash, CkfConfig, DC_COUNT};
 
 const TEST_SEED: u64 = 0x1234_5678_9ABC_DEF0;
 
+#[test]
+fn config_reports_bucket_count_without_allocating_storage() {
+    assert_eq!(CkfConfig::new(1).bucket_count().unwrap(), 2);
+    assert_eq!(CkfConfig::new(1_048_576).bucket_count().unwrap(), 524_288);
+    assert!(CkfConfig::new(0).bucket_count().is_err());
+}
+
 fn canonical(hash: u64) -> CanonicalSequenceBlockHash {
     CanonicalSequenceBlockHash::root(LocalBlockHash(hash))
 }
