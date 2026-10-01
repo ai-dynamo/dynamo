@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Mapping, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Dict, Mapping, Optional
 
 import numpy as np
 import sglang as sgl
@@ -16,7 +16,10 @@ from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
-from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
@@ -24,6 +27,7 @@ from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.sglang._compat import (
     cache_salt_kwargs,
     filter_supported_async_generate_kwargs,
+    prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -43,6 +47,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     VIDEO_URL_KEY,
     build_disagg_mm_kwargs,
     extract_media_urls,
+    extract_mm_hashes,
     raise_if_unextracted_multimodal,
 )
 from dynamo.sglang.request_utils import request_cache_salt
@@ -433,32 +438,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         probe = filter_supported_async_generate_kwargs(engine, {"mm_hashes": None})
         return "mm_hashes" in probe
 
-    @staticmethod
-    def _extract_mm_hashes(request: Dict[str, Any]) -> Optional[List[str]]:
-        """Pull the per-image hashes the Rust frontend forwards via extra_args.
-
-        Returns ``None`` when the field is absent or malformed; SGLang then
-        recomputes the hash internally via ``hash_feature()``.
-        """
-        extra_args = request.get("extra_args")
-        if not isinstance(extra_args, dict):
-            return None
-        mm_hashes = extra_args.get("mm_hashes")
-        if not mm_hashes:
-            return None
-        if not isinstance(mm_hashes, list):
-            return None
-        # Fail closed if a non-string slipped into the list — downstream
-        # SGLang treats mm_hashes as List[str] and a bad element would
-        # crash the worker mid-request. Routing falls back to text-prefix.
-        if not all(isinstance(h, str) for h in mm_hashes):
-            logging.warning(
-                "extra_args.mm_hashes contained non-str entries; "
-                "ignoring routing-side hashes and letting SGLang recompute"
-            )
-            return None
-        return mm_hashes
-
     def _metadata_uploader_from_request(
         self, request: Dict[str, Any]
     ) -> MetadataUploader | None:
@@ -593,6 +572,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 context.trace_headers() if self.enable_trace else None
             ),
             routed_dp_rank=routing.get("dp_rank"),
+            prefill_dp_rank=routing.get("prefill_dp_rank"),
             lora_path=self._resolve_lora(request),
             cache_salt=request_cache_salt(request),
         )
@@ -736,6 +716,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
+                **prefill_dp_rank_kwargs(self.engine, routing.get("prefill_dp_rank")),
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
                 data_parallel_rank=dp_rank,
@@ -780,7 +761,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 assert self._image_loader is not None
                 image_items = mm_data.get(IMAGE_URL_KEY) or []
                 if image_items:
-                    image_data = await self._image_loader.load_image_batch(image_items)
+                    image_data = await self._image_loader.load_image_batch(
+                        image_items,
+                        cache_scope=image_cache_scope_from_request(request),
+                    )
                 else:
                     image_data = None
 
@@ -808,7 +792,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             mm_hashes_kwargs: Dict[str, Any] = {}
             if self._mm_hashes_supported:
-                forwarded = self._extract_mm_hashes(request)
+                forwarded = extract_mm_hashes(request)
                 if forwarded is not None:
                     mm_hashes_kwargs["mm_hashes"] = forwarded
 

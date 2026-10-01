@@ -245,11 +245,17 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
-    /// ETCD lease TTL in seconds (default: 10)
+    /// ETCD lease TTL in seconds (default: 30)
     pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
 
     /// Maximum time in seconds to retry the initial ETCD connection (default: 120)
     pub const ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
+    /// HTTP/2 keepalive ping interval in seconds for the ETCD channel (default: 15, 0 disables)
+    pub const ETCD_KEEPALIVE_INTERVAL_SECONDS: &str = "ETCD_KEEPALIVE_INTERVAL_SECONDS";
+
+    /// Seconds to wait for a keepalive ping ack before the ETCD channel is closed (default: 10)
+    pub const ETCD_KEEPALIVE_TIMEOUT_SECONDS: &str = "ETCD_KEEPALIVE_TIMEOUT_SECONDS";
 
     /// ETCD authentication environment variables
     pub mod auth {
@@ -1065,6 +1071,8 @@ mod tests {
             etcd::ETCD_ENDPOINTS,
             etcd::ETCD_LEASE_TTL,
             etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+            etcd::ETCD_KEEPALIVE_INTERVAL_SECONDS,
+            etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,

@@ -99,12 +99,12 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 				Args: []string{
 					"--model", "test", tensorParallelSizeFlag, "8",
 					"--kv-transfer-config",
-					`{"kv_connector": "NixlConnector", "kv_role": "kv_both"}`,
+					`{"kv_connector": "NixlConnector", "kv_role": "kv_producer"}`,
 				},
 			},
 			containerGPUs: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s && python3 -m dynamo.vllm --model test %s 8 --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\"}" --distributed-executor-backend ray`,
+				`ray start --head --port=%s && python3 -m dynamo.vllm --model test %s 8 --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_producer\"}" --distributed-executor-backend ray`,
 				VLLMPort, tensorParallelSizeFlag,
 			)},
 			expectProbesRemoved: true,
@@ -406,6 +406,67 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			containerGPUs: 1,
 			expectedArgs: []string{
 				"-m", "dynamo.vllm", tensorParallelSizeFlag, "2",
+				"--distributed-executor-backend", "mp",
+				"--nnodes", "2",
+				"--master-addr", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+				"--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", "0",
+			},
+			expectProbesRemoved: true,
+		},
+		{
+			// updateVLLMMultinodeArgs reads the container through getExpandedArgs, a
+			// separate entry point from the getExpandedCommandLine one the detection
+			// helpers use. These two rows are the only coverage that the sizing path
+			// normalizes at all: without them, deleting normalizeVLLMFlags from
+			// getExpandedArgs leaves the whole suite green.
+			name:          "multinode leader sizes from short -tp alias",
+			numberOfNodes: 2,
+			role:          RoleLeader,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+				},
+				Resources: &v1alpha1.Resources{
+					Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm", "-tp", "2"},
+			},
+			containerGPUs: 1,
+			expectedArgs: []string{
+				"-m", "dynamo.vllm", "-tp", "2",
+				"--distributed-executor-backend", "mp",
+				"--nnodes", "2",
+				"--master-addr", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+				"--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", "0",
+			},
+			expectProbesRemoved: true,
+		},
+		{
+			name:          "multinode leader sizes from equals-form tensor-parallel-size",
+			numberOfNodes: 2,
+			role:          RoleLeader,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+				},
+				Resources: &v1alpha1.Resources{
+					Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag + "=2"},
+			},
+			containerGPUs: 1,
+			expectedArgs: []string{
+				"-m", "dynamo.vllm", tensorParallelSizeFlag + "=2",
 				"--distributed-executor-backend", "mp",
 				"--nnodes", "2",
 				"--master-addr", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
@@ -1032,6 +1093,46 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			expectInitContainer: true,
 			expectedInitImage:   "vllm:command",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+		},
+		{
+			name:              "mp worker with underscore-and-equals executor flag injects init container",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Image:   "vllm:underscore",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", "--distributed_executor_backend=mp"},
+					},
+				},
+			},
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:underscore",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+		},
+		{
+			// The shell ends the word at ";", so vLLM runs with the mp backend and the
+			// worker needs the init container to wait for the leader's master port.
+			name:              "mp worker with shell-terminated executor flag injects init container",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Image:   "vllm:terminated",
+						Command: []string{"/bin/sh", "-c"},
+						Args:    []string{"exec python3 -m dynamo.vllm " + tensorParallelSizeFlag + " 16 " + distributedExecutorFlag + " mp;"},
+					},
+				},
+			},
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:terminated",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 		{

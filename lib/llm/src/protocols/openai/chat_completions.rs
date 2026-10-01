@@ -130,7 +130,12 @@ pub struct NvCreateChatCompletionRequest {
     pub return_tokens_as_token_ids: Option<bool>,
 
     /// Catch-all for unsupported fields - checked during validation
-    #[serde(flatten, default, skip_serializing)]
+    #[serde(
+        flatten,
+        default,
+        skip_serializing,
+        deserialize_with = "validate::deserialize_extra_fields"
+    )]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
@@ -287,7 +292,7 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub nvext: Option<serde_json::Value>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
-    #[serde(skip)]
+    #[serde(default, skip_serializing)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
 }
 

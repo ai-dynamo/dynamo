@@ -145,7 +145,7 @@ vllm-rs serve "$MODEL" \
     --enable-lora \
     --max-loras "$MAX_LORAS" \
     --max-lora-rank "$MAX_LORA_RANK" \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
@@ -163,7 +163,7 @@ vllm-rs serve "$MODEL" \
     --enable-lora \
     --max-loras "$MAX_LORAS" \
     --max-lora-rank "$MAX_LORA_RANK" \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
     --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"${VLLM_PREFILL_KV_EVENT_ENDPOINT}\",\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &

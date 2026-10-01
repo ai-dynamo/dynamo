@@ -276,7 +276,7 @@ pub struct SelectionCore {
     listens_for_kv_events: bool,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
-    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    worker_selection_policy_factory: WorkerSelectionPolicyFactory,
     host: SelectionHost,
     worker_type: WorkerType,
     cancel_token: CancellationToken,
@@ -323,11 +323,15 @@ impl SelectionCore {
 
     /// Create a local selector and report invalid tracking configuration.
     pub fn try_new_local(
-        kv_router_config: crate::config::KvRouterConfig,
+        mut kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
         cache_config: SelectionCacheConfig,
+        policy_factory: WorkerSelectionPolicyFactory,
     ) -> anyhow::Result<Self> {
+        kv_router_config
+            .apply_policy_config()
+            .map_err(anyhow::Error::msg)?;
         kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
@@ -338,7 +342,7 @@ impl SelectionCore {
             indexer_threads,
             cancel_token,
             None,
-            None,
+            policy_factory,
             SelectionHost::default(),
             WorkerType::Aggregated,
             true,
@@ -359,7 +363,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+        worker_selection_policy_factory: WorkerSelectionPolicyFactory,
         host: SelectionHost,
         worker_type: WorkerType,
         signal_indexer_ready: bool,
