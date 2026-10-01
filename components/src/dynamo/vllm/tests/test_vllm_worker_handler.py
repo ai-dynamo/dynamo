@@ -551,7 +551,10 @@ class TestReasoningParserForwarding:
         assert chunks[1]["engine_data"]["sampling_mask"] == [[11, 21], [12, 22]]
 
     @pytest.mark.asyncio
-    async def test_generate_tokens_emits_final_kv_transfer_params(self):
+    @pytest.mark.parametrize("report_kv_cache_hit", [True, False])
+    async def test_generate_tokens_emits_final_kv_transfer_params(
+        self, report_kv_cache_hit
+    ):
         from vllm.sampling_params import SamplingParams
 
         handler = _make_handler()
@@ -582,14 +585,19 @@ class TestReasoningParserForwarding:
                 PatchedTokensPrompt(prompt_token_ids=[1]),
                 SamplingParams(max_tokens=1),
                 "req-kv",
+                report_kv_cache_hit=report_kv_cache_hit,
             )
         ]
 
-        assert chunks[-1]["engine_data"]["kv_transfer_params"] == {"connector": "nixl"}
-        assert chunks[-1]["engine_data"]["kv_cache_hit"] == {
-            "prompt_tokens": 2,
-            "reused_tokens": 1,
-        }
+        engine_data = chunks[-1]["engine_data"]
+        assert engine_data["kv_transfer_params"] == {"connector": "nixl"}
+        if report_kv_cache_hit:
+            assert engine_data["kv_cache_hit"] == {
+                "prompt_tokens": 2,
+                "reused_tokens": 1,
+            }
+        else:
+            assert "kv_cache_hit" not in engine_data
 
     @pytest.mark.asyncio
     async def test_generate_tokens_rejects_sampling_mask_length_mismatch(self):
@@ -1295,12 +1303,67 @@ async def test_prefill_emits_attempt_cache_reuse(monkeypatch, cached_tokens):
         )
     ]
 
-    expected = (
-        {"prompt_tokens": 3, "reused_tokens": cached_tokens}
-        if cached_tokens is not None
-        else {}
+    if cached_tokens is None:
+        assert "engine_data" not in chunks[0]
+    else:
+        assert chunks[0]["engine_data"]["kv_cache_hit"] == {
+            "prompt_tokens": 3,
+            "reused_tokens": cached_tokens,
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    ("prefill_result", "expected_report"),
+    [
+        (None, True),
+        ({"disaggregated_params": {"kv_transfer_params": {"remote": 1}}}, False),
+    ],
+)
+async def test_decode_reports_cache_hit_only_without_transferred_kv(
+    prefill_result, expected_report
+):
+    """A decode worker loading prefill KV counts it as cached, so it must not report."""
+    config = _make_config(disaggregation_mode="DECODE")
+    handler = _make_handler(config=config)
+    handler.engine_client = MagicMock()
+    handler.engine_client.abort = AsyncMock()
+    handler.shutdown_event = None
+    handler.runtime = MagicMock()
+    handler.config = config
+    handler.default_sampling_params = {}
+    handler.model_max_len = None
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._build_prompt_from_request = MagicMock(return_value=MagicMock())
+
+    seen_report_flags: list[bool] = []
+
+    async def _fake_generate_tokens(*args, report_kv_cache_hit=True, **kwargs):
+        seen_report_flags.append(report_kv_cache_hit)
+        if False:
+            yield None
+
+    handler.generate_tokens = _fake_generate_tokens
+    context = MagicMock()
+    context.async_killed_or_stopped.return_value = (
+        asyncio.get_running_loop().create_future()
     )
-    assert chunks[0]["engine_data"]["kv_cache_hit"] == expected
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "prefill_result": prefill_result,
+        "routing": {},
+        "model": "test-model",
+    }
+
+    with patch.object(mod, "_update_kv_transfer_params"):
+        async for _ in handler._generate_token_mode(request, context, "req-decode"):
+            pass
+
+    assert seen_report_flags == [expected_report]
 
 
 # ── Deferred abort (disagg decode KV-transfer safety) tests ────────

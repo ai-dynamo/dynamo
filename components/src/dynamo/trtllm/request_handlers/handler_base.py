@@ -1423,15 +1423,16 @@ class HandlerBase(BaseGenerativeHandler):
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
                             )
+                            generation_only = (
+                                getattr(disaggregated_params, "request_type", None)
+                                == "generation_only"
+                            )
 
                             if prefill_prompt_tokens_details:
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
                                 prompt_tokens_details = _prompt_tokens_details(
-                                    res,
-                                    num_input_tokens,
-                                    getattr(disaggregated_params, "request_type", None)
-                                    == "generation_only",
+                                    res, num_input_tokens, generation_only
                                 )
                                 engine_reported = prompt_tokens_details.pop(
                                     "_engine_reported", None
@@ -1449,6 +1450,16 @@ class HandlerBase(BaseGenerativeHandler):
                                 ),
                                 "prompt_tokens_details": prompt_tokens_details,
                             }
+                            # A generation-only request counts its transferred
+                            # prompt KV as cached, so only context attempts report.
+                            if not generation_only:
+                                kv_cache_hit = _kv_cache_hit_engine_data(
+                                    res, num_input_tokens
+                                )
+                                if kv_cache_hit:
+                                    out.setdefault("engine_data", {})[
+                                        "kv_cache_hit"
+                                    ] = kv_cache_hit
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
@@ -1649,6 +1660,18 @@ class HandlerBase(BaseGenerativeHandler):
         # 1. it catches unsupported fields / attributes.
         # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
         return dataclasses.replace(sampling_params, **overrides)
+
+
+def _kv_cache_hit_engine_data(res, num_input_tokens: int) -> dict:
+    """Build the final-chunk cache-reuse report read by the KV router."""
+    cached_tokens = getattr(res, "cached_tokens", None)
+    if cached_tokens is None:
+        return {}
+    # Same clamp as usage: the engine counts over the expanded multimodal prompt.
+    return {
+        "prompt_tokens": num_input_tokens,
+        "reused_tokens": min(num_input_tokens, int(cached_tokens)),
+    }
 
 
 def _prompt_tokens_details(res, num_input_tokens: int, generation_only: bool) -> dict:

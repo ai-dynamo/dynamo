@@ -231,8 +231,10 @@ def _new_decode_handler(
     use_sglang_tokenizer: bool = False,
     skip_tokenizer_init: bool = False,
     enable_rl: bool = False,
+    serving_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
 ):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.serving_mode = serving_mode
     handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
     handler.config = SimpleNamespace(
@@ -1731,8 +1733,14 @@ def test_kv_cache_hit_engine_data_omits_missing_prompt_tokens(meta_info):
 
 
 @pytest.mark.asyncio
-async def test_process_token_stream_reports_kv_cache_hit_on_final_chunk_only():
-    handler = _new_decode_handler()
+@pytest.mark.parametrize(
+    ("serving_mode", "reports"),
+    [(DisaggregationMode.AGGREGATED, True), (DisaggregationMode.DECODE, False)],
+)
+async def test_process_token_stream_reports_kv_cache_hit_on_final_chunk_only(
+    serving_mode, reports
+):
+    handler = _new_decode_handler(serving_mode=serving_mode)
     final_meta_info = {
         "id": "sglang-1",
         "finish_reason": {"type": "stop"},
@@ -1764,14 +1772,19 @@ async def test_process_token_stream_reports_kv_cache_hit_on_final_chunk_only():
 
     assert len(chunks) == 2
     assert "kv_cache_hit" not in chunks[0].get("engine_data", {})
-    assert chunks[1]["engine_data"]["kv_cache_hit"] == {
-        "prompt_tokens": 4,
-        "reused_tokens": 3,
-    }
+    # Disaggregated decode would only echo the prefill worker's hit.
+    expected = {"prompt_tokens": 4, "reused_tokens": 3} if reports else None
+    assert chunks[1].get("engine_data", {}).get("kv_cache_hit") == expected
 
 
 @pytest.mark.asyncio
-async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk():
+@pytest.mark.parametrize(
+    ("serving_mode", "reports"),
+    [(DisaggregationMode.AGGREGATED, True), (DisaggregationMode.DECODE, False)],
+)
+async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk(
+    serving_mode, reports
+):
     responses = [
         {"output_ids": [101], "meta_info": {"id": "request-1", "prompt_tokens": 4}},
         {
@@ -1786,7 +1799,7 @@ async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk():
     ]
 
     chunks = await _collect(
-        _new_decode_handler()._process_native_generate_stream(
+        _new_decode_handler(serving_mode=serving_mode)._process_native_generate_stream(
             _stream(
                 [
                     {"token_ids": [], "engine_data": {"sglang_response": response}}
@@ -1798,10 +1811,10 @@ async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk():
     )
 
     assert chunks[0]["engine_data"] == {"sglang_response": responses[0]}
-    assert chunks[1]["engine_data"] == {
-        "sglang_response": responses[1],
-        "kv_cache_hit": {"prompt_tokens": 4, "reused_tokens": 3},
-    }
+    expected = {"sglang_response": responses[1]}
+    if reports:
+        expected["kv_cache_hit"] = {"prompt_tokens": 4, "reused_tokens": 3}
+    assert chunks[1]["engine_data"] == expected
 
 
 @pytest.mark.asyncio

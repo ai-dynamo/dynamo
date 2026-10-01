@@ -319,6 +319,13 @@ F1 is added separately in [the cache reuse history PR](https://github.com/ai-dyn
 
 Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
 
+vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of each aggregated or prefill attempt, as `engine_data.kv_cache_hit` with `prompt_tokens` and `reused_tokens`. `reused_tokens` is the engine's per-request cached-token count, so it includes hits on host and storage tiers and KV connectors, the same tiers F2 and F3 count.
+
+- Disaggregated decode attempts do not report, because each engine counts the KV transferred from the prefill worker as cached. Their F4 stays at zero; read worker reuse from the `prefill` phase.
+- The router counts a report only when its `prompt_tokens` equals the routed prompt length. Engines count multimodal prompts after placeholder expansion, so those reports are rejected and contribute zero.
+- Engines recompute the last prompt token, so a full-prefix hit reports at least one token less than F3, and up to one block less for vLLM.
+- Preemption, partial-block reuse in TensorRT-LLM, and KV loads that fail under a recompute policy can also make F4 differ from F3 when the router's estimate is accurate.
+
 ### Per-request routing overhead
 
 `dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.

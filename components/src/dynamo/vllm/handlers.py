@@ -3411,6 +3411,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
         session_id=None,
+        report_kv_cache_hit=True,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3526,9 +3527,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
-                        out.setdefault("engine_data", {})[
-                            "kv_cache_hit"
-                        ] = BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                        kv_cache_hit = (
+                            BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                            if report_kv_cache_hit
+                            else {}
+                        )
+                        if kv_cache_hit:
+                            out.setdefault("engine_data", {})[
+                                "kv_cache_hit"
+                            ] = kv_cache_hit
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
@@ -4030,6 +4037,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
                         session_id=session_id,
+                        # Transferred prefill KV counts as cached in vLLM, so a
+                        # decode attempt's count would not be local reuse.
+                        report_kv_cache_hit=kv_params is None,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -4351,10 +4361,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
                     ),
-                    "engine_data": {
-                        "kv_cache_hit": BaseWorkerHandler._kv_cache_hit_engine_data(res)
-                    },
                 }
+                kv_cache_hit = BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                if kv_cache_hit:
+                    output["engine_data"] = {"kv_cache_hit": kv_cache_hit}
 
                 # Log prefill completion with LoRA info
                 self._log_with_lora_context(

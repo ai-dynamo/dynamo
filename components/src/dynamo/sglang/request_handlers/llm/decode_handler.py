@@ -583,6 +583,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         return native_generate_stream(self.engine, native_request)
 
+    @property
+    def _reports_kv_cache_hit(self) -> bool:
+        # Disaggregated decode copies the prefill worker's cached_tokens into its
+        # own meta_info, so only the prefill attempt reports cache reuse.
+        return self.serving_mode != DisaggregationMode.DECODE
+
     async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -892,7 +898,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 "sglang_response": public_response,
                             },
                         }
-                if isinstance(meta_info, dict) and meta_info.get("finish_reason"):
+                if (
+                    self._reports_kv_cache_hit
+                    and isinstance(meta_info, dict)
+                    and meta_info.get("finish_reason")
+                ):
                     # Native Generate is routed too; the frontend forwards only
                     # sglang_response, so this sibling key stays router-only.
                     kv_cache_hit = _kv_cache_hit_engine_data(meta_info)
@@ -1021,7 +1031,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if prompt_payload is not None and metadata_uploader is None:
                         engine_data["prompt_logprobs"] = prompt_payload
                     # Router-facing, so kept even when metadata is uploaded instead.
-                    kv_cache_hit = _kv_cache_hit_engine_data(meta_info)
+                    kv_cache_hit = (
+                        _kv_cache_hit_engine_data(meta_info)
+                        if self._reports_kv_cache_hit
+                        else {}
+                    )
                     if kv_cache_hit:
                         engine_data["kv_cache_hit"] = kv_cache_hit
                     input_tokens = meta_info.get("prompt_tokens")
