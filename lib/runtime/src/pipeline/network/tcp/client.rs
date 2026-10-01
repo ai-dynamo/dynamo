@@ -766,7 +766,6 @@ mod tests {
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::{Context as TraceContext, SubscriberExt};
     use tracing_subscriber::registry::LookupSpan;
-    use tracing_subscriber::util::SubscriberInitExt;
 
     type CapturedCancellationEvent = (HashMap<String, String>, Option<String>);
 
@@ -812,9 +811,10 @@ mod tests {
     #[tokio::test]
     async fn upstream_cancellation_event_is_parented_to_worker_request_span() {
         let captured = Arc::new(CancellationEventCapture::default());
-        let _subscriber = tracing_subscriber::registry()
-            .with(CancellationEventLayer(captured.clone()))
-            .set_default();
+        // Do not install a global LogTracer: other tests initialize logging.
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(CancellationEventLayer(captured.clone())),
+        );
         let controller = Arc::new(Controller::new("request-123".to_string()));
         let span = tracing::info_span!(target: "request_span", "handle_payload");
 

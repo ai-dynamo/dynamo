@@ -411,7 +411,6 @@ mod tests {
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::{Context as TraceContext, SubscriberExt};
     use tracing_subscriber::registry::LookupSpan;
-    use tracing_subscriber::util::SubscriberInitExt;
 
     use super::*;
 
@@ -553,9 +552,10 @@ mod tests {
     #[tokio::test]
     async fn route_span_covers_attempt_lifecycle_and_retry_metadata() {
         let captured = Arc::new(Captured::default());
-        let _subscriber = tracing_subscriber::registry()
-            .with(CaptureLayer(captured.clone()))
-            .set_default();
+        // Do not install a global LogTracer: other tests initialize logging.
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(CaptureLayer(captured.clone())),
+        );
 
         let mut request = Context::new(());
         let trace_context = attach_route_trace_context(

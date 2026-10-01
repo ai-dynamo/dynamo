@@ -12,7 +12,7 @@ import base64
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -40,6 +40,47 @@ pytestmark = [
 ]
 
 
+def test_rl_weight_world_size_accepts_tensor_parallel_topology():
+    parallel_config = SimpleNamespace(
+        data_parallel_size=1,
+        distributed_executor_backend="mp",
+        world_size=4,
+    )
+
+    assert mod.resolve_rl_weight_world_size(parallel_config) == 4
+
+
+@pytest.mark.parametrize(
+    "parallel_config",
+    [
+        SimpleNamespace(
+            data_parallel_size=2,
+            distributed_executor_backend="mp",
+            world_size=4,
+        ),
+        SimpleNamespace(
+            data_parallel_size=1,
+            distributed_executor_backend="external_launcher",
+            world_size=4,
+        ),
+    ],
+)
+def test_rl_weight_world_size_rejects_unsupported_topologies(parallel_config):
+    with pytest.raises(ValueError, match="data parallelism and external launcher"):
+        mod.resolve_rl_weight_world_size(parallel_config)
+
+
+def test_native_generate_cache_salt_applies_to_prefill_prompt():
+    request = {
+        "extra_args": {"vllm_tito": {"cache_salt": "policy-7"}},
+    }
+    prompt = {"prompt_token_ids": [1, 2, 3]}
+
+    mod._apply_nvext_cache_salt(request, prompt)
+
+    assert prompt["cache_salt"] == "dynamo-cache-salt:policy-7"
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -62,6 +103,7 @@ def _make_config(
     # so set to LOCAL mode.
     config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
     config.enable_multimodal = enable_multimodal
+    config.enable_rl = False
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
     )
@@ -98,6 +140,7 @@ def _make_handler(
     # BaseWorkerHandler.__init__ is bypassed above; the decode generate path
     # registers per-request deferred-abort guards here.
     handler._deferred_aborts = {}
+    handler._weight_version = mod._WEIGHT_VERSION_UNDECLARED
     return handler
 
 
@@ -141,6 +184,68 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
     resp.metrics = None
     resp.kv_transfer_params = {"do_remote_decode": False}
     return resp
+
+
+@pytest.mark.parametrize(
+    ("disaggregation_mode", "expected_worker_type"),
+    [
+        (None, mod.WorkerType.Aggregated),
+        ("PREFILL", mod.WorkerType.Prefill),
+        ("DECODE", mod.WorkerType.Decode),
+    ],
+)
+def test_lora_discovery_publishes_engine_generate_capability(
+    disaggregation_mode, expected_worker_type
+):
+    config = _make_config(disaggregation_mode=disaggregation_mode)
+    handler = _make_handler(config)
+    handler.config = config
+    handler.generate_endpoint = MagicMock()
+    handler.dp_range = (0, 1)
+    handler.model_max_len = 4096
+    handler.config.route_to_encoder = False
+    handler.config.engine_args.max_loras = 2
+    handler.engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            lora_config=SimpleNamespace(enable_tower_connector_lora=True)
+        )
+    )
+    runtime_config = MagicMock()
+
+    with (
+        patch.object(mod, "ModelRuntimeConfig", return_value=runtime_config),
+        patch.object(mod, "apply_data_parallel_runtime_config"),
+        patch.object(mod, "publish_kv_hint_capabilities"),
+        patch.object(mod, "publish_vllm_token_budget"),
+        patch.object(mod, "state_agent_settings", return_value=None),
+        patch.object(mod, "get_configured_kv_event_block_size", return_value=16),
+        patch.object(
+            mod,
+            "publish_engine_generate_capability",
+            create=True,
+            return_value=True,
+        ) as publish_generate,
+        patch.object(mod, "register_model", new=AsyncMock()) as register_model,
+    ):
+        asyncio.run(handler._register_lora_discovery("adapter-v1", 42))
+
+    if expected_worker_type == mod.WorkerType.Prefill:
+        publish_generate.assert_not_called()
+    else:
+        publish_generate.assert_called_once()
+        (
+            runtime_arg,
+            input_arg,
+            model_type_arg,
+            worker_arg,
+            tower_lora_arg,
+        ) = publish_generate.call_args.args
+        assert runtime_arg is runtime_config
+        assert input_arg == mod.ModelInput.Tokens
+        assert model_type_arg.supports_chat()
+        assert worker_arg == expected_worker_type
+        assert tower_lora_arg is True
+    assert register_model.await_args.kwargs["runtime_config"] is runtime_config
 
 
 @pytest.mark.asyncio
@@ -391,6 +496,126 @@ class TestReasoningParserForwarding:
         np.testing.assert_array_equal(decoded, routed_experts.reshape(-1))
 
     @pytest.mark.asyncio
+    async def test_generate_tokens_emits_sampling_mask_only_on_final_chunk(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        routed_experts=None,
+                        sampling_mask=None,
+                        finish_reason=None,
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=None,
+                        sampling_mask=SimpleNamespace(token_ids=[[11, 21], [12, 22]]),
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=2),
+            "req-mask",
+        ):
+            chunks.append(chunk)
+
+        assert "engine_data" not in chunks[0]
+        assert chunks[1]["engine_data"]["sampling_mask"] == [[11, 21], [12, 22]]
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_emits_final_kv_transfer_params(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+                kv_transfer_params={"connector": "nixl"},
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_tokens(
+                PatchedTokensPrompt(prompt_token_ids=[1]),
+                SamplingParams(max_tokens=1),
+                "req-kv",
+            )
+        ]
+
+        assert chunks[-1]["engine_data"]["kv_transfer_params"] == {"connector": "nixl"}
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_rejects_sampling_mask_length_mismatch(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11, 12],
+                        routed_experts=None,
+                        sampling_mask=SimpleNamespace(token_ids=[[11]]),
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        with pytest.raises(ValueError, match="sampling mask"):
+            async for _ in handler.generate_tokens(
+                PatchedTokensPrompt(prompt_token_ids=[1]),
+                SamplingParams(max_tokens=2),
+                "req-mask",
+            ):
+                pass
+
     async def test_generate_tokens_routed_experts_start_echoes_prompt_start(self):
         """routed_experts.start echoes SamplingParams.routed_experts_prompt_start
         (the offset vLLM trimmed) so the RL consumer can align the completion."""
@@ -1926,10 +2151,29 @@ class TestRLAdminRouteHardening:
                 handler.resume_generation,
                 handler.flush_cache,
                 handler.abort_request,
+                handler.get_weight_version,
+                handler.set_weight_version,
             ):
                 resp = await fn(body)
                 assert resp["status"] == "error", (fn.__name__, body, resp)
                 assert "JSON object" in resp["message"]
+
+    @pytest.mark.asyncio
+    async def test_keep_pause_rejects_active_lora_requests(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler._lora_state = mod.LoRAState()
+        handler.engine_client = MagicMock()
+        handler.engine_client.pause_generation = AsyncMock()
+        handler._lora_state.begin_request("adapterA")
+
+        resp = await handler.pause_generation({"mode": "keep"})
+
+        assert resp["status"] == "error"
+        assert "active LoRA requests" in resp["message"]
+        handler.engine_client.pause_generation.assert_not_awaited()
+        handler._lora_state.end_request("adapterA")
 
     @pytest.mark.asyncio
     async def test_distributed_update_can_match_async_rl_semantics(self):
@@ -1950,7 +2194,7 @@ class TestRLAdminRouteHardening:
             }
         )
 
-        assert resp == {"status": "ok", "version": 7}
+        assert resp == {"status": "ok", "version": 7, "version_declared": True}
         handler.engine_client.collective_rpc.assert_awaited_once_with(
             "update_weights",
             kwargs={"update_info": {"names": ["weight"]}},
@@ -1997,6 +2241,263 @@ class TestRLAdminRouteHardening:
             "finish_weight_update", kwargs={}
         )
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+
+    @staticmethod
+    def _make_rl_handler():
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_get_weight_version_reports_undeclared_before_any_update(self):
+        config = _make_config(enable_multimodal=False)
+        config.custom_encoder_class = None
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.DecodeWorkerHandler(
+                runtime=MagicMock(),
+                config=config,
+                engine=MagicMock(),
+                default_sampling_params={},
+            )
+
+        resp = await handler.get_weight_version({})
+
+        assert resp["status"] == "ok"
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    @staticmethod
+    def _constructed_handler(load_format):
+        config = _make_config(enable_multimodal=False)
+        config.custom_encoder_class = None
+        config.engine_args.load_format = load_format
+        with patch.object(mod, "VllmEngineMonitor"):
+            return mod.DecodeWorkerHandler(
+                runtime=MagicMock(),
+                config=config,
+                engine=MagicMock(),
+                default_sampling_params={},
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("load_format", "desired"),
+        [
+            ("modelexpress", "policy-7"),
+            ("mx", "policy-8"),
+        ],
+    )
+    async def test_modelexpress_rl_startup_declares_the_desired_version(
+        self, monkeypatch, load_format, desired
+    ):
+        envs = {
+            "modelexpress.envs": SimpleNamespace(MX_LOAD_STRATEGY_CHAIN="RL"),
+            "modelexpress_rl.envs": SimpleNamespace(
+                MX_REFIT_DESIRED_VERSION_UID=desired
+            ),
+        }
+        import_module = MagicMock(side_effect=envs.__getitem__)
+        monkeypatch.setattr(mod.importlib, "import_module", import_module)
+
+        handler = self._constructed_handler(load_format)
+
+        assert import_module.call_args_list == [
+            call("modelexpress.envs"),
+            call("modelexpress_rl.envs"),
+        ]
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": desired,
+            "version_declared": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_startup_version_stays_undeclared_without_rl_policy_attributes(
+        self, monkeypatch
+    ):
+        envs = {
+            "modelexpress.envs": SimpleNamespace(),
+            "modelexpress_rl.envs": SimpleNamespace(),
+        }
+        monkeypatch.setattr(
+            mod.importlib, "import_module", MagicMock(side_effect=envs.__getitem__)
+        )
+
+        handler = self._constructed_handler("modelexpress")
+
+        resp = await handler.get_weight_version({})
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    @pytest.mark.asyncio
+    async def test_startup_version_stays_undeclared_without_rl_loader_support(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            mod.importlib,
+            "import_module",
+            MagicMock(
+                side_effect=ModuleNotFoundError(
+                    "ModelExpress is not installed", name="modelexpress"
+                )
+            ),
+        )
+
+        handler = self._constructed_handler("modelexpress")
+
+        resp = await handler.get_weight_version({})
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    def test_modelexpress_startup_propagates_broken_install(self, monkeypatch):
+        monkeypatch.setattr(
+            mod.importlib,
+            "import_module",
+            MagicMock(side_effect=RuntimeError("incompatible grpcio")),
+        )
+
+        with pytest.raises(RuntimeError, match="incompatible grpcio"):
+            self._constructed_handler("modelexpress")
+
+    def test_startup_version_reads_declared_load_format_directly(self, monkeypatch):
+        config = _make_config(enable_multimodal=False)
+        config.engine_args = SimpleNamespace()
+        import_module = MagicMock()
+        monkeypatch.setattr(mod.importlib, "import_module", import_module)
+
+        with pytest.raises(AttributeError):
+            mod._modelexpress_startup_weight_version(config)
+        import_module.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_modelexpress_startup_does_not_import_modelexpress(
+        self, monkeypatch
+    ):
+        import_module = MagicMock(side_effect=RuntimeError("incompatible grpcio"))
+        monkeypatch.setattr(mod.importlib, "import_module", import_module)
+
+        handler = self._constructed_handler("auto")
+
+        import_module.assert_not_called()
+        resp = await handler.get_weight_version({})
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("load_format", "chain", "desired"),
+        [
+            # The INFERENCE chain ignores the desired version and loads base weights.
+            ("modelexpress", "INFERENCE", "policy-7"),
+            ("modelexpress", "RL", None),
+        ],
+    )
+    async def test_startup_version_stays_undeclared_without_the_rl_loader(
+        self, monkeypatch, load_format, chain, desired
+    ):
+        envs = {
+            "modelexpress.envs": SimpleNamespace(MX_LOAD_STRATEGY_CHAIN=chain),
+            "modelexpress_rl.envs": SimpleNamespace(
+                MX_REFIT_DESIRED_VERSION_UID=desired
+            ),
+        }
+        monkeypatch.setattr(
+            mod.importlib, "import_module", MagicMock(side_effect=envs.__getitem__)
+        )
+
+        handler = self._constructed_handler(load_format)
+
+        resp = await handler.get_weight_version({})
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", [None, 7, "policy-43"])
+    async def test_set_weight_version_declares_without_touching_the_engine(
+        self, version
+    ):
+        handler = self._make_rl_handler()
+
+        resp = await handler.set_weight_version({"weight_version": version})
+
+        assert resp == {"status": "ok", "version": version}
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_set_weight_version_rejects_a_missing_version(self):
+        handler = self._make_rl_handler()
+
+        resp = await handler.set_weight_version({})
+
+        assert resp["status"] == "error"
+        assert (await handler.get_weight_version({}))["version_declared"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", [None, "initial", "unknown"])
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("update_weights_from_disk", {"model_path": "/models/checkpoint-42"}),
+            ("update_weights_from_distributed", {"engine_rpc": "update_weights"}),
+        ],
+    )
+    async def test_explicit_version_is_declared(self, route, body, version):
+        handler = self._make_rl_handler()
+        handler._paused = True
+
+        response = await getattr(handler, route)({**body, "weight_version": version})
+
+        assert response == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "version",
+        [mod._WEIGHT_VERSION_UNDECLARED, None, "policy-42"],
+        ids=["undeclared", "declared-null", "declared-string"],
+    )
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("update_weights_from_disk", {"model_path": "/models/checkpoint-43"}),
+            ("update_weights_from_distributed", {"engine_rpc": "update_weights"}),
+        ],
+    )
+    async def test_update_without_a_version_preserves_declaration(
+        self, route, body, version
+    ):
+        handler = self._make_rl_handler()
+        handler._paused = True
+        if version is not mod._WEIGHT_VERSION_UNDECLARED:
+            await handler.set_weight_version({"weight_version": version})
+        previous = await handler.get_weight_version({})
+
+        response = await getattr(handler, route)(body)
+
+        assert response == {
+            "status": "ok",
+            "version": "unknown",
+            "version_declared": False,
+        }
+        assert await handler.get_weight_version({}) == previous
 
     @pytest.mark.asyncio
     async def test_init_weights_update_group_succeeds_within_timeout(self):

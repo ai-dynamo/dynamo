@@ -574,9 +574,7 @@ COPY components/ /opt/dynamo/components/
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
 ARG TARGETARCH
-{% if framework != "sglang" %}
 ARG ENABLE_MEDIA_FFMPEG
-{% endif %}
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
@@ -593,7 +591,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-{% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist && \
+{% if framework == "sglang" and device == "xpu" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     # Skip maturin's built-in repair: it would graft the in-tree libav* into the
     # wheel, which the codec gate rejects. Repair with those sonames excluded so
@@ -609,7 +607,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         esac && \
     MANYLINUX_POLICY=manylinux_{{ "2_35" if device == "cpu" else "2_28" }}_${ARCH_ALT} && \
 {% endif %}
-        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
+        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
         auditwheel repair \
             --exclude 'libavcodec.so.*' \
             --exclude 'libavdevice.so.*' \
@@ -622,7 +620,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             --wheel-dir /opt/dynamo/dist \
             target/wheels/ai_dynamo_runtime-*.whl; \
     else \
-        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
     fi && \
 {% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
@@ -635,9 +633,8 @@ COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/side
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
-# AI Simulate is released separately as an abi3 wheel. Its public PyPI artifact
-# is a small resolver sdist because the full wheel is too large for that registry;
-# stage the actual wheel directly from NVIDIA's package index. Download only this
+# AISimulate is released separately as an abi3 wheel. Stage the pinned wheel
+# directly from NVIDIA's package index. Download only this
 # distribution; runtime images own dependency installation through their
 # requirements files and local wheels.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \

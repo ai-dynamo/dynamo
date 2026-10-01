@@ -80,6 +80,17 @@ pub fn connection_timeout(message: impl Into<String>) -> DynamoError {
     backend(BackendError::ConnectionTimeout, message)
 }
 
+fn typed(kind: ErrorType, message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(kind)
+        .message(message)
+        .build()
+}
+
+pub fn cancelled(message: impl Into<String>) -> DynamoError {
+    typed(ErrorType::Cancelled, message)
+}
+
 pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
     status_to_dynamo_parts(rpc, status.message(), status.code())
 }
@@ -125,6 +136,12 @@ mod tests {
                 BackendError::ConnectionTimeout,
             ),
             (tonic::Code::Internal, BackendError::Unknown),
+            // Not WorkerOverloaded: that type is migratable, and a shared
+            // helper cannot tell an overloaded engine from a per-request
+            // rejection such as an oversized message, which every worker would
+            // reject identically. A backend that knows its server means
+            // backpressure maps this itself.
+            (tonic::Code::ResourceExhausted, BackendError::Unknown),
         ] {
             let error = status_to_dynamo("Test", tonic::Status::new(code, "failure"));
             assert_eq!(error.error_type(), ErrorType::Backend(expected));

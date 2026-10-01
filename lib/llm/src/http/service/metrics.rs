@@ -129,6 +129,19 @@ pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
 }
 
+pub fn request_was_timed_out(err: &(dyn std::error::Error + 'static)) -> bool {
+    use dynamo_runtime::error::BackendError;
+
+    const TIMEOUT: &[DynamoErrorType] = &[
+        DynamoErrorType::ResponseTimeout,
+        DynamoErrorType::ConnectionTimeout,
+        DynamoErrorType::Backend(BackendError::ResponseTimeout),
+        DynamoErrorType::Backend(BackendError::ConnectionTimeout),
+    ];
+    const NON_TIMEOUT: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, TIMEOUT, NON_TIMEOUT)
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;
@@ -3904,6 +3917,18 @@ mod tests {
 
         assert_eq!(with_json, without_json);
         assert!(with_json.get("llm_metrics").is_none());
+
+        let mut inbound_json = without_json;
+        inbound_json["llm_metrics"] = serde_json::json!({
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "chunk_tokens": 1,
+            "cached_tokens": 1,
+            "image_tokens": 300
+        });
+        let inbound: NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(inbound_json).unwrap();
+        assert_eq!(inbound.llm_metrics, with_metrics.llm_metrics);
     }
 
     #[test]

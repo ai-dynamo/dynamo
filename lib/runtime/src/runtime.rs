@@ -79,6 +79,7 @@ pub struct Runtime {
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
+    shutdown_started: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
     shutdown_state: Arc<ShutdownState>,
     compute_pool: Option<Arc<compute::ComputePool>>,
@@ -98,6 +99,7 @@ impl Runtime {
 
         // create endpoint shutdown token as a child of the main token
         let endpoint_shutdown_token = cancellation_token.child_token();
+        let shutdown_started = endpoint_shutdown_token.child_token();
 
         // secondary runtime for background ectd/nats tasks
         let secondary = match secondary {
@@ -121,6 +123,7 @@ impl Runtime {
             secondary,
             cancellation_token,
             endpoint_shutdown_token,
+            shutdown_started,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             shutdown_state: Arc::new(ShutdownState {
                 initiated: AtomicBool::new(false),
@@ -361,6 +364,24 @@ impl Runtime {
         self.compute_pool.as_ref()
     }
 
+    /// Withdraw readiness before application draining without stopping the
+    /// endpoints or transports still needed to complete that drain.
+    pub fn mark_shutting_down(&self) {
+        if !self.shutdown_started.is_cancelled() {
+            tracing::info!("Runtime readiness withdrawn for shutdown");
+            self.shutdown_started.cancel();
+        }
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_started.is_cancelled()
+    }
+
+    /// Observe shutdown from its start, rather than waiting for transport teardown.
+    pub fn shutdown_started_token(&self) -> CancellationToken {
+        self.shutdown_started.child_token()
+    }
+
     /// A [`CancellationToken`] that is cancelled once the shutdown phases started by
     /// [`Runtime::shutdown`] have completed, that is once phase 3 has cancelled the
     /// primary token. It stays un-cancelled if `shutdown` was never called.
@@ -411,6 +432,7 @@ impl Runtime {
     ///
     /// Calling this more than once is a no-op after the first call.
     pub fn shutdown(&self) {
+        self.mark_shutting_down();
         // Runs here, not in the coordinator task, so it cannot be lost with it; ahead of the
         // `initiated` latch so a racing second caller also returns with it cancelled.
         self.endpoint_shutdown_token.cancel();

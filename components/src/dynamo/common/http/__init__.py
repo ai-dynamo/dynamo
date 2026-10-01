@@ -11,9 +11,16 @@ follows redirects manually and revalidates each hop against the policy.
 
 ``DYN_HTTP_BACKEND`` accepts only ``aiohttp``; any other value logs a warning
 and uses aiohttp. aiohttp scales well under fan-out and exposes a
-``TCPConnector(resolver=...)`` hook that a policy-aware resolver can use to pin
-validated DNS answers (the connect-time SSRF backstop lands on top of this
-capability; it is not wired in the default client here).
+``TCPConnector(resolver=...)`` hook. The default client wires a
+``BlocklistResolver`` (``_ssrf_resolver.py``) into it that pins validated DNS
+answers at connect time — the SSRF backstop against DNS rebinding. The
+connector may return private addresses only when the ``DYN_MM_ALLOW_INTERNAL``
+deployment baseline and the request policy both allow it. It governs
+**direct** connections: when a proxy applies, the proxy resolves the origin,
+so a policy-protected fetch that would be proxied fails closed unless
+``DYN_MM_TRUST_EGRESS_PROXY=1`` asserts that the proxy enforces destination
+policy. ``NO_PROXY`` is honored, so a fetch that goes direct is never refused.
+IP literals never reach a resolver in aiohttp and stay ``validate_url``'s job.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ from dynamo.common.configuration.groups.http_args import (
 from .aiohttp_client import AiohttpClient
 from .base import (
     HttpClient,
+    HttpConfigurationError,
     HttpConnectionError,
     HttpError,
     HttpStatusError,
@@ -97,6 +105,7 @@ __all__ = [
     "AiohttpClient",
     "HttpError",
     "HttpTimeoutError",
+    "HttpConfigurationError",
     "HttpConnectionError",
     "HttpStatusError",
     "HttpConfigBase",
