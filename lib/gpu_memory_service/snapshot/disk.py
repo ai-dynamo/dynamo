@@ -6,10 +6,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, Sequence, Tuple
 
-from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.snapshot.backends.pinned_host import (
     PINNED_COPY_CHUNK_SIZE,
     close_pinned_copy_slots,
@@ -65,9 +67,10 @@ class DeviceToFileWriter:
             raise ValueError("buffers must be positive")
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
+        self._vmm = get_vmm()
         if device is not None:
-            cuda_utils.cuda_runtime_set_device(device)
-        self._slots = make_pinned_copy_slots(buffers)
+            self._vmm.runtime_set_device(device)
+        self._slots = make_pinned_copy_slots(self._vmm, buffers)
         self._slot_index = 0
         self._closed = False
         try:
@@ -138,12 +141,75 @@ def plan_shard_layout(
     allocations_info: Sequence[GetAllocationResponse],
     shard_size_bytes: int,
 ) -> list[Tuple[int, int]]:
+    return _plan_shard_layout(
+        [int(allocation.aligned_size) for allocation in allocations_info],
+        shard_size_bytes,
+    )
+
+
+def write_device_shards(
+    extents: Sequence[Tuple[int, int]],
+    shard_dirs: Sequence[str],
+    *,
+    device: int,
+    shard_size_bytes: int,
+    max_workers: int,
+    relative_to: Optional[str] = None,
+) -> list[Tuple[str, int]]:
+    """Write ``(device_va, size)`` extents and return their file placements."""
+    if not shard_dirs:
+        raise ValueError("at least one shard directory is required")
+    if max_workers <= 0:
+        raise ValueError("max_workers must be positive")
+    sizes = [int(size) for _va, size in extents]
+    if any(size <= 0 for size in sizes):
+        raise ValueError("extent sizes must be positive")
+
+    layout = _plan_shard_layout(sizes, shard_size_bytes)
+    groups: Dict[int, list[int]] = defaultdict(list)
+    for index, (shard_index, _offset) in enumerate(layout):
+        groups[shard_index].append(index)
+    for shard_dir in shard_dirs:
+        os.makedirs(shard_dir, exist_ok=True)
+
+    placements: list[Optional[Tuple[str, int]]] = [None] * len(extents)
+
+    def write_shard(shard_index: int, indices: list[int]) -> None:
+        path = os.path.join(
+            shard_dirs[shard_index % len(shard_dirs)],
+            f"shard_{shard_index:04d}.bin",
+        )
+        manifest_path = os.path.relpath(path, relative_to) if relative_to else path
+        with DeviceToFileWriter(path, device=device) as writer:
+            for index in indices:
+                va, size = extents[index]
+                writer.write_device(va, size)
+                placements[index] = (manifest_path, layout[index][1])
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(write_shard, shard_index, indices)
+            for shard_index, indices in groups.items()
+        ]
+        for future in futures:
+            future.result()
+
+    if any(placement is None for placement in placements):
+        raise RuntimeError("shard writer did not produce every extent")
+    return [placement for placement in placements if placement is not None]
+
+
+def _plan_shard_layout(
+    sizes: Sequence[int],
+    shard_size_bytes: int,
+) -> list[Tuple[int, int]]:
+    if shard_size_bytes <= 0:
+        raise ValueError("shard_size_bytes must be positive")
     result: list[Tuple[int, int]] = []
     shard_idx = -1
     current_offset = 0
     started = False
-    for alloc in allocations_info:
-        size = int(alloc.aligned_size)
+    for size in sizes:
         if not started or (
             current_offset > 0 and current_offset + size > shard_size_bytes
         ):

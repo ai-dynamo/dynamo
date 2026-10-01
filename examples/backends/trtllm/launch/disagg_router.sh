@@ -32,7 +32,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
   --disaggregation-mode prefill \
-  --publish-events-and-metrics &
+  --publish-kv-events &
 
 # run decode worker
 # No event publishing needed - prefill handles it

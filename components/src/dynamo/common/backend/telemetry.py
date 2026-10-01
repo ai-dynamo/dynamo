@@ -60,8 +60,8 @@ def trace_headers(context: Context) -> dict[str, str] | None:
 
     Thin wrapper over ``Context.trace_headers()``; see that method's
     docstring for return semantics. Most engine code should prefer
-    :func:`engine_trace_kwargs` instead — it builds the splat-ready kwargs
-    dict with the right name and gate per backend.
+    :func:`engine_trace_kwargs` instead — it builds a splat-ready kwargs dict
+    with the keyword name and optional engine-specific gate.
     """
     return context.trace_headers()
 
@@ -72,9 +72,11 @@ def engine_trace_kwargs(
     kwarg_name: str = "trace_headers",
     enabled: bool = True,
 ) -> dict[str, dict[str, str]]:
-    """Splat-ready ``{kwarg_name: headers}`` for the inference-engine call,
-    or ``{}`` when no traceparent / ``enabled=False``. See CLAUDE.md for
-    per-backend kwarg names + gates."""
+    """Return ``{kwarg_name: headers}`` for the inference-engine call.
+
+    Returns an empty dict when no traceparent is available or ``enabled`` is
+    false. See CLAUDE.md for usage guidance.
+    """
     if not enabled:
         return {}
     headers = context.trace_headers()

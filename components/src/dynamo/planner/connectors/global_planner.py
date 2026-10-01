@@ -13,9 +13,9 @@ from kubernetes.config.config_exception import ConfigException
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.clients.remote_client import RemotePlannerClient
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
-from dynamo.planner.connectors.remote_client import RemotePlannerClient
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
@@ -23,6 +23,7 @@ from dynamo.planner.errors import (
     ModelNameNotFoundError,
     UserProvidedModelNameMismatchError,
 )
+from dynamo.planner.monitoring.dgd_services import ComponentGPUShape
 from dynamo.planner.monitoring.worker_info import (
     WorkerInfo,
     build_worker_info_from_defaults,
@@ -38,7 +39,7 @@ class GlobalPlannerConnector(PlannerConnector):
     """
     Connector that delegates scaling decisions to a centralized GlobalPlanner.
 
-    This connector wraps RemotePlannerClient and implements the PlannerConnector
+    This connector wraps RemotePlannerClient and implements the InfraScaler
     interface, allowing planner_core.py to treat global-planner environment mode
     consistently with kubernetes and virtual modes.
     """
@@ -78,7 +79,7 @@ class GlobalPlannerConnector(PlannerConnector):
         self._local_k8s_connector: Optional[KubernetesConnector] = None
         self._local_k8s_init_attempted: bool = False
 
-    async def _async_init(self):
+    async def async_init(self):
         """Async initialization - creates RemotePlannerClient"""
         self.remote_client = RemotePlannerClient(
             self.runtime,
@@ -127,7 +128,7 @@ class GlobalPlannerConnector(PlannerConnector):
 
         if self.remote_client is None:
             raise RuntimeError(
-                "GlobalPlannerConnector not initialized. Call _async_init() first."
+                "GlobalPlannerConnector not initialized. Call async_init() first."
             )
 
         # Get DGD info from environment variables
@@ -209,8 +210,9 @@ class GlobalPlannerConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-        **kwargs,
-    ):
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> None:
         """
         Validate deployment (no-op for GlobalPlanner).
 
@@ -278,7 +280,7 @@ class GlobalPlannerConnector(PlannerConnector):
             )
         return self._local_k8s_connector
 
-    def get_actual_worker_counts(
+    async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
@@ -301,7 +303,7 @@ class GlobalPlannerConnector(PlannerConnector):
                 "reporting (0, 0, stable=True) for out-of-cluster usage."
             )
             return 0, 0, True
-        return local.get_actual_worker_counts(
+        return await local.get_actual_worker_counts(
             prefill_component_name=prefill_component_name,
             decode_component_name=decode_component_name,
         )
@@ -312,6 +314,34 @@ class GlobalPlannerConnector(PlannerConnector):
         if local is None:
             return base_dynamo_namespace
         return local.get_worker_runtime_namespace(base_dynamo_namespace)
+
+    def get_gpu_counts(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Resolve pool-local per-engine GPU widths when available."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            return None, None
+        return local.get_gpu_counts(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+
+    def get_gpu_shapes(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[ComponentGPUShape], Optional[ComponentGPUShape]]:
+        """Resolve pool-local GPU shapes when available."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            return None, None
+        return local.get_gpu_shapes(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
 
     def get_worker_info(
         self,
@@ -331,7 +361,11 @@ class GlobalPlannerConnector(PlannerConnector):
             return local.get_worker_info(sub_component_type, backend)
         return build_worker_info_from_defaults(backend, sub_component_type)
 
-    def get_model_name(self, **kwargs) -> str:
+    def get_model_name(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> str:
         """
         Get model name.
 
@@ -345,7 +379,10 @@ class GlobalPlannerConnector(PlannerConnector):
         local = self._get_local_k8s_connector()
         if local is not None:
             try:
-                return local.get_model_name(**kwargs)
+                return local.get_model_name(
+                    require_prefill=require_prefill,
+                    require_decode=require_decode,
+                )
             except (
                 ModelNameNotFoundError,
                 DeploymentModelNameMismatchError,

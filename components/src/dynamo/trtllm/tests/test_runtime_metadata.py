@@ -1,11 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
-from dynamo.trtllm.utils.trtllm_utils import get_spec_decode_runtime_data
+from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
+from dynamo.trtllm.utils.trtllm_utils import (
+    get_spec_decode_runtime_data,
+    publish_trtllm_token_budget,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -13,6 +19,29 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+def test_token_budget_matches_trtllm_policy():
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+
+    publish_trtllm_token_budget(runtime_config, 4096)
+
+    runtime_config.set_engine_specific.assert_called_once()
+    key, value = runtime_config.set_engine_specific.call_args.args
+    assert key == TOKEN_BUDGET_RUNTIME_KEY
+    assert json.loads(value) == {
+        "combined_limit": 4096,
+        "reject_prompt_overflow": True,
+        "reject_total_overflow": False,
+    }
+
+
+def test_token_budget_is_omitted_when_trtllm_infers_limit():
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+
+    publish_trtllm_token_budget(runtime_config, None)
+
+    runtime_config.set_engine_specific.assert_not_called()
 
 
 def test_spec_decode_runtime_data_uses_max_draft_len():

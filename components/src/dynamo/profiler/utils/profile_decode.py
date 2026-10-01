@@ -33,7 +33,9 @@ def get_num_request_range(
     if conc_per_dp < granularity:
         ans = list(range(attn_dp_size, conc_per_dp * attn_dp_size + 1, attn_dp_size))
     else:
-        step = (conc_per_dp - 1) * attn_dp_size / (granularity - 1)
+        # Sweep within the KV-cache capacity: `granularity` evenly-spaced
+        # multiples of attn_dp_size spanning [attn_dp_size, conc_per_dp * attn_dp_size].
+        step = (conc_per_dp - 1) / (granularity - 1)
         ans = [attn_dp_size + int(i * step) * attn_dp_size for i in range(granularity)]
     return ans
 

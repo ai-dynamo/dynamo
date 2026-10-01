@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib
+import json
+from pathlib import Path
 
 import pytest
 
-from dynamo.mocker import MockEngineArgs
-from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
+from dynamo.llm import KvRouterConfig
+from dynamo.mocker import MockEngineArgs, run_mocker_trace_replay
+from dynamo.replay import ReplayReport, run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
 from .replay_utils import (
@@ -15,6 +17,8 @@ from .replay_utils import (
     _decode_args,
     _partial_router_config,
     _prefill_args,
+    _report_summary,
+    _require_aisimulate_distribution,
     _router_config,
     _sglang_args,
     _vllm_args,
@@ -30,13 +34,6 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.timeout(120),
 ]
-
-
-@pytest.fixture(autouse=True)
-def _skip_online(request):
-    callspec = getattr(request.node, "callspec", None)
-    if callspec and callspec.params.get("replay_mode") == "online":
-        pytest.skip("intermittent hang in online replay mode (#9548)")
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -77,6 +74,7 @@ def test_run_trace_replay_smoke_matrix(
         input_tokens=64,
         output_tokens=2,
     )
+    assert "weka_nested_timestamp_basis" not in _report_summary(report)
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -112,8 +110,10 @@ def test_run_trace_replay_invariant_counts_match(tmp_path, engine_type, replay_m
         "total_input_tokens",
         "total_output_tokens",
     ):
-        assert single[field] == multi_round_robin[field]
-        assert single[field] == multi_kv_router[field]
+        assert (
+            _report_summary(single)[field] == _report_summary(multi_round_robin)[field]
+        )
+        assert _report_summary(single)[field] == _report_summary(multi_kv_router)[field]
 
 
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
@@ -136,6 +136,292 @@ def test_run_trace_replay_supports_multiturn_sessions(tmp_path, replay_mode):
     )
 
 
+def test_offline_replay_per_request_capture_is_explicit(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+
+    summary_only = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        replay_mode="offline",
+    )
+    captured = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        replay_mode="offline",
+        capture_per_request=True,
+    )
+
+    assert summary_only.per_request is None
+    assert summary_only.coverage["capture_per_request"] is False
+    assert captured.per_request is not None
+    assert len(captured.per_request) == 4
+    assert captured.coverage["per_request_records"] == 4
+
+
+def test_dynamo_mocker_wrapper_returns_public_replay_report(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+
+    report = run_mocker_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+    )
+
+    assert isinstance(report, ReplayReport)
+    assert report.summary["completed_requests"] == 4
+
+
+def test_dynamo_mocker_wrapper_forwards_agentic_execution_model(tmp_path):
+    trace_path = _write_agentic_mooncake_trace(tmp_path)
+
+    report = run_mocker_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        trace_format="agentic_mooncake",
+        agentic_lanes=1,
+        execution_model="target-model",
+    )
+
+    assert isinstance(report, ReplayReport)
+    assert report.summary["completed_requests"] == 2
+    assert report.summary["agentic_model_projection"]["target_model"] == (
+        "target-model"
+    )
+
+
+def test_online_replay_keeps_summary_dictionary_result(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        replay_mode="online",
+    )
+
+    assert isinstance(report, dict)
+    assert report["completed_requests"] == 4
+
+
+def test_offline_replay_report_serializes_complete_result(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        replay_mode="offline",
+    )
+
+    assert set(report.to_dict()) == {
+        "summary",
+        "per_request",
+        "coverage",
+        "planner",
+    }
+    assert report.to_dict()["per_request"] is None
+
+
+def test_per_request_capture_records_queued_routes_and_dp_identity():
+    dp_report = run_synthetic_trace_replay(
+        8,
+        2,
+        4,
+        extra_engine_args=MockEngineArgs(
+            block_size=4,
+            num_gpu_blocks=64,
+            max_num_seqs=4,
+            speedup_ratio=1000.0,
+            dp_size=2,
+        ),
+        num_workers=1,
+        replay_mode="offline",
+        router_mode="kv_router",
+        replay_concurrency=2,
+        capture_per_request=True,
+    )
+    dp_routes = [record["routing_history"][0] for record in dp_report.per_request]
+    assert {(route["logical_worker_id"], route["dp_rank"]) for route in dp_routes} == {
+        (0, 0),
+        (0, 1),
+    }
+    assert {(route["scheduler_id"], route["dp_rank"]) for route in dp_routes} == {
+        (0, 0),
+        (1, 1),
+    }
+    assert {route["outcome"] for route in dp_routes} == {"immediate"}
+
+    queued_report = run_synthetic_trace_replay(
+        8,
+        8,
+        4,
+        extra_engine_args=MockEngineArgs(
+            block_size=4,
+            num_gpu_blocks=6,
+            max_num_seqs=1,
+            speedup_ratio=1000.0,
+        ),
+        num_workers=2,
+        replay_mode="offline",
+        router_mode="kv_router",
+        router_config=KvRouterConfig(
+            router_queue_threshold=0.0,
+            router_event_threads=1,
+            router_temperature=0.0,
+        ),
+        replay_concurrency=4,
+        capture_per_request=True,
+    )
+    queued_routes = [
+        record["routing_history"][0]
+        for record in queued_report.per_request
+        if record["routing_history"][0]["outcome"] == "queued"
+    ]
+    assert len(queued_routes) == 2
+    assert {route["logical_worker_id"] for route in queued_routes} == {0, 1}
+    for route in queued_routes:
+        assert route["queue_entered_at_ms"] == 0.0
+        assert route["released_at_ms"] > route["queue_entered_at_ms"]
+        assert route["queue_wait_ms"] == pytest.approx(
+            route["released_at_ms"] - route["queue_entered_at_ms"]
+        )
+
+
+def test_online_replay_rejects_in_memory_per_request_capture(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    with pytest.raises(ValueError, match="capture_per_request only supports"):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=_vllm_args(),
+            replay_mode="online",
+            capture_per_request=True,
+        )
+    with pytest.raises(ValueError, match="capture_per_request only supports"):
+        run_synthetic_trace_replay(
+            8,
+            2,
+            1,
+            extra_engine_args=_vllm_args(),
+            replay_mode="online",
+            replay_concurrency=1,
+            capture_per_request=True,
+        )
+
+
+def test_online_trace_replay_emits_per_request_goodput_and_capacity(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    jsonl_path = tmp_path / "online_requests.jsonl"
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode="online",
+        router_mode="kv_router",
+        report_jsonl_path=jsonl_path,
+        sla_e2e_ms=1_000_000.0,
+    )
+
+    records = [
+        json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 4
+    assert {record["session_id"] for record in records} == {
+        "session-a",
+        "session-b",
+    }
+    assert all(record["decode_worker_idx"] is not None for record in records)
+    assert report["goodput_completed_requests"] == 4
+    assert report["decode_worker_seconds"] > 0.0
+    assert report["decode_gpus_per_worker"] == 1
+    assert report["gpu_hours"] > 0.0
+
+
+def _write_agentic_mooncake_trace(tmp_path):
+    trace_path = tmp_path / "agentic.jsonl"
+    records = [
+        {
+            "schema": "dynamo.agentic_mooncake",
+            "version": 2,
+            "block_size": 64,
+            "hash_id_scope": "local",
+            "source": {"format": "test-fixture", "digest": "agentic-replay"},
+        },
+        {
+            "request_id": "root",
+            "play_id": "play",
+            "session_id": "root",
+            "model": "test-model",
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [1],
+            "not_before_ms": 0.0,
+            "dependencies": [],
+        },
+        {
+            "request_id": "dependent",
+            "play_id": "play",
+            "session_id": "dependent",
+            "model": "test-model",
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [2],
+            "not_before_ms": 0.0,
+            "dependencies": [
+                {
+                    "request_id": "root",
+                    "trigger": "completion",
+                    "delay_ms": 5.0,
+                    "relation": "sequence",
+                }
+            ],
+        },
+    ]
+    trace_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    return trace_path
+
+
+def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
+    trace_path = _write_agentic_mooncake_trace(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode="online",
+        router_mode="kv_router",
+        trace_format="agentic_mooncake",
+        execution_model="target-model",
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+    assert report["agentic_model_projection"] == {
+        "policy": "project_to_configured_target",
+        "source_models": ["test-model"],
+        "target_model": "target-model",
+    }
+
+
+def test_online_synthetic_replay_supports_goodput_sla():
+    report = run_synthetic_trace_replay(
+        64,
+        2,
+        2,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode="online",
+        arrival_interval_ms=1.0,
+        sla_e2e_ms=1_000_000.0,
+    )
+
+    assert report["goodput_completed_requests"] == 2
+
+
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_trace_replay_supports_applied_compute_agentic_format_with_concurrency(
     tmp_path, replay_mode
@@ -154,6 +440,7 @@ def test_run_trace_replay_supports_applied_compute_agentic_format_with_concurren
         trace_num_prefix_groups=1,
     )
 
+    report = _report_summary(report)
     assert report["num_requests"] == 5
     assert report["completed_requests"] == 5
     assert report["total_input_tokens"] == 64 + 68 + 72 + 64 + 68
@@ -173,6 +460,245 @@ def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurr
             replay_mode="offline",
             trace_format="applied_compute_agentic",
         )
+
+
+def _write_weka_trace(
+    path: Path, *, nested_timestamps: tuple[float, float] | None = None
+) -> Path:
+    requests = [
+        {
+            "t": 0.0,
+            "type": "s",
+            "model": "model",
+            "in": 64,
+            "out": 1,
+            "hash_ids": [1],
+        }
+    ]
+    if nested_timestamps is not None:
+        marker_time, child_time = nested_timestamps
+        requests.append(
+            {
+                "t": marker_time,
+                "type": "subagent",
+                "agent_id": "worker",
+                "subagent_type": "Explore",
+                "status": "completed",
+                "models": ["model"],
+                "requests": [
+                    {
+                        "t": child_time,
+                        "type": "s",
+                        "model": "model",
+                        "in": 64,
+                        "out": 1,
+                        "hash_ids": [2],
+                    }
+                ],
+            }
+        )
+    path.write_text(
+        json.dumps(
+            {
+                "id": path.stem,
+                "models": ["model"],
+                "block_size": 64,
+                "hash_id_scope": "local",
+                "requests": requests,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.parametrize(
+    ("basis", "child_start_ms"),
+    [(None, 2_000.0), ("auto", 2_000.0), ("absolute", 2_000.0), ("relative", 3_000.0)],
+)
+@pytest.mark.parametrize("arrival_speedup_ratio", [1.0, 2.0])
+def test_weka_nested_timestamp_override_reaches_native_replay(
+    tmp_path, basis, child_start_ms, arrival_speedup_ratio
+):
+    trace_path = _write_weka_trace(
+        tmp_path / "nested.json", nested_timestamps=(1.0, 2.0)
+    )
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        trace_format="weka",
+        execution_model="target-model",
+        weka_nested_timestamp_basis=basis,
+        arrival_speedup_ratio=arrival_speedup_ratio,
+        capture_per_request=True,
+    )
+
+    assert report.summary["completed_requests"] == 2
+    assert report.summary["weka_nested_timestamp_basis"] == (
+        "relative" if basis == "relative" else "absolute"
+    )
+    root, child = sorted(
+        report.per_request, key=lambda record: record["arrival_time_ms"]
+    )
+    assert root["arrival_time_ms"] == 0.0
+    # With no recorded root API duration, the graph's child delay starts when
+    # the replayed root completes. Only that delay is scaled by the speedup.
+    assert child["arrival_time_ms"] == (
+        root["terminal_time_ms"] + child_start_ms / arrival_speedup_ratio
+    )
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_weka_auto_reports_corpus_wide_resolved_timestamp_basis(tmp_path, replay_mode):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    ambiguous = _write_weka_trace(
+        corpus / "ambiguous.json", nested_timestamps=(0.010, 0.0105)
+    )
+    original_bytes = ambiguous.read_bytes()
+    for source, expected_basis, child_delay_ms, expected_count in [
+        (ambiguous, "absolute", 10.5, 2),
+        (corpus, "relative", 20.5, 4),
+    ]:
+        if source == corpus:
+            # A pre-marker child in another file changes Auto for the whole
+            # corpus, including the byte-identical ambiguous trace.
+            _write_weka_trace(corpus / "witness.json", nested_timestamps=(0.020, 0.001))
+        report = run_trace_replay(
+            source,
+            extra_engine_args=_vllm_args(),
+            trace_format="weka",
+            execution_model="target-model",
+            replay_mode=replay_mode,
+            capture_per_request=replay_mode == "offline",
+        )
+        summary = _report_summary(report)
+        assert summary["weka_nested_timestamp_basis"] == expected_basis
+        assert summary["completed_requests"] == expected_count
+        if replay_mode == "offline":
+            root, child = sorted(
+                (
+                    record
+                    for record in report.per_request
+                    if record["play_id"].endswith(":play:ambiguous")
+                ),
+                key=lambda record: record["arrival_time_ms"],
+            )
+            assert child["arrival_time_ms"] - root["terminal_time_ms"] == pytest.approx(
+                child_delay_ms
+            )
+    assert ambiguous.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_weka_without_nested_requests_reports_timestamp_basis_not_applicable(
+    tmp_path, replay_mode
+):
+    report = run_trace_replay(
+        _write_weka_trace(tmp_path / "flat.json"),
+        extra_engine_args=_vllm_args(),
+        trace_format="weka",
+        execution_model="target-model",
+        replay_mode=replay_mode,
+    )
+    summary = _report_summary(report)
+    assert summary["completed_requests"] == 1
+    assert summary["weka_nested_timestamp_basis"] == "not_applicable"
+
+
+def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
+    trace_path = (
+        Path(__file__).resolve().parents[5]
+        / "lib"
+        / "bench"
+        / "testdata"
+        / "pi_request_trace.jsonl.gz"
+    )
+
+    with pytest.raises(Exception, match="not supported with replay_concurrency"):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=_vllm_args(),
+            replay_concurrency=2,
+            trace_format="dynamo",
+            execution_model="target-model",
+        )
+
+
+def test_direct_agentic_dynamo_trace_honors_per_request_capture():
+    trace_path = (
+        Path(__file__).resolve().parents[5]
+        / "lib"
+        / "bench"
+        / "testdata"
+        / "pi_request_trace.jsonl.gz"
+    )
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        replay_mode="offline",
+        trace_format="dynamo",
+        execution_model="target-model",
+        capture_per_request=True,
+    )
+
+    assert report.per_request
+    assert report.coverage["capture_per_request"] is True
+    assert report.coverage["per_request_records"] == len(report.per_request)
+    assert report.summary["completed_requests"] == len(report.per_request)
+    assert report.summary["agentic_model_projection"]["target_model"] == "target-model"
+
+
+@pytest.mark.planner
+def test_planner_replay_accepts_multi_shard_dynamo_trace(tmp_path):
+    _require_aisimulate_distribution()
+    trace_paths = []
+    for index in range(2):
+        trace_path = tmp_path / f"trace-{index}.jsonl"
+        trace_path.write_text(
+            json.dumps(
+                {
+                    "schema": "dynamo.request.trace.v1",
+                    "event_type": "request_end",
+                    "event_time_unix_ms": 1_010 + index * 10,
+                    "request": {
+                        "request_id": f"request-{index}",
+                        "request_received_ms": 1_000 + index * 10,
+                        "output_tokens": 2,
+                        "replay": {
+                            "trace_block_size": 64,
+                            "input_length": 64,
+                            "input_sequence_hashes": [101 + index],
+                        },
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        trace_paths.append(trace_path)
+
+    planner_report = run_trace_replay(
+        trace_paths,
+        extra_engine_args=_vllm_args(),
+        num_workers=1,
+        trace_format="dynamo",
+        planner_config={
+            "mode": "agg",
+            "optimization_target": "throughput",
+            "report_interval_hours": None,
+            "live_dashboard_port": 0,
+        },
+    )
+
+    _assert_basic_report_counts(
+        planner_report.summary,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
 
 
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
@@ -289,8 +815,10 @@ def test_run_synthetic_trace_replay_invariant_counts_match(
         "total_input_tokens",
         "total_output_tokens",
     ):
-        assert single[field] == multi_round_robin[field]
-        assert single[field] == multi_kv_router[field]
+        assert (
+            _report_summary(single)[field] == _report_summary(multi_round_robin)[field]
+        )
+        assert _report_summary(single)[field] == _report_summary(multi_kv_router)[field]
 
 
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
@@ -303,6 +831,7 @@ def test_run_synthetic_trace_replay_supports_multiturn_workloads(tmp_path, repla
         num_workers=2,
         replay_mode=replay_mode,
         router_mode="kv_router",
+        arrival_interval_ms=1.0,
         turns_per_session=2,
         inter_turn_delay_ms=5.0,
         shared_prefix_ratio=0.5,
@@ -336,6 +865,7 @@ def test_run_synthetic_trace_replay_workload_validates_zero_token_lengths(
             num_workers=2,
             replay_mode="offline",
             router_mode="kv_router",
+            arrival_interval_ms=1.0,
             turns_per_session=2,
         )
 
@@ -429,37 +959,6 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
     )
 
 
-def test_run_trace_replay_materializes_kv_bytes_from_aic_model(monkeypatch, tmp_path):
-    kv_cache = importlib.import_module("dynamo.mocker.utils.kv_cache")
-    monkeypatch.setattr(
-        kv_cache,
-        "compute_kv_bytes_per_token",
-        lambda model_path: 1 if model_path == "test/model" else None,
-    )
-    trace_path = _write_trace_and_args(tmp_path)
-
-    report = run_trace_replay(
-        trace_path,
-        extra_engine_args=MockEngineArgs(
-            block_size=64,
-            speedup_ratio=1000.0,
-            num_gpu_blocks=512,
-            num_g2_blocks=512,
-            num_g3_blocks=512,
-            aic_model_path="test/model",
-        ),
-        num_workers=1,
-        replay_mode="offline",
-    )
-
-    _assert_basic_report_counts(
-        report,
-        num_requests=2,
-        input_tokens=64,
-        output_tokens=2,
-    )
-
-
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
 def test_run_trace_replay_supports_disagg_offline(tmp_path, router_mode):
     trace_path = _write_trace_and_args(tmp_path)
@@ -499,6 +998,7 @@ def test_run_synthetic_trace_replay_disagg_preserves_expected_output_tokens(
         num_decode_workers=2,
         replay_mode="offline",
         router_mode=router_mode,
+        arrival_interval_ms=1.0,
     )
 
     _assert_basic_report_counts(

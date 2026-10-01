@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -11,14 +12,55 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId,
-    ModelCardInstanceId,
+    DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, EventScope,
+    EventSourceInstanceId, ModelCardInstanceId, classify_discovery_change, encode_event_segment,
+    model_with_updated_taints, resync_discovery_events, validate_event_source_reregistration,
+    validate_model_reregistration,
 };
 use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
+const EVENT_SOURCES_BUCKET: &str = "v1/event_sources";
+const UPDATE_MODEL_TAINTS_MAX_ATTEMPTS: usize = 8;
+
+async fn update_model_taints_in_bucket(
+    bucket: &dyn kv::Bucket,
+    key: &kv::Key,
+    target_id: &DiscoveryInstanceId,
+    taints: &HashSet<String>,
+) -> Result<()> {
+    for _ in 0..UPDATE_MODEL_TAINTS_MAX_ATTEMPTS {
+        let existing_json = bucket
+            .get(key)
+            .await?
+            .ok_or_else(|| kv::StoreError::MissingKey(key.to_string()))?;
+        let existing: DiscoveryInstance = serde_json::from_slice(&existing_json)?;
+        if &existing.id() != target_id {
+            anyhow::bail!(
+                "model discovery record {target_id:?} contains mismatched identity {:?}",
+                existing.id()
+            )
+        }
+        let candidate = model_with_updated_taints(&existing, taints.clone())?;
+        if candidate == existing {
+            return Ok(());
+        }
+
+        let candidate_json = serde_json::to_vec(&candidate)?.into();
+        match bucket
+            .compare_and_replace(key, existing_json, candidate_json)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(kv::StoreError::Retry) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(kv::StoreError::Retry.into())
+}
 
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
@@ -35,8 +77,8 @@ impl KVStoreDiscovery {
     }
 
     /// Build the key path for an endpoint (relative to bucket, not absolute)
-    fn endpoint_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
-        format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
+    fn endpoint_key(instance: &crate::component::Instance) -> String {
+        instance.endpoint_instance_id().to_path()
     }
 
     /// Build the key path for a model (relative to bucket, not absolute)
@@ -45,13 +87,23 @@ impl KVStoreDiscovery {
     }
 
     /// Build the key path for an event channel relative to bucket, not absolute)
-    fn event_channel_key(
-        namespace: &str,
-        component: &str,
-        topic: &str,
-        instance_id: u64,
-    ) -> String {
-        format!("{}/{}/{}/{:x}", namespace, component, topic, instance_id)
+    fn event_channel_key(scope: &EventScope, topic: &str, instance_id: u64) -> String {
+        format!(
+            "{}/topic/{}/{:x}",
+            scope.path_prefix(),
+            encode_event_segment(topic),
+            instance_id
+        )
+    }
+
+    /// Build the key path for an event source relative to its bucket.
+    fn event_source_key(scope: &EventScope, topic: &str, publisher_id: u64) -> String {
+        EventSourceInstanceId {
+            scope: scope.clone(),
+            topic: topic.to_string(),
+            publisher_id,
+        }
+        .to_path()
     }
 
     /// Extract prefix for querying based on discovery query
@@ -96,16 +148,24 @@ impl KVStoreDiscovery {
             }
             DiscoveryQuery::EventChannels(query) => {
                 let mut path = EVENT_CHANNELS_BUCKET.to_string();
-                if let Some(ns) = &query.namespace {
+                if let Some(scope) = &query.scope {
                     path.push('/');
-                    path.push_str(ns);
-                    if let Some(comp) = &query.component {
-                        path.push('/');
-                        path.push_str(comp);
-                        if let Some(topic) = &query.topic {
-                            path.push('/');
-                            path.push_str(topic);
-                        }
+                    path.push_str(&scope.path_prefix());
+                    if let Some(topic) = &query.topic {
+                        path.push_str("/topic/");
+                        path.push_str(&encode_event_segment(topic));
+                    }
+                }
+                path
+            }
+            DiscoveryQuery::EventSources(query) => {
+                let mut path = EVENT_SOURCES_BUCKET.to_string();
+                if let Some(scope) = &query.scope {
+                    path.push('/');
+                    path.push_str(&scope.path_prefix());
+                    if let Some(topic) = &query.topic {
+                        path.push_str("/topic/");
+                        path.push_str(&encode_event_segment(topic));
                     }
                 }
                 path
@@ -139,8 +199,34 @@ impl KVStoreDiscovery {
             return true;
         }
 
-        // Check if the relative key starts with the relative prefix
-        relative_key.starts_with(relative_prefix)
+        relative_key == relative_prefix
+            || relative_key
+                .strip_prefix(relative_prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+
+    fn bucket_for_prefix(prefix: &str) -> &'static str {
+        if prefix == INSTANCES_BUCKET
+            || prefix
+                .strip_prefix(INSTANCES_BUCKET)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            INSTANCES_BUCKET
+        } else if prefix == EVENT_CHANNELS_BUCKET
+            || prefix
+                .strip_prefix(EVENT_CHANNELS_BUCKET)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            EVENT_CHANNELS_BUCKET
+        } else if prefix == EVENT_SOURCES_BUCKET
+            || prefix
+                .strip_prefix(EVENT_SOURCES_BUCKET)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            EVENT_SOURCES_BUCKET
+        } else {
+            MODELS_BUCKET
+        }
     }
 
     /// Parse and deserialize a discovery instance from KV store entry
@@ -148,26 +234,184 @@ impl KVStoreDiscovery {
         let instance: DiscoveryInstance = serde_json::from_slice(value)?;
         Ok(instance)
     }
+
+    fn parse_instance_id_from_key(key_str: &str, bucket_name: &str) -> Option<DiscoveryInstanceId> {
+        let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
+        let parsed = match bucket_name {
+            INSTANCES_BUCKET => {
+                EndpointInstanceId::from_path(relative_key).map(DiscoveryInstanceId::Endpoint)
+            }
+            MODELS_BUCKET => {
+                ModelCardInstanceId::from_path(relative_key).map(DiscoveryInstanceId::Model)
+            }
+            EVENT_CHANNELS_BUCKET => EventChannelInstanceId::from_path(relative_key)
+                .map(DiscoveryInstanceId::EventChannel),
+            EVENT_SOURCES_BUCKET => {
+                EventSourceInstanceId::from_path(relative_key).map(DiscoveryInstanceId::EventSource)
+            }
+            _ => {
+                tracing::warn!(
+                    key = %key_str,
+                    bucket = bucket_name,
+                    "Unknown discovery bucket for delete/resync key"
+                );
+                return None;
+            }
+        };
+
+        parsed
+            .inspect_err(|err| {
+                tracing::warn!(
+                    key = %key_str,
+                    relative_key = %relative_key,
+                    bucket = bucket_name,
+                    error = %err,
+                    "Failed to parse discovery instance id from key"
+                );
+            })
+            .ok()
+    }
+
+    fn discovery_events_from_watch_event(
+        event: kv::WatchEvent,
+        prefix: &str,
+        bucket_name: &str,
+        known_instances: &mut HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+        is_established: bool,
+    ) -> Vec<DiscoveryEvent> {
+        match event {
+            kv::WatchEvent::Put(kv) => {
+                if !Self::matches_prefix(kv.key_str(), prefix, bucket_name) {
+                    return vec![];
+                }
+
+                match Self::parse_instance(kv.value()) {
+                    Ok(instance) => {
+                        let id = instance.id();
+                        match classify_discovery_change(known_instances.get(&id), &instance) {
+                            Ok(Some(event)) => {
+                                known_instances.insert(id, instance);
+                                vec![event]
+                            }
+                            Ok(None) => vec![],
+                            Err(error) => {
+                                tracing::error!(
+                                    key = %kv.key_str(),
+                                    ?id,
+                                    %error,
+                                    "Rejecting immutable discovery model-card mutation"
+                                );
+                                vec![]
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            key = %kv.key_str(),
+                            error = %e,
+                            "Failed to parse discovery instance from watch event"
+                        );
+                        vec![]
+                    }
+                }
+            }
+            kv::WatchEvent::Delete(kv) => {
+                let key_str = kv.as_ref();
+                if !Self::matches_prefix(key_str, prefix, bucket_name) {
+                    return vec![];
+                }
+
+                let Some(id) = Self::parse_instance_id_from_key(key_str, bucket_name) else {
+                    return vec![];
+                };
+
+                known_instances.remove(&id);
+                tracing::debug!(
+                    "KVStoreDiscovery::list_and_watch: Emitting Removed event for {:?}, key={}",
+                    id,
+                    key_str
+                );
+                vec![DiscoveryEvent::Removed(id)]
+            }
+            kv::WatchEvent::Resync(snapshot) => {
+                let mut next_instances = HashMap::<DiscoveryInstanceId, DiscoveryInstance>::new();
+
+                for (key, value) in snapshot {
+                    let key_str = key.as_ref();
+                    if !Self::matches_prefix(key_str, prefix, bucket_name) {
+                        continue;
+                    }
+
+                    match Self::parse_instance(value.as_ref()) {
+                        Ok(instance) => {
+                            next_instances.insert(instance.id(), instance);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                key = %key_str,
+                                error = %e,
+                                "Failed to parse discovery instance from resync event"
+                            );
+                            // The key is still present in the authoritative snapshot; keep
+                            // the previous value if only this local parse failed.
+                            if let Some(id) = Self::parse_instance_id_from_key(key_str, bucket_name)
+                                && let Some(existing) = known_instances.get(&id)
+                            {
+                                next_instances.insert(id, existing.clone());
+                            }
+                        }
+                    }
+                }
+
+                let old_count = known_instances.len();
+                let events = resync_discovery_events(known_instances, next_instances);
+
+                if is_established {
+                    tracing::warn!(
+                        prefix,
+                        old_count,
+                        new_count = known_instances.len(),
+                        emitted_events = events.len(),
+                        "KVStoreDiscovery::list_and_watch resynced discovery state"
+                    );
+                } else {
+                    tracing::debug!(
+                        prefix,
+                        count = known_instances.len(),
+                        "KVStoreDiscovery::list_and_watch established from the initial snapshot"
+                    );
+                }
+
+                events
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl Discovery for KVStoreDiscovery {
+    async fn check_connection(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.cancel_token.is_cancelled(),
+            "discovery is shutting down"
+        );
+        self.store.check_connection().await?;
+        Ok(())
+    }
+
     fn instance_id(&self) -> u64 {
         self.store.connection_id()
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let instance_id = self.instance_id();
-        let instance = spec.with_instance_id(instance_id);
+        let instance = spec.into_instance(self.instance_id());
+        let instance_id = instance.instance_id();
+        let is_event_source = matches!(&instance, DiscoveryInstance::EventSource { .. });
+        let is_model = matches!(&instance, DiscoveryInstance::Model { .. });
 
         let (bucket_name, key_path) = match &instance {
             DiscoveryInstance::Endpoint(inst) => {
-                let key = Self::endpoint_key(
-                    &inst.namespace,
-                    &inst.component,
-                    &inst.endpoint,
-                    inst.instance_id,
-                );
+                let key = Self::endpoint_key(inst);
                 tracing::debug!(
                     "KVStoreDiscovery::register: Registering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
                     inst.instance_id,
@@ -219,13 +463,12 @@ impl Discovery for KVStoreDiscovery {
                 (MODELS_BUCKET, key)
             }
             DiscoveryInstance::EventChannel {
-                namespace,
-                component,
+                scope,
                 topic,
                 instance_id,
                 ..
             } => {
-                let key = Self::event_channel_key(namespace, component, topic, *instance_id);
+                let key = Self::event_channel_key(scope, topic, *instance_id);
                 // TODO: bis - remove this info log
                 tracing::info!(
                     "KVStoreDiscovery::register: EventChannel bucket={}, key={}",
@@ -233,14 +476,29 @@ impl Discovery for KVStoreDiscovery {
                     key
                 );
                 tracing::debug!(
-                    "KVStoreDiscovery::register: Registering event channel instance_id={}, namespace={}, component={}, topic={}, key={}",
+                    "KVStoreDiscovery::register: Registering event channel instance_id={}, scope={:?}, topic={}, key={}",
                     instance_id,
-                    namespace,
-                    component,
+                    scope,
                     topic,
                     key
                 );
                 (EVENT_CHANNELS_BUCKET, key)
+            }
+            DiscoveryInstance::EventSource {
+                scope,
+                topic,
+                publisher_id,
+                ..
+            } => {
+                let key = Self::event_source_key(scope, topic, *publisher_id);
+                tracing::debug!(
+                    "KVStoreDiscovery::register: Registering event source publisher_id={}, scope={:?}, topic={}, key={}",
+                    publisher_id,
+                    scope,
+                    topic,
+                    key
+                );
+                (EVENT_SOURCES_BUCKET, key)
             }
         };
 
@@ -261,32 +519,71 @@ impl Discovery for KVStoreDiscovery {
         let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
         let key = kv::Key::new(key_path.clone());
 
+        if is_event_source && let Some(existing) = bucket.get(&key).await? {
+            let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
+            validate_event_source_reregistration(&existing, &instance)?;
+            return Ok(existing);
+        }
+
         tracing::debug!(
             "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
             bucket_name,
             key_path
         );
         // Use revision 0 for initial registration
-        let outcome = bucket.insert(&key, instance_json.into(), 0).await?;
+        let outcome = match bucket.insert(&key, instance_json.into(), 0).await {
+            Ok(outcome) => outcome,
+            Err(error) if is_event_source => {
+                let Some(existing) = bucket.get(&key).await? else {
+                    return Err(error.into());
+                };
+                let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
+                validate_event_source_reregistration(&existing, &instance)?;
+                return Ok(existing);
+            }
+            Err(error) => return Err(error.into()),
+        };
         tracing::debug!(
-            "KVStoreDiscovery::register: Successfully registered instance_id={}, key={}, outcome={:?}",
+            "KVStoreDiscovery::register: Registration insert completed instance_id={}, key={}, outcome={:?}",
             instance_id,
             key_path,
             outcome
         );
 
+        if is_model && matches!(outcome, kv::StoreOutcome::Exists(_)) {
+            let existing = bucket.get(&key).await?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model discovery record disappeared during same-ID registration replay"
+                )
+            })?;
+            let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
+            validate_model_reregistration(&existing, &instance)?;
+            return Ok(existing);
+        }
+
         Ok(instance)
+    }
+
+    async fn update_model_taints_internal(
+        &self,
+        id: ModelCardInstanceId,
+        taints: HashSet<String>,
+    ) -> Result<()> {
+        let bucket = self
+            .store
+            .get_bucket(MODELS_BUCKET)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("model discovery bucket is not registered"))?;
+        let key = kv::Key::new(id.to_path());
+        let target_id = DiscoveryInstanceId::Model(id);
+
+        update_model_taints_in_bucket(bucket.as_ref(), &key, &target_id, &taints).await
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
         let (bucket_name, key_path) = match &instance {
             DiscoveryInstance::Endpoint(inst) => {
-                let key = Self::endpoint_key(
-                    &inst.namespace,
-                    &inst.component,
-                    &inst.endpoint,
-                    inst.instance_id,
-                );
+                let key = Self::endpoint_key(inst);
                 tracing::debug!(
                     "Unregistering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
                     inst.instance_id,
@@ -337,22 +634,36 @@ impl Discovery for KVStoreDiscovery {
                 (MODELS_BUCKET, key)
             }
             DiscoveryInstance::EventChannel {
-                namespace,
-                component,
+                scope,
                 topic,
                 instance_id,
                 ..
             } => {
-                let key = Self::event_channel_key(namespace, component, topic, *instance_id);
+                let key = Self::event_channel_key(scope, topic, *instance_id);
                 tracing::debug!(
-                    "KVStoreDiscovery::unregister: Unregistering event channel instance_id={}, namespace={}, component={}, topic={}, key={}",
+                    "KVStoreDiscovery::unregister: Unregistering event channel instance_id={}, scope={:?}, topic={}, key={}",
                     instance_id,
-                    namespace,
-                    component,
+                    scope,
                     topic,
                     key
                 );
                 (EVENT_CHANNELS_BUCKET, key)
+            }
+            DiscoveryInstance::EventSource {
+                scope,
+                topic,
+                publisher_id,
+                ..
+            } => {
+                let key = Self::event_source_key(scope, topic, *publisher_id);
+                tracing::debug!(
+                    "KVStoreDiscovery::unregister: Unregistering event source publisher_id={}, scope={:?}, topic={}, key={}",
+                    publisher_id,
+                    scope,
+                    topic,
+                    key
+                );
+                (EVENT_SOURCES_BUCKET, key)
             }
         };
 
@@ -375,13 +686,7 @@ impl Discovery for KVStoreDiscovery {
 
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         let prefix = Self::query_prefix(&query);
-        let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
-            INSTANCES_BUCKET
-        } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
-            EVENT_CHANNELS_BUCKET
-        } else {
-            MODELS_BUCKET
-        };
+        let bucket_name = Self::bucket_for_prefix(&prefix);
 
         // Get bucket - if it doesn't exist, return empty list
         let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
@@ -426,13 +731,7 @@ impl Discovery for KVStoreDiscovery {
         cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream> {
         let prefix = Self::query_prefix(&query);
-        let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
-            INSTANCES_BUCKET
-        } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
-            EVENT_CHANNELS_BUCKET
-        } else {
-            MODELS_BUCKET
-        };
+        let bucket_name = Self::bucket_for_prefix(&prefix);
 
         tracing::trace!(
             "KVStoreDiscovery::list_and_watch: Starting watch for query={:?}, prefix={}, bucket={}",
@@ -444,147 +743,33 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
-        // Use the kv::Manager's watch mechanism
-        let (_, mut rx) = self.store.clone().watch(
-            bucket_name,
-            None, // No TTL
-            cancel_token,
-        );
+        let (_, mut rx) = self
+            .store
+            .clone()
+            .watch(
+                bucket_name,
+                None, // No TTL
+                cancel_token,
+            )
+            .await?;
 
         // Create a stream that filters and transforms WatchEvents to DiscoveryEvents
         let stream = async_stream::stream! {
+            let mut known_instances = HashMap::<DiscoveryInstanceId, DiscoveryInstance>::new();
+            // The first storage event is the establishment snapshot.
+            let mut is_established = false;
+
             while let Some(event) = rx.recv().await {
-                let discovery_event = match event {
-                    kv::WatchEvent::Put(kv) => {
-                        // Check if this key matches our prefix
-                        if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
-                            continue;
-                        }
+                let discovery_events = Self::discovery_events_from_watch_event(
+                    event,
+                    &prefix,
+                    bucket_name,
+                    &mut known_instances,
+                    is_established,
+                );
+                is_established = true;
 
-                        match Self::parse_instance(kv.value()) {
-                            Ok(instance) => {
-                                Some(DiscoveryEvent::Added(instance))
-                            },
-                            Err(e) => {
-                                tracing::warn!(
-                                    key = %kv.key_str(),
-                                    error = %e,
-                                    "Failed to parse discovery instance from watch event"
-                                );
-                                None
-                            }
-                        }
-                    }
-                    kv::WatchEvent::Delete(kv) => {
-                        let key_str = kv.as_ref();
-                        // Check if this key matches our prefix
-                        if !Self::matches_prefix(key_str, &prefix, bucket_name) {
-                            continue;
-                        }
-
-                        // Extract DiscoveryInstanceId from the key path
-                        // Delete events have empty values in etcd, so we reconstruct the ID from the key
-                        //
-                        // Key format (relative to bucket, after stripping bucket prefix):
-                        // - Endpoints: "namespace/component/endpoint/{instance_id:x}"
-                        // - Models: "namespace/component/endpoint/{instance_id:x}"
-                        // - LoRA models: "namespace/component/endpoint/{instance_id:x}/{lora_slug}"
-                        // - EventChannels: "namespace/component/{instance_id:x}"
-                        //
-                        // Use strip_bucket_prefix for consistency with matches_prefix().
-                        let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
-                        let key_parts: Vec<&str> = relative_key.split('/').collect();
-
-                        // EventChannels need 4 parts (namespace/component/topic/instance_id)
-                        // Endpoints/Models need at least 4 parts
-                        let min_parts = 4;
-                        if key_parts.len() < min_parts {
-                            tracing::warn!(
-                                key = %key_str,
-                                relative_key = %relative_key,
-                                actual_parts = key_parts.len(),
-                                expected_min = min_parts,
-                                bucket = bucket_name,
-                                "Delete event key doesn't have enough parts"
-                            );
-                            continue;
-                        }
-
-                        let namespace = key_parts[0].to_string();
-                        let component = key_parts[1].to_string();
-
-                        // Handle EventChannel (4 parts: namespace/component/topic/instance_id) vs Endpoints/Models
-                        let id = if bucket_name == EVENT_CHANNELS_BUCKET {
-                            // EventChannel keys: namespace/component/topic/{instance_id:x}
-                            let topic = key_parts[2].to_string();
-                            let instance_id_hex = key_parts[3];
-                            match u64::from_str_radix(instance_id_hex, 16) {
-                                Ok(instance_id) => {
-                                    DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
-                                        namespace,
-                                        component,
-                                        topic,
-                                        instance_id,
-                                    })
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        key = %key_str,
-                                        error = %e,
-                                        instance_id_hex = %instance_id_hex,
-                                        "Failed to parse event channel instance_id hex"
-                                    );
-                                    continue;
-                                }
-                            }
-                        } else {
-                            let endpoint = key_parts[2].to_string();
-                            let instance_id_hex = key_parts[3];
-
-                            match u64::from_str_radix(instance_id_hex, 16) {
-                                Ok(instance_id) => {
-                                    // Construct the appropriate DiscoveryInstanceId based on bucket type
-                                    if bucket_name == INSTANCES_BUCKET {
-                                        DiscoveryInstanceId::Endpoint(EndpointInstanceId {
-                                            namespace,
-                                            component,
-                                            endpoint,
-                                            instance_id,
-                                        })
-                                    } else {
-                                        // Model - check for LoRA suffix (5th part if present)
-                                        let model_suffix = key_parts.get(4).map(|s| s.to_string());
-                                        DiscoveryInstanceId::Model(ModelCardInstanceId {
-                                            namespace,
-                                            component,
-                                            endpoint,
-                                            instance_id,
-                                            model_suffix,
-                                        })
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        key = %key_str,
-                                        error = %e,
-                                        instance_id_hex = %instance_id_hex,
-                                        "Failed to parse instance_id hex from deleted key"
-                                    );
-                                    continue;
-                                }
-                            }
-                        };
-
-                        tracing::debug!(
-                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for {:?}, key={}",
-                            id,
-                            key_str
-                        );
-                        Some(DiscoveryEvent::Removed(id))
-                    }
-                };
-
-                if let Some(event) = discovery_event {
+                for event in discovery_events {
                     yield Ok(event);
                 }
             }
@@ -601,31 +786,374 @@ impl Discovery for KVStoreDiscovery {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use crate::discovery::startup_contract as contract;
+    use crate::discovery::{
+        EventChannelQuery, EventSourceQuery, EventTransport, ModelTaintsUpdate,
+    };
+    use crate::protocols::EndpointId;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn endpoint_instance(instance_id: u64) -> DiscoveryInstance {
+        DiscoveryInstance::Endpoint(crate::component::Instance {
+            namespace: "ns".to_string(),
+            component: "component".to_string(),
+            endpoint: "endpoint".to_string(),
+            instance_id,
+            transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        })
+    }
+
+    fn endpoint_kv(instance_id: u64) -> kv::KeyValue {
+        let instance = endpoint_instance(instance_id);
+        kv::KeyValue::new(
+            kv::Key::new(format!(
+                "{}/{}/{}/{:x}",
+                "ns", "component", "endpoint", instance_id
+            )),
+            serde_json::to_vec(&instance).unwrap().into(),
+        )
+    }
+
+    fn resync_ids(event: &DiscoveryEvent) -> HashSet<DiscoveryInstanceId> {
+        let DiscoveryEvent::Resync(instances) = event else {
+            panic!("expected a resync event, got {event:?}");
+        };
+        instances.iter().map(DiscoveryInstance::id).collect()
+    }
+
+    #[test]
+    fn test_resync_removes_missing_discovery_instances() {
+        let prefix = format!("{}/{}/{}", INSTANCES_BUCKET, "ns", "component");
+        let mut known_instances = HashMap::new();
+
+        let first = endpoint_instance(1);
+        let second = endpoint_instance(2);
+        let third = endpoint_instance(3);
+        known_instances.insert(first.id(), first);
+        known_instances.insert(second.id(), second.clone());
+
+        let mut snapshot = HashMap::new();
+        let second_kv = endpoint_kv(2);
+        snapshot.insert(
+            kv::Key::new(second_kv.key()),
+            second_kv.value().to_vec().into(),
+        );
+        let third_kv = endpoint_kv(3);
+        snapshot.insert(
+            kv::Key::new(third_kv.key()),
+            third_kv.value().to_vec().into(),
+        );
+
+        let events = KVStoreDiscovery::discovery_events_from_watch_event(
+            kv::WatchEvent::Resync(snapshot),
+            &prefix,
+            INSTANCES_BUCKET,
+            &mut known_instances,
+            true,
+        );
+
+        assert!(!events.contains(&DiscoveryEvent::Added(second)));
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events[..2],
+            [
+                DiscoveryEvent::Removed(endpoint_instance(1).id()),
+                DiscoveryEvent::Added(third),
+            ]
+        );
+        assert_eq!(
+            resync_ids(&events[2]),
+            HashSet::from([endpoint_instance(2).id(), endpoint_instance(3).id()])
+        );
+        assert_eq!(known_instances.len(), 2);
+        assert!(known_instances.contains_key(&endpoint_instance(2).id()));
+        assert!(known_instances.contains_key(&endpoint_instance(3).id()));
+    }
+
+    #[test]
+    fn test_resync_retains_known_instance_on_parse_failure() {
+        let prefix = format!("{}/{}/{}", INSTANCES_BUCKET, "ns", "component");
+        let mut known_instances = HashMap::new();
+
+        let first = endpoint_instance(1);
+        known_instances.insert(first.id(), first.clone());
+
+        let mut snapshot = HashMap::new();
+        snapshot.insert(
+            kv::Key::new(format!("ns/component/endpoint/{:x}", 1)),
+            bytes::Bytes::from_static(b"not json"),
+        );
+
+        let events = KVStoreDiscovery::discovery_events_from_watch_event(
+            kv::WatchEvent::Resync(snapshot),
+            &prefix,
+            INSTANCES_BUCKET,
+            &mut known_instances,
+            true,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(resync_ids(&events[0]), HashSet::from([first.id()]));
+        assert_eq!(known_instances.len(), 1);
+        assert_eq!(known_instances.get(&first.id()), Some(&first));
+    }
+
+    #[test]
+    fn resync_changed_model_taints_emits_scoped_event() {
+        let prefix = format!("{}/{}/{}/{}", MODELS_BUCKET, "ns", "worker", "generate");
+        let old = model_spec("first").into_instance(7);
+        let updated = model_spec("second").into_instance(7);
+        let DiscoveryInstanceId::Model(id) = updated.id() else {
+            unreachable!()
+        };
+        let mut known_instances = HashMap::from([(old.id(), old)]);
+        let snapshot = HashMap::from([(
+            kv::Key::new(id.to_path()),
+            serde_json::to_vec(&updated).unwrap().into(),
+        )]);
+
+        let events = KVStoreDiscovery::discovery_events_from_watch_event(
+            kv::WatchEvent::Resync(snapshot),
+            &prefix,
+            MODELS_BUCKET,
+            &mut known_instances,
+            true,
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0],
+            DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                id: id.clone(),
+                taints: vec![
+                    "dynamo.topology/zone=west".to_string(),
+                    "second".to_string(),
+                ],
+            })
+        );
+        assert_eq!(
+            resync_ids(&events[1]),
+            HashSet::from([DiscoveryInstanceId::Model(id.clone())])
+        );
+        assert_eq!(
+            known_instances.get(&DiscoveryInstanceId::Model(id)),
+            Some(&updated)
+        );
+    }
+
+    #[test]
+    fn test_matches_prefix_requires_path_boundary() {
+        let prefix = format!("{}/{}/{}", INSTANCES_BUCKET, "ns", "component");
+
+        assert!(KVStoreDiscovery::matches_prefix(
+            "ns/component/endpoint/1",
+            &prefix,
+            INSTANCES_BUCKET
+        ));
+        assert!(KVStoreDiscovery::matches_prefix(
+            "ns/component",
+            &prefix,
+            INSTANCES_BUCKET
+        ));
+        assert!(!KVStoreDiscovery::matches_prefix(
+            "ns/component2/endpoint/1",
+            &prefix,
+            INSTANCES_BUCKET
+        ));
+    }
+
+    #[test]
+    fn test_bucket_for_prefix_requires_path_boundary() {
+        assert_eq!(
+            KVStoreDiscovery::bucket_for_prefix("v1/instances/ns/component"),
+            INSTANCES_BUCKET
+        );
+        assert_eq!(
+            KVStoreDiscovery::bucket_for_prefix("v1/event_channels/ns/component/topic"),
+            EVENT_CHANNELS_BUCKET
+        );
+        assert_eq!(
+            KVStoreDiscovery::bucket_for_prefix("v1/event_sources/ns/component/topic"),
+            EVENT_SOURCES_BUCKET
+        );
+        assert_eq!(
+            KVStoreDiscovery::bucket_for_prefix("v1/instances2/ns/component"),
+            MODELS_BUCKET
+        );
+    }
 
     #[tokio::test]
-    async fn test_kv_store_discovery_register_endpoint() {
+    async fn event_channel_keys_and_queries_preserve_exact_endpoint_scope() {
         let store = kv::Manager::memory();
-        let cancel_token = CancellationToken::new();
-        let client = KVStoreDiscovery::new(store, cancel_token);
-
-        let spec = DiscoverySpec::Endpoint {
-            namespace: "test".to_string(),
-            component: "comp1".to_string(),
-            endpoint: "ep1".to_string(),
-            transport: TransportType::Nats("nats://localhost:4222".to_string()),
-            device_type: None,
+        let client = KVStoreDiscovery::new(store, CancellationToken::new());
+        let endpoint_a = EndpointId {
+            namespace: "ns/one".to_string(),
+            component: "worker.component".to_string(),
+            name: "a/*".to_string(),
+        };
+        let endpoint_b = EndpointId {
+            name: "b/>".to_string(),
+            ..endpoint_a.clone()
         };
 
-        let instance = client.register(spec).await.unwrap();
-
-        match instance {
-            DiscoveryInstance::Endpoint(inst) => {
-                assert_eq!(inst.namespace, "test");
-                assert_eq!(inst.component, "comp1");
-                assert_eq!(inst.endpoint, "ep1");
-            }
-            _ => panic!("Expected Endpoint instance"),
+        for (publisher_id, endpoint) in [(1, endpoint_a.clone()), (2, endpoint_b.clone())] {
+            client
+                .register(DiscoverySpec::EventChannel {
+                    scope: EventScope::Endpoint { endpoint },
+                    topic: "kv/events".to_string(),
+                    publisher_id,
+                    transport: EventTransport::zmq(format!(
+                        "tcp://127.0.0.1:{}",
+                        5000 + publisher_id
+                    )),
+                })
+                .await
+                .unwrap();
         }
+
+        let mut a = client
+            .list(DiscoveryQuery::EventChannels(
+                EventChannelQuery::endpoint_topic(endpoint_a.clone(), "kv/events"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].instance_id(), 1);
+        client.unregister(a.pop().unwrap()).await.unwrap();
+        assert!(
+            client
+                .list(DiscoveryQuery::EventChannels(
+                    EventChannelQuery::endpoint_topic(endpoint_a, "kv/events"),
+                ))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let b = client
+            .list(DiscoveryQuery::EventChannels(
+                EventChannelQuery::endpoint_topic(endpoint_b, "kv/events"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].instance_id(), 2);
+    }
+
+    async fn assert_event_source_lifecycle(store: kv::Manager) {
+        let client = KVStoreDiscovery::new(store, CancellationToken::new());
+        let endpoint = EndpointId {
+            namespace: "ns/one".to_string(),
+            component: "worker.component".to_string(),
+            name: "decode/*".to_string(),
+        };
+        let query = DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+            endpoint.clone(),
+            "kv/events",
+        ));
+        let spec = |publisher_id, worker_id| DiscoverySpec::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic: "kv/events".to_string(),
+            publisher_id,
+            metadata: serde_json::json!({"worker_id": worker_id, "dp_rank": 0}),
+        };
+
+        let first = client.register(spec(100, 7)).await.unwrap();
+        assert_eq!(client.register(spec(100, 7)).await.unwrap(), first);
+        assert!(client.register(spec(100, 8)).await.is_err());
+        assert_eq!(
+            client.list(query.clone()).await.unwrap(),
+            vec![first.clone()]
+        );
+
+        let second = client.register(spec(205, 7)).await.unwrap();
+        assert_eq!(client.list(query.clone()).await.unwrap().len(), 2);
+
+        client.unregister(first).await.unwrap();
+        assert_eq!(client.list(query).await.unwrap(), vec![second]);
+    }
+
+    #[tokio::test]
+    async fn event_source_lifecycle_round_trips_through_memory_kv_discovery() {
+        assert_event_source_lifecycle(kv::Manager::memory()).await;
+    }
+
+    #[tokio::test]
+    async fn event_source_lifecycle_round_trips_through_file_kv_discovery() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store_cancel = CancellationToken::new();
+        let store = kv::Manager::file(store_cancel.clone(), tempdir.path());
+        assert_event_source_lifecycle(store).await;
+        store_cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn event_source_watch_removes_exact_publisher_incarnation() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let endpoint = EndpointId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            name: "decode".to_string(),
+        };
+        let query = DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+            endpoint.clone(),
+            "kv-events",
+        ));
+        let mut stream = client.list_and_watch(query, None).await.unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
+        let spec = |publisher_id| DiscoverySpec::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic: "kv-events".to_string(),
+            publisher_id,
+            metadata: serde_json::json!({"dp_rank": 0}),
+        };
+
+        let first = client.register(spec(100)).await.unwrap();
+        let second = client.register(spec(205)).await.unwrap();
+        let mut added = std::collections::HashSet::new();
+        for _ in 0..2 {
+            let DiscoveryEvent::Added(instance) = stream.next().await.unwrap().unwrap() else {
+                panic!("expected source addition");
+            };
+            added.insert(instance.id());
+        }
+        assert_eq!(
+            added,
+            std::collections::HashSet::from([first.id(), second.id()])
+        );
+
+        client.unregister(first).await.unwrap();
+        let removed = tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+            loop {
+                if let DiscoveryEvent::Removed(id) = stream.next().await.unwrap().unwrap() {
+                    break id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            removed,
+            DiscoveryInstanceId::EventSource(EventSourceInstanceId {
+                scope: EventScope::Endpoint { endpoint },
+                topic: "kv-events".to_string(),
+                publisher_id: 100,
+            })
+        );
+        assert_eq!(
+            client
+                .list(DiscoveryQuery::EventSources(EventSourceQuery::all()))
+                .await
+                .unwrap(),
+            vec![second]
+        );
     }
 
     #[tokio::test]
@@ -640,6 +1168,7 @@ mod tests {
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
             device_type: None,
+            request_plane_codec: None,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec1).await.unwrap();
@@ -648,6 +1177,7 @@ mod tests {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
             device_type: None,
+            request_plane_codec: None,
             endpoint: "ep2".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
@@ -656,6 +1186,7 @@ mod tests {
         let spec3 = DiscoverySpec::Endpoint {
             namespace: "ns2".to_string(),
             device_type: None,
+            request_plane_codec: None,
             component: "comp2".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
@@ -697,6 +1228,7 @@ mod tests {
             .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
             .unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
 
         let client_clone = client.clone();
         let register_task = tokio::spawn(async move {
@@ -704,6 +1236,7 @@ mod tests {
 
             let spec = DiscoverySpec::Endpoint {
                 device_type: None,
+                request_plane_codec: None,
                 namespace: "test".to_string(),
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),
@@ -728,5 +1261,278 @@ mod tests {
 
         register_task.await.unwrap();
         cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn watch_reports_an_unregister_that_follows_establishment() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let instance = client
+            .register(DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "ep".to_string(),
+                device_type: None,
+                request_plane_codec: None,
+                transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let mut stream = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+        client.unregister(instance.clone()).await.unwrap();
+
+        let added = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
+        assert_eq!(
+            contract::next(&mut stream).await,
+            DiscoveryEvent::Resync(vec![instance.clone()])
+        );
+
+        let removed = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            removed,
+            DiscoveryEvent::Removed(instance.id()),
+            "an unregister after establishment must reach the stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_reports_a_resync_after_the_backend_lags() {
+        use crate::storage::kv::Bucket;
+
+        let store = kv::Manager::memory();
+        let client = KVStoreDiscovery::new(store.clone(), CancellationToken::new());
+        let mut stream = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+        // Consume the startup snapshot so the resync asserted below can only come from the lag.
+        contract::expect_empty_snapshot(&mut stream).await;
+
+        let instance = client
+            .register(DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "ep".to_string(),
+                device_type: None,
+                request_plane_codec: None,
+                transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            client.list(DiscoveryQuery::AllEndpoints).await.unwrap(),
+            vec![instance.clone()]
+        );
+        client.unregister(instance).await.unwrap();
+
+        // The memory store has one change buffer for all buckets. These writes push the register
+        // and the unregister out of the buffer before the watch task reads them: on the
+        // current-thread test runtime that task cannot run before this test yields.
+        let filler = store.get_or_create_bucket("filler", None).await.unwrap();
+        let key = kv::Key::new("key".to_string());
+        for revision in 1..=(kv::MEMORY_EVENT_BUFFER_CAPACITY + 1) as u64 {
+            filler.insert(&key, "value".into(), revision).await.unwrap();
+        }
+
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("the stream must report the resync")
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, DiscoveryEvent::Resync(vec![]));
+    }
+
+    #[tokio::test]
+    async fn memory_backend_keeps_the_startup_contract() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        contract::check(&client).await;
+    }
+
+    #[tokio::test]
+    async fn file_backend_keeps_the_startup_contract() {
+        let cancel_token = CancellationToken::new();
+        let root = tempfile::tempdir().unwrap();
+        let store = kv::Manager::file(cancel_token.clone(), root.path());
+        let client = KVStoreDiscovery::new(store, cancel_token.clone());
+        contract::check(&client).await;
+        cancel_token.cancel();
+    }
+
+    fn model_spec(taint: &str) -> DiscoverySpec {
+        DiscoverySpec::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            card_json: serde_json::json!({
+                "display_name": "model",
+                "runtime_config": {
+                    "taints": [taint, "dynamo.topology/zone=west"],
+                    "topology_domains": {"zone": "west"}
+                }
+            }),
+            model_suffix: None,
+        }
+    }
+
+    struct AlwaysConflictingBucket {
+        value: bytes::Bytes,
+        compare_attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl kv::Bucket for AlwaysConflictingBucket {
+        async fn insert(
+            &self,
+            _key: &kv::Key,
+            _value: bytes::Bytes,
+            _revision: u64,
+        ) -> Result<kv::StoreOutcome, kv::StoreError> {
+            unreachable!("insert is not used by this test")
+        }
+
+        async fn get(&self, _key: &kv::Key) -> Result<Option<bytes::Bytes>, kv::StoreError> {
+            Ok(Some(self.value.clone()))
+        }
+
+        async fn compare_and_replace(
+            &self,
+            _key: &kv::Key,
+            _expected: bytes::Bytes,
+            _value: bytes::Bytes,
+        ) -> Result<kv::StoreOutcome, kv::StoreError> {
+            self.compare_attempts.fetch_add(1, Ordering::Relaxed);
+            Err(kv::StoreError::Retry)
+        }
+
+        async fn delete(&self, _key: &kv::Key) -> Result<(), kv::StoreError> {
+            unreachable!("delete is not used by this test")
+        }
+
+        async fn watch(
+            &self,
+        ) -> Result<Pin<Box<dyn futures::Stream<Item = kv::WatchEvent> + Send + '_>>, kv::StoreError>
+        {
+            unreachable!("watch is not used by this test")
+        }
+
+        async fn entries(&self) -> Result<HashMap<kv::Key, bytes::Bytes>, kv::StoreError> {
+            unreachable!("entries is not used by this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn model_taint_update_stops_after_bounded_conflicts() {
+        let existing = model_spec("first").into_instance(7);
+        let target_id = existing.id();
+        let DiscoveryInstanceId::Model(id) = &target_id else {
+            unreachable!()
+        };
+        let key = kv::Key::new(id.to_path());
+        let bucket = AlwaysConflictingBucket {
+            value: serde_json::to_vec(&existing).unwrap().into(),
+            compare_attempts: AtomicUsize::new(0),
+        };
+
+        let error = update_model_taints_in_bucket(
+            &bucket,
+            &key,
+            &target_id,
+            &HashSet::from(["second".to_string()]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<kv::StoreError>(),
+            Some(kv::StoreError::Retry)
+        ));
+        assert_eq!(
+            bucket.compare_attempts.load(Ordering::Relaxed),
+            UPDATE_MODEL_TAINTS_MAX_ATTEMPTS
+        );
+    }
+
+    #[tokio::test]
+    async fn model_taint_updates_replace_existing_value_and_emit_scoped_event() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let query = DiscoveryQuery::EndpointModels {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+        };
+        let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
+
+        client.register(model_spec("first")).await.unwrap();
+        let DiscoveryEvent::Added(first) = stream.next().await.unwrap().unwrap() else {
+            panic!("expected initial model addition");
+        };
+
+        let DiscoveryInstanceId::Model(id) = first.id() else {
+            unreachable!()
+        };
+        for taint in ["second", "third"] {
+            client
+                .update_model_taints(id.clone(), HashSet::from([taint.to_string()]))
+                .await
+                .unwrap();
+            let event = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                event,
+                DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                    id: id.clone(),
+                    taints: vec!["dynamo.topology/zone=west".to_string(), taint.to_string(),],
+                })
+            );
+        }
+
+        let replayed = client.register(model_spec("first")).await.unwrap();
+        let DiscoveryInstance::Model { card_json, .. } = &replayed else {
+            panic!("expected model instance");
+        };
+        let replayed_taints = card_json["runtime_config"]["taints"].as_array().unwrap();
+        assert!(replayed_taints.contains(&serde_json::json!("third")));
+        assert!(!replayed_taints.contains(&serde_json::json!("first")));
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(50), stream.next())
+                .await
+                .is_err()
+        );
+
+        client
+            .update_model_taints(id, HashSet::from(["third".to_string()]))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(50), stream.next())
+                .await
+                .is_err()
+        );
+
+        let listed = client.list(query).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id(), first.id());
+        let DiscoveryInstance::Model { card_json, .. } = &listed[0] else {
+            panic!("expected model instance");
+        };
+        let taints = card_json["runtime_config"]["taints"].as_array().unwrap();
+        assert!(taints.contains(&serde_json::json!("third")));
+        assert!(!taints.contains(&serde_json::json!("second")));
     }
 }

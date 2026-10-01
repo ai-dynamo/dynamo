@@ -14,6 +14,12 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const (
+	// HOME in the frontend image, where the native Rust EPP ships: that image
+	// does `useradd -m ... dynamo` + `ENV HOME=/home/dynamo` + `USER dynamo`.
+	nativeRustEPPHome = "/home/dynamo"
+)
+
 // EPPDefaults implements ComponentDefaults for EPP (Endpoint Picker Plugin) components
 type EPPDefaults struct {
 	*BaseComponentDefaults
@@ -93,7 +99,7 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		},
 		{
 			Name:  "RUST_LOG",
-			Value: "debug,dynamo_llm::kv_router=trace",
+			Value: "info",
 		},
 		{
 			Name:  "DYN_ENFORCE_DISAGG",
@@ -105,35 +111,89 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		},
 	}...)
 
-	// EPP default args
-	// These can be overridden via extraPodSpec.mainContainer.args (mergo.WithOverride)
-	poolName := epp.GetPoolName(context.ParentGraphDeploymentName, context.EPPConfig)
-	poolNamespace := epp.GetPoolNamespace(context.ParentGraphDeploymentNamespace, context.EPPConfig)
-	configFilePath := epp.GetConfigFilePath()
-
 	container.Command = []string{}
 
-	container.Args = []string{
-		"--pool-name", poolName,
-		"--pool-namespace", poolNamespace,
-		"--pool-group", epp.InferencePoolGroup,
-		"-v", "4",
-		"--zap-encoder", "json",
-		"--grpc-port", fmt.Sprintf("%d", commonconsts.EPPGRPCPort),
-		"--grpc-health-port", "9003",
-		"--config-file", configFilePath,
-	}
+	// Presence of eppConfig keeps the legacy Go EPP launch contract so existing
+	// DGDs survive operator upgrades unchanged until migration clears it.
+	if epp.IsLegacyGoEPP(context.EPPConfig) {
+		poolName := epp.GetPoolName(context.ParentGraphDeploymentName)
+		poolNamespace := epp.GetPoolNamespace(context.ParentGraphDeploymentNamespace)
+		configFilePath := epp.GetConfigFilePath()
 
-	// Mount EPP config
-	_, volumeMount := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
-	container.VolumeMounts = append(container.VolumeMounts, volumeMount)
+		container.Args = []string{
+			"--pool-name", poolName,
+			"--pool-namespace", poolNamespace,
+			"--pool-group", epp.InferencePoolGroup,
+			"-v", "4",
+			"--zap-encoder", "json",
+			"--grpc-port", fmt.Sprintf("%d", commonconsts.EPPGRPCPort),
+			"--grpc-health-port", "9003",
+			"--config-file", configFilePath,
+		}
 
-	// Mount HuggingFace cache directory for model config downloads
-	hfCacheMount := corev1.VolumeMount{
-		Name:      "hf-cache",
-		MountPath: "/home/nonroot/.cache",
+		_, volumeMount := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
+		container.VolumeMounts = append(container.VolumeMounts, volumeMount)
+	} else {
+		// Native Rust EPP: configured through DYN_* env vars, serves
+		// ext_proc/health on fixed ports, takes no CLI flags, and reads no
+		// config file. Leave Args empty and let the image ENTRYPOINT run.
+		// Users can still override args via extraPodSpec.mainContainer.args.
+		container.Args = []string{}
+
+		// Pin HOME rather than inheriting whatever the image sets. The native
+		// Rust EPP's default image (frontend) uses /home/dynamo while the
+		// dedicated dynamo-epp image runs as nonroot, so without this the mount
+		// below can only be right for one of them.
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "HOME",
+			Value: nativeRustEPPHome,
+		})
+
+		// Mount the model-config cache under the pinned HOME. The Rust EPP
+		// resolves its MDC cache root from $HOME (lib/llm/src/model_card.rs), so
+		// a mount that does not match is silently inert and the blobs grow on
+		// the container's writable layer instead.
+		//
+		// Native Rust EPP only. Recipes render the native path on
+		// dynamo-frontend, but the image is the user's to set, and the images an
+		// EPP component can carry disagree on HOME:
+		//
+		//   contract  image                     image HOME      mounted
+		//   native    dynamo-frontend:1.5.0+    /home/dynamo    yes, HOME pinned
+		//   native    dynamo-epp:1.5.0          /home/nonroot   yes, HOME pinned
+		//   legacy    epp-image:1.4.x           /home/nonroot   no
+		//   legacy    dynamo-frontend:1.4.x     /home/dynamo    no
+		//
+		// A DYN_EPP_MODE=standalone EPP is absent from that list on both counts:
+		// it is applied as hand-written YAML rather than rendered here, and it
+		// needs no cache anyway, since runner.rs takes the
+		// EppRouter::from_selector branch and never reaches download_config.
+		//
+		// The two native images disagree just as the legacy pair does, but the
+		// operator sets HOME itself above, so both converge on /home/dynamo and
+		// one mount path is right for both. The legacy rows get no such pin, and
+		// nothing available here picks between them: eppConfig names the launch
+		// contract, not the image, and the resolved runtime version only bounds
+		// it to "below 1.5.0", which both legacy images satisfy. A mount at the
+		// wrong HOME is worse than none -- nothing errors, the blobs go to the
+		// writable layer anyway, and the volume merely looks correct.
+		//
+		// Going without costs little there in any case: the legacy Go EPP does
+		// download the same files, calling the same download_config through
+		// libdynamo_llm_capi, but only once at startup over a fixed file set --
+		// so the loss is a few MB and a re-fetch on restart, on a component
+		// being removed.
+		//
+		// Withholding it re-renders existing legacy EPP Pods, so they roll once
+		// on an operator upgrade. That is a deliberate exception to the no-roll
+		// rule in deploy/operator/internal/AGENTS.md, taken on deprecation
+		// grounds; the promised legacy contract (CLI flags, config volume,
+		// Service selector) is untouched.
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      "hf-cache",
+			MountPath: nativeRustEPPHome + "/.cache",
+		})
 	}
-	container.VolumeMounts = append(container.VolumeMounts, hfCacheMount)
 
 	return container, nil
 }
@@ -147,18 +207,19 @@ func (e *EPPDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, 
 	// EPP needs longer grace period for graceful shutdown
 	podSpec.TerminationGracePeriodSeconds = ptr.To(int64(130))
 
-	// Add EPP config volume
-	volume, _ := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
-	podSpec.Volumes = append(podSpec.Volumes, volume)
-
-	// Add emptyDir volume for HuggingFace cache (needed for downloading model config files)
-	hfCacheVolume := corev1.Volume{
-		Name: "hf-cache",
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
+	if epp.IsLegacyGoEPP(context.EPPConfig) {
+		volume, _ := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
+		podSpec.Volumes = append(podSpec.Volumes, volume)
+	} else {
+		// Backs the model-config cache mounted in GetBaseContainer, which is
+		// native Rust EPP only; see there for why the legacy path goes without.
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: "hf-cache",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
 	}
-	podSpec.Volumes = append(podSpec.Volumes, hfCacheVolume)
 
 	return podSpec, nil
 }

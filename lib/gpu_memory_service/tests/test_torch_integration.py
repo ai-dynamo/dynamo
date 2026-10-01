@@ -16,7 +16,7 @@ import time
 from typing import cast
 
 import pytest
-from _deps import HAS_CUDA, HAS_GMS, HAS_TORCH
+from _deps import HAS_GMS, HAS_GPU, HAS_TORCH, HAS_XPU
 
 if not HAS_GMS:
     pytest.skip(
@@ -27,12 +27,34 @@ if not HAS_GMS:
 if not HAS_TORCH:
     pytest.skip("torch is required", allow_module_level=True)
 
-if not HAS_CUDA:
+if not HAS_GPU:
     pytest.skip(
-        "CUDA is required for torch GMS integration tests", allow_module_level=True
+        "CUDA or XPU GPU is required for torch GMS integration tests",
+        allow_module_level=True,
     )
 
 import torch
+
+# Device-agnostic helper: prefer XPU when available, fall back to CUDA.
+if HAS_XPU:
+    _DEVICE = "xpu"
+
+    def _synchronize():
+        torch.xpu.synchronize()
+
+    def _empty_cache():
+        torch.xpu.empty_cache()
+
+else:
+    _DEVICE = "cuda"
+
+    def _synchronize():
+        torch.cuda.synchronize()
+
+    def _empty_cache():
+        torch.cuda.empty_cache()
+
+
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
@@ -40,6 +62,7 @@ from gpu_memory_service.client.torch.module import (
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.vmm import _reset_vmm_singleton
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
@@ -50,19 +73,19 @@ pytestmark = [
 ]
 
 _SERVER_START_TIMEOUT_SECONDS = 5.0
-_SERVER_STOP_TIMEOUT_SECONDS = 5.0
+_SERVER_STOP_TIMEOUT_SECONDS = 15.0  # XPU: SYCL synchronize may take longer
 _POLL_INTERVAL_SECONDS = 0.01
 
 
 class _TinyModule(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.linear = torch.nn.Linear(8, 4, bias=False, device="cuda")
+        self.linear = torch.nn.Linear(8, 4, bias=False, device=_DEVICE)
         self.register_buffer(
             "scale",
-            torch.linspace(0.5, 2.0, steps=4, device="cuda", dtype=torch.float32),
+            torch.linspace(0.5, 2.0, steps=4, device=_DEVICE, dtype=torch.float32),
         )
-        self.extra = torch.arange(1, 5, device="cuda", dtype=torch.float32)
+        self.extra = torch.arange(1, 5, device=_DEVICE, dtype=torch.float32)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.linear(x)
@@ -136,6 +159,7 @@ def running_gms(tmp_path):
             raise thread_error
         if os.path.exists(socket_path):
             os.unlink(socket_path)
+        _reset_vmm_singleton()
 
 
 def _make_gms_tensor(
@@ -164,8 +188,8 @@ def _assert_exact_tensor_equal(expected: torch.Tensor, actual: torch.Tensor) -> 
 
 def test_gms_tensor_matches_plain_torch_ops(running_gms):
     socket_path = running_gms
-    baseline = torch.arange(64, device="cuda", dtype=torch.float32).reshape(8, 8)
-    rhs = torch.arange(32, device="cuda", dtype=torch.float32).reshape(8, 4)
+    baseline = torch.arange(64, device=_DEVICE, dtype=torch.float32).reshape(8, 8)
+    rhs = torch.arange(32, device=_DEVICE, dtype=torch.float32).reshape(8, 4)
 
     writer = GMSClientMemoryManager(socket_path, device=0)
     writer.connect(RequestedLockType.RW)
@@ -206,10 +230,10 @@ def test_finalize_gms_write_prunes_unreferenced_allocations(running_gms):
 
     socket_path = running_gms
     torch.manual_seed(11)
-    baseline = _TinyModule().cuda()
-    gms_model = _TinyModule().cuda()
+    baseline = _TinyModule().to(_DEVICE)
+    gms_model = _TinyModule().to(_DEVICE)
     gms_model.load_state_dict(baseline.state_dict())
-    inputs = torch.randn(3, 8, device="cuda", dtype=torch.float32)
+    inputs = torch.randn(3, 8, device=_DEVICE, dtype=torch.float32)
     expected = baseline(inputs).detach().clone()
 
     writer = GMSClientMemoryManager(socket_path, device=0)
@@ -251,16 +275,76 @@ def test_finalize_gms_write_prunes_unreferenced_allocations(running_gms):
         assert len(handles) == 3
         assert all(info.allocation_id != unreferenced_allocation_id for info in handles)
 
-        materialized = _TinyModule().cuda()
+        materialized = _TinyModule().to(_DEVICE)
         materialize_module_from_gms(reader, materialized, device_index=0)
         _assert_exact_tensor_equal(expected, materialized(inputs))
     finally:
         reader.close()
 
 
+def test_finalize_gms_write_rebinds_nonparameter_tensors(running_gms):
+    from gpu_memory_service.integrations.common.utils import finalize_gms_write
+
+    socket_path = running_gms
+    torch.manual_seed(13)
+    baseline = _TinyModule().to(_DEVICE)
+    gms_model = _TinyModule().to(_DEVICE)
+    inputs = torch.randn(3, 8, device=_DEVICE, dtype=torch.float32)
+    expected = baseline(inputs).detach().clone()
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+
+    baseline_weight = cast(torch.Tensor, baseline.linear.weight)
+    baseline_scale = cast(torch.Tensor, baseline.scale)
+    baseline_extra = cast(torch.Tensor, baseline.extra)
+
+    _, gms_weight = _make_gms_tensor(writer, baseline_weight, tag="weights")
+    gms_model.linear.weight = torch.nn.Parameter(
+        gms_weight, requires_grad=baseline_weight.requires_grad
+    )
+    _, gms_scale = _make_gms_tensor(writer, baseline_scale, tag="weights")
+    gms_model._buffers["scale"] = gms_scale
+    _, gms_extra = _make_gms_tensor(writer, baseline_extra, tag="weights")
+    gms_model.extra = gms_extra
+    del gms_weight, gms_scale, gms_extra
+
+    weight_ptr = gms_model.linear.weight.data_ptr()
+
+    finalize_gms_write(writer, gms_model)
+
+    def _in_gms(tensor: torch.Tensor) -> bool:
+        ptr = tensor.data_ptr()
+        return any(
+            va <= ptr < va + mapping.aligned_size
+            for va, mapping in writer.mappings.items()
+        )
+
+    try:
+        # Parameters keep their shared (now read-only) GMS binding.
+        assert gms_model.linear.weight.data_ptr() == weight_ptr
+        assert _in_gms(cast(torch.Tensor, gms_model.linear.weight))
+
+        # The buffer and the tensor attr are rebound to private memory.
+        assert not _in_gms(cast(torch.Tensor, gms_model.scale))
+        assert not _in_gms(cast(torch.Tensor, gms_model.extra))
+
+        # Values are preserved across the rebind.
+        _assert_exact_tensor_equal(expected, gms_model(inputs))
+
+        # The rebound copies are writable. Without the rebind these writes
+        # would land on the PROT_READ weights mapping (Xid 31).
+        cast(torch.Tensor, gms_model.scale).add_(1.0)
+        cast(torch.Tensor, gms_model.extra).zero_()
+        _synchronize()
+    finally:
+        del gms_model
+        writer.close()
+
+
 def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     socket_path = running_gms
-    baseline = torch.arange(64, device="cuda", dtype=torch.float32).reshape(8, 8)
+    baseline = torch.arange(64, device=_DEVICE, dtype=torch.float32).reshape(8, 8)
 
     writer = GMSClientMemoryManager(socket_path, device=0)
     writer.connect(RequestedLockType.RW)
@@ -296,10 +380,10 @@ def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
 def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
     socket_path = running_gms
     torch.manual_seed(7)
-    baseline = _TinyModule().cuda()
-    gms_model = _TinyModule().cuda()
+    baseline = _TinyModule().to(_DEVICE)
+    gms_model = _TinyModule().to(_DEVICE)
     gms_model.load_state_dict(baseline.state_dict())
-    inputs = torch.randn(3, 8, device="cuda", dtype=torch.float32)
+    inputs = torch.randn(3, 8, device=_DEVICE, dtype=torch.float32)
     expected = baseline(inputs).detach().clone()
 
     writer = GMSClientMemoryManager(socket_path, device=0)
@@ -329,7 +413,7 @@ def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
 
     reader = GMSClientMemoryManager(socket_path, device=0)
     reader.connect(RequestedLockType.RO)
-    materialized = _TinyModule().cuda()
+    materialized = _TinyModule().to(_DEVICE)
     materialize_module_from_gms(reader, materialized, device_index=0)
 
     _assert_exact_tensor_equal(expected, materialized(inputs))
@@ -341,3 +425,32 @@ def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
     )
 
     reader.close()
+
+
+def test_integration_helper_without_explicit_init_vmm(tmp_path):
+    """Ensure GMSClientMemoryManager works without pre-seeding the VMM singleton.
+
+    Integration paths (vLLM, SGLang, TRTLLM, gms-storage-client) construct
+    GMSClientMemoryManager without calling init_vmm() first. The lazy
+    auto-detection in get_vmm() must initialize transparently based on
+    available hardware.
+    """
+    # Reset singleton to simulate a fresh process that never called init_vmm()
+    _reset_vmm_singleton()
+
+    from gpu_memory_service.common.vmm import (
+        _detect_device_type,
+        get_vmm,
+        get_vmm_device_type,
+    )
+
+    # get_vmm() should lazily auto-detect and initialize without raising
+    vmm = get_vmm()
+    assert vmm is not None
+
+    # device type should match what auto-detection would pick
+    expected = _detect_device_type()
+    assert get_vmm_device_type() == expected
+
+    # Clean up
+    _reset_vmm_singleton()

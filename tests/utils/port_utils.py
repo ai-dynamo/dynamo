@@ -15,6 +15,8 @@ import random
 import socket
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +28,7 @@ _PORT_REGISTRY_FILE = Path(tempfile.gettempdir()) / "pytest_port_allocations.jso
 # TODO: Get Rust backend to use u16 instead of i16 so we can use full 1024-65535 range
 _PORT_MIN = 1024
 _PORT_MAX = 32767
+_START_PORT_RANDOM_OFFSET_MAX = 500
 
 
 @dataclass(frozen=True)
@@ -38,7 +41,8 @@ class ServicePorts:
 
     frontend_port: int
     system_ports: list[int]
-    kv_event_port: int = 0
+    kv_event_ports: list[int] = field(default_factory=list)
+    fpm_port: int = 0
     # Per-worker VLLM_NIXL_SIDE_CHANNEL_PORT values; unique per deployment so
     # parallel (xdist) deployments on one host don't collide.
     nixl_side_channel_ports: list[int] = field(default_factory=list)
@@ -98,7 +102,7 @@ def allocate_ports(count: int, start_port: int) -> list[int]:
 
     Port range is limited to i16 (1024-32767) due to Rust backend expecting i16.
 
-    Searches from a random offset (start_port + random(100)) and walks up incrementally.
+    Searches from a random offset (start_port + random(500)) and walks up incrementally.
     Wraps around to _PORT_MIN (1024) when exceeding _PORT_MAX. Retries up to 100 times.
 
     Args:
@@ -148,8 +152,8 @@ def allocate_ports(count: int, start_port: int) -> list[int]:
             allocated_ports = set(int(p) for p in registry.keys())
             ports: list[int] = []
 
-            # Start searching from desired port + random offset
-            current_port = start_port + random.randint(0, 100)
+            # Start searching from desired port + random offset.
+            current_port = start_port + random.randint(0, _START_PORT_RANDOM_OFFSET_MAX)
             if current_port > _PORT_MAX:
                 current_port = _PORT_MIN + (current_port - _PORT_MAX - 1)
 
@@ -260,7 +264,7 @@ def allocate_contiguous_ports(
             allocated_ports = set(int(p) for p in registry.keys())
             ports: list[int] = []
 
-            current_port = start_port + random.randint(0, 100)
+            current_port = start_port + random.randint(0, _START_PORT_RANDOM_OFFSET_MAX)
             if current_port + block_size - 1 > _PORT_MAX:
                 current_port = _PORT_MIN
 
@@ -332,6 +336,16 @@ def allocate_port(start_port: int) -> int:
         int: An available port number between start_port and 32767 (i16 max)
     """
     return allocate_ports(1, start_port)[0]
+
+
+@contextmanager
+def reserved_ports(count: int, start_port: int) -> Iterator[list[int]]:
+    """Reserve ports for a context and always release their registry entries."""
+    ports = allocate_ports(count, start_port)
+    try:
+        yield ports
+    finally:
+        deallocate_ports(ports)
 
 
 def deallocate_ports(ports: list[int]) -> None:

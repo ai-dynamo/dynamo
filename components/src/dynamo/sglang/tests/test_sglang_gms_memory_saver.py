@@ -3,28 +3,99 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import contextmanager
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 pytest.importorskip("gpu_memory_service", reason="gpu_memory_service is required")
 torch = pytest.importorskip("torch", reason="torch is required")
 
+import gpu_memory_service.integrations.sglang as gms_sglang  # noqa: E402
 import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver  # noqa: E402
 from gpu_memory_service.common.locks import (  # noqa: E402
     GrantedLockType,
     RequestedLockType,
 )
+from gpu_memory_service.common.vmm import VMMDeviceType  # noqa: E402
 from gpu_memory_service.integrations.sglang.memory_saver import (  # noqa: E402
     GMSMemorySaverImpl,
 )
+
+# Expected device type for parametrized assertions — matches what
+# GMSMemorySaverImpl will produce via get_vmm_device_type().
+_HAS_XPU = hasattr(torch, "xpu") and torch.xpu.is_available()
+_EXPECTED_DEVICE = torch.device("xpu", 0) if _HAS_XPU else torch.device("cuda", 0)
 
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.gpu_0,
+    pytest.mark.profiled_vram_gib(0),
     pytest.mark.sglang,
+    pytest.mark.core,
 ]
+
+
+@pytest.fixture
+def fake_gms_model_loader(monkeypatch):
+    model_loader = ModuleType("gpu_memory_service.integrations.sglang.model_loader")
+    model_loader.GMSModelLoader = object
+    monkeypatch.setitem(
+        sys.modules,
+        "gpu_memory_service.integrations.sglang.model_loader",
+        model_loader,
+    )
+    monkeypatch.setattr(gms_sglang, "_gms_initialized", False)
+    monkeypatch.setattr(gms_sglang, "_gms_lock_mode", None)
+    monkeypatch.setattr(gms_sglang, "_gms_ro_connect_timeout_ms", None)
+
+
+def test_setup_gms_declares_memory_saver(monkeypatch, fake_gms_model_loader):
+    class ReadOnlyServerArgs:
+        def __setattr__(self, name, value):
+            raise AssertionError(f"unexpected direct assignment: {name}={value!r}")
+
+    server_args = ReadOnlyServerArgs()
+    declare_late_resolution = Mock()
+    monkeypatch.setattr(gms_sglang, "declare_late_resolution", declare_late_resolution)
+
+    loader = gms_sglang.setup_gms(server_args)
+
+    declare_late_resolution.assert_called_once_with(
+        server_args,
+        "dynamo.gms",
+        enable_memory_saver=True,
+    )
+    assert loader is object
+    assert gms_sglang.is_gms_active()
+
+
+def test_setup_gms_uses_override_when_declaration_is_unavailable(
+    monkeypatch,
+    fake_gms_model_loader,
+):
+    override = Mock()
+    server_args = SimpleNamespace(override=override)
+    monkeypatch.setattr(gms_sglang, "declare_late_resolution", None)
+
+    gms_sglang.setup_gms(server_args)
+
+    override.assert_called_once_with("dynamo.gms", enable_memory_saver=True)
+
+
+def test_setup_gms_assigns_memory_saver_for_legacy_args(
+    monkeypatch,
+    fake_gms_model_loader,
+):
+    server_args = SimpleNamespace(enable_memory_saver=False)
+    monkeypatch.setattr(gms_sglang, "declare_late_resolution", None)
+
+    gms_sglang.setup_gms(server_args)
+
+    assert server_args.enable_memory_saver is True
 
 
 class _FakeManager:
@@ -61,6 +132,14 @@ class _FakeManager:
 
 @pytest.fixture
 def build_impl(monkeypatch, tmp_path):
+    # Ensure get_vmm_device_type() returns the correct type for
+    # GMSMemorySaverImpl.__init__ which calls it to determine self._device.
+    _dev_type = VMMDeviceType.XPU if _HAS_XPU else VMMDeviceType.CUDA
+    monkeypatch.setattr(
+        gms_memory_saver,
+        "get_vmm_device_type",
+        lambda: _dev_type,
+    )
     monkeypatch.setattr(
         gms_memory_saver,
         "get_socket_path",
@@ -103,9 +182,9 @@ def build_impl(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("tag", "weights_lock", "expected_pool_calls"),
     [
-        ("weights", GrantedLockType.RW, [("weights", torch.device("cuda", 0))]),
+        ("weights", GrantedLockType.RW, [("weights", _EXPECTED_DEVICE)]),
         ("weights", GrantedLockType.RO, []),
-        ("kv_cache", GrantedLockType.RW, [("kv_cache", torch.device("cuda", 0))]),
+        ("kv_cache", GrantedLockType.RW, [("kv_cache", _EXPECTED_DEVICE)]),
         ("cuda_graph", GrantedLockType.RW, []),
     ],
 )
@@ -161,3 +240,120 @@ def test_region_requires_rw_allocator(build_impl, tag):
     with pytest.raises(RuntimeError, match=rf"requires '{tag}' to be RW"):
         with impl.region(tag, enable_cpu_backup=False):
             pass
+
+
+def test_write_publication_follows_outermost_region_and_switches_weights_ro(
+    build_impl, monkeypatch
+):
+    impl, weights, _, _ = build_impl()
+    model = torch.nn.Module()
+    impl.preloaded_weights_bytes = 456
+    finalized_models = []
+    events = []
+
+    @contextmanager
+    def traced_pool(tag, device):
+        events.append(f"pool_enter:{tag}")
+        try:
+            yield
+        finally:
+            events.append(f"pool_exit:{tag}")
+
+    def finalize(allocator, pending_model):
+        events.append("finalize")
+        finalized_models.append(pending_model)
+        allocator.granted_lock_type = GrantedLockType.RO
+        return SimpleNamespace(committed_bytes=123)
+
+    monkeypatch.setattr(gms_memory_saver, "gms_use_mem_pool", traced_pool)
+    monkeypatch.setattr(gms_memory_saver, "finalize_gms_write", finalize)
+
+    with impl.region("weights", enable_cpu_backup=False):
+        with impl.region("kv_cache", enable_cpu_backup=False):
+            impl.finalize_write_mode(model)
+            events.append("defer")
+
+    assert events == [
+        "pool_enter:weights",
+        "pool_enter:kv_cache",
+        "defer",
+        "pool_exit:kv_cache",
+        "pool_exit:weights",
+        "finalize",
+    ]
+    assert finalized_models == [model]
+    assert weights.granted_lock_type == GrantedLockType.RO
+    assert impl.imported_weights_bytes == 123
+    assert impl.preloaded_weights_bytes == 0
+
+    with impl.region("weights", enable_cpu_backup=False):
+        impl.finalize_write_mode(torch.nn.Module())
+
+    assert events[-1] == "finalize"
+    assert finalized_models == [model]
+
+
+@pytest.mark.parametrize("failure_source", ["body", "pool_exit"])
+def test_nested_region_failure_discards_pending_publication(
+    build_impl, monkeypatch, failure_source
+):
+    impl, weights, _, _ = build_impl()
+    stale_model = torch.nn.Module()
+    fresh_model = torch.nn.Module()
+    finalize = Mock(return_value=SimpleNamespace(committed_bytes=1))
+    monkeypatch.setattr(gms_memory_saver, "finalize_gms_write", finalize)
+
+    @contextmanager
+    def maybe_failing_pool(tag, device):
+        yield
+        if failure_source == "pool_exit" and tag == "kv_cache":
+            raise ValueError("pool exit failed")
+
+    monkeypatch.setattr(gms_memory_saver, "gms_use_mem_pool", maybe_failing_pool)
+
+    failure_message = failure_source.replace("_", " ")
+    with impl.region("weights", enable_cpu_backup=False):
+        impl.finalize_write_mode(stale_model)
+        with pytest.raises(ValueError, match=f"{failure_message} failed"):
+            with impl.region("kv_cache", enable_cpu_backup=False):
+                if failure_source == "body":
+                    raise ValueError("body failed")
+
+    finalize.assert_not_called()
+
+    with impl.region("weights", enable_cpu_backup=False):
+        impl.finalize_write_mode(fresh_model)
+    finalize.assert_called_once_with(weights, fresh_model)
+
+
+def test_failed_finalization_is_cleared_and_not_retried(build_impl, monkeypatch):
+    impl, weights, _, _ = build_impl()
+    model = torch.nn.Module()
+    finalize = Mock(side_effect=ValueError("finalization failed"))
+    monkeypatch.setattr(gms_memory_saver, "finalize_gms_write", finalize)
+
+    with pytest.raises(ValueError, match="finalization failed"):
+        with impl.region("weights", enable_cpu_backup=False):
+            impl.finalize_write_mode(model)
+
+    with impl.region("weights", enable_cpu_backup=False):
+        pass
+    finalize.assert_called_once_with(weights, model)
+
+
+def test_invalid_or_duplicate_publication_preserves_first_model(
+    build_impl, monkeypatch
+):
+    impl, weights, _, _ = build_impl()
+    first_model = torch.nn.Module()
+    finalize = Mock(return_value=SimpleNamespace(committed_bytes=1))
+    monkeypatch.setattr(gms_memory_saver, "finalize_gms_write", finalize)
+
+    with impl.region("weights", enable_cpu_backup=False):
+        impl.finalize_write_mode(first_model)
+        with pytest.raises(TypeError, match="must not be None"):
+            impl.finalize_write_mode(None)
+        with pytest.raises(RuntimeError, match="publication is already pending"):
+            impl.finalize_write_mode(torch.nn.Module())
+
+    finalize.assert_called_once_with(weights, first_model)

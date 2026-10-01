@@ -42,7 +42,7 @@ echo ""
 
 worker_pod() {
   kubectl get pods -n "$NS" \
-    -l "nvidia.com/dynamo-component=VllmDecodeWorker" \
+    -l "nvidia.com/dynamo-component=worker" \
     --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
 }
@@ -57,7 +57,7 @@ frontend_pod() {
 # Verify at least one worker pod exists before proceeding
 INITIAL_POD=$(worker_pod)
 if [ -z "$INITIAL_POD" ]; then
-  echo "ERROR: no running VllmDecodeWorker pod found in namespace $NS" >&2
+  echo "ERROR: no running worker pod found in namespace $NS" >&2
   exit 1
 fi
 echo "Worker pod (at start): $INITIAL_POD"
@@ -139,8 +139,8 @@ scale() {
   echo "SCALE dp=$from_dp → dp=$to_dp at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "  worker pod: $(worker_pod)"
   echo "=========================================="
-  echo "--- request: POST /engine/scale_elastic_ep {\"new_data_parallel_size\": $to_dp} ---"
-  RESP=$(curl -s -X POST http://localhost:8001/engine/scale_elastic_ep \
+  echo "--- request: POST /engine/control/scale_elastic_ep {\"new_data_parallel_size\": $to_dp} ---"
+  RESP=$(curl -s -X POST http://localhost:8001/engine/control/scale_elastic_ep \
     -H "Content-Type: application/json" \
     -d "{\"new_data_parallel_size\": $to_dp}" \
     --max-time "$timeout")

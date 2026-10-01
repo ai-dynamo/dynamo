@@ -109,7 +109,8 @@ func applyGMSSharedResources(podSpec *corev1.PodSpec, c *corev1.Container, rank 
 // layout (a restarted engine re-imports IPC handles from the still-running
 // GMS server). In the inter-pod GMS failover layout, augmentEngineForGMS
 // overrides the engine's RestartPolicy to Never so the cohort can only be
-// recovered via FailoverCascadeReconciler; see the comment there.
+// recovered by the failover cascade controller; see
+// failover_cascade_controller.go.
 func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount int) *corev1.PodSpec {
 	podSpec := basePodSpec.DeepCopy()
 	if len(podSpec.Containers) == 0 {
@@ -184,7 +185,7 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 //     coordination via the failover lock file and DYN_VLLM_GMS_SHADOW_MODE.
 //     An in-place restart leaves the cohort in a half-torn-down state and
 //     blocks recovery. The correct recovery path is for the pod to exit,
-//     FailoverCascadeReconciler (see failover_cascade_controller.go) to
+//     the failover cascade controller (failover_cascade_controller.go) to
 //     force-delete the full engine group based on the
 //     KubeLabelDynamoFailoverEngineGroupMember label, and Grove to recreate
 //     the cohort from scratch. That label is applied in graph.go only when

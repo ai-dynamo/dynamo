@@ -24,7 +24,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Dict, List, Optional, Set
+from typing import List, Optional, Set
 
 import pytest
 
@@ -44,30 +44,6 @@ logging.disable(logging.WARNING)
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-
-REQUIRED_CATEGORIES: Dict[str, Set[str]] = {
-    "Lifecycle": {"pre_merge", "post_merge", "nightly", "weekly", "release"},
-    "Test Type": {
-        "unit",
-        "integration",
-        "e2e",
-        "benchmark",
-        "stress",
-        "multimodal",
-        "performance",
-    },
-    "Hardware": {
-        "gpu_0",
-        "gpu_1",
-        "gpu_2",
-        "gpu_4",
-        "gpu_8",
-        "h100",
-        "k8s",
-        "xpu_1",
-        "xpu_2",
-    },
-}
 
 STUB_MODULES = [
     "pytest_httpserver",
@@ -104,6 +80,7 @@ STUB_MODULES = [
     "aiohttp",
     "aiofiles",
     "httpx",
+    "uvloop",
     "yarl",
     "pytest_asyncio",
     "tabulate",
@@ -128,12 +105,12 @@ STUB_MODULES = [
     "psutil",
     "requests",
     "numpy",
-    "gradio",
-    "aiconfigurator",
-    "aiconfigurator.webapp",
-    "aiconfigurator.webapp.components",
-    "aiconfigurator.webapp.components.profiling",
+    "aisimulate",
+    "aisimulate_core",
     "boto3",
+    "boto3.exceptions",
+    "boto3.s3",
+    "boto3.s3.transfer",
     "botocore",
     "botocore.client",
     "botocore.exceptions",
@@ -149,7 +126,9 @@ STUB_MODULES = [
     "gpu_memory_service.client.torch.tensor",
     "gpu_memory_service.common",
     "gpu_memory_service.common.locks",
-    "gpu_memory_service.common.cuda_utils",
+    "gpu_memory_service.common.vmm",
+    "gpu_memory_service.common.vmm.device",
+    "gpu_memory_service.common.vmm.cuda_utils",
     "gpu_memory_service.common.protocol",
     "gpu_memory_service.common.protocol.messages",
     "gpu_memory_service.common.protocol.wire",
@@ -195,12 +174,15 @@ STUB_MODULES = [
     "sglang.srt.managers.io_struct",
     "sglang.srt.parser",
     "sglang.srt.parser.conversation",
+    "sglang.srt.parser.jinja_template_utils",
     "sglang.srt.parser.reasoning_parser",
     "sglang.srt.sampling",
     "sglang.srt.sampling.custom_logit_processor",
     "sglang.srt.utils",
     "sglang.srt.utils.hf_transformers_utils",
     "sglang.srt.utils.network",
+    "sglang.srt.utils.server_args_config_parser",
+    "sglang.srt.utils.video_decoder",
     "sglang.srt.disaggregation",
     "sglang.srt.disaggregation.kv_events",
     "sglang.srt.disaggregation.utils",
@@ -222,6 +204,12 @@ STUB_MODULES = [
     "vllm.entrypoints.openai.chat_completion.protocol",
     "vllm.entrypoints.openai.engine",
     "vllm.entrypoints.openai.engine.protocol",
+    "vllm.entrypoints.generate",
+    "vllm.entrypoints.generate.base",
+    "vllm.entrypoints.generate.base.protocol",
+    "vllm.entrypoints.pooling",
+    "vllm.entrypoints.pooling.embed",
+    "vllm.entrypoints.pooling.embed.protocol",
     "vllm.inputs",
     "vllm.logprobs",
     "vllm.lora",
@@ -231,7 +219,7 @@ STUB_MODULES = [
     "vllm.outputs",
     "vllm.reasoning",
     "vllm.reasoning.mistral_reasoning_parser",
-    "vllm.reasoning.qwen3_reasoning_parser",
+    "vllm.reasoning.qwen3_engine_reasoning_parser",
     "vllm.renderers",
     "vllm.renderers.embed_utils",
     "vllm.sampling_params",
@@ -240,7 +228,10 @@ STUB_MODULES = [
     "vllm.tool_parsers",
     "vllm.tool_parsers.hermes_tool_parser",
     "vllm.tool_parsers.mistral_tool_parser",
-    "vllm.tool_parsers.qwen3coder_tool_parser",
+    "vllm.tool_parsers.qwen3_engine_tool_parser",
+    "vllm.tool_parsers.utils",
+    "vllm.usage",
+    "vllm.usage.usage_lib",
     "vllm.utils",
     "vllm.utils.async_utils",
     "vllm.utils.hashing",
@@ -248,6 +239,7 @@ STUB_MODULES = [
     "vllm.v1",
     "vllm.v1.core",
     "vllm.v1.core.kv_cache_utils",
+    "vllm.v1.core.single_type_kv_cache_manager",
     "vllm.v1.core.sched",
     "vllm.v1.core.sched.async_scheduler",
     "vllm.v1.core.sched.output",
@@ -256,9 +248,15 @@ STUB_MODULES = [
     "vllm.v1.engine.exceptions",
     "vllm.v1.engine.input_processor",
     "vllm.v1.engine.output_processor",
+    "vllm.v1.engine.utils",
+    "vllm.v1.executor",
     "vllm.v1.metrics",
     "vllm.v1.metrics.loggers",
     "vllm.v1.metrics.stats",
+    "vllm.v1.kv_cache_interface",
+    "vllm.v1.outputs",
+    "vllm.v1.worker",
+    "vllm.v1.worker.gpu_worker",
     "vllm.v1.request",
     "vllm.v1.sample",
     "vllm.v1.sample.logits_processor",
@@ -273,8 +271,27 @@ STUB_MODULES = [
     "nixl._api",
     "nixl._bindings",
     "aiohttp.web",
-    "aiconfigurator.sdk",
-    "aiconfigurator.sdk.task",
+    "aiohttp.test_utils",
+    # aiohttp submodules used by the connect-time resolver in
+    # dynamo.common.http; the bare "aiohttp" stub above has no submodules,
+    # so importing these fails collection for every test that reaches it.
+    "aiohttp.abc",
+    "aiohttp.helpers",
+    "aiohttp.resolver",
+    "aisimulate.generator",
+    "aisimulate.generator.naive",
+    "aisimulate.sdk",
+    "aisimulate.sdk.task_v2",
+    "aisimulate.legacy_cli",
+    "aisimulate.legacy_cli.main",
+    "aisimulate_core.sdk",
+    "aisimulate_core.sdk.common",
+    "aisimulate_core.sdk.engine",
+    "aisimulate_core.sdk.memory",
+    "aisimulate_core.sdk.models",
+    "aisimulate_core.sdk.perf_database",
+    "aisimulate_core.sdk.utils",
+    "aisimulate_core.sdk.rust_engine_step",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -284,6 +301,22 @@ STUB_MODULES = [
     "blake3",
 ]
 
+# These APIs define the AISimulate application/core contract. The marker-report
+# environment may contain an older, otherwise importable release, so force
+# stubs for these versioned modules during marker-only collection.
+FORCE_STUB_MODULES = {
+    "aisimulate.sdk.task_v2",
+    "aisimulate.legacy_cli.main",
+    "aisimulate_core.sdk.models",
+    "aisimulate_core.sdk.utils",
+    "aisimulate_core.sdk",
+    "aisimulate_core.sdk.common",
+    "aisimulate_core.sdk.engine",
+    "aisimulate_core.sdk.memory",
+    "aisimulate_core.sdk.perf_database",
+    "aisimulate_core.sdk.rust_engine_step",
+}
+
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
@@ -291,6 +324,11 @@ PROJECT_PATHS = [
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
 ]
 sys.path[:0] = PROJECT_PATHS  # prepend to sys.path
+
+# Must follow the sys.path bootstrap above: this file runs as
+# `python3 tests/report_pytest_markers.py`, so sys.path[0] is tests/, not the
+# repo root, and the `tests` package is not importable any earlier.
+from tests.marker_categories import REQUIRED_CATEGORIES  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -315,6 +353,15 @@ def missing_categories(markers: Set[str]) -> List[str]:
 # --------------------------------------------------------------------------- #
 
 
+class _StubMeta(type):
+    def __getattr__(cls, attr):
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(attr)
+        sub = _make_stub_class(f"{cls.__name__}.{attr}")
+        setattr(cls, attr, sub)
+        return sub
+
+
 def _make_stub_class(name: str) -> type:
     """Permissive class usable as a base, a pydantic field type, or a callable.
 
@@ -324,14 +371,6 @@ def _make_stub_class(name: str) -> type:
     - __init_subclass__ tolerates arbitrary keyword args from typing tricks.
     - __get_pydantic_core_schema__ returns any_schema for pydantic field use.
     """
-
-    class _StubMeta(type):
-        def __getattr__(cls, attr):
-            if attr.startswith("__") and attr.endswith("__"):
-                raise AttributeError(attr)
-            sub = _make_stub_class(f"{cls.__name__}.{attr}")
-            setattr(cls, attr, sub)
-            return sub
 
     def _init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         pass
@@ -410,9 +449,9 @@ class DependencyStubber:
         stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
         return stub
 
-    def ensure_available(self, module_name: str) -> ModuleType:
+    def ensure_available(self, module_name: str, *, force: bool = False) -> ModuleType:
         """Ensure a module is available, stubbing it if not installed."""
-        if module_name in sys.modules:
+        if module_name in sys.modules and not force:
             return sys.modules[module_name]
 
         parts = module_name.split(".")
@@ -420,7 +459,7 @@ class DependencyStubber:
             ".".join(parts[:i]) in self.stubbed for i in range(1, len(parts))
         )
 
-        if not parent_stubbed:
+        if not force and not parent_stubbed:
             try:
                 return importlib.import_module(module_name)
             except (ImportError, AttributeError):
@@ -440,6 +479,11 @@ class DependencyStubber:
         stub = self._create_module_stub(module_name)
         sys.modules[module_name] = stub
         self.stubbed.add(module_name)
+        if "." in module_name:
+            parent_name, child_name = module_name.rsplit(".", 1)
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, child_name, stub)
         return stub
 
 
@@ -622,7 +666,7 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
 
         stubber = DependencyStubber()
         for module in STUB_MODULES:
-            stubber.ensure_available(module)
+            stubber.ensure_available(module, force=module in FORCE_STUB_MODULES)
 
         # Special case: pytest-benchmark needs a real Warning subclass
         try:
@@ -651,6 +695,12 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
         LOG.info("Stubbed %d modules", len(stubber.stubbed))
 
     plugin = MarkerReportPlugin()
+    # The repository-root conftest.py defaults pre_merge/gpu_0 onto unmarked
+    # tests so CI still runs them. Opt out here: this report exists to show what
+    # tests actually declare, and with the defaults applied every test would
+    # look Lifecycle- and Hardware-complete, so no missing marker could ever be
+    # reported.
+    os.environ["DYNAMO_PYTEST_NO_DEFAULT_MARKERS"] = "1"
     exitcode = pytest.main(
         [
             "--collect-only",

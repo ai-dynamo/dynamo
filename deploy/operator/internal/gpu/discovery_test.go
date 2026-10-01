@@ -498,6 +498,31 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: nvidiacomv1beta1.GPUSKUTypeGB10,
 		},
 		{
+			name:     "B300 SXM6 AC (DCGM format)",
+			input:    "NVIDIA B300 SXM6 AC",
+			expected: nvidiacomv1beta1.GPUSKUTypeB300SXM,
+		},
+		{
+			name:     "B300 bare",
+			input:    "NVIDIA B300",
+			expected: nvidiacomv1beta1.GPUSKUTypeB300SXM,
+		},
+		{
+			name:     "B300 compact SXM6 suffix",
+			input:    "NVIDIA B300SXM6 AC",
+			expected: nvidiacomv1beta1.GPUSKUTypeB300SXM,
+		},
+		{
+			name:     "GB300 should not match B300",
+			input:    "NVIDIA GB300",
+			expected: "",
+		},
+		{
+			name:     "B3000 should not match B300",
+			input:    "NVIDIA B3000",
+			expected: "",
+		},
+		{
 			name:     "B200 SXM",
 			input:    "B200 SXM",
 			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,
@@ -518,6 +543,11 @@ func TestInferHardwareSystem(t *testing.T) {
 			name:     "H100 default PCIe",
 			input:    "H100",
 			expected: nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		},
+		{
+			name:     "H100 HBM3 implies SXM",
+			input:    "NVIDIA-H100-80GB-HBM3",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100SXM,
 		},
 		{
 			name:     "H200 SXM",

@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dynamo_mocker::common::perf_model::PerfModel;
@@ -11,24 +13,136 @@ use dynamo_mocker::common::protocols::{
     SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs, WorkerType as RsWorkerType,
 };
 use dynamo_mocker::loadgen::{
-    ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
+    ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
+    TraceFileFormat, WekaImportOptions, WekaNestedTimestampBasis, WekaResolvedTimestampBasis,
 };
-use dynamo_mocker::replay::ReplayArgsMode;
+use dynamo_mocker::replay::{
+    ReplayArgsMode, ReplayRuntimeObservers, ReplayScalingDecision, ReplayScalingPolicy,
+    ReplayScalingSnapshot, ReplayTelemetryObserver, ReplayTelemetryOptions,
+    ReplayTelemetrySnapshot,
+};
+use parking_lot::Mutex;
 use pyo3::{
-    exceptions::{PyException, PyValueError},
+    exceptions::{PyException, PyTypeError, PyValueError},
     prelude::*,
 };
 use pythonize::pythonize;
+use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::aic_callback::{
-    create_aic_callback, create_aic_prefill_load_estimator, estimate_aic_num_gpu_blocks,
-};
-use super::entrypoint::{AicPerfConfig, KvRouterConfig, to_pyerr};
+use super::ais_callback::{create_ais_callback, create_ais_prefill_load_estimator};
+use super::entrypoint::{AisPerfConfig, KvRouterConfig, normalize_ais_perf_config, to_pyerr};
 
-const DEFAULT_GPU_MEMORY_UTILIZATION: f64 = 0.9;
-const DEFAULT_MEM_FRACTION_STATIC: f64 = 0.88;
+#[derive(Debug, Serialize)]
+struct OfflineReplayCoverage {
+    capture_per_request: bool,
+    capture_planner_details: bool,
+    per_request_records: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct OfflineReplayTelemetry {
+    sample_interval_ms: f64,
+    samples: Vec<ReplayTelemetrySnapshot>,
+}
+
+#[pyclass(name = "_OfflineReplayResult")]
+#[derive(Debug)]
+pub struct OfflineReplayResult {
+    report: dynamo_mocker::replay::TraceSimulationReport,
+    weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
+    lifecycle_operations: Vec<dynamo_mocker::replay::LifecycleOperation>,
+    capture_per_request: bool,
+    coverage: OfflineReplayCoverage,
+    telemetry: Option<OfflineReplayTelemetry>,
+}
+
+impl OfflineReplayResult {
+    fn new(
+        report: dynamo_mocker::replay::TraceSimulationReport,
+        capture_per_request: bool,
+        capture_planner_details: bool,
+        runtime_evidence: dynamo_mocker::replay::OfflineRuntimeEvidence,
+        weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
+        telemetry: Option<OfflineReplayTelemetry>,
+    ) -> Self {
+        let dynamo_mocker::replay::OfflineRuntimeEvidence {
+            lifecycle_operations,
+            ..
+        } = runtime_evidence;
+        let coverage = OfflineReplayCoverage {
+            capture_per_request,
+            capture_planner_details,
+            per_request_records: report.per_request.len(),
+        };
+        Self {
+            report,
+            weka_nested_timestamp_basis,
+            lifecycle_operations,
+            capture_per_request,
+            coverage,
+            telemetry,
+        }
+    }
+}
+
+#[pymethods]
+impl OfflineReplayResult {
+    #[getter]
+    fn summary(&self, py: Python<'_>) -> PyResult<PyObject> {
+        replay_summary_to_python(py, &self.report, self.weka_nested_timestamp_basis)
+    }
+
+    #[getter]
+    fn per_request(&self, py: Python<'_>) -> PyResult<PyObject> {
+        if !self.capture_per_request {
+            return Ok(py.None());
+        }
+        pythonize(py, &self.report.per_request)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+
+    #[getter]
+    fn coverage(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pythonize(py, &self.coverage)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+
+    #[getter]
+    fn lifecycle_operations(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pythonize(py, &self.lifecycle_operations)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+
+    #[getter]
+    fn telemetry(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let Some(telemetry) = self.telemetry.as_ref() else {
+            return Ok(py.None());
+        };
+        pythonize(py, telemetry)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+}
+
+fn replay_summary_to_python(
+    py: Python<'_>,
+    report: &dynamo_mocker::replay::TraceSimulationReport,
+    weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
+) -> PyResult<PyObject> {
+    let summary = pythonize(py, report).map_err(to_pyerr)?;
+    if let Some(basis) = weka_nested_timestamp_basis {
+        summary.set_item(
+            "weka_nested_timestamp_basis",
+            pythonize(py, &basis).map_err(to_pyerr)?,
+        )?;
+    }
+    Ok(summary.unbind())
+}
 
 fn parse_mocker_engine_type(engine_type: &str) -> PyResult<RsMockerEngineType> {
     match engine_type {
@@ -171,9 +285,10 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         engine_type: &str,
         num_gpu_blocks: Option<usize>,
         block_size: usize,
@@ -187,45 +302,35 @@ impl MockEngineArgs {
         startup_time: Option<f64>,
         worker_type: &str,
         planner_profile_data: Option<PathBuf>,
-        aic_backend: Option<String>,
-        aic_system: Option<String>,
-        aic_backend_version: Option<String>,
-        aic_tp_size: Option<usize>,
-        aic_model_path: Option<String>,
-        aic_moe_tp_size: Option<usize>,
-        aic_moe_ep_size: Option<usize>,
-        aic_attention_dp_size: Option<usize>,
-        aic_nextn: Option<usize>,
-        aic_nextn_accept_rates: Option<String>,
-        aic_mtp_seed: u64,
+        ais_nextn: Option<usize>,
+        ais_nextn_accept_rates: Option<String>,
+        ais_mtp_seed: Option<u64>,
         gpu_memory_utilization: Option<f64>,
         mem_fraction_static: Option<f64>,
         free_gpu_memory_fraction: Option<f64>,
         enable_local_indexer: bool,
         bootstrap_port: Option<u16>,
+        handoff_session_timeout_ms: u64,
         kv_bytes_per_token: Option<usize>,
         kv_transfer_bandwidth: Option<f64>,
+        kv_transfer_timing_mode: &str,
         reasoning: Option<ReasoningConfig>,
+        response_replay_trace_path: Option<PathBuf>,
         zmq_kv_events_port: Option<u16>,
         zmq_replay_port: Option<u16>,
         preemption_mode: &str,
         router_queue_policy: Option<&str>,
         sglang: Option<SglangArgs>,
         trtllm: Option<TrtllmArgs>,
-        num_g2_blocks: Option<usize>,
-        num_g3_blocks: Option<usize>,
-        offload_batch_size: Option<usize>,
-        bandwidth_g1_to_g2_gbps: Option<f64>,
-        bandwidth_g2_to_g1_gbps: Option<f64>,
-        bandwidth_g2_to_g3_gbps: Option<f64>,
-        bandwidth_g3_to_g2_gbps: Option<f64>,
-        enable_g4_storage: bool,
-        bandwidth_g2_to_g4_gbps: Option<f64>,
-        bandwidth_g4_to_g2_gbps: Option<f64>,
+        max_model_len: Option<usize>,
+        ais_perf_config: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let engine_type = parse_mocker_engine_type(engine_type)?;
         let worker_type = parse_worker_type(worker_type)?;
         let preemption_mode = parse_preemption_mode(preemption_mode)?;
+        let kv_transfer_timing_mode = kv_transfer_timing_mode
+            .parse()
+            .map_err(|error: String| PyException::new_err(error))?;
         let router_queue_policy = router_queue_policy
             .map(|value| {
                 value.parse().map_err(|e: String| {
@@ -237,6 +342,7 @@ impl MockEngineArgs {
         let mut builder = RsMockEngineArgs::builder()
             .engine_type(engine_type)
             .block_size(block_size)
+            .max_model_len(max_model_len)
             .max_num_seqs(max_num_seqs)
             .max_num_batched_tokens(max_num_batched_tokens)
             .enable_prefix_caching(enable_prefix_caching)
@@ -247,35 +353,25 @@ impl MockEngineArgs {
             .startup_time(startup_time)
             .worker_type(worker_type)
             .planner_profile_data(planner_profile_data.clone())
-            .aic_backend(aic_backend)
-            .aic_system(aic_system)
-            .aic_backend_version(aic_backend_version)
-            .aic_tp_size(aic_tp_size)
-            .aic_model_path(aic_model_path)
-            .aic_moe_tp_size(aic_moe_tp_size)
-            .aic_moe_ep_size(aic_moe_ep_size)
-            .aic_attention_dp_size(aic_attention_dp_size)
-            .aic_nextn(aic_nextn)
-            .aic_nextn_accept_rates(aic_nextn_accept_rates)
-            .aic_mtp_seed(aic_mtp_seed)
+            .ais_perf_config(
+                ais_perf_config
+                    .map(|config| normalize_ais_perf_config(py, config))
+                    .transpose()?,
+            )
+            .ais_nextn(ais_nextn)
+            .ais_nextn_accept_rates(ais_nextn_accept_rates)
+            .ais_mtp_seed(ais_mtp_seed.unwrap_or(42))
             .gpu_memory_utilization(gpu_memory_utilization)
             .mem_fraction_static(mem_fraction_static)
             .free_gpu_memory_fraction(free_gpu_memory_fraction)
             .enable_local_indexer(enable_local_indexer)
             .bootstrap_port(bootstrap_port)
+            .handoff_session_timeout_ms(handoff_session_timeout_ms)
             .kv_bytes_per_token(kv_bytes_per_token)
             .kv_transfer_bandwidth(kv_transfer_bandwidth)
-            .num_g2_blocks(num_g2_blocks)
-            .num_g3_blocks(num_g3_blocks)
-            .enable_g4_storage(enable_g4_storage)
-            .offload_batch_size(offload_batch_size)
-            .bandwidth_g1_to_g2_gbps(bandwidth_g1_to_g2_gbps)
-            .bandwidth_g2_to_g1_gbps(bandwidth_g2_to_g1_gbps)
-            .bandwidth_g2_to_g3_gbps(bandwidth_g2_to_g3_gbps)
-            .bandwidth_g3_to_g2_gbps(bandwidth_g3_to_g2_gbps)
-            .bandwidth_g2_to_g4_gbps(bandwidth_g2_to_g4_gbps)
-            .bandwidth_g4_to_g2_gbps(bandwidth_g4_to_g2_gbps)
+            .kv_transfer_timing_mode(kv_transfer_timing_mode)
             .reasoning(reasoning.map(|config| config.inner()))
+            .response_replay_trace_path(response_replay_trace_path)
             .zmq_kv_events_port(zmq_kv_events_port)
             .zmq_replay_port(zmq_replay_port)
             .preemption_mode(preemption_mode)
@@ -312,19 +408,28 @@ impl MockEngineArgs {
     }
 
     #[staticmethod]
-    fn from_json(config_json: &str) -> PyResult<Self> {
-        let num_gpu_blocks_explicit = serde_json::from_str::<serde_json::Value>(config_json)
-            .ok()
-            .and_then(|value| {
-                value.as_object().map(|object| {
-                    object
-                        .get("num_gpu_blocks")
-                        .and_then(|value| value.as_u64())
-                        .is_some()
-                })
-            })
-            .unwrap_or(false);
-        RsMockEngineArgs::from_json_str(config_json)
+    pub(super) fn from_json(py: Python<'_>, config_json: &str) -> PyResult<Self> {
+        let mut config: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+            PyException::new_err(format!("Failed to parse MockEngineArgs JSON: {e}"))
+        })?;
+        let num_gpu_blocks_explicit = config
+            .get("num_gpu_blocks")
+            .and_then(serde_json::Value::as_u64)
+            .is_some();
+        if let Some(perf_config) = config.get_mut("ais_perf_config")
+            && !perf_config.is_null()
+        {
+            *perf_config = normalize_ais_perf_config(py, &pythonize(py, perf_config)?)?;
+        }
+        if let Some(timing) = config.get_mut("timing_model")
+            && timing["type"] == "external"
+            && matches!(timing["provider"].as_str(), Some("aic" | "ais"))
+            && let Some(perf_config) = timing.get_mut("config")
+        {
+            *perf_config = normalize_ais_perf_config(py, &pythonize(py, perf_config)?)?;
+        }
+        let config_json = serde_json::to_string(&config).map_err(to_pyerr)?;
+        RsMockEngineArgs::from_json_str(&config_json)
             .map(|inner| Self {
                 inner,
                 num_gpu_blocks_explicit,
@@ -344,6 +449,11 @@ impl MockEngineArgs {
     #[getter]
     fn num_gpu_blocks(&self) -> usize {
         self.inner.num_gpu_blocks
+    }
+
+    #[getter]
+    fn max_model_len(&self) -> Option<usize> {
+        self.inner.max_model_len
     }
 
     #[getter]
@@ -382,168 +492,122 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn handoff_session_timeout_ms(&self) -> u64 {
+        self.inner.handoff_session_timeout_ms
+    }
+
+    #[getter]
+    fn kv_transfer_timing_mode(&self) -> &'static str {
+        match self.inner.kv_transfer_timing_mode {
+            dynamo_mocker::common::protocols::KvTransferTimingMode::FullPrompt => "full_prompt",
+            dynamo_mocker::common::protocols::KvTransferTimingMode::DestinationMissing => {
+                "destination_missing"
+            }
+        }
+    }
+
+    #[getter]
+    fn engine_type(&self) -> &'static str {
+        match self.inner.engine_type {
+            dynamo_mocker::common::protocols::EngineType::Vllm => "vllm",
+            dynamo_mocker::common::protocols::EngineType::Sglang => "sglang",
+            dynamo_mocker::common::protocols::EngineType::Trtllm => "trtllm",
+        }
+    }
+
+    #[getter]
     fn kv_bytes_per_token(&self) -> Option<usize> {
         self.inner.kv_bytes_per_token
     }
 
     #[getter]
-    fn num_g2_blocks(&self) -> Option<usize> {
-        self.inner.num_g2_blocks
+    fn response_replay_trace_path(&self) -> Option<PathBuf> {
+        self.inner.response_replay_trace_path.clone()
     }
 
     #[getter]
-    fn num_g3_blocks(&self) -> Option<usize> {
-        self.inner.num_g3_blocks
+    fn ais_perf_config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(pythonize(py, &self.inner.ais_perf_config)?.unbind())
     }
 
     #[getter]
-    fn enable_g4_storage(&self) -> bool {
-        self.inner.enable_g4_storage
+    fn ais_backend(&self) -> Option<String> {
+        self.inner.ais_backend.clone()
     }
 
     #[getter]
-    fn offload_batch_size(&self) -> Option<usize> {
-        self.inner.offload_batch_size
+    fn ais_system(&self) -> Option<String> {
+        self.inner.ais_system.clone()
     }
 
     #[getter]
-    fn bandwidth_g1_to_g2_gbps(&self) -> Option<f64> {
-        self.inner.bandwidth_g1_to_g2_gbps
+    fn ais_backend_version(&self) -> Option<String> {
+        self.inner.ais_backend_version.clone()
     }
 
     #[getter]
-    fn bandwidth_g2_to_g1_gbps(&self) -> Option<f64> {
-        self.inner.bandwidth_g2_to_g1_gbps
+    fn ais_tp_size(&self) -> Option<usize> {
+        self.inner.ais_tp_size
     }
 
     #[getter]
-    fn bandwidth_g2_to_g3_gbps(&self) -> Option<f64> {
-        self.inner.bandwidth_g2_to_g3_gbps
+    fn ais_model_path(&self) -> Option<String> {
+        self.inner.ais_model_path.clone()
     }
 
     #[getter]
-    fn bandwidth_g3_to_g2_gbps(&self) -> Option<f64> {
-        self.inner.bandwidth_g3_to_g2_gbps
+    fn ais_moe_tp_size(&self) -> Option<usize> {
+        self.inner.ais_moe_tp_size
     }
 
     #[getter]
-    fn bandwidth_g2_to_g4_gbps(&self) -> Option<f64> {
-        self.inner.bandwidth_g2_to_g4_gbps
+    fn ais_moe_ep_size(&self) -> Option<usize> {
+        self.inner.ais_moe_ep_size
     }
 
     #[getter]
-    fn bandwidth_g4_to_g2_gbps(&self) -> Option<f64> {
-        self.inner.bandwidth_g4_to_g2_gbps
+    fn ais_attention_dp_size(&self) -> Option<usize> {
+        self.inner.ais_attention_dp_size
     }
 
     #[getter]
-    fn aic_backend(&self) -> Option<String> {
-        self.inner.aic_backend.clone()
-    }
-
-    #[setter]
-    fn set_aic_backend(&mut self, value: Option<String>) {
-        self.inner.aic_backend = value;
+    fn ais_gemm_dtype(&self) -> Option<String> {
+        self.inner.ais_gemm_dtype.clone()
     }
 
     #[getter]
-    fn aic_system(&self) -> Option<String> {
-        self.inner.aic_system.clone()
-    }
-
-    #[setter]
-    fn set_aic_system(&mut self, value: Option<String>) {
-        self.inner.aic_system = value;
+    fn ais_moe_dtype(&self) -> Option<String> {
+        self.inner.ais_moe_dtype.clone()
     }
 
     #[getter]
-    fn aic_backend_version(&self) -> Option<String> {
-        self.inner.aic_backend_version.clone()
-    }
-
-    #[setter]
-    fn set_aic_backend_version(&mut self, value: Option<String>) {
-        self.inner.aic_backend_version = value;
+    fn ais_fmha_dtype(&self) -> Option<String> {
+        self.inner.ais_fmha_dtype.clone()
     }
 
     #[getter]
-    fn aic_tp_size(&self) -> Option<usize> {
-        self.inner.aic_tp_size
-    }
-
-    #[setter]
-    fn set_aic_tp_size(&mut self, value: Option<usize>) {
-        self.inner.aic_tp_size = value;
+    fn ais_kv_cache_dtype(&self) -> Option<String> {
+        self.inner.ais_kv_cache_dtype.clone()
     }
 
     #[getter]
-    fn aic_model_path(&self) -> Option<String> {
-        self.inner.aic_model_path.clone()
-    }
-
-    #[setter]
-    fn set_aic_model_path(&mut self, value: Option<String>) {
-        self.inner.aic_model_path = value;
+    fn ais_comm_dtype(&self) -> Option<String> {
+        self.inner.ais_comm_dtype.clone()
     }
 
     #[getter]
-    fn aic_moe_tp_size(&self) -> Option<usize> {
-        self.inner.aic_moe_tp_size
-    }
-
-    #[setter]
-    fn set_aic_moe_tp_size(&mut self, value: Option<usize>) {
-        self.inner.aic_moe_tp_size = value;
+    fn ais_nextn(&self) -> Option<usize> {
+        self.inner.ais_nextn
     }
 
     #[getter]
-    fn aic_moe_ep_size(&self) -> Option<usize> {
-        self.inner.aic_moe_ep_size
-    }
-
-    #[setter]
-    fn set_aic_moe_ep_size(&mut self, value: Option<usize>) {
-        self.inner.aic_moe_ep_size = value;
+    fn ais_nextn_accept_rates(&self) -> Option<String> {
+        self.inner.ais_nextn_accept_rates.clone()
     }
 
     #[getter]
-    fn aic_attention_dp_size(&self) -> Option<usize> {
-        self.inner.aic_attention_dp_size
-    }
-
-    #[setter]
-    fn set_aic_attention_dp_size(&mut self, value: Option<usize>) {
-        self.inner.aic_attention_dp_size = value;
-    }
-
-    #[getter]
-    fn aic_nextn(&self) -> Option<usize> {
-        self.inner.aic_nextn
-    }
-
-    #[setter]
-    fn set_aic_nextn(&mut self, value: Option<usize>) {
-        self.inner.aic_nextn = value;
-    }
-
-    #[getter]
-    fn aic_nextn_accept_rates(&self) -> Option<String> {
-        self.inner.aic_nextn_accept_rates.clone()
-    }
-
-    #[setter]
-    fn set_aic_nextn_accept_rates(&mut self, value: Option<String>) {
-        self.inner.aic_nextn_accept_rates = value;
-    }
-
-    #[getter]
-    fn aic_mtp_seed(&self) -> u64 {
-        self.inner.aic_mtp_seed
-    }
-
-    #[setter]
-    fn set_aic_mtp_seed(&mut self, value: u64) {
-        self.inner.aic_mtp_seed = value;
+    fn ais_mtp_seed(&self) -> u64 {
+        self.inner.ais_mtp_seed
     }
 
     #[getter]
@@ -630,7 +694,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -638,17 +702,9 @@ impl MockEngineArgs {
         zmq_replay_port: Option<u16>,
         kv_bytes_per_token: Option<usize>,
         num_gpu_blocks: Option<usize>,
-        aic_backend: Option<String>,
-        aic_system: Option<String>,
-        aic_backend_version: Option<String>,
-        aic_tp_size: Option<usize>,
-        aic_model_path: Option<String>,
-        aic_moe_tp_size: Option<usize>,
-        aic_moe_ep_size: Option<usize>,
-        aic_attention_dp_size: Option<usize>,
-        aic_nextn: Option<usize>,
-        aic_nextn_accept_rates: Option<String>,
-        aic_mtp_seed: Option<u64>,
+        ais_nextn: Option<usize>,
+        ais_nextn_accept_rates: Option<String>,
+        ais_mtp_seed: Option<u64>,
         gpu_memory_utilization: Option<f64>,
         mem_fraction_static: Option<f64>,
         free_gpu_memory_fraction: Option<f64>,
@@ -673,38 +729,14 @@ impl MockEngineArgs {
             inner.num_gpu_blocks = blocks;
             num_gpu_blocks_explicit = true;
         }
-        if let Some(backend) = aic_backend {
-            inner.aic_backend = Some(backend);
+        if let Some(nextn) = ais_nextn {
+            inner.ais_nextn = Some(nextn);
         }
-        if let Some(system) = aic_system {
-            inner.aic_system = Some(system);
+        if let Some(rates) = ais_nextn_accept_rates {
+            inner.ais_nextn_accept_rates = Some(rates);
         }
-        if let Some(version) = aic_backend_version {
-            inner.aic_backend_version = Some(version);
-        }
-        if let Some(tp_size) = aic_tp_size {
-            inner.aic_tp_size = Some(tp_size);
-        }
-        if let Some(model_path) = aic_model_path {
-            inner.aic_model_path = Some(model_path);
-        }
-        if let Some(moe_tp_size) = aic_moe_tp_size {
-            inner.aic_moe_tp_size = Some(moe_tp_size);
-        }
-        if let Some(moe_ep_size) = aic_moe_ep_size {
-            inner.aic_moe_ep_size = Some(moe_ep_size);
-        }
-        if let Some(attention_dp_size) = aic_attention_dp_size {
-            inner.aic_attention_dp_size = Some(attention_dp_size);
-        }
-        if let Some(nextn) = aic_nextn {
-            inner.aic_nextn = Some(nextn);
-        }
-        if let Some(rates) = aic_nextn_accept_rates {
-            inner.aic_nextn_accept_rates = Some(rates);
-        }
-        if let Some(seed) = aic_mtp_seed {
-            inner.aic_mtp_seed = seed;
+        if let Some(seed) = ais_mtp_seed {
+            inner.ais_mtp_seed = seed;
         }
         if let Some(gpu_memory_utilization) = gpu_memory_utilization {
             inner.gpu_memory_utilization = Some(gpu_memory_utilization);
@@ -733,17 +765,61 @@ impl MockEngineArgs {
     }
 }
 
+fn replay_canonical_path(path: &Path) -> Option<PathBuf> {
+    path.canonicalize().ok().or_else(|| {
+        let file_name = path.file_name()?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        parent
+            .canonicalize()
+            .ok()
+            .map(|parent| parent.join(file_name))
+    })
+}
+
+fn replay_normalized_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+fn replay_paths_equal(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (replay_canonical_path(left), replay_canonical_path(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => matches!(
+            (
+                replay_normalized_absolute_path(left),
+                replay_normalized_absolute_path(right)
+            ),
+            (Ok(left), Ok(right)) if left == right
+        ),
+    }
+}
+
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
-    trace_file: PathBuf,
+    trace_files: Vec<PathBuf>,
     extra_engine_args: Option<MockEngineArgs>,
     prefill_engine_args: Option<MockEngineArgs>,
     decode_engine_args: Option<MockEngineArgs>,
     router_config: Option<KvRouterConfig>,
-    aic_perf_config: Option<&AicPerfConfig>,
+    ais_perf_config: Option<&AisPerfConfig>,
     num_workers: usize,
     num_prefill_workers: usize,
     num_decode_workers: usize,
@@ -751,13 +827,48 @@ pub fn run_mocker_trace_replay(
     replay_mode: &str,
     router_mode: &str,
     arrival_speedup_ratio: f64,
-    trace_block_size: usize,
+    trace_block_size: Option<usize>,
     trace_format: &str,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
     report_jsonl_path: Option<PathBuf>,
     max_sim_time_ms: Option<f64>,
+    model_name: Option<String>,
+    sla_ttft_ms: Option<f64>,
+    sla_itl_ms: Option<f64>,
+    sla_e2e_ms: Option<f64>,
+    capture_per_request: bool,
+    capture_planner_details: bool,
+    scaling_policy: Option<Py<PyAny>>,
+    agentic_lanes: Option<isize>,
+    execution_model: Option<String>,
+    weka_nested_timestamp_basis: Option<&str>,
+    capture_telemetry: bool,
+    telemetry_sample_interval_ms: f64,
+    telemetry_callback: Option<Py<PyAny>>,
+    telemetry_jsonl_path: Option<PathBuf>,
 ) -> PyResult<PyObject> {
+    if telemetry_jsonl_path.as_deref().is_some_and(|path| {
+        report_jsonl_path
+            .as_deref()
+            .is_some_and(|report| replay_paths_equal(path, report))
+            || trace_files
+                .iter()
+                .any(|trace| replay_paths_equal(path, trace))
+    }) || report_jsonl_path.as_deref().is_some_and(|path| {
+        trace_files
+            .iter()
+            .any(|trace| replay_paths_equal(path, trace))
+    }) {
+        return Err(PyValueError::new_err(
+            "replay output paths must differ from each other and trace files",
+        ));
+    }
+    if capture_per_request && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "capture_per_request only supports replay_mode='offline'",
+        ));
+    }
     let args_selection = load_replay_args_selection(
         py,
         extra_engine_args,
@@ -769,21 +880,48 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
+    let weka_options =
+        parse_weka_import_options(trace_format, weka_nested_timestamp_basis).map_err(to_pyerr)?;
+    let execution_model = match execution_model {
+        Some(model) if model.trim().is_empty() => {
+            return Err(PyValueError::new_err("execution_model must be non-empty"));
+        }
+        Some(model) => Some(model.trim().to_string()),
+        None => None,
+    };
+    if matches!(
+        trace_format,
+        dynamo_mocker::loadgen::TraceFileFormat::AgenticMooncake
+            | dynamo_mocker::loadgen::TraceFileFormat::Weka
+    ) && execution_model.is_none()
+    {
+        return Err(PyValueError::new_err(
+            "agentic execution requires a configured target model",
+        ));
+    }
+    dynamo_mocker::loadgen::validate_trace_files(trace_format, &trace_files).map_err(to_pyerr)?;
     let prefill_load_estimator = load_replay_prefill_load_estimator(
         py,
         router_mode,
         router_config.as_ref(),
-        aic_perf_config,
+        ais_perf_config,
     )?;
-    let router_config = load_replay_router_config(router_config);
+    let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
-    if report_jsonl_path.is_some() && replay_mode != "offline" {
+    let is_offline = replay_mode == "offline";
+    if scaling_policy.is_some() && replay_mode != "offline" {
         return Err(PyValueError::new_err(
-            "report_jsonl_path is only supported for replay_mode='offline'",
+            "scaling_policy only supports replay_mode='offline'",
         ));
     }
     let jsonl_path_for_emit = report_jsonl_path.clone();
-    let record_per_request = report_jsonl_path.is_some();
+    let capture_planner_details = scaling_policy.is_some() && capture_planner_details;
+    let capture_options = dynamo_mocker::replay::ReplayCaptureOptions {
+        capture_per_request: capture_per_request || report_jsonl_path.is_some(),
+        capture_lifecycle_evidence: capture_planner_details,
+        ..Default::default()
+    };
+    let record_per_request = capture_options.effective_per_request();
     if let Some(ms) = max_sim_time_ms {
         if !ms.is_finite() || ms < 0.0 {
             return Err(PyValueError::new_err(
@@ -796,8 +934,95 @@ pub fn run_mocker_trace_replay(
             ));
         }
     }
-    let report = py.allow_threads(move || {
+    validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+    validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+    validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+    let sla = dynamo_mocker::replay::SlaThresholds {
+        ttft_ms: sla_ttft_ms,
+        itl_ms: sla_itl_ms,
+        e2e_ms: sla_e2e_ms,
+    };
+    let scaling_callback_error = scaling_policy
+        .as_ref()
+        .map(|_| PyCallbackErrorSlot::default());
+    let telemetry_callback_error = telemetry_callback
+        .as_ref()
+        .map(|_| PyCallbackErrorSlot::default());
+    let PreparedReplayTelemetry {
+        options: telemetry,
+        capture: telemetry_capture,
+        writer: telemetry_writer,
+        sample_interval_ms: telemetry_sample_interval_ms,
+    } = prepare_replay_telemetry(
+        py,
+        &replay_mode,
+        capture_telemetry,
+        telemetry_sample_interval_ms,
+        telemetry_callback,
+        telemetry_jsonl_path.as_deref(),
+        telemetry_callback_error.clone(),
+    )?;
+    let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+                    mut telemetry: Option<ReplayTelemetryOptions>| {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        let agentic_lanes = parse_agentic_lanes(agentic_lanes)?;
+        if agentic_lanes.is_some() && replay_concurrency.is_some() {
+            anyhow::bail!("agentic_lanes cannot be combined with replay_concurrency");
+        }
+        if agentic_lanes.is_some()
+            && !matches!(
+                trace_format,
+                dynamo_mocker::loadgen::TraceFileFormat::AgenticMooncake
+                    | dynamo_mocker::loadgen::TraceFileFormat::Weka
+                    | dynamo_mocker::loadgen::TraceFileFormat::Dynamo
+            )
+        {
+            anyhow::bail!(
+                "agentic_lanes requires trace_format='agentic_mooncake', 'weka', or 'dynamo'"
+            );
+        }
+        if matches!(
+            trace_format,
+            TraceFileFormat::Dynamo | TraceFileFormat::Weka
+        ) {
+            let (trace, resolved_basis) = if trace_format == TraceFileFormat::Weka {
+                let (graph, basis) = dynamo_mocker::loadgen::load_weka_agentic_graph_with_options(
+                    &trace_files[0],
+                    trace_block_size,
+                    weka_options,
+                )?;
+                (DynamoRequestTrace::Agentic(graph), Some(basis))
+            } else {
+                (
+                    DynamoRequestTrace::from_request_trace_files(&trace_files, trace_block_size)?,
+                    None,
+                )
+            };
+            if matches!(&trace, DynamoRequestTrace::Agentic(_)) && execution_model.is_none() {
+                anyhow::bail!("agentic execution requires a configured target model");
+            }
+            return run_loaded_dynamo_request_trace(
+                args_selection,
+                trace,
+                router_config,
+                prefill_load_estimator,
+                num_workers,
+                replay_concurrency,
+                agentic_lanes,
+                &replay_mode,
+                arrival_speedup_ratio,
+                router_mode,
+                record_per_request,
+                max_sim_time_ms,
+                sla,
+                scaling_policy,
+                telemetry,
+            )
+            .map(|report| (report, resolved_basis));
+        }
+
+        let trace_block_size = trace_block_size.unwrap_or(512);
+        let trace_file = &trace_files[0];
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
             && replay_concurrency.is_none()
         {
@@ -806,128 +1031,344 @@ pub fn run_mocker_trace_replay(
             );
         }
 
-        match args_selection {
-            ReplayArgsSelection::Aggregated(args) => {
-                match (replay_mode.as_str(), replay_concurrency) {
-                    ("offline", Some(max_in_flight)) => {
-                        dynamo_mocker::replay::simulate_concurrency_file_with_router_mode_and_format(
-                            *args,
-                            router_config.clone(),
-                            prefill_load_estimator.clone(),
-                            &trace_file,
-                            trace_block_size,
-                            max_in_flight,
-                            num_workers,
-                            router_mode,
-                            trace_format,
-                            trace_shared_prefix_ratio,
-                            trace_num_prefix_groups,
-                            record_per_request, max_sim_time_ms,
-                        )
-                    }
-                    ("offline", None) => {
-                        dynamo_mocker::replay::simulate_trace_file_with_router_mode_and_format(
-                            *args,
-                            router_config.clone(),
-                            prefill_load_estimator.clone(),
-                            &trace_file,
-                            trace_block_size,
-                            num_workers,
-                            arrival_speedup_ratio,
-                            router_mode,
-                            trace_format,
-                            trace_shared_prefix_ratio,
-                            trace_num_prefix_groups,
-                            record_per_request, max_sim_time_ms,
-                        )
-                    }
-                    ("online", Some(max_in_flight)) => {
-                        dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode_and_format(
-                            *args,
-                            router_config.clone(),
-                            prefill_load_estimator.clone(),
-                            &trace_file,
-                            trace_block_size,
-                            max_in_flight,
-                            num_workers,
-                            router_mode,
-                            trace_format,
-                            trace_shared_prefix_ratio,
-                            trace_num_prefix_groups,
-                        )
-                    }
-                    ("online", None) => {
-                        dynamo_mocker::replay::simulate_trace_live_file_with_router_mode_and_format(
-                            *args,
-                            router_config.clone(),
-                            prefill_load_estimator.clone(),
-                            &trace_file,
-                            trace_block_size,
-                            num_workers,
-                            arrival_speedup_ratio,
-                            router_mode,
-                            trace_format,
-                            trace_shared_prefix_ratio,
-                            trace_num_prefix_groups,
-                        )
-                    }
-                    (other, _) => anyhow::bail!(
-                        "replay_mode must be either 'offline' or 'online', got '{}'",
-                        other
-                    ),
-                }
+        match select_replay_dispatch(args_selection, &replay_mode, replay_concurrency)? {
+            ReplayDispatch::AggregatedOfflineConcurrency(args, max_in_flight) => {
+                dynamo_mocker::replay::simulate_concurrency_file_with_router_mode_and_format_and_runtime_observers(
+                    *args,
+                    router_config.clone(),
+                    prefill_load_estimator.clone(),
+                    trace_file,
+                    trace_block_size,
+                    max_in_flight,
+                    num_workers,
+                    router_mode,
+                    trace_format,
+                    trace_shared_prefix_ratio,
+                    trace_num_prefix_groups,
+                    record_per_request,
+                    max_sim_time_ms,
+                    sla,
+                    take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                )
             }
-            ReplayArgsSelection::Disagg(config) => match (replay_mode.as_str(), replay_concurrency)
-            {
-                ("offline", Some(max_in_flight)) => {
-                    dynamo_mocker::replay::simulate_concurrency_file_disagg_with_router_mode_and_format(
-                        *config,
-                        router_config.clone(),
-                        prefill_load_estimator.clone(),
-                        &trace_file,
-                        trace_block_size,
-                        max_in_flight,
-                        router_mode,
-                        trace_format,
-                        trace_shared_prefix_ratio,
-                        trace_num_prefix_groups,
-                        record_per_request, max_sim_time_ms,
-                    )
-                }
-                ("offline", None) => {
-                    dynamo_mocker::replay::simulate_trace_file_disagg_with_router_mode_and_format(
-                        *config,
-                        router_config.clone(),
-                        prefill_load_estimator.clone(),
-                        &trace_file,
-                        trace_block_size,
-                        arrival_speedup_ratio,
-                        router_mode,
-                        trace_format,
-                        trace_shared_prefix_ratio,
-                        trace_num_prefix_groups,
-                        record_per_request, max_sim_time_ms,
-                    )
-                }
-                ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),
-                (other, _) => anyhow::bail!(
-                    "replay_mode must be either 'offline' or 'online', got '{}'",
-                    other
-                ),
-            },
+            ReplayDispatch::AggregatedOffline(args) => {
+                dynamo_mocker::replay::simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
+                    *args,
+                    router_config.clone(),
+                    prefill_load_estimator.clone(),
+                    trace_file,
+                    trace_block_size,
+                    num_workers,
+                    arrival_speedup_ratio,
+                    router_mode,
+                    trace_format,
+                    trace_shared_prefix_ratio,
+                    trace_num_prefix_groups,
+                    record_per_request,
+                    max_sim_time_ms,
+                    agentic_lanes,
+                    sla,
+                    take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                )
+            }
+            ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight) => {
+                dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode_and_format_and_options(
+                    *args,
+                    router_config.clone(),
+                    prefill_load_estimator.clone(),
+                    trace_file,
+                    trace_block_size,
+                    max_in_flight,
+                    num_workers,
+                    router_mode,
+                    trace_format,
+                    trace_shared_prefix_ratio,
+                    trace_num_prefix_groups,
+                    record_per_request,
+                    sla,
+                )
+            }
+            ReplayDispatch::AggregatedOnline(args) => {
+                dynamo_mocker::replay::simulate_trace_live_file_with_router_mode_and_format_and_options(
+                    *args,
+                    router_config.clone(),
+                    prefill_load_estimator.clone(),
+                    trace_file,
+                    trace_block_size,
+                    num_workers,
+                    arrival_speedup_ratio,
+                    router_mode,
+                    trace_format,
+                    trace_shared_prefix_ratio,
+                    trace_num_prefix_groups,
+                    record_per_request,
+                    agentic_lanes,
+                    sla,
+                )
+            }
+            ReplayDispatch::DisaggOfflineConcurrency(config, max_in_flight) => {
+                dynamo_mocker::replay::simulate_concurrency_file_disagg_with_router_mode_and_format_and_runtime_observers(
+                    *config,
+                    router_config.clone(),
+                    prefill_load_estimator.clone(),
+                    trace_file,
+                    trace_block_size,
+                    max_in_flight,
+                    router_mode,
+                    trace_format,
+                    trace_shared_prefix_ratio,
+                    trace_num_prefix_groups,
+                    record_per_request,
+                    max_sim_time_ms,
+                    sla,
+                    take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                )
+            }
+            ReplayDispatch::DisaggOffline(config) => {
+                dynamo_mocker::replay::simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observers(
+                    *config,
+                    router_config.clone(),
+                    prefill_load_estimator.clone(),
+                    trace_file,
+                    trace_block_size,
+                    arrival_speedup_ratio,
+                    router_mode,
+                    trace_format,
+                    trace_shared_prefix_ratio,
+                    trace_num_prefix_groups,
+                    record_per_request,
+                    max_sim_time_ms,
+                    agentic_lanes,
+                    sla,
+                    take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                )
+            }
         }
-    });
-    let report = report.map_err(to_pyerr)?;
+        .map(|report| (report, None))
+    };
+    let report_result = if let Some(callback) = scaling_policy {
+        run(
+            Some(Box::new(PyReplayScalingPolicy {
+                callback,
+                capture_lifecycle_evidence: capture_planner_details,
+                callback_error: scaling_callback_error
+                    .clone()
+                    .expect("scaling error slot exists with callback"),
+            })),
+            telemetry,
+        )
+    } else {
+        py.allow_threads(move || run(None, telemetry))
+    };
+    // Always finish the sink so buffered I/O errors are observed even when the
+    // replay failed. Preserve the replay/callback error as the primary error.
+    let telemetry_finish_result = finish_replay_telemetry(
+        telemetry_capture,
+        telemetry_writer,
+        telemetry_sample_interval_ms,
+    );
+    let (report, resolved_weka_basis) = report_result.map_err(|error| {
+        replay_run_err_to_pyerr(
+            error,
+            scaling_callback_error.as_ref(),
+            telemetry_callback_error.as_ref(),
+        )
+    })?;
+    let telemetry = telemetry_finish_result.map_err(to_pyerr)?;
+    let runtime_evidence = report.runtime_evidence.clone();
     // Write per-request JSONL from Rust directly if requested, avoiding a
     // potentially-large round trip through pyo3 / pythonize. Each line is one
     // JSON object (matching AIPerf's profile_export.jsonl convention).
-    if let Some(path) = jsonl_path_for_emit.as_ref() {
+    if let Some(path) = jsonl_path_for_emit.as_deref() {
         py.allow_threads(|| write_per_request_jsonl(path, &report.per_request))
             .map_err(to_pyerr)?;
     }
-    pythonize(py, &report)
-        .map_err(to_pyerr)
-        .map(|obj| obj.unbind())
+    if is_offline {
+        return Py::new(
+            py,
+            OfflineReplayResult::new(
+                report,
+                record_per_request,
+                capture_planner_details,
+                runtime_evidence,
+                resolved_weka_basis,
+                telemetry,
+            ),
+        )
+        .map(Py::into_any);
+    }
+    replay_summary_to_python(py, &report, resolved_weka_basis)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_loaded_dynamo_request_trace(
+    args_selection: ReplayArgsSelection,
+    trace: DynamoRequestTrace,
+    router_config: Option<dynamo_kv_router::config::KvRouterConfig>,
+    prefill_load_estimator: Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>,
+    num_workers: usize,
+    replay_concurrency: Option<usize>,
+    agentic_lanes: Option<usize>,
+    replay_mode: &str,
+    arrival_speedup_ratio: f64,
+    router_mode: dynamo_mocker::replay::ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: dynamo_mocker::replay::SlaThresholds,
+    mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    mut telemetry: Option<ReplayTelemetryOptions>,
+) -> anyhow::Result<dynamo_mocker::replay::TraceSimulationReport> {
+    match trace {
+        DynamoRequestTrace::Standard(trace) => {
+            anyhow::ensure!(
+                agentic_lanes.is_none(),
+                "agentic_lanes requires an agentic Dynamo request trace"
+            );
+            match select_replay_dispatch(args_selection, replay_mode, replay_concurrency)? {
+                ReplayDispatch::AggregatedOfflineConcurrency(args, max_in_flight) => {
+                    dynamo_mocker::replay::simulate_concurrency_workload_with_router_mode_and_options_and_runtime_observers(
+                            *args,
+                            router_config,
+                            prefill_load_estimator,
+                            trace,
+                            max_in_flight,
+                            num_workers,
+                            router_mode,
+                            record_per_request,
+                            max_sim_time_ms,
+                            sla,
+                            take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                        )
+                }
+                ReplayDispatch::AggregatedOffline(args) => {
+                    dynamo_mocker::replay::simulate_loaded_trace_with_router_mode_and_options_and_runtime_observers(
+                        *args,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        num_workers,
+                        arrival_speedup_ratio,
+                        router_mode,
+                        record_per_request,
+                        max_sim_time_ms,
+                        sla,
+                        take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                    )
+                }
+                ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight) => {
+                    dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode_and_options(
+                        *args,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        max_in_flight,
+                        num_workers,
+                        router_mode,
+                        record_per_request,
+                        sla,
+                    )
+                }
+                ReplayDispatch::AggregatedOnline(args) => {
+                    dynamo_mocker::replay::simulate_loaded_trace_live_with_router_mode_and_options(
+                        *args,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        num_workers,
+                        arrival_speedup_ratio,
+                        router_mode,
+                        record_per_request,
+                        sla,
+                    )
+                }
+                ReplayDispatch::DisaggOfflineConcurrency(config, max_in_flight) => {
+                    dynamo_mocker::replay::simulate_concurrency_workload_disagg_with_router_mode_and_options_and_runtime_observers(
+                            *config,
+                            router_config,
+                            prefill_load_estimator,
+                            trace,
+                            max_in_flight,
+                            router_mode,
+                            record_per_request,
+                            max_sim_time_ms,
+                            sla,
+                            take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                        )
+                }
+                ReplayDispatch::DisaggOffline(config) => {
+                    dynamo_mocker::replay::simulate_loaded_trace_disagg_with_router_mode_and_options_and_runtime_observers(
+                        *config,
+                        router_config,
+                        prefill_load_estimator,
+                        trace,
+                        arrival_speedup_ratio,
+                        router_mode,
+                        record_per_request,
+                        max_sim_time_ms,
+                        sla,
+                        take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                    )
+                }
+            }
+        }
+        DynamoRequestTrace::Agentic(trace) => {
+            // TODO(aisimulate): cap requests admitted by agentic Workload inputs;
+            // max_in_flight currently does not constrain this admission source.
+            if replay_concurrency.is_some() {
+                anyhow::bail!(
+                    "agentic Dynamo request traces are not supported with replay_concurrency"
+                );
+            }
+            let trace = trace
+                .normalize_starts()
+                .speed_up_timing(arrival_speedup_ratio)?;
+            match (args_selection, replay_mode) {
+                (ReplayArgsSelection::Aggregated(args), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode_and_runtime_observers(
+                    *args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    num_workers,
+                    router_mode,
+                    record_per_request,
+                    max_sim_time_ms,
+                    agentic_lanes,
+                    sla,
+                    take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                ),
+                (ReplayArgsSelection::Aggregated(args), "online") => dynamo_mocker::replay::simulate_agentic_trace_live_workload_with_router_mode_and_options(
+                    *args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    num_workers,
+                    router_mode,
+                    record_per_request,
+                    agentic_lanes,
+                    sla,
+                ),
+                (ReplayArgsSelection::Disagg(config), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_disagg_with_router_mode_and_runtime_observers(
+                    *config,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    router_mode,
+                    record_per_request,
+                    max_sim_time_ms,
+                    agentic_lanes,
+                    sla,
+                    take_runtime_observers(&mut scaling_policy, &mut telemetry),
+                ),
+                (ReplayArgsSelection::Disagg(_), "online") => anyhow::bail!(
+                    "online P/D agentic replay is not supported"
+                ),
+                (_, other) => anyhow::bail!(
+                    "replay_mode must be either 'offline' or 'online', got '{}'",
+                    other
+                ),
+            }
+        }
+    }
 }
 
 /// Write per-request records to a JSONL file. One JSON object per line, no
@@ -935,16 +1376,15 @@ pub fn run_mocker_trace_replay(
 /// and is friendlier to streaming consumers (pandas read_json with lines=True,
 /// jq -c, etc.).
 fn write_per_request_jsonl(
-    path: &std::path::Path,
+    path: &Path,
     records: &[dynamo_mocker::replay::PerRequestRecord],
 ) -> anyhow::Result<()> {
-    use std::io::{BufWriter, Write};
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
-    let file = std::fs::File::create(path)?;
+    let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     for record in records {
         let line = serde_json::to_string(record)?;
@@ -956,7 +1396,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -967,7 +1407,7 @@ pub fn run_mocker_synthetic_trace_replay(
     prefill_engine_args: Option<MockEngineArgs>,
     decode_engine_args: Option<MockEngineArgs>,
     router_config: Option<KvRouterConfig>,
-    aic_perf_config: Option<&AicPerfConfig>,
+    ais_perf_config: Option<&AisPerfConfig>,
     num_workers: usize,
     num_prefill_workers: usize,
     num_decode_workers: usize,
@@ -975,12 +1415,43 @@ pub fn run_mocker_synthetic_trace_replay(
     replay_mode: &str,
     router_mode: &str,
     arrival_speedup_ratio: f64,
-    arrival_interval_ms: f64,
+    request_rate: Option<f64>,
+    arrival_interval_ms: Option<f64>,
+    arrival_seed: u64,
     turns_per_session: usize,
     shared_prefix_ratio: f64,
     num_prefix_groups: usize,
     inter_turn_delay_ms: f64,
+    model_name: Option<String>,
+    sla_ttft_ms: Option<f64>,
+    sla_itl_ms: Option<f64>,
+    sla_e2e_ms: Option<f64>,
+    capture_per_request: bool,
+    capture_planner_details: bool,
+    scaling_policy: Option<Py<PyAny>>,
+    capture_telemetry: bool,
+    telemetry_sample_interval_ms: f64,
+    telemetry_callback: Option<Py<PyAny>>,
+    telemetry_jsonl_path: Option<PathBuf>,
 ) -> PyResult<PyObject> {
+    if capture_per_request && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "capture_per_request only supports replay_mode='offline'",
+        ));
+    }
+    if scaling_policy.is_some() && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "scaling_policy only supports replay_mode='offline'",
+        ));
+    }
+    validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+    validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+    validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+    let sla = dynamo_mocker::replay::SlaThresholds {
+        ttft_ms: sla_ttft_ms,
+        itl_ms: sla_itl_ms,
+        e2e_ms: sla_e2e_ms,
+    };
     let args_selection = load_replay_args_selection(
         py,
         extra_engine_args,
@@ -995,16 +1466,47 @@ pub fn run_mocker_synthetic_trace_replay(
         py,
         router_mode,
         router_config.as_ref(),
-        aic_perf_config,
+        ais_perf_config,
     )?;
-    let router_config = load_replay_router_config(router_config);
+    let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
+    let is_offline = replay_mode == "offline";
+    let capture_planner_details = scaling_policy.is_some() && capture_planner_details;
+    let capture_options = dynamo_mocker::replay::ReplayCaptureOptions {
+        capture_per_request,
+        capture_lifecycle_evidence: capture_planner_details,
+        ..Default::default()
+    };
+    let record_per_request = capture_options.effective_per_request();
     let block_size = match &args_selection {
         ReplayArgsSelection::Aggregated(args) => args.block_size.max(1),
         ReplayArgsSelection::Disagg(config) => config.prefill_args.block_size.max(1),
     };
-    let report = py.allow_threads(move || {
-        let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+    let scaling_callback_error = scaling_policy
+        .as_ref()
+        .map(|_| PyCallbackErrorSlot::default());
+    let telemetry_callback_error = telemetry_callback
+        .as_ref()
+        .map(|_| PyCallbackErrorSlot::default());
+    let PreparedReplayTelemetry {
+        options: telemetry,
+        capture: telemetry_capture,
+        writer: telemetry_writer,
+        sample_interval_ms: telemetry_sample_interval_ms,
+    } = prepare_replay_telemetry(
+        py,
+        &replay_mode,
+        capture_telemetry,
+        telemetry_sample_interval_ms,
+        telemetry_callback,
+        telemetry_jsonl_path.as_deref(),
+        telemetry_callback_error.clone(),
+    )?;
+    let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+                    mut telemetry: Option<ReplayTelemetryOptions>| {
+        let load_controller =
+            parse_synthetic_load_controller(replay_concurrency, request_rate, arrival_interval_ms)?;
+        let replay_concurrency = load_controller.replay_concurrency();
         let use_workload = turns_per_session > 1
             || shared_prefix_ratio > 0.0
             || num_prefix_groups > 0
@@ -1016,7 +1518,11 @@ pub fn run_mocker_synthetic_trace_replay(
                 input_tokens,
                 output_tokens,
                 request_count,
-                arrival_interval_ms,
+                load_controller
+                    .arrival_spec()
+                    .cloned()
+                    .unwrap_or(ArrivalSpec::Burst),
+                arrival_seed,
                 turns_per_session,
                 shared_prefix_ratio,
                 num_prefix_groups,
@@ -1030,7 +1536,7 @@ pub fn run_mocker_synthetic_trace_replay(
                 ReplayArgsSelection::Aggregated(args) => match (replay_mode.as_str(), replay_concurrency)
                 {
                     ("offline", Some(max_in_flight)) => {
-                        dynamo_mocker::replay::simulate_concurrency_workload_with_router_mode(
+                        dynamo_mocker::replay::simulate_concurrency_workload_with_router_mode_and_options_and_runtime_observers(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
@@ -1038,20 +1544,28 @@ pub fn run_mocker_synthetic_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
+                            record_per_request,
+                            None,
+                            sla,
+                            take_runtime_observers(&mut scaling_policy, &mut telemetry),
                         )
                     }
                     ("offline", None) => {
-                        dynamo_mocker::replay::simulate_trace_workload_with_router_mode(
+                        dynamo_mocker::replay::simulate_trace_workload_with_router_mode_and_options_and_runtime_observers(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             trace,
                             num_workers,
                             router_mode,
+                            record_per_request,
+                            None,
+                            sla,
+                            take_runtime_observers(&mut scaling_policy, &mut telemetry),
                         )
                     }
                     ("online", Some(max_in_flight)) => {
-                        dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode(
+                        dynamo_mocker::replay::simulate_concurrency_live_workload_with_router_mode_and_options(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
@@ -1059,16 +1573,20 @@ pub fn run_mocker_synthetic_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
+                            record_per_request,
+                            sla,
                         )
                     }
                     ("online", None) => {
-                        dynamo_mocker::replay::simulate_trace_live_workload_with_router_mode(
+                        dynamo_mocker::replay::simulate_trace_live_workload_with_router_mode_and_options(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             trace,
                             num_workers,
                             router_mode,
+                            record_per_request,
+                            sla,
                         )
                     }
                     (other, _) => anyhow::bail!(
@@ -1077,24 +1595,30 @@ pub fn run_mocker_synthetic_trace_replay(
                     ),
                 },
                 ReplayArgsSelection::Disagg(config) => {
+                    validate_disagg_replay_mode(&replay_mode)?;
                     match (replay_mode.as_str(), replay_concurrency) {
-                        ("offline", Some(max_in_flight)) => dynamo_mocker::replay::simulate_concurrency_workload_disagg_with_router_mode(
+                        ("offline", Some(max_in_flight)) => dynamo_mocker::replay::simulate_concurrency_workload_disagg_with_router_mode_and_options_and_runtime_observers(
                             *config,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             trace,
                             max_in_flight,
                             router_mode,
+                            record_per_request,
+                            None,
+                            sla,
+                            take_runtime_observers(&mut scaling_policy, &mut telemetry),
                         ),
-                        ("offline", None) => dynamo_mocker::replay::simulate_trace_workload_disagg_with_router_mode(
+                        ("offline", None) => dynamo_mocker::replay::simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_observers(
                             *config,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
                             trace,
                             router_mode,
-                        ),
-                        ("online", _) => anyhow::bail!(
-                            "disagg replay only supports replay_mode='offline'"
+                            record_per_request,
+                            None,
+                            sla,
+                            take_runtime_observers(&mut scaling_policy, &mut telemetry),
                         ),
                         (other, _) => anyhow::bail!(
                             "replay_mode must be either 'offline' or 'online', got '{}'",
@@ -1105,19 +1629,22 @@ pub fn run_mocker_synthetic_trace_replay(
             };
         }
 
+        let arrival_timestamps_ms = load_controller
+            .arrival_spec()
+            .map(|spec| spec.timestamps(request_count, arrival_seed))
+            .transpose()?;
         let requests = build_synthetic_requests(
             input_tokens,
             output_tokens,
             request_count,
-            arrival_interval_ms,
-            replay_concurrency.is_none(),
+            arrival_timestamps_ms.as_deref(),
         )?;
 
         match args_selection {
             ReplayArgsSelection::Aggregated(args) => match (replay_mode.as_str(), replay_concurrency)
             {
                 ("offline", Some(max_in_flight)) => {
-                    dynamo_mocker::replay::simulate_concurrency_requests_with_router_mode(
+                    dynamo_mocker::replay::simulate_concurrency_requests_with_router_mode_and_runtime_observers(
                         *args,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
@@ -1125,9 +1652,12 @@ pub fn run_mocker_synthetic_trace_replay(
                         max_in_flight,
                         num_workers,
                         router_mode,
+                        record_per_request,
+                        sla,
+                        take_runtime_observers(&mut scaling_policy, &mut telemetry),
                     )
                 }
-                ("offline", None) => dynamo_mocker::replay::simulate_trace_requests_with_router_mode(
+                ("offline", None) => dynamo_mocker::replay::simulate_trace_requests_with_router_mode_and_runtime_observers(
                     *args,
                     router_config.clone(),
                     prefill_load_estimator.clone(),
@@ -1135,9 +1665,12 @@ pub fn run_mocker_synthetic_trace_replay(
                     num_workers,
                     arrival_speedup_ratio,
                     router_mode,
+                    record_per_request,
+                    sla,
+                    take_runtime_observers(&mut scaling_policy, &mut telemetry),
                 ),
                 ("online", Some(max_in_flight)) => {
-                    dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode(
+                    dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode_and_options(
                         *args,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
@@ -1145,10 +1678,12 @@ pub fn run_mocker_synthetic_trace_replay(
                         max_in_flight,
                         num_workers,
                         router_mode,
+                        record_per_request,
+                        sla,
                     )
                 }
                 ("online", None) => {
-                    dynamo_mocker::replay::simulate_trace_live_requests_with_router_mode(
+                    dynamo_mocker::replay::simulate_trace_live_requests_with_router_mode_and_options(
                         *args,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
@@ -1156,6 +1691,8 @@ pub fn run_mocker_synthetic_trace_replay(
                         num_workers,
                         arrival_speedup_ratio,
                         router_mode,
+                        record_per_request,
+                        sla,
                     )
                 }
                 (other, _) => anyhow::bail!(
@@ -1163,45 +1700,251 @@ pub fn run_mocker_synthetic_trace_replay(
                     other
                 ),
             },
-            ReplayArgsSelection::Disagg(config) => match (replay_mode.as_str(), replay_concurrency)
-            {
+            ReplayArgsSelection::Disagg(config) => {
+                validate_disagg_replay_mode(&replay_mode)?;
+                match (replay_mode.as_str(), replay_concurrency) {
                 ("offline", Some(max_in_flight)) => {
-                    dynamo_mocker::replay::simulate_concurrency_requests_disagg_with_router_mode(
+                    dynamo_mocker::replay::simulate_concurrency_requests_disagg_with_router_mode_and_runtime_observers(
                         *config,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
                         requests,
                         max_in_flight,
                         router_mode,
+                        record_per_request,
+                        sla,
+                        take_runtime_observers(&mut scaling_policy, &mut telemetry),
                     )
                 }
                 ("offline", None) => {
-                    dynamo_mocker::replay::simulate_trace_requests_disagg_with_router_mode(
+                    dynamo_mocker::replay::simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
                         *config,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
                         requests,
                         arrival_speedup_ratio,
                         router_mode,
+                        record_per_request,
+                        sla,
+                        take_runtime_observers(&mut scaling_policy, &mut telemetry),
                     )
                 }
-                ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),
                 (other, _) => anyhow::bail!(
                     "replay_mode must be either 'offline' or 'online', got '{}'",
                     other
                 ),
-            },
+                }
+            }
         }
-    });
-    let report = report.map_err(to_pyerr)?;
-    pythonize(py, &report)
-        .map_err(to_pyerr)
-        .map(|obj| obj.unbind())
+    };
+    let report_result = if let Some(callback) = scaling_policy {
+        run(
+            Some(Box::new(PyReplayScalingPolicy {
+                callback,
+                capture_lifecycle_evidence: capture_planner_details,
+                callback_error: scaling_callback_error
+                    .clone()
+                    .expect("scaling error slot exists with callback"),
+            })),
+            telemetry,
+        )
+    } else {
+        py.allow_threads(move || run(None, telemetry))
+    };
+    // Always finish the sink so buffered I/O errors are observed even when the
+    // replay failed. Preserve the replay/callback error as the primary error.
+    let telemetry_finish_result = finish_replay_telemetry(
+        telemetry_capture,
+        telemetry_writer,
+        telemetry_sample_interval_ms,
+    );
+    let report = report_result.map_err(|error| {
+        replay_run_err_to_pyerr(
+            error,
+            scaling_callback_error.as_ref(),
+            telemetry_callback_error.as_ref(),
+        )
+    })?;
+    let telemetry = telemetry_finish_result.map_err(to_pyerr)?;
+    let runtime_evidence = report.runtime_evidence.clone();
+    if is_offline {
+        return Py::new(
+            py,
+            OfflineReplayResult::new(
+                report,
+                record_per_request,
+                capture_planner_details,
+                runtime_evidence,
+                None,
+                telemetry,
+            ),
+        )
+        .map(Py::into_any);
+    }
+    pythonize(py, &report).map(Bound::unbind).map_err(to_pyerr)
 }
 
 enum ReplayArgsSelection {
     Aggregated(Box<RsMockEngineArgs>),
     Disagg(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>),
+}
+
+enum ReplayDispatch {
+    AggregatedOfflineConcurrency(Box<RsMockEngineArgs>, usize),
+    AggregatedOffline(Box<RsMockEngineArgs>),
+    AggregatedOnlineConcurrency(Box<RsMockEngineArgs>, usize),
+    AggregatedOnline(Box<RsMockEngineArgs>),
+    DisaggOfflineConcurrency(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>, usize),
+    DisaggOffline(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>),
+}
+
+fn select_replay_dispatch(
+    args_selection: ReplayArgsSelection,
+    replay_mode: &str,
+    replay_concurrency: Option<usize>,
+) -> anyhow::Result<ReplayDispatch> {
+    match (args_selection, replay_mode, replay_concurrency) {
+        (ReplayArgsSelection::Aggregated(args), "offline", Some(max_in_flight)) => Ok(
+            ReplayDispatch::AggregatedOfflineConcurrency(args, max_in_flight),
+        ),
+        (ReplayArgsSelection::Aggregated(args), "offline", None) => {
+            Ok(ReplayDispatch::AggregatedOffline(args))
+        }
+        (ReplayArgsSelection::Aggregated(args), "online", Some(max_in_flight)) => Ok(
+            ReplayDispatch::AggregatedOnlineConcurrency(args, max_in_flight),
+        ),
+        (ReplayArgsSelection::Aggregated(args), "online", None) => {
+            Ok(ReplayDispatch::AggregatedOnline(args))
+        }
+        (ReplayArgsSelection::Disagg(config), "offline", Some(max_in_flight)) => Ok(
+            ReplayDispatch::DisaggOfflineConcurrency(config, max_in_flight),
+        ),
+        (ReplayArgsSelection::Disagg(config), "offline", None) => {
+            Ok(ReplayDispatch::DisaggOffline(config))
+        }
+        (ReplayArgsSelection::Disagg(_), other, _) => {
+            validate_disagg_replay_mode(other)?;
+            anyhow::bail!("replay_mode must be either 'offline' or 'online', got '{other}'")
+        }
+        (_, other, _) => {
+            anyhow::bail!("replay_mode must be either 'offline' or 'online', got '{other}'")
+        }
+    }
+}
+
+fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
+    if replay_mode == "online" {
+        anyhow::bail!("disagg replay only supports replay_mode='offline'");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_synthetic_requests, fpm_snapshots_to_json, reconcile_replay_dp_topology,
+        validate_disagg_replay_mode,
+    };
+    use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
+    use dynamo_mocker::loadgen::ArrivalSpec;
+
+    #[test]
+    fn online_disaggregation_is_rejected_with_stable_message() {
+        assert_eq!(
+            validate_disagg_replay_mode("online")
+                .unwrap_err()
+                .to_string(),
+            "disagg replay only supports replay_mode='offline'"
+        );
+        assert!(validate_disagg_replay_mode("offline").is_ok());
+    }
+
+    #[test]
+    fn programmatic_attention_dp_materializes_without_ais_backend() {
+        let mut args = MockEngineArgs::builder()
+            .dp_size(1)
+            .ais_attention_dp_size(Some(4))
+            .build()
+            .unwrap();
+
+        reconcile_replay_dp_topology(&mut args).unwrap();
+
+        assert_eq!(args.dp_size, 4);
+    }
+
+    #[test]
+    fn programmatic_attention_dp_rejects_mismatched_topology() {
+        let mut args = MockEngineArgs::builder()
+            .dp_size(2)
+            .ais_attention_dp_size(Some(4))
+            .build()
+            .unwrap();
+
+        let error = reconcile_replay_dp_topology(&mut args).unwrap_err();
+
+        assert!(error.to_string().contains("dp_size must match"));
+    }
+
+    #[test]
+    fn fpm_json_preserves_worker_and_dp_rank_identity() {
+        let snapshots = fpm_snapshots_to_json(vec![(
+            2,
+            ForwardPassSnapshot {
+                dp_rank: 3,
+                ..Default::default()
+            },
+        )]);
+
+        assert_eq!(snapshots[0]["worker_id"], 2);
+        assert_eq!(snapshots[0]["dp_rank"], 3);
+    }
+
+    #[test]
+    fn simple_synthetic_arrival_mode_changes_timestamps_only() {
+        let fixed_timestamps = ArrivalSpec::ConstantQps { qps: 20.0 }
+            .timestamps(8, 42)
+            .unwrap();
+        let poisson_timestamps = ArrivalSpec::PoissonQps { qps: 20.0 }
+            .timestamps(8, 42)
+            .unwrap();
+        let fixed = build_synthetic_requests(16, 4, 8, Some(&fixed_timestamps)).unwrap();
+        let poisson = build_synthetic_requests(16, 4, 8, Some(&poisson_timestamps)).unwrap();
+
+        assert_ne!(fixed_timestamps, poisson_timestamps);
+        assert_eq!(
+            fixed
+                .iter()
+                .map(|request| request.arrival_timestamp_ms.unwrap())
+                .collect::<Vec<_>>(),
+            fixed_timestamps
+        );
+        assert_eq!(
+            poisson
+                .iter()
+                .map(|request| request.arrival_timestamp_ms.unwrap())
+                .collect::<Vec<_>>(),
+            poisson_timestamps
+        );
+        for (fixed_request, poisson_request) in fixed.iter().zip(&poisson) {
+            assert_eq!(fixed_request.tokens, poisson_request.tokens);
+            assert_eq!(
+                fixed_request.max_output_tokens,
+                poisson_request.max_output_tokens
+            );
+            assert_eq!(
+                fixed_request.output_token_ids,
+                poisson_request.output_token_ids
+            );
+            assert_eq!(fixed_request.uuid, poisson_request.uuid);
+            assert_eq!(fixed_request.dp_rank, poisson_request.dp_rank);
+            assert_eq!(fixed_request.priority, poisson_request.priority);
+            assert_eq!(
+                fixed_request.strict_priority,
+                poisson_request.strict_priority
+            );
+            assert_eq!(fixed_request.policy_class, poisson_request.policy_class);
+        }
+    }
 }
 
 fn load_replay_args_selection(
@@ -1256,135 +1999,93 @@ fn materialize_replay_mocker_args(
     extra_args: MockEngineArgs,
 ) -> PyResult<RsMockEngineArgs> {
     let mut args = extra_args.inner();
-    populate_missing_offload_kv_bytes_per_token(py, &mut args)?;
-
-    if let Some(ref backend_name) = args.aic_backend.clone() {
-        let backend = backend_name.clone();
-        let system = args.aic_system.as_deref().unwrap_or("h200_sxm").to_string();
-        let model_name = args
-            .aic_model_path
-            .clone()
-            .ok_or_else(|| PyException::new_err("--aic-perf-model requires --model-path"))?;
-        let backend_version = args.aic_backend_version.clone();
-        let tp_size = args.aic_tp_size.unwrap_or(1);
-        let moe_tp_size = args.aic_moe_tp_size;
-        let moe_ep_size = args.aic_moe_ep_size;
-        let attention_dp_size = args.aic_attention_dp_size;
-        let nextn = args.aic_nextn;
-        let undiscounted_accept_rates = args.undiscounted_aic_accept_rates();
-        // AIC-backed config may intentionally omit num_gpu_blocks. Estimate it
-        // here, after candidate TP/backend/model overrides have been applied.
+    reconcile_replay_dp_topology(&mut args)
+        .map_err(|error| PyException::new_err(error.to_string()))?;
+    if let Some(config) = args.ais_perf_config.as_ref() {
         if !extra_args.num_gpu_blocks_explicit() {
-            args.num_gpu_blocks = estimate_aic_num_gpu_blocks(
-                py,
-                &backend,
-                &system,
-                &model_name,
-                tp_size,
-                args.block_size,
+            let kwargs = pyo3::types::PyDict::new(py);
+            kwargs.set_item("block_size", args.block_size)?;
+            kwargs.set_item(
+                "max_num_batched_tokens",
                 args.max_num_batched_tokens.unwrap_or(8192),
-                args.gpu_memory_utilization
-                    .unwrap_or(DEFAULT_GPU_MEMORY_UTILIZATION),
-                args.mem_fraction_static
-                    .or(Some(DEFAULT_MEM_FRACTION_STATIC)),
-                args.free_gpu_memory_fraction,
-                backend_version.as_deref(),
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-            )
-            .map_err(|e| {
-                PyException::new_err(format!(
-                    "Failed to estimate AIC KV cache capacity (--aic-perf-model was requested): {}",
-                    e
-                ))
-            })?;
+            )?;
+            kwargs.set_item("max_num_seqs", args.max_num_seqs.unwrap_or(256))?;
+            for (key, value) in [
+                ("gpu_memory_utilization", args.gpu_memory_utilization),
+                ("mem_fraction_static", args.mem_fraction_static),
+                ("free_gpu_memory_fraction", args.free_gpu_memory_fraction),
+            ] {
+                if let Some(value) = value {
+                    kwargs.set_item(key, value)?;
+                }
+            }
+            args.num_gpu_blocks = py
+                .import("dynamo._internal.ais")?
+                .call_method(
+                    "estimate_canonical_num_gpu_blocks",
+                    (pythonize(py, config)?,),
+                    Some(&kwargs),
+                )?
+                .extract()?;
         }
-        let callback = create_aic_callback(
-            py,
-            &backend,
-            &system,
-            &model_name,
-            tp_size,
-            backend_version.as_deref(),
-            moe_tp_size,
-            moe_ep_size,
-            attention_dp_size,
-            nextn,
-            undiscounted_accept_rates.as_deref(),
-        )
-        .map_err(|e| {
-            PyException::new_err(format!(
-                "Failed to create AIC callback (--aic-perf-model was requested): {}",
-                e
-            ))
-        })?;
-        tracing::debug!(
-            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
-            backend,
-            system,
-            model_name,
-            backend_version
-        );
-        args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+        let callback = create_ais_callback(py, config)?;
+        args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
     }
-
     Ok(args)
 }
 
-fn populate_missing_offload_kv_bytes_per_token(
-    py: Python<'_>,
-    args: &mut RsMockEngineArgs,
-) -> PyResult<()> {
-    if args.kv_bytes_per_token.is_some() {
-        return Ok(());
+/// Reconcile the scheduler topology before optional AIS callback/capacity
+/// materialization. This mirrors the JSON loader: an explicit attention-DP
+/// size defines rank topology even when the caller supplies KV capacity and no
+/// AIS backend.
+fn reconcile_replay_dp_topology(args: &mut RsMockEngineArgs) -> anyhow::Result<()> {
+    let attention_dp = args.ais_attention_dp_size;
+    let dp = attention_dp.unwrap_or(1).max(1);
+    let dp = u32::try_from(dp)
+        .map_err(|_| anyhow::anyhow!("ais_attention_dp_size does not fit into a u32"))?;
+    let has_ais_config = args.ais_backend.is_some() || attention_dp.is_some();
+    if has_ais_config && args.dp_size > 1 && args.dp_size != dp {
+        anyhow::bail!(
+            "dp_size must match ais_attention_dp_size for AIS-backed replay (got dp_size={}, ais_attention_dp_size={dp})",
+            args.dp_size
+        );
     }
-    let offload_requested = args.num_g2_blocks.unwrap_or_default() > 0
-        || args.num_g3_blocks.unwrap_or_default() > 0
-        || args.enable_g4_storage;
-    if !offload_requested {
-        return Ok(());
-    }
-    let Some(model_path) = args.aic_model_path.as_deref() else {
-        return Ok(());
-    };
-
-    let kv_cache_module = py.import("dynamo.mocker.utils.kv_cache")?;
-    let kv_bytes_per_token = kv_cache_module
-        .getattr("compute_kv_bytes_per_token")?
-        .call1((model_path,))?
-        .extract::<Option<usize>>()?;
-    if let Some(kv_bytes_per_token) = kv_bytes_per_token {
-        args.kv_bytes_per_token = Some(kv_bytes_per_token);
+    if attention_dp.is_some() && dp > 1 {
+        args.dp_size = dp;
     }
     Ok(())
 }
 
 fn load_replay_router_config(
     router_config: Option<KvRouterConfig>,
-) -> Option<dynamo_kv_router::config::KvRouterConfig> {
-    router_config.map(|config| config.inner())
+    model_name: Option<String>,
+) -> PyResult<Option<dynamo_kv_router::config::KvRouterConfig>> {
+    if model_name.as_ref().is_some_and(|name| name.is_empty()) {
+        return Err(PyValueError::new_err("model_name must be non-empty"));
+    }
+
+    Ok(router_config.map(|config| config.inner().with_policy_model_name(model_name)))
 }
 
 fn load_replay_prefill_load_estimator(
     py: Python<'_>,
     router_mode: dynamo_mocker::replay::ReplayRouterMode,
     router_config: Option<&KvRouterConfig>,
-    aic_perf_config: Option<&AicPerfConfig>,
+    ais_perf_config: Option<&AisPerfConfig>,
 ) -> PyResult<Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>> {
     if router_mode != dynamo_mocker::replay::ReplayRouterMode::KvRouter {
-        if aic_perf_config.is_some() {
+        if ais_perf_config.is_some() {
             return Err(PyException::new_err(
-                "aic_perf_config requires router_mode='kv_router'",
+                "ais_perf_config requires router_mode='kv_router'",
             ));
         }
         return Ok(None);
     }
 
     let Some(router_config) = router_config else {
-        if aic_perf_config.is_some() {
+        if ais_perf_config.is_some() {
             return Err(PyException::new_err(
-                "aic_perf_config requires router_config with router_prefill_load_model='aic'",
+                "ais_perf_config requires router_config with router_prefill_load_model='ais'",
             ));
         }
         return Ok(None);
@@ -1392,34 +2093,23 @@ fn load_replay_prefill_load_estimator(
 
     let router_config = router_config.inner();
     if !router_config.router_prefill_load_model.is_enabled() {
-        if aic_perf_config.is_some() {
+        if ais_perf_config.is_some() {
             return Err(PyException::new_err(
-                "aic_perf_config requires router_prefill_load_model='aic'",
+                "ais_perf_config requires router_prefill_load_model='ais'",
             ));
         }
         return Ok(None);
     }
 
-    let Some(aic_perf_config) = aic_perf_config else {
+    let Some(ais_perf_config) = ais_perf_config else {
         return Err(PyException::new_err(
-            "router_prefill_load_model='aic' requires aic_perf_config",
+            "router_prefill_load_model='ais' requires ais_perf_config",
         ));
     };
-
-    create_aic_prefill_load_estimator(
+    Ok(Some(create_ais_prefill_load_estimator(
         py,
-        aic_perf_config.backend_name(),
-        aic_perf_config.system(),
-        aic_perf_config.model_path(),
-        aic_perf_config.tp_size(),
-        aic_perf_config.backend_version(),
-        aic_perf_config.moe_tp_size(),
-        aic_perf_config.moe_ep_size(),
-        aic_perf_config.attention_dp_size(),
-        aic_perf_config.nextn(),
-        aic_perf_config.nextn_accept_rates(),
-    )
-    .map(Some)
+        ais_perf_config.config(),
+    )?))
 }
 
 fn parse_replay_router_mode(
@@ -1435,6 +2125,30 @@ fn parse_replay_router_mode(
     }
 }
 
+fn parse_weka_import_options(
+    trace_format: TraceFileFormat,
+    nested_timestamp_basis: Option<&str>,
+) -> anyhow::Result<WekaImportOptions> {
+    let Some(basis) = nested_timestamp_basis else {
+        return Ok(WekaImportOptions::default());
+    };
+    let nested_timestamp_basis = match basis {
+        "auto" => WekaNestedTimestampBasis::Auto,
+        "absolute" => WekaNestedTimestampBasis::Absolute,
+        "relative" => WekaNestedTimestampBasis::Relative,
+        _ => anyhow::bail!(
+            "weka_nested_timestamp_basis must be 'auto', 'absolute', or 'relative', got '{basis}'"
+        ),
+    };
+    anyhow::ensure!(
+        trace_format == TraceFileFormat::Weka,
+        "weka_nested_timestamp_basis requires trace_format='weka'"
+    );
+    Ok(WekaImportOptions {
+        nested_timestamp_basis,
+    })
+}
+
 fn parse_trace_file_format(
     trace_format: &str,
 ) -> PyResult<dynamo_mocker::loadgen::TraceFileFormat> {
@@ -1446,11 +2160,13 @@ fn parse_trace_file_format(
         "agentic_mooncake" | "agentic-mooncake" => {
             Ok(dynamo_mocker::loadgen::TraceFileFormat::AgenticMooncake)
         }
+        "weka" => Ok(dynamo_mocker::loadgen::TraceFileFormat::Weka),
         "applied_compute_agentic" => {
             Ok(dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic)
         }
+        "dynamo" => Ok(dynamo_mocker::loadgen::TraceFileFormat::Dynamo),
         other => Err(PyException::new_err(format!(
-            "trace_format must be 'mooncake', 'mooncake-delta', 'agentic_mooncake'/'agentic-mooncake', or 'applied_compute_agentic', got '{}'",
+            "trace_format must be 'mooncake', 'mooncake-delta', 'agentic_mooncake'/'agentic-mooncake', 'weka', 'applied_compute_agentic', or 'dynamo', got '{}'",
             other
         ))),
     }
@@ -1464,13 +2180,86 @@ fn parse_replay_concurrency(replay_concurrency: Option<isize>) -> anyhow::Result
     }
 }
 
+fn parse_agentic_lanes(agentic_lanes: Option<isize>) -> anyhow::Result<Option<usize>> {
+    match agentic_lanes {
+        Some(value) if value < 1 => anyhow::bail!("agentic_lanes must be at least 1"),
+        Some(value) => Ok(Some(value as usize)),
+        None => Ok(None),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SyntheticLoadController {
+    Concurrency(usize),
+    Arrivals(ArrivalSpec),
+}
+
+impl SyntheticLoadController {
+    fn replay_concurrency(&self) -> Option<usize> {
+        match self {
+            Self::Concurrency(value) => Some(*value),
+            Self::Arrivals(_) => None,
+        }
+    }
+
+    fn arrival_spec(&self) -> Option<&ArrivalSpec> {
+        match self {
+            Self::Concurrency(_) => None,
+            Self::Arrivals(spec) => Some(spec),
+        }
+    }
+}
+
+fn parse_synthetic_load_controller(
+    replay_concurrency: Option<isize>,
+    request_rate: Option<f64>,
+    arrival_interval_ms: Option<f64>,
+) -> anyhow::Result<SyntheticLoadController> {
+    let controller_count = usize::from(replay_concurrency.is_some())
+        + usize::from(request_rate.is_some())
+        + usize::from(arrival_interval_ms.is_some());
+    if controller_count != 1 {
+        anyhow::bail!(
+            "synthetic replay requires exactly one of replay_concurrency, request_rate, or arrival_interval_ms"
+        );
+    }
+
+    if let Some(replay_concurrency) = parse_replay_concurrency(replay_concurrency)? {
+        return Ok(SyntheticLoadController::Concurrency(replay_concurrency));
+    }
+    if let Some(qps) = request_rate {
+        if !qps.is_finite() || qps <= 0.0 {
+            anyhow::bail!("request_rate must be a finite positive number, got {qps}");
+        }
+        return Ok(SyntheticLoadController::Arrivals(ArrivalSpec::PoissonQps {
+            qps,
+        }));
+    }
+
+    let interval_ms = arrival_interval_ms.expect("controller count validated");
+    if !interval_ms.is_finite() || interval_ms < 0.0 {
+        anyhow::bail!(
+            "arrival_interval_ms must be a finite non-negative number, got {interval_ms}"
+        );
+    }
+    if interval_ms == 0.0 {
+        return Ok(SyntheticLoadController::Arrivals(ArrivalSpec::Burst));
+    }
+    Ok(SyntheticLoadController::Arrivals(
+        ArrivalSpec::ConstantQps {
+            qps: 1000.0 / interval_ms,
+        },
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_synthetic_workload(
     block_size: usize,
     input_tokens: usize,
     output_tokens: usize,
     request_count: usize,
-    arrival_interval_ms: f64,
+    first_turn_arrivals: ArrivalSpec,
+    arrival_seed: u64,
     turns_per_session: usize,
     shared_prefix_ratio: f64,
     num_prefix_groups: usize,
@@ -1488,20 +2277,9 @@ fn build_synthetic_workload(
     if turns_per_session == 0 {
         anyhow::bail!("turns_per_session must be at least 1");
     }
-    if !arrival_interval_ms.is_finite() || arrival_interval_ms < 0.0 {
-        anyhow::bail!("arrival_interval_ms must be a finite non-negative number");
-    }
     if !inter_turn_delay_ms.is_finite() || inter_turn_delay_ms < 0.0 {
         anyhow::bail!("inter_turn_delay_ms must be a finite non-negative number");
     }
-
-    let first_turn_arrivals = if arrival_interval_ms == 0.0 {
-        ArrivalSpec::Burst
-    } else {
-        ArrivalSpec::ConstantQps {
-            qps: 1000.0 / arrival_interval_ms,
-        }
-    };
 
     RsTrace::synthetic(SyntheticTraceSpec {
         block_size,
@@ -1516,6 +2294,7 @@ fn build_synthetic_workload(
             stddev: 0.0,
         },
         shared_prefix_ratio,
+        cached_prefix_tokens: 0,
         num_prefix_groups,
         first_turn_arrivals,
         inter_turn_delays: if inter_turn_delay_ms == 0.0 {
@@ -1524,6 +2303,7 @@ fn build_synthetic_workload(
             DelaySpec::ConstantMs(inter_turn_delay_ms)
         },
         seed: 42,
+        arrival_seed,
     })
 }
 
@@ -1531,8 +2311,7 @@ fn build_synthetic_requests(
     input_tokens: usize,
     output_tokens: usize,
     request_count: usize,
-    arrival_interval_ms: f64,
-    include_arrival_timestamps: bool,
+    arrival_timestamps_ms: Option<&[f64]>,
 ) -> anyhow::Result<Vec<DirectRequest>> {
     if input_tokens == 0 {
         anyhow::bail!("input_tokens must be at least 1");
@@ -1543,10 +2322,12 @@ fn build_synthetic_requests(
     if request_count == 0 {
         anyhow::bail!("request_count must be at least 1");
     }
-    if !arrival_interval_ms.is_finite() || arrival_interval_ms < 0.0 {
+    if let Some(arrival_timestamps_ms) = arrival_timestamps_ms
+        && arrival_timestamps_ms.len() != request_count
+    {
         anyhow::bail!(
-            "arrival_interval_ms must be a finite non-negative number, got {}",
-            arrival_interval_ms
+            "arrival timestamp count {} does not match request_count {request_count}",
+            arrival_timestamps_ms.len()
         );
     }
 
@@ -1560,8 +2341,8 @@ fn build_synthetic_requests(
             max_output_tokens: output_tokens,
             uuid: Some(Uuid::from_u128((request_idx as u128) + 1)),
             dp_rank: 0,
-            arrival_timestamp_ms: include_arrival_timestamps
-                .then_some(request_idx as f64 * arrival_interval_ms),
+            arrival_timestamp_ms: arrival_timestamps_ms.map(|values| values[request_idx]),
+            ..Default::default()
         });
     }
 
@@ -1581,7 +2362,7 @@ fn synthetic_token_id(request_idx: usize, token_idx: usize) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Planner-in-the-loop replay bridge
+// Python scaling-policy adapter
 // ---------------------------------------------------------------------------
 
 fn fpm_snapshots_to_json(
@@ -1592,6 +2373,7 @@ fn fpm_snapshots_to_json(
         .map(|(worker_id, fpm)| {
             json!({
                 "worker_id": worker_id,
+                "dp_rank": fpm.dp_rank,
                 "wall_time": fpm.wall_time_secs,
                 "num_prefill_requests": fpm.num_prefill_requests,
                 "sum_prefill_tokens": fpm.sum_prefill_tokens,
@@ -1611,197 +2393,340 @@ fn fpm_snapshots_to_json(
         .collect()
 }
 
-/// Step-based bridge for driving an offline replay with a Python planner.
-///
-/// Supports both aggregated and disaggregated topologies. The Python adapter
-/// calls `advance_to()` to run the simulation forward, collects FPM/traffic
-/// metrics, feeds them to the planner state machine, then calls
-/// `apply_scaling()` to resize worker pools.
-#[pyclass(unsendable)]
-pub struct PlannerReplayBridge {
-    handle: Option<dynamo_mocker::replay::PlannerReplayHandle>,
+/// Reject a goodput SLA threshold that is not a finite, non-negative value;
+/// `None` (unset) is allowed and means "do not gate on this dimension".
+fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
+    if let Some(v) = value
+        && (!v.is_finite() || v < 0.0)
+    {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be a finite, non-negative value, got {v}"
+        )));
+    }
+    Ok(())
 }
 
-#[pymethods]
-impl PlannerReplayBridge {
-    /// Create a bridge for an aggregated Mooncake-style JSONL trace replay.
-    #[new]
-    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512))]
-    fn new(
-        trace_file: PathBuf,
-        extra_engine_args: &MockEngineArgs,
-        num_workers: usize,
-        router_mode: &str,
-        router_config: Option<KvRouterConfig>,
-        arrival_speedup_ratio: f64,
-        trace_block_size: usize,
-    ) -> PyResult<Self> {
-        let args =
-            Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
-        let router_mode = parse_replay_router_mode(router_mode)?;
-        let router_config = load_replay_router_config(router_config);
+#[derive(Clone, Default)]
+struct ReplayTelemetryCapture(Arc<Mutex<Vec<ReplayTelemetrySnapshot>>>);
 
-        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file(
-            args,
-            router_config,
-            None,
-            &trace_file,
-            trace_block_size,
-            num_workers,
-            arrival_speedup_ratio,
-            router_mode,
-        )
-        .map_err(to_pyerr)?;
-
-        Ok(Self {
-            handle: Some(handle),
-        })
+impl ReplayTelemetryCapture {
+    fn push(&self, snapshot: ReplayTelemetrySnapshot) {
+        self.0.lock().push(snapshot);
     }
 
-    /// Create a bridge for a disaggregated Mooncake-style JSONL trace replay.
-    #[staticmethod]
-    #[pyo3(signature = (trace_file, prefill_engine_args, decode_engine_args, num_prefill_workers, num_decode_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512))]
-    #[allow(clippy::too_many_arguments)]
-    fn create_disagg(
-        trace_file: PathBuf,
-        prefill_engine_args: &MockEngineArgs,
-        decode_engine_args: &MockEngineArgs,
-        num_prefill_workers: usize,
-        num_decode_workers: usize,
-        router_mode: &str,
-        router_config: Option<KvRouterConfig>,
-        arrival_speedup_ratio: f64,
-        trace_block_size: usize,
-    ) -> PyResult<Self> {
-        let prefill_args =
-            Python::with_gil(|py| materialize_replay_mocker_args(py, prefill_engine_args.clone()))?;
-        let decode_args =
-            Python::with_gil(|py| materialize_replay_mocker_args(py, decode_engine_args.clone()))?;
-        let config = dynamo_mocker::replay::OfflineDisaggReplayConfig {
-            prefill_args,
-            decode_args,
-            num_prefill_workers,
-            num_decode_workers,
-        };
-        let router_mode = parse_replay_router_mode(router_mode)?;
-        let router_config = load_replay_router_config(router_config);
+    fn take(&self) -> Vec<ReplayTelemetrySnapshot> {
+        std::mem::take(&mut *self.0.lock())
+    }
+}
 
-        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file_disagg(
-            config,
-            router_config,
-            None,
-            &trace_file,
-            trace_block_size,
-            arrival_speedup_ratio,
-            router_mode,
-        )
-        .map_err(to_pyerr)?;
+/// Lazy JSONL sink. The target is not opened or truncated until the first
+/// successfully produced sample, so argument validation and input loading
+/// failures cannot damage a pre-existing output. If replay later fails, the
+/// file retains every previously completed line; the final failing write may
+/// leave a partial line for callers to detect and discard.
+struct ReplayTelemetryJsonl {
+    path: PathBuf,
+    writer: Option<BufWriter<File>>,
+}
 
-        Ok(Self {
-            handle: Some(handle),
-        })
+impl ReplayTelemetryJsonl {
+    fn new(path: PathBuf) -> Self {
+        Self { path, writer: None }
     }
 
-    /// Advance the simulation to `until_ms` simulated time.
-    ///
-    /// Returns a dict with separate prefill/decode worker counts and FPM snapshots.
-    /// Traffic metrics are NOT included — call `drain_traffic()` explicitly on
-    /// throughput-scaling ticks only.
-    fn advance_to(&mut self, py: Python<'_>, until_ms: f64) -> PyResult<PyObject> {
-        let handle = self
-            .handle
+    fn writer(&mut self) -> anyhow::Result<&mut BufWriter<File>> {
+        if self.writer.is_none() {
+            if let Some(parent) = self.path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            self.writer = Some(BufWriter::new(File::create(&self.path)?));
+        }
+        Ok(self
+            .writer
             .as_mut()
-            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
+            .expect("telemetry writer initialized above"))
+    }
 
-        let tick_data = handle.advance_to(until_ms).map_err(to_pyerr)?;
+    fn write(&mut self, snapshot: &ReplayTelemetrySnapshot) -> anyhow::Result<()> {
+        let writer = self.writer()?;
+        serde_json::to_writer(&mut *writer, snapshot)?;
+        writer.write_all(b"\n")?;
+        Ok(())
+    }
 
-        let result = json!({
-            "now_ms": tick_data.now_ms,
-            "is_done": tick_data.is_done,
-            "prefill_fpm_snapshots": fpm_snapshots_to_json(tick_data.prefill_fpm_snapshots),
-            "decode_fpm_snapshots": fpm_snapshots_to_json(tick_data.decode_fpm_snapshots),
-            "active_prefill_count": tick_data.active_prefill_count,
-            "active_decode_count": tick_data.active_decode_count,
-            "total_prefill_count": tick_data.total_prefill_count,
-            "total_decode_count": tick_data.total_decode_count,
+    fn flush(&mut self) -> anyhow::Result<()> {
+        if let Some(writer) = self.writer.as_mut() {
+            writer.flush()?;
+        }
+        Ok(())
+    }
+}
+
+// Samples are emitted serially. Shared ownership only lets the binding flush
+// after AISimulate has consumed the observer; this is not a concurrent writer.
+type ReplayTelemetryWriter = Arc<Mutex<ReplayTelemetryJsonl>>;
+
+struct PyReplayTelemetryObserver {
+    capture: Option<ReplayTelemetryCapture>,
+    callback: Option<Py<PyAny>>,
+    callback_error: Option<PyCallbackErrorSlot>,
+    writer: Option<ReplayTelemetryWriter>,
+}
+
+impl ReplayTelemetryObserver for PyReplayTelemetryObserver {
+    fn on_sample(&mut self, snapshot: ReplayTelemetrySnapshot) -> anyhow::Result<()> {
+        if let Some(callback) = self.callback.as_ref() {
+            let result = Python::with_gil(|py| -> PyResult<()> {
+                let sample = pythonize(py, &snapshot).map_err(to_pyerr)?;
+                callback.bind(py).call1((sample,))?;
+                Ok(())
+            });
+            if let (Err(error), Some(callback_error)) = (&result, &self.callback_error) {
+                Python::with_gil(|py| callback_error.record(py, error));
+            }
+            result.map_err(anyhow::Error::new)?;
+        }
+
+        if let Some(writer) = self.writer.as_ref() {
+            writer.lock().write(&snapshot)?;
+        }
+
+        if let Some(capture) = self.capture.as_ref() {
+            capture.push(snapshot);
+        }
+        Ok(())
+    }
+}
+
+struct PreparedReplayTelemetry {
+    options: Option<ReplayTelemetryOptions>,
+    capture: Option<ReplayTelemetryCapture>,
+    writer: Option<ReplayTelemetryWriter>,
+    sample_interval_ms: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_replay_telemetry(
+    py: Python<'_>,
+    replay_mode: &str,
+    capture_telemetry: bool,
+    sample_interval_ms: f64,
+    callback: Option<Py<PyAny>>,
+    jsonl_path: Option<&Path>,
+    callback_error: Option<PyCallbackErrorSlot>,
+) -> PyResult<PreparedReplayTelemetry> {
+    let enabled = capture_telemetry || callback.is_some() || jsonl_path.is_some();
+    if !enabled {
+        return Ok(PreparedReplayTelemetry {
+            options: None,
+            capture: None,
+            writer: None,
+            sample_interval_ms,
         });
-
-        pythonize(py, &result)
-            .map_err(to_pyerr)
-            .map(|obj| obj.unbind())
+    }
+    if replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "replay telemetry only supports replay_mode='offline'",
+        ));
+    }
+    if !sample_interval_ms.is_finite() || sample_interval_ms <= 0.0 {
+        return Err(PyValueError::new_err(
+            "telemetry_sample_interval_ms must be a positive finite number",
+        ));
+    }
+    if callback
+        .as_ref()
+        .is_some_and(|callback| !callback.bind(py).is_callable())
+    {
+        return Err(PyTypeError::new_err(
+            "telemetry_callback must be callable or None",
+        ));
     }
 
-    /// Drain accumulated traffic metrics since the last drain.
-    ///
-    /// Returns a dict with:
-    ///   - `duration_s`      (f64): window length in seconds
-    ///   - `num_req`         (usize): completed requests in the window
-    ///   - `avg_isl`         (f64): mean input sequence length (tokens)
-    ///   - `avg_osl`         (f64): mean output sequence length (tokens)
-    ///   - `avg_ttft_ms`     (f64): mean time-to-first-token in milliseconds,
-    ///                              averaged only over requests that reported
-    ///                              a TTFT sample (0.0 when no samples)
-    ///   - `avg_itl_ms`      (f64): mean inter-token latency in milliseconds,
-    ///                              averaged only over requests that generated
-    ///                              at least one token gap (0.0 when no samples)
-    ///   - `avg_accept_length` (f64 | None): mean visible tokens per decode
-    ///                              request-forward, including the base token
-    ///                              (`None` when no decode forwards were observed)
-    ///   - `avg_kv_hit_rate` (f64): arithmetic mean of per-request
-    ///                              ``overlap_blocks / isl_blocks`` ratios
-    ///                              across router admissions in the window
-    ///                              (one sample per request, not weighted
-    ///                              by ISL), matching the real router's
-    ///                              `dynamo_component_router_kv_hit_rate`
-    ///                              histogram semantics
-    ///
-    /// Call this only on throughput-scaling ticks so the observation window
-    /// covers the full `throughput_adjustment_interval`.
-    fn drain_traffic(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        let handle = self
-            .handle
-            .as_mut()
-            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
+    let capture = capture_telemetry.then(ReplayTelemetryCapture::default);
+    let writer =
+        jsonl_path.map(|path| Arc::new(Mutex::new(ReplayTelemetryJsonl::new(path.to_path_buf()))));
+    let options = Some(ReplayTelemetryOptions {
+        sample_interval_ms,
+        observer: Box::new(PyReplayTelemetryObserver {
+            capture: capture.clone(),
+            callback,
+            callback_error,
+            writer: writer.clone(),
+        }),
+    });
+    Ok(PreparedReplayTelemetry {
+        options,
+        capture,
+        writer,
+        sample_interval_ms,
+    })
+}
 
-        let stats = handle.drain_traffic();
+fn finish_replay_telemetry(
+    capture: Option<ReplayTelemetryCapture>,
+    writer: Option<ReplayTelemetryWriter>,
+    sample_interval_ms: f64,
+) -> anyhow::Result<Option<OfflineReplayTelemetry>> {
+    if let Some(writer) = writer {
+        writer.lock().flush()?;
+    }
+    Ok(capture.map(|capture| OfflineReplayTelemetry {
+        sample_interval_ms,
+        samples: capture.take(),
+    }))
+}
 
-        let result = json!({
-            "duration_s": stats.duration_s,
-            "num_req": stats.num_req,
-            "avg_isl": stats.avg_isl,
-            "avg_osl": stats.avg_osl,
-            "avg_ttft_ms": stats.avg_ttft_ms,
-            "avg_itl_ms": stats.avg_itl_ms,
-            "avg_accept_length": stats.avg_accept_length,
-            "avg_kv_hit_rate": stats.avg_kv_hit_rate,
+fn take_runtime_observers(
+    scaling_policy: &mut Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: &mut Option<ReplayTelemetryOptions>,
+) -> ReplayRuntimeObservers {
+    ReplayRuntimeObservers {
+        scaling_policy: scaling_policy.take(),
+        telemetry: telemetry.take(),
+    }
+}
+
+/// Convert a replay error back into a `PyErr`, preserving the original Python
+/// exception (its type and traceback) when a scaling or telemetry callback
+/// failed. Non-Python errors (e.g. a simulation dead-end) fall back to the
+/// generic conversion.
+fn replay_run_err_to_pyerr(
+    err: anyhow::Error,
+    callback_error: Option<&PyCallbackErrorSlot>,
+    telemetry_callback_error: Option<&PyCallbackErrorSlot>,
+) -> PyErr {
+    if let Some(py_err) = callback_error.and_then(PyCallbackErrorSlot::take) {
+        return py_err;
+    }
+    if let Some(py_err) = telemetry_callback_error.and_then(PyCallbackErrorSlot::take) {
+        return py_err;
+    }
+    match err.downcast::<PyErr>() {
+        Ok(py_err) => py_err,
+        Err(other) => to_pyerr(other),
+    }
+}
+
+#[derive(Clone, Default)]
+struct PyCallbackErrorSlot(Arc<Mutex<Option<PyErr>>>);
+
+impl PyCallbackErrorSlot {
+    fn record(&self, py: Python<'_>, error: &PyErr) {
+        *self.0.lock() = Some(error.clone_ref(py));
+    }
+
+    fn take(&self) -> Option<PyErr> {
+        self.0.lock().take()
+    }
+}
+
+/// Adapts a Python object to [`ReplayScalingPolicy`]. The high-level replay call
+/// keeps the GIL for Python-backed scaling, so each tick is a cheap re-entry.
+struct PyReplayScalingPolicy {
+    callback: Py<PyAny>,
+    capture_lifecycle_evidence: bool,
+    callback_error: PyCallbackErrorSlot,
+}
+
+impl ReplayScalingPolicy for PyReplayScalingPolicy {
+    fn capture_lifecycle_evidence(&self) -> bool {
+        self.capture_lifecycle_evidence
+    }
+
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        let result = Python::with_gil(|py| {
+            self.callback
+                .bind(py)
+                .call_method0("initial_tick_ms")?
+                .extract::<f64>()
         });
-
-        pythonize(py, &result)
-            .map_err(to_pyerr)
-            .map(|obj| obj.unbind())
+        if let Err(error) = &result {
+            Python::with_gil(|py| self.callback_error.record(py, error));
+        }
+        result.map_err(anyhow::Error::new)
     }
 
-    /// Apply a scaling decision with separate prefill and decode targets.
-    /// For agg mode, `target_prefill` is ignored (pass 0).
-    fn apply_scaling(&mut self, target_prefill: usize, target_decode: usize) -> PyResult<()> {
-        let handle = self
-            .handle
-            .as_mut()
-            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
-        handle
-            .apply_scaling(target_prefill, target_decode)
-            .map_err(to_pyerr)
-    }
-
-    /// Finalize the replay and return the trace simulation report.
-    fn finalize(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        let handle = self
-            .handle
-            .take()
-            .ok_or_else(|| PyException::new_err("bridge has already been finalized"))?;
-        let report = handle.finalize();
-        pythonize(py, &report)
-            .map_err(to_pyerr)
-            .map(|obj| obj.unbind())
+    fn on_tick(
+        &mut self,
+        snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        let ReplayScalingSnapshot {
+            tick_ordinal,
+            now_ms,
+            prefill_fpm,
+            decode_fpm,
+            traffic,
+            active_prefill_ids,
+            active_decode_ids,
+            starting_prefill_ids,
+            starting_decode_ids,
+            draining_prefill_ids,
+            draining_decode_ids,
+        } = snapshot;
+        let result = Python::with_gil(|py| -> PyResult<ReplayScalingDecision> {
+            let non_draining_prefill_count = active_prefill_ids.len() + starting_prefill_ids.len();
+            let non_draining_decode_count = active_decode_ids.len() + starting_decode_ids.len();
+            let total_prefill_count = non_draining_prefill_count + draining_prefill_ids.len();
+            let total_decode_count = non_draining_decode_count + draining_decode_ids.len();
+            let metrics_json = json!({
+                "tick_ordinal": tick_ordinal,
+                "now_ms": now_ms,
+                "prefill_fpm_snapshots": fpm_snapshots_to_json(prefill_fpm),
+                "decode_fpm_snapshots": fpm_snapshots_to_json(decode_fpm),
+                "active_prefill_count": active_prefill_ids.len(),
+                "active_decode_count": active_decode_ids.len(),
+                "active_prefill_ids": active_prefill_ids,
+                "active_decode_ids": active_decode_ids,
+                "starting_prefill_count": starting_prefill_ids.len(),
+                "starting_decode_count": starting_decode_ids.len(),
+                "starting_prefill_ids": starting_prefill_ids,
+                "starting_decode_ids": starting_decode_ids,
+                "draining_prefill_count": draining_prefill_ids.len(),
+                "draining_decode_count": draining_decode_ids.len(),
+                "draining_prefill_ids": draining_prefill_ids,
+                "draining_decode_ids": draining_decode_ids,
+                "non_draining_prefill_count": non_draining_prefill_count,
+                "non_draining_decode_count": non_draining_decode_count,
+                "total_prefill_count": total_prefill_count,
+                "total_decode_count": total_decode_count,
+                "traffic": {
+                    "duration_s": traffic.duration_s,
+                    "num_req": traffic.num_req,
+                    "avg_isl": traffic.avg_isl,
+                    "avg_osl": traffic.avg_osl,
+                    "avg_ttft_ms": traffic.avg_ttft_ms,
+                    "avg_itl_ms": traffic.avg_itl_ms,
+                    // Native denominators keep completion-derived shape and
+                    // latency averages exact even though num_req is offered load.
+                    "shape_count": traffic.shape_count,
+                    "ttft_count": traffic.ttft_count,
+                    "itl_count": traffic.itl_count,
+                    "avg_accept_length": traffic.avg_accept_length,
+                    "avg_kv_hit_rate": traffic.avg_kv_hit_rate,
+                    // Denominators behind the two ratio averages, so the Python
+                    // adapter can merge partial windows with exact count weights
+                    // instead of approximating with num_req.
+                    "hit_rate_count": traffic.hit_rate_count,
+                    "accept_length_forward_count": traffic.accept_length_forward_count,
+                },
+            });
+            let metrics_obj = pythonize(py, &metrics_json).map_err(to_pyerr)?;
+            let decision = self
+                .callback
+                .bind(py)
+                .call_method1("on_tick", (metrics_obj,))?;
+            Ok(ReplayScalingDecision {
+                target_prefill: decision.get_item("target_prefill")?.extract()?,
+                target_decode: decision.get_item("target_decode")?.extract()?,
+                next_tick_ms: decision.get_item("next_tick_ms")?.extract()?,
+            })
+        });
+        if let Err(error) = &result {
+            Python::with_gil(|py| self.callback_error.record(py, error));
+        }
+        result.map_err(anyhow::Error::new)
     }
 }

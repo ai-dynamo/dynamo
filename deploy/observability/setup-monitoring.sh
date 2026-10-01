@@ -8,6 +8,11 @@
 
 set -e
 
+# Namespace where the Dynamo operator/platform is installed.
+# Defaults to dynamo-system (the value used throughout the Dynamo docs);
+# override with DYNAMO_NAMESPACE if you installed it elsewhere.
+DYNAMO_NAMESPACE="${DYNAMO_NAMESPACE:-dynamo-system}"
+
 echo "=========================================="
 echo "Installing Prometheus & Grafana for Dynamo"
 echo "=========================================="
@@ -74,18 +79,23 @@ kubectl get pods -n monitoring
 echo ""
 echo "Step 6: Updating Dynamo operator with Prometheus endpoint..."
 # Detect currently installed version to avoid accidental upgrades
-DYNAMO_VERSION=$(helm list -n dynamo -o json | jq -r '.[] | select(.name=="dynamo-platform") | .chart' | sed 's/dynamo-platform-//')
-echo "Detected Dynamo Platform version: ${DYNAMO_VERSION}"
+DYNAMO_VERSION=$(helm list -n "${DYNAMO_NAMESPACE}" -o json | jq -r '.[] | select(.name=="dynamo-platform") | .chart' | sed 's/dynamo-platform-//')
+if [ -z "${DYNAMO_VERSION}" ]; then
+  echo "ERROR: Could not detect a 'dynamo-platform' Helm release in namespace '${DYNAMO_NAMESPACE}'." >&2
+  echo "       Set DYNAMO_NAMESPACE to the namespace where Dynamo is installed and retry." >&2
+  exit 1
+fi
+echo "Detected Dynamo Platform version: ${DYNAMO_VERSION} (namespace: ${DYNAMO_NAMESPACE})"
 
 # Delete the conflicting secret (grove-operator will recreate it)
 echo "Removing grove-webhook-server-cert to avoid conflict..."
-kubectl delete secret grove-webhook-server-cert -n dynamo --ignore-not-found=true
+kubectl delete secret grove-webhook-server-cert -n "${DYNAMO_NAMESPACE}" --ignore-not-found=true
 
 # Perform the upgrade
 echo "Running Helm upgrade..."
 helm upgrade dynamo-platform nvidia-dynamo/dynamo-platform \
   --version "${DYNAMO_VERSION}" \
-  --namespace dynamo \
+  --namespace "${DYNAMO_NAMESPACE}" \
   --reuse-values \
   --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
 

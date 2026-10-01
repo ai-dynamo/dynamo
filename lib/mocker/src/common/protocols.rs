@@ -12,25 +12,7 @@ use validator::{Validate, ValidationError};
 
 use crate::common::perf_model::PerfModel;
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
-use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash, Token};
-
-/// Metadata marker type for kvbm-logical blocks in the mocker's G1 pool.
-#[derive(Clone, Debug)]
-pub struct G1;
-
-/// Eviction strategy for the kvbm-logical inactive pool.
-///
-/// `Lineage` is the default and matches kvbm-logical's own default — it evicts
-/// leaf blocks first, which subsumes the preemption-priority behaviour that the
-/// mocker's old `LRUEvictor::push_front` provided.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-pub enum MockerEvictionBackend {
-    Lru,
-    MultiLru,
-    #[default]
-    Lineage,
-}
+use dynamo_tokens::Token;
 
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
@@ -43,6 +25,23 @@ pub trait KvCacheEventSink: Send + Sync {
         _storage_tier: StorageTier,
     ) -> anyhow::Result<()> {
         self.publish(event)
+    }
+
+    /// Publishes events that share one source visibility boundary.
+    ///
+    /// Implementations that do not have a native batch representation retain
+    /// singleton delivery semantics by default.
+    fn publish_batch_with_storage_tiers(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        let mut first_error = None;
+        for (event, storage_tier) in events {
+            if let Err(error) = self.publish_with_storage_tier(event, storage_tier) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -58,6 +57,20 @@ pub struct RawKvEvent {
 /// Trait for publishing transport-specific raw KV event payloads.
 pub trait RawKvEventSink: Send + Sync {
     fn publish(&self, event: RawKvEvent) -> anyhow::Result<()>;
+
+    /// Publishes raw events that share one source visibility boundary.
+    ///
+    /// Implementations that do not have a native batch representation retain
+    /// singleton delivery semantics by default.
+    fn publish_batch(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        let mut first_error = None;
+        for event in events {
+            if let Err(error) = self.publish(event) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
 }
 
 /// Shared KV event publisher bundle used by schedulers and KV managers.
@@ -114,42 +127,32 @@ impl KvEventPublishers {
 
         Ok(())
     }
+
+    /// Publishes normal KV events without also forwarding them to a raw sink.
+    ///
+    /// Deferred live-scheduler forwarding uses this to preserve its source
+    /// visibility boundary for normal and raw sinks independently.
+    pub(crate) fn publish_event_sink_batch_only(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        if let Some(sink) = self.event_sink.as_ref() {
+            sink.publish_batch_with_storage_tiers(events)?;
+        }
+        Ok(())
+    }
+
+    /// Publishes raw events as one source visibility boundary.
+    pub(crate) fn publish_raw_batch(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        if let Some(sink) = self.raw_sink.as_ref() {
+            sink.publish_batch(events)?;
+        }
+        Ok(())
+    }
 }
 
-/// Per-iteration forward pass snapshot, mirroring the Python `ForwardPassMetrics`
-/// schema in `components/src/dynamo/common/forward_pass_metrics.py`.
-///
-/// Produced by the scheduler core after each `execute_pass_internal()` call.
-/// Runtime publishers may either stamp identity at serialization time or fill
-/// the identity fields directly when snapshots are consumed in-process.
-#[derive(Debug, Clone, Default)]
-pub struct ForwardPassSnapshot {
-    // -- identity --
-    // `Default::default()` leaves `version == 0` and identity fields empty or
-    // zero, which means an unstamped local snapshot. Runtime publishers may
-    // stamp or overwrite these fields at the serialization boundary.
-    pub version: u32,
-    pub worker_id: String,
-    pub dp_rank: u32,
-    pub counter_id: u64,
-    // -- scheduled requests (executed this iteration) --
-    pub num_prefill_requests: u32,
-    pub sum_prefill_tokens: u64,
-    pub var_prefill_length: f64,
-    pub sum_prefill_kv_tokens: u64,
-    pub num_decode_requests: u32,
-    pub sum_decode_kv_tokens: u64,
-    pub var_decode_kv_tokens: f64,
-    // -- queued requests (waiting, not scheduled) --
-    pub num_queued_prefill: u32,
-    pub sum_queued_prefill_tokens: u64,
-    pub var_queued_prefill_length: f64,
-    pub num_queued_decode: u32,
-    pub sum_queued_decode_kv_tokens: u64,
-    pub var_queued_decode_kv_tokens: f64,
-    // -- timing --
-    pub wall_time_secs: f64,
-}
+/// Replay-neutral per-pass metrics shared by offline and Live Mocker drivers.
+pub use aisimulate_core::replay::ForwardPassSnapshot;
 
 /// Trait for publishing forward pass metrics snapshots.
 /// This abstracts the FPM publishing pipeline so mocker schedulers remain generic.
@@ -177,74 +180,17 @@ impl FpmPublisher {
     }
 }
 
-pub type NumBlocks = usize;
-
-/// Represents different block movement operations in the cache
-/// For Use and Promote variants, block hashes are included for KV event publishing
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum MoveBlock {
-    Use(
-        Vec<UniqueBlock>,
-        Vec<BlockHash>,
-        Vec<PositionalLineageHash>,
-        Option<Vec<Vec<u32>>>,
-        Option<UniqueBlock>,
-    ),
-    Deref(Vec<UniqueBlock>),
-    Promote(
-        Uuid,
-        SequenceHash,
-        Option<u64>,
-        Option<BlockHash>,
-        PositionalLineageHash,
-        Option<Vec<u32>>,
-    ),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum MoveBlockResponse {
-    Store(Vec<SequenceHash>, Option<u64>),
-    Remove(Vec<SequenceHash>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirectRequest {
-    pub tokens: Vec<Token>,
-    pub max_output_tokens: usize,
-    pub uuid: Option<Uuid>,
-    pub dp_rank: u32,
-    pub arrival_timestamp_ms: Option<f64>,
-}
-
-/// Represents the cost of prefilling content in the cache
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrefillCost {
-    pub new_blocks: usize,
-    pub new_tokens: usize,
-    /// Number of tokens already cached (prefix hit).
-    /// isl = cached_tokens + new_tokens
-    pub cached_tokens: usize,
-    /// Subset of `cached_tokens` backed by active blocks. Physical-capacity
-    /// admission discounts only these because inactive reuse is re-consumed.
-    pub active_cached_tokens: usize,
-}
-
-impl PrefillCost {
-    pub fn predict_prefill_compute(
-        &self,
-        new_tokens: Option<usize>,
-        perf_model: &PerfModel,
-    ) -> f64 {
-        let tokens = new_tokens.unwrap_or(self.new_tokens);
-        let isl = self.cached_tokens + tokens;
-        perf_model.predict_prefill_time(1, isl, self.cached_tokens)
-    }
-}
+/// Replay-owned request DTO shared by Dynamo's compatibility and Live Mocker
+/// drivers. The type remains provider-neutral; Dynamo-specific metadata is
+/// interpreted only by Dynamo adapters.
+pub use aisimulate_core::replay::DirectRequest;
 
 /// Signal for output token generation with completion status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSignal {
     pub uuid: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<Token>,
     /// Terminal flag: the request's lifecycle has ended. Replay drivers free
     /// resources and advance/notify on this.
     pub completed: bool,
@@ -255,6 +201,10 @@ pub struct OutputSignal {
     pub rejected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_delay_ms: Option<f64>,
+    /// Prompt tokens served from KV cache at admission (scheduler truth,
+    /// post-eviction). Set once, on the request's first output signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<usize>,
 }
 
 /// Preemption policy for evicting decode requests under memory pressure
@@ -311,21 +261,6 @@ impl FromStr for EngineType {
     }
 }
 
-/// Scheduling policy applied by the shared vLLM scheduler core.
-///
-/// Derived from [`EngineType`] (+ engine-specific args) so the core reads a
-/// single discriminant instead of re-deriving engine behavior per pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SchedulingPolicy {
-    /// vLLM semantics: require the current known sequence to fit at waiting
-    /// admission, then permit preemption under later KV pressure.
-    #[default]
-    Vllm,
-    /// TRT-LLM `GUARANTEED_NO_EVICT`: reserve `prompt + max_output` per
-    /// admitted request up front; never preempt.
-    TrtllmGuaranteedNoEvict,
-}
-
 /// Worker type for disaggregated serving configurations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -349,6 +284,31 @@ impl FromStr for WorkerType {
             "decode" => Ok(Self::Decode),
             _ => Err(format!(
                 "Invalid worker_type '{value}'. Must be 'aggregated', 'prefill', or 'decode'."
+            )),
+        }
+    }
+}
+
+/// Physical KV footprint used to model a coordinated disaggregated transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvTransferTimingMode {
+    /// Charge the source request's full logical prompt length.
+    #[default]
+    FullPrompt,
+    /// Charge only the physical prompt footprint missing at the destination.
+    DestinationMissing,
+}
+
+impl FromStr for KvTransferTimingMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "full_prompt" => Ok(Self::FullPrompt),
+            "destination_missing" => Ok(Self::DestinationMissing),
+            _ => Err(format!(
+                "Invalid kv_transfer_timing_mode '{value}'. Must be 'full_prompt' or 'destination_missing'."
             )),
         }
     }
@@ -466,6 +426,7 @@ struct MockEngineArgsSerde {
     engine_type: OptionalConfigValue<String>,
     num_gpu_blocks: OptionalConfigValue<usize>,
     block_size: OptionalConfigValue<usize>,
+    max_model_len: OptionalConfigValue<usize>,
     max_num_seqs: OptionalConfigValue<usize>,
     max_num_batched_tokens: OptionalConfigValue<usize>,
     enable_prefix_caching: OptionalConfigValue<bool>,
@@ -478,43 +439,51 @@ struct MockEngineArgsSerde {
     is_prefill: OptionalConfigValue<bool>,
     is_decode: OptionalConfigValue<bool>,
     planner_profile_data: OptionalConfigValue<PathBuf>,
-    aic_backend: OptionalConfigValue<String>,
-    aic_system: OptionalConfigValue<String>,
-    aic_backend_version: OptionalConfigValue<String>,
-    aic_tp_size: OptionalConfigValue<usize>,
-    aic_model_path: OptionalConfigValue<String>,
-    aic_moe_tp_size: OptionalConfigValue<usize>,
-    aic_moe_ep_size: OptionalConfigValue<usize>,
-    aic_attention_dp_size: OptionalConfigValue<usize>,
-    aic_nextn: OptionalConfigValue<usize>,
-    aic_nextn_accept_rates: OptionalConfigValue<String>,
-    aic_mtp_seed: OptionalConfigValue<u64>,
+    #[serde(rename = "tensor_parallel_size")]
+    ais_tp_size: OptionalConfigValue<usize>,
+    ais_nextn: OptionalConfigValue<usize>,
+    ais_nextn_accept_rates: OptionalConfigValue<String>,
+    ais_mtp_seed: OptionalConfigValue<u64>,
     gpu_memory_utilization: OptionalConfigValue<f64>,
     mem_fraction_static: OptionalConfigValue<f64>,
     free_gpu_memory_fraction: OptionalConfigValue<f64>,
     enable_local_indexer: OptionalConfigValue<bool>,
     bootstrap_port: OptionalConfigValue<u16>,
+    handoff_session_timeout_ms: OptionalConfigValue<u64>,
+    #[serde(alias = "kv_transfer_bytes_per_token")]
     kv_bytes_per_token: OptionalConfigValue<usize>,
+    kv_cache_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
-    num_g2_blocks: OptionalConfigValue<usize>,
-    num_g3_blocks: OptionalConfigValue<usize>,
-    enable_g4_storage: OptionalConfigValue<bool>,
-    offload_batch_size: OptionalConfigValue<usize>,
-    bandwidth_g1_to_g2_gbps: OptionalConfigValue<f64>,
-    bandwidth_g2_to_g1_gbps: OptionalConfigValue<f64>,
-    bandwidth_g2_to_g3_gbps: OptionalConfigValue<f64>,
-    bandwidth_g3_to_g2_gbps: OptionalConfigValue<f64>,
-    bandwidth_g2_to_g4_gbps: OptionalConfigValue<f64>,
-    bandwidth_g4_to_g2_gbps: OptionalConfigValue<f64>,
+    kv_transfer_timing_mode: OptionalConfigValue<String>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
+    response_replay_trace_path: OptionalConfigValue<PathBuf>,
     zmq_kv_events_port: OptionalConfigValue<u16>,
     zmq_replay_port: OptionalConfigValue<u16>,
     preemption_mode: OptionalConfigValue<String>,
     router_queue_policy: OptionalConfigValue<String>,
     sglang: OptionalConfigValue<SglangArgs>,
     trtllm: OptionalConfigValue<TrtllmArgs>,
+    timing_model: OptionalConfigValue<TimingModelSerde>,
+    ais_perf_config: OptionalConfigValue<serde_json::Value>,
+    prefill_schedule_interval: OptionalConfigValue<usize>,
+    prefill_decode_interval: OptionalConfigValue<usize>,
     #[serde(rename = "has_perf_model")]
     _has_perf_model: OptionalConfigValue<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum TimingModelSerde {
+    Default,
+    Polynomial,
+    Fixed {
+        prefill_ms: f64,
+        decode_ms: f64,
+    },
+    External {
+        provider: String,
+        config: serde_json::Value,
+    },
 }
 
 fn load_perf_model(path: &Path) -> Arc<PerfModel> {
@@ -544,12 +513,22 @@ pub struct MockEngineArgs {
     #[builder(default = "EngineType::Vllm")]
     pub engine_type: EngineType,
 
+    /// Usable simulated G1 capacity. This preserves the mocker's historical
+    /// convention across backends. A raw vLLM `num_gpu_blocks` value also
+    /// includes its reserved null block, so parity runs configure real vLLM
+    /// with one additional total block.
     #[builder(default = "16384")]
     #[validate(range(min = 1))]
     pub num_gpu_blocks: usize,
 
     #[builder(default = "0")]
     pub block_size: usize,
+
+    /// Optional vLLM sequence-length limit, including prompt and generated
+    /// tokens. Requests with no room to generate are rejected before admission.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub max_model_len: Option<usize>,
 
     // This was 1024 in the past but reverted back to 256
     #[builder(default = Some(256))]
@@ -601,83 +580,128 @@ pub struct MockEngineArgs {
     #[builder(default = "Arc::new(PerfModel::default())")]
     pub perf_model: Arc<PerfModel>,
 
-    /// If set, indicates direct AIC SDK calls should be used.
+    /// Complete canonical AISimulate config. This is also the saved identity;
+    /// estimator settings are never reconstructed from the legacy flat fields.
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ais_perf_config: Option<serde_json::Value>,
+
+    #[builder(default = "1")]
+    #[validate(range(min = 1))]
+    pub prefill_schedule_interval: usize,
+
+    #[builder(default = "0")]
+    pub prefill_decode_interval: usize,
+
+    /// If set, indicates direct AIS SDK calls should be used.
     /// The value is the backend name (e.g., "sglang", "vllm").
-    /// The Python layer reads this and overrides perf_model with an Aiconfigurator callback.
+    /// The Python layer reads this and overrides perf_model with an Ais callback.
     #[serde(skip)]
     #[builder(default = "None")]
-    pub aic_backend: Option<String>,
+    pub ais_backend: Option<String>,
 
-    /// AIC GPU system name (e.g., "h200_sxm"). Required when aic_backend is set.
+    /// AIS GPU system name (e.g., "h200_sxm"). Required when ais_backend is set.
     #[serde(skip)]
     #[builder(default = "None")]
-    pub aic_system: Option<String>,
+    pub ais_system: Option<String>,
 
-    /// AIC backend engine version (e.g., "0.12.0" for vLLM, "0.5.6.post2" for SGLang).
-    /// If None, uses the default version for the backend.
+    /// AIS performance-database slot ("current", "previous", or "next" when available),
+    /// or a version assigned to one of those slots.
+    /// If None, uses the release database's "current" slot.
     #[serde(skip)]
     #[builder(default = "None")]
-    pub aic_backend_version: Option<String>,
+    pub ais_backend_version: Option<String>,
 
-    /// Tensor parallel size for AIC latency prediction.
-    /// Only affects AIC performance model lookups, not mocker scheduling.
-    #[serde(skip)]
+    /// Tensor parallel size for AIS latency prediction.
+    /// Only affects AIS performance model lookups, not mocker scheduling.
+    #[serde(
+        rename = "tensor_parallel_size",
+        skip_serializing_if = "Option::is_none"
+    )]
     #[builder(default = "None")]
-    pub aic_tp_size: Option<usize>,
+    pub ais_tp_size: Option<usize>,
 
-    /// HuggingFace model path for AIC latency prediction (e.g., "nvidia/Llama-3.1-8B-Instruct-FP8").
+    /// HuggingFace model path for AIS latency prediction (e.g., "nvidia/Llama-3.1-8B-Instruct-FP8").
     #[serde(skip)]
     #[builder(default = "None")]
-    pub aic_model_path: Option<String>,
+    pub ais_model_path: Option<String>,
 
-    /// MoE tensor-parallel size for AIC latency prediction (e.g., 4 for pure MoE-TP).
-    /// Required for MoE models; must satisfy: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.
+    /// MoE tensor-parallel size for AIS latency prediction (e.g., 4 for pure MoE-TP).
+    /// Required for MoE models; must satisfy: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.
     #[serde(skip)]
     #[builder(default = "None")]
-    pub aic_moe_tp_size: Option<usize>,
+    pub ais_moe_tp_size: Option<usize>,
 
-    /// MoE expert-parallel size for AIC latency prediction (e.g., 4 for pure EP).
-    /// Required for MoE models; must satisfy: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.
+    /// MoE expert-parallel size for AIS latency prediction (e.g., 4 for pure EP).
+    /// Required for MoE models; must satisfy: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.
     #[serde(skip)]
     #[builder(default = "None")]
-    pub aic_moe_ep_size: Option<usize>,
+    pub ais_moe_ep_size: Option<usize>,
 
-    /// Attention data-parallel size for AIC latency prediction (default: 1).
-    /// Corresponds to the `dp` dimension in AIC CLI output.
-    /// Must satisfy: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.
+    /// Attention data-parallel size for AIS latency prediction (default: 1).
+    /// Corresponds to the `dp` dimension in AIS CLI output.
+    /// Must satisfy: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.
     #[serde(skip)]
     #[builder(default = "None")]
-    pub aic_attention_dp_size: Option<usize>,
+    pub ais_attention_dp_size: Option<usize>,
+
+    /// Weight dtype override for AIS latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub ais_gemm_dtype: Option<String>,
+
+    /// MoE kernel dtype override for AIS latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub ais_moe_dtype: Option<String>,
+
+    /// Activation dtype override for AIS latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub ais_fmha_dtype: Option<String>,
+
+    /// KV-cache dtype override for AIS latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub ais_kv_cache_dtype: Option<String>,
+
+    /// Communication (collective) dtype override for AIS latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub ais_comm_dtype: Option<String>,
 
     /// MTP/Eagle speculative-decoding draft-token count (1..=5).
-    /// The mocker samples accepted drafts while AIC supplies undiscounted
+    /// The mocker samples accepted drafts while AIS supplies undiscounted
     /// verification-round latency.
     #[builder(default = "None")]
     #[validate(range(min = 1, max = 5))]
-    pub aic_nextn: Option<usize>,
+    #[serde(rename = "ais_nextn")]
+    pub ais_nextn: Option<usize>,
 
     /// Conditional acceptance rates for draft tokens, comma-separated.
     /// Entry i is P(draft i accepted | every earlier draft was accepted).
     #[builder(default = "None")]
-    pub aic_nextn_accept_rates: Option<String>,
+    #[serde(rename = "ais_nextn_accept_rates")]
+    pub ais_nextn_accept_rates: Option<String>,
 
     /// Base RNG seed for MTP burst sampling. Worker rank is added with
     /// wrapping arithmetic before constructing each worker-local sampler.
     #[builder(default = "42")]
-    pub aic_mtp_seed: u64,
+    #[serde(rename = "ais_mtp_seed")]
+    pub ais_mtp_seed: u64,
 
-    /// GPU memory fraction for AIC KV capacity estimation with vLLM.
+    /// GPU memory fraction for AIS KV capacity estimation with vLLM.
     #[builder(default = "None")]
     #[validate(range(min = 0.0, max = 1.0))]
     pub gpu_memory_utilization: Option<f64>,
 
-    /// Static memory fraction for AIC KV capacity estimation with SGLang.
+    /// Static memory fraction for AIS KV capacity estimation with SGLang.
     #[builder(default = "None")]
     #[validate(range(min = 0.0, max = 1.0))]
     pub mem_fraction_static: Option<f64>,
 
     /// Fraction of *free* GPU memory (after weights/buffers) allocated to the KV
-    /// cache, for AIC KV capacity estimation with TRT-LLM. Mirrors TRT-LLM's
+    /// cache, for AIS KV capacity estimation with TRT-LLM. Mirrors TRT-LLM's
     /// `KvCacheConfig.free_gpu_memory_fraction`. Unlike vLLM's
     /// `gpu_memory_utilization` (a fraction of *total* memory), this is a
     /// fraction of what remains after the model is loaded.
@@ -695,10 +719,20 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub bootstrap_port: Option<u16>,
 
-    /// KV cache bytes per token, auto-computed from model config by Python CLI.
+    /// Absolute live handoff session timeout, excluding modeled transfer delay.
+    #[builder(default = "300_000")]
+    #[validate(range(min = 1))]
+    pub handoff_session_timeout_ms: u64,
+
+    /// Bytes transferred per token, auto-computed from model config by Python CLI.
     /// Formula: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
     #[builder(default = "None")]
     pub kv_bytes_per_token: Option<usize>,
+
+    /// Physical KV-cache bytes occupied by one token, independent of transfer geometry.
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_cache_bytes_per_token: Option<usize>,
 
     /// KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation.
     /// Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay.
@@ -707,72 +741,21 @@ pub struct MockEngineArgs {
     #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
 
-    /// KVBM G2 (host DRAM) block capacity. When the `kvbm-offload`
-    /// feature is enabled, setting this explicitly opts the mocker into
-    /// G2 offload simulation. When unset or set to 0, no G2 offload engine
-    /// is attached.
-    #[builder(default = "None")]
-    #[validate(range(min = 1))]
-    pub num_g2_blocks: Option<usize>,
-
-    /// KVBM G3 shared lower-tier block capacity. Positive values require
-    /// `num_g2_blocks` and a resolvable KV block byte size; 0 disables G3.
-    #[builder(default = "None")]
-    #[validate(range(min = 1))]
-    pub num_g3_blocks: Option<usize>,
-
-    /// Enable KVBM mock G4 object-storage simulation. G4 stages through G2
-    /// and uses object presence operations instead of a `BlockManager<G4>`.
-    #[builder(default = "false")]
-    pub enable_g4_storage: bool,
-
-    /// Batch size for the G1→G2 offload pipeline. Offloads are grouped
-    /// into batches of this size before being handed to the worker.
-    /// Only consulted when the `kvbm-offload` feature is enabled;
-    /// falls back to the `KvbmOffloadConfig` default when unset or 0.
-    #[builder(default = "None")]
-    #[validate(range(min = 1))]
-    pub offload_batch_size: Option<usize>,
-
-    /// G1→G2 offload bandwidth in GB/s for the PS-queue simulation.
-    /// Only consulted when the `kvbm-offload` feature is enabled;
-    /// falls back to the `KvbmOffloadConfig` default (host DRAM PCIe
-    /// ballpark) when unset.
-    #[builder(default = "None")]
-    #[validate(range(min = 0.0))]
-    pub bandwidth_g1_to_g2_gbps: Option<f64>,
-
-    /// G2→G1 onboard bandwidth in GB/s for the PS-queue simulation.
-    /// Only consulted when the `kvbm-offload` feature is enabled;
-    /// falls back to the `KvbmOffloadConfig` default when unset.
-    #[builder(default = "None")]
-    #[validate(range(min = 0.0))]
-    pub bandwidth_g2_to_g1_gbps: Option<f64>,
-
-    /// G2→G3 offload bandwidth in GB/s for the shared PS-queue simulation.
-    #[builder(default = "None")]
-    #[validate(range(min = 0.0))]
-    pub bandwidth_g2_to_g3_gbps: Option<f64>,
-
-    /// G3→G2 staging bandwidth in GB/s for the shared PS-queue simulation.
-    #[builder(default = "None")]
-    #[validate(range(min = 0.0))]
-    pub bandwidth_g3_to_g2_gbps: Option<f64>,
-
-    /// G2→G4 object offload bandwidth in GB/s for the shared PS-queue simulation.
-    #[builder(default = "None")]
-    #[validate(range(min = 0.0))]
-    pub bandwidth_g2_to_g4_gbps: Option<f64>,
-
-    /// G4→G2 object staging bandwidth in GB/s for the shared PS-queue simulation.
-    #[builder(default = "None")]
-    #[validate(range(min = 0.0))]
-    pub bandwidth_g4_to_g2_gbps: Option<f64>,
+    /// Selects whether disaggregated transfer timing charges the full prompt
+    /// or only the physical prompt footprint missing at the destination.
+    #[builder(default = "KvTransferTimingMode::FullPrompt")]
+    pub kv_transfer_timing_mode: KvTransferTimingMode,
 
     /// Reasoning/thinking token configuration.
     /// When set, the mocker wraps output in thinking boundary tokens.
     #[builder(default = "None")]
     pub reasoning: Option<ReasoningConfig>,
+
+    /// Optional Mooncake trace with exact output token IDs keyed by
+    /// `output_replay_id` annotations. Direct replay paths carry the same token
+    /// IDs on `DirectRequest` and do not need this lookup.
+    #[builder(default = "None")]
+    pub response_replay_trace_path: Option<PathBuf>,
 
     /// ZMQ port for publishing KV events in vLLM's native wire format.
     /// When set, the scheduler publishes to a ZMQ PUB socket instead of directly to NATS.
@@ -819,34 +802,39 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
-    if args.num_g3_blocks.is_some() && args.num_g2_blocks.is_none() {
+    if matches!(args.engine_type, EngineType::Vllm | EngineType::Trtllm) && args.block_size < 2 {
         return Err(mock_engine_args_validation_error(
-            "g3_requires_g2",
-            "num_g3_blocks requires num_g2_blocks because mocker stages G3 through G2".to_string(),
-        ));
-    }
-    if args.enable_g4_storage && args.num_g2_blocks.is_none() {
-        return Err(mock_engine_args_validation_error(
-            "g4_requires_g2",
-            "enable_g4_storage requires num_g2_blocks because mocker stages G4 through G2"
-                .to_string(),
+            "shared_scheduler_block_size_too_small",
+            format!(
+                "the vLLM/TRT-LLM scheduler requires block_size to be at least 2 for engine_type={:?}, got block_size={}",
+                args.engine_type, args.block_size,
+            ),
         ));
     }
 
-    if args.aic_nextn.is_some() && args.decode_speedup_ratio != 1.0 {
+    if args.max_model_len.is_some() && args.engine_type != EngineType::Vllm {
+        return Err(mock_engine_args_validation_error(
+            "max_model_len_requires_vllm",
+            format!(
+                "max_model_len is supported only for engine_type=vllm, got engine_type={:?}",
+                args.engine_type
+            ),
+        ));
+    }
+    if args.ais_nextn.is_some() && args.decode_speedup_ratio != 1.0 {
         return Err(mock_engine_args_validation_error(
             "mtp_decode_speedup_conflict",
             format!(
-                "aic_nextn requires decode_speedup_ratio=1.0 because MTP output acceleration is modeled by burst sampling, got {}",
+                "ais_nextn requires decode_speedup_ratio=1.0 because MTP output acceleration is modeled by burst sampling, got {}",
                 args.decode_speedup_ratio
             ),
         ));
     }
 
-    if args.aic_nextn.is_none() && args.aic_nextn_accept_rates.is_some() {
+    if args.ais_nextn.is_none() && args.ais_nextn_accept_rates.is_some() {
         return Err(mock_engine_args_validation_error(
             "mtp_rates_without_nextn",
-            "aic_nextn_accept_rates requires aic_nextn".to_string(),
+            "ais_nextn_accept_rates requires ais_nextn".to_string(),
         ));
     }
 
@@ -912,6 +900,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(block_size) = compat.block_size.into_non_null("block_size")? {
             builder = builder.block_size(block_size);
+        }
+        if let Some(max_model_len) = compat.max_model_len.into_nullable() {
+            builder = builder.max_model_len(max_model_len);
         }
         if let Some(max_num_seqs) = compat.max_num_seqs.into_nullable() {
             builder = builder.max_num_seqs(max_num_seqs);
@@ -981,39 +972,67 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
                 builder = builder.perf_model(load_perf_model(&path));
             }
         }
+        let mut ais_perf_config = compat.ais_perf_config.into_nullable().flatten();
+        if let Some(interval) = compat
+            .prefill_schedule_interval
+            .into_non_null("prefill_schedule_interval")?
+        {
+            builder = builder.prefill_schedule_interval(interval);
+        }
+        if let Some(interval) = compat
+            .prefill_decode_interval
+            .into_non_null("prefill_decode_interval")?
+        {
+            builder = builder.prefill_decode_interval(interval);
+        }
+        if let Some(timing_model) = compat.timing_model.into_nullable().flatten() {
+            if ais_perf_config.is_some() {
+                return Err("ais_perf_config cannot be combined with timing_model".to_string());
+            }
+            let perf_model = match timing_model {
+                TimingModelSerde::Default | TimingModelSerde::Polynomial => PerfModel::Polynomial,
+                TimingModelSerde::External { provider, config } => {
+                    if provider != "aic" && provider != "ais" {
+                        return Err(format!("unsupported external timing provider: {provider}"));
+                    }
+                    ais_perf_config = Some(config);
+                    // The Python binding materializes the process-local callback.
+                    PerfModel::Polynomial
+                }
+                TimingModelSerde::Fixed {
+                    prefill_ms,
+                    decode_ms,
+                } => {
+                    if !prefill_ms.is_finite()
+                        || prefill_ms < 0.0
+                        || !decode_ms.is_finite()
+                        || decode_ms < 0.0
+                    {
+                        return Err(
+                            "fixed timing prefill_ms and decode_ms must be finite and nonnegative"
+                                .to_string(),
+                        );
+                    }
+                    PerfModel::Fixed {
+                        prefill_ms,
+                        decode_ms,
+                    }
+                }
+            };
+            builder = builder.perf_model(Arc::new(perf_model));
+        }
 
-        if let Some(aic_backend) = compat.aic_backend.into_nullable() {
-            builder = builder.aic_backend(aic_backend);
+        if let Some(ais_tp_size) = compat.ais_tp_size.into_nullable() {
+            builder = builder.ais_tp_size(ais_tp_size);
         }
-        if let Some(aic_system) = compat.aic_system.into_nullable() {
-            builder = builder.aic_system(aic_system);
+        if let Some(ais_nextn) = compat.ais_nextn.into_nullable() {
+            builder = builder.ais_nextn(ais_nextn);
         }
-        if let Some(aic_backend_version) = compat.aic_backend_version.into_nullable() {
-            builder = builder.aic_backend_version(aic_backend_version);
+        if let Some(ais_nextn_accept_rates) = compat.ais_nextn_accept_rates.into_nullable() {
+            builder = builder.ais_nextn_accept_rates(ais_nextn_accept_rates);
         }
-        if let Some(aic_tp_size) = compat.aic_tp_size.into_nullable() {
-            builder = builder.aic_tp_size(aic_tp_size);
-        }
-        if let Some(aic_model_path) = compat.aic_model_path.into_nullable() {
-            builder = builder.aic_model_path(aic_model_path);
-        }
-        if let Some(aic_moe_tp_size) = compat.aic_moe_tp_size.into_nullable() {
-            builder = builder.aic_moe_tp_size(aic_moe_tp_size);
-        }
-        if let Some(aic_moe_ep_size) = compat.aic_moe_ep_size.into_nullable() {
-            builder = builder.aic_moe_ep_size(aic_moe_ep_size);
-        }
-        if let Some(aic_attention_dp_size) = compat.aic_attention_dp_size.into_nullable() {
-            builder = builder.aic_attention_dp_size(aic_attention_dp_size);
-        }
-        if let Some(aic_nextn) = compat.aic_nextn.into_nullable() {
-            builder = builder.aic_nextn(aic_nextn);
-        }
-        if let Some(aic_nextn_accept_rates) = compat.aic_nextn_accept_rates.into_nullable() {
-            builder = builder.aic_nextn_accept_rates(aic_nextn_accept_rates);
-        }
-        if let Some(aic_mtp_seed) = compat.aic_mtp_seed.into_non_null("aic_mtp_seed")? {
-            builder = builder.aic_mtp_seed(aic_mtp_seed);
+        if let Some(ais_mtp_seed) = compat.ais_mtp_seed.into_non_null("ais_mtp_seed")? {
+            builder = builder.ais_mtp_seed(ais_mtp_seed);
         }
         if let Some(gpu_memory_utilization) = compat.gpu_memory_utilization.into_nullable() {
             builder = builder.gpu_memory_utilization(gpu_memory_utilization);
@@ -1033,47 +1052,33 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(bootstrap_port) = compat.bootstrap_port.into_nullable() {
             builder = builder.bootstrap_port(bootstrap_port);
         }
+        if let Some(timeout_ms) = compat
+            .handoff_session_timeout_ms
+            .into_non_null("handoff_session_timeout_ms")?
+        {
+            builder = builder.handoff_session_timeout_ms(timeout_ms);
+        }
         if let Some(kv_bytes_per_token) = compat.kv_bytes_per_token.into_nullable() {
             builder = builder.kv_bytes_per_token(kv_bytes_per_token);
+        }
+        if let Some(kv_cache_bytes_per_token) = compat.kv_cache_bytes_per_token.into_nullable() {
+            builder = builder.kv_cache_bytes_per_token(kv_cache_bytes_per_token);
         }
         if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
             builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);
         }
-        if let Some(num_g2_blocks) = compat.num_g2_blocks.into_nullable() {
-            builder = builder.num_g2_blocks(num_g2_blocks);
-        }
-        if let Some(num_g3_blocks) = compat.num_g3_blocks.into_nullable() {
-            builder = builder.num_g3_blocks(num_g3_blocks);
-        }
-        if let Some(enable_g4_storage) = compat
-            .enable_g4_storage
-            .into_non_null("enable_g4_storage")?
+        if let Some(mode) = compat
+            .kv_transfer_timing_mode
+            .into_non_null("kv_transfer_timing_mode")?
         {
-            builder = builder.enable_g4_storage(enable_g4_storage);
-        }
-        if let Some(offload_batch_size) = compat.offload_batch_size.into_nullable() {
-            builder = builder.offload_batch_size(offload_batch_size);
-        }
-        if let Some(bandwidth_g1_to_g2_gbps) = compat.bandwidth_g1_to_g2_gbps.into_nullable() {
-            builder = builder.bandwidth_g1_to_g2_gbps(bandwidth_g1_to_g2_gbps);
-        }
-        if let Some(bandwidth_g2_to_g1_gbps) = compat.bandwidth_g2_to_g1_gbps.into_nullable() {
-            builder = builder.bandwidth_g2_to_g1_gbps(bandwidth_g2_to_g1_gbps);
-        }
-        if let Some(bandwidth_g2_to_g3_gbps) = compat.bandwidth_g2_to_g3_gbps.into_nullable() {
-            builder = builder.bandwidth_g2_to_g3_gbps(bandwidth_g2_to_g3_gbps);
-        }
-        if let Some(bandwidth_g3_to_g2_gbps) = compat.bandwidth_g3_to_g2_gbps.into_nullable() {
-            builder = builder.bandwidth_g3_to_g2_gbps(bandwidth_g3_to_g2_gbps);
-        }
-        if let Some(bandwidth_g2_to_g4_gbps) = compat.bandwidth_g2_to_g4_gbps.into_nullable() {
-            builder = builder.bandwidth_g2_to_g4_gbps(bandwidth_g2_to_g4_gbps);
-        }
-        if let Some(bandwidth_g4_to_g2_gbps) = compat.bandwidth_g4_to_g2_gbps.into_nullable() {
-            builder = builder.bandwidth_g4_to_g2_gbps(bandwidth_g4_to_g2_gbps);
+            builder = builder.kv_transfer_timing_mode(mode.parse()?);
         }
         if let Some(reasoning) = compat.reasoning.into_nullable() {
             builder = builder.reasoning(reasoning);
+        }
+        if let Some(response_replay_trace_path) = compat.response_replay_trace_path.into_nullable()
+        {
+            builder = builder.response_replay_trace_path(response_replay_trace_path);
         }
         if let Some(zmq_kv_events_port) = compat.zmq_kv_events_port.into_nullable() {
             builder = builder.zmq_kv_events_port(zmq_kv_events_port);
@@ -1097,6 +1102,23 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
             builder = builder.trtllm(trtllm);
         }
 
+        if let Some(config) = ais_perf_config {
+            if !config.is_object() {
+                return Err("ais_perf_config must be a canonical config object".to_string());
+            }
+            let configured_role = config
+                .get("worker_type")
+                .and_then(serde_json::Value::as_str);
+            let role = match worker_type {
+                WorkerType::Aggregated => "aggregated",
+                WorkerType::Prefill => "prefill",
+                WorkerType::Decode => "decode",
+            };
+            if configured_role != Some(role) {
+                return Err(format!("AIS worker_type must match the {role} engine role"));
+            }
+            builder = builder.ais_perf_config(Some(config));
+        }
         builder
             .build()
             .map_err(|e| format!("Failed to build MockEngineArgs: {e}"))?
@@ -1124,10 +1146,122 @@ impl MockEngineArgs {
         MockEngineArgsBuilder::default()
     }
 
+    /// GPUs occupied by one worker (engine), derived from tensor parallelism
+    /// and the materialized DP topology. AIS-backed replay uses
+    /// `ais_tp_size × ais_attention_dp_size`; non-AIS replay still counts one
+    /// GPU for every independently modeled `dp_size` rank. Used to turn
+    /// provisioned worker-seconds into GPU-hours.
+    pub fn ais_gpus_per_worker(&self) -> usize {
+        self.ais_tp_size.unwrap_or(1) * self.dp_size.max(1) as usize
+    }
+
+    /// Finite ownership bound for live handoff queues and sessions.
+    ///
+    /// An unset runnable-sequence limit is semantically unbounded, so use the
+    /// physical KV block count as the conservative process-local bound.
+    pub fn effective_handoff_capacity(&self) -> usize {
+        self.max_num_seqs.unwrap_or(self.num_gpu_blocks).max(1)
+    }
+
     pub fn normalized(mut self) -> anyhow::Result<Self> {
+        self.materialize_ais_config()?;
         self.materialize_defaults();
         self.validate_config()?;
         Ok(self)
+    }
+
+    fn materialize_ais_config(&mut self) -> anyhow::Result<()> {
+        let Some(config) = self.ais_perf_config.as_ref() else {
+            return Ok(());
+        };
+        let canonical: aisimulate_core::ForwardPassPerfModelConfig =
+            serde_json::from_value(config.clone())
+                .map_err(|error| anyhow::anyhow!("invalid ais_perf_config: {error}"))?;
+        // TODO(aisimulate): add pipeline stages to ReplayRoleConfig/grouped engine
+        // construction and model pipeline scheduling before forwarding pp > 1.
+        anyhow::ensure!(
+            canonical.pp == 1,
+            "Mocker/Replay supports only pp=1; got pp={}",
+            canonical.pp
+        );
+        // The upstream schema owns required fields, enums, unknown-field
+        // rejection and defaults. Validate before any legacy branch selection.
+        let config = serde_json::to_value(canonical)?;
+        anyhow::ensure!(
+            config
+                .pointer("/speculation/kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("ngram"),
+            "Mocker does not implement ngram draft scheduling; use a supported scheduler speculation mode"
+        );
+        let role = match self.worker_type {
+            WorkerType::Aggregated => "aggregated",
+            WorkerType::Prefill => "prefill",
+            WorkerType::Decode => "decode",
+        };
+        anyhow::ensure!(
+            config
+                .get("worker_type")
+                .and_then(serde_json::Value::as_str)
+                == Some(role),
+            "AIS worker_type must match the {role} engine role"
+        );
+        macro_rules! string_field {
+            ($name:literal, $target:ident) => {
+                if let Some(value) = config.get($name).and_then(serde_json::Value::as_str) {
+                    anyhow::ensure!(
+                        self.$target.as_deref().is_none_or(|old| old == value),
+                        "AIS {} conflicts with legacy {}",
+                        $name,
+                        stringify!($target)
+                    );
+                    self.$target = Some(value.to_string());
+                }
+            };
+        }
+        macro_rules! size_field {
+            ($name:literal, $target:ident) => {
+                if let Some(value) = config.get($name).and_then(serde_json::Value::as_u64) {
+                    let value = usize::try_from(value)?;
+                    anyhow::ensure!(
+                        self.$target.is_none_or(|old| old == value),
+                        "AIS {} conflicts with legacy {}",
+                        $name,
+                        stringify!($target)
+                    );
+                    self.$target = Some(value);
+                }
+            };
+        }
+        string_field!("backend", ais_backend);
+        string_field!("system", ais_system);
+        string_field!("model", ais_model_path);
+        string_field!("backend_version", ais_backend_version);
+        string_field!("gemm_quant_mode", ais_gemm_dtype);
+        string_field!("moe_quant_mode", ais_moe_dtype);
+        string_field!("fmha_quant_mode", ais_fmha_dtype);
+        string_field!("kvcache_quant_mode", ais_kv_cache_dtype);
+        string_field!("comm_quant_mode", ais_comm_dtype);
+        size_field!("tp", ais_tp_size);
+        size_field!("moe_tp_size", ais_moe_tp_size);
+        size_field!("moe_ep_size", ais_moe_ep_size);
+        size_field!("attention_dp", ais_attention_dp_size);
+        if let Some(dp) = self.ais_attention_dp_size {
+            anyhow::ensure!(
+                self.dp_size == 1 || self.dp_size as usize == dp,
+                "dp_size conflicts with canonical attention_dp"
+            );
+            self.dp_size = u32::try_from(dp)?;
+        }
+        if let Some(nextn) = config.get("nextn").and_then(serde_json::Value::as_u64) {
+            let nextn = usize::try_from(nextn)?;
+            anyhow::ensure!(
+                self.ais_nextn.unwrap_or(0) == 0 || self.ais_nextn == Some(nextn),
+                "canonical nextn conflicts with scheduler ais_nextn"
+            );
+            self.ais_nextn = (nextn != 0).then_some(nextn);
+        }
+        Ok(())
     }
 
     fn materialize_defaults(&mut self) {
@@ -1156,39 +1290,20 @@ impl MockEngineArgs {
                 }
             }
         }
-
-        if self.num_g2_blocks == Some(0) {
-            self.num_g2_blocks = None;
-        }
-        if self.num_g3_blocks == Some(0) {
-            self.num_g3_blocks = None;
-        }
-        if self.offload_batch_size == Some(0) {
-            self.offload_batch_size = None;
-        }
     }
 
     fn validate_config(&mut self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
-        if let Some(nextn) = self.aic_nextn {
+        if let Some(nextn) = self.ais_nextn {
             let rates = crate::common::speculative::normalize_conditional_accept_rates(
                 nextn,
-                self.aic_nextn_accept_rates.as_deref(),
+                self.ais_nextn_accept_rates.as_deref(),
             )?;
-            self.aic_nextn_accept_rates =
+            self.ais_nextn_accept_rates =
                 Some(crate::common::speculative::format_accept_rates(&rates));
         }
         Ok(())
-    }
-
-    /// Scheduling policy applied by the shared vLLM scheduler core, derived
-    /// from the engine type. TRT-LLM uses `GUARANTEED_NO_EVICT`.
-    pub fn scheduling_policy(&self) -> SchedulingPolicy {
-        match self.engine_type {
-            EngineType::Trtllm => SchedulingPolicy::TrtllmGuaranteedNoEvict,
-            EngineType::Vllm | EngineType::Sglang => SchedulingPolicy::Vllm,
-        }
     }
 
     pub fn is_prefill(&self) -> bool {
@@ -1201,10 +1316,6 @@ impl MockEngineArgs {
 
     pub fn needs_kv_publisher(&self) -> bool {
         self.enable_prefix_caching && !self.is_decode()
-    }
-
-    pub fn undiscounted_aic_accept_rates(&self) -> Option<String> {
-        crate::common::speculative::undiscounted_aic_accept_rates(self.aic_nextn)
     }
 
     /// Create MockEngineArgs from a JSON file containing extra engine arguments
@@ -1226,13 +1337,199 @@ impl MockEngineArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn canonical_ais_config_preserves_controls_and_materializes_identity() {
+        let config = json!({
+            "model": "model", "system": "h200_sxm", "backend": "vllm",
+            "worker_type": "aggregated", "tp": 2, "attention_dp": 2,
+            "systems_paths": ["first", "second"],
+            "estimator_config": {"correction": {"enabled": false}}
+        });
+        let args = MockEngineArgs::from_json_str(
+            &json!({
+                "timing_model": {"type": "external", "provider": "aic", "config": config},
+                "tensor_parallel_size": 2, "dp_size": 2,
+                "prefill_schedule_interval": 3,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(args.ais_perf_config, Some(config.clone()));
+        assert_eq!(args.ais_tp_size, Some(2));
+        assert_eq!(args.ais_backend.as_deref(), Some("vllm"));
+        assert_eq!(args.prefill_schedule_interval, 3);
+        let serialized = serde_json::to_value(&args).unwrap();
+        assert_eq!(serialized["ais_perf_config"], config);
+        assert!(serialized.get("aic_nextn").is_none());
+    }
+
+    #[test]
+    fn canonical_ais_config_rejects_role_topology_and_alias_conflicts() {
+        let config = json!({"model": "model", "system": "gpu", "backend": "vllm",
+                            "worker_type": "decode", "tp": 2});
+        for value in [
+            json!({"ais_perf_config": config}),
+            json!({"worker_type": "decode", "ais_perf_config": config, "tensor_parallel_size": 4}),
+            json!({"aic_backend": "vllm"}),
+            json!({"ais_perf_config": []}),
+            json!({"ais_perf_config": {"model": "model", "system": "gpu", "worker_type": "aggregated"}}),
+            json!({"worker_type": "decode", "ais_perf_config": config,
+                   "timing_model": {"type": "fixed", "prefill_ms": 1, "decode_ms": 1}}),
+        ] {
+            assert!(
+                MockEngineArgs::from_json_str(&value.to_string()).is_err(),
+                "{value}"
+            );
+        }
+        let args = MockEngineArgs::builder()
+            .worker_type(WorkerType::Decode)
+            .ais_perf_config(Some(config))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        assert_eq!(args.ais_tp_size, Some(2));
+    }
+
+    #[test]
+    fn canonical_ais_config_rejects_pipeline_parallelism() {
+        let config = json!({
+            "model": "model", "system": "gpu", "backend": "vllm",
+            "worker_type": "aggregated", "pp": 2
+        });
+        let error = MockEngineArgs::builder()
+            .ais_perf_config(Some(config.clone()))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(error.to_string().contains("supports only pp=1; got pp=2"));
+
+        let mut alias_config = config.clone();
+        alias_config.as_object_mut().unwrap().remove("pp");
+        alias_config["pp_size"] = json!(2);
+        for value in [
+            json!({"ais_perf_config": config}),
+            json!({"timing_model": {
+                "type": "external", "provider": "aic", "config": alias_config
+            }}),
+        ] {
+            let error = MockEngineArgs::from_json_str(&value.to_string()).unwrap_err();
+            assert!(error.to_string().contains("supports only pp=1; got pp=2"));
+        }
+    }
+
+    #[test]
+    fn canonical_ais_config_accepts_default_and_explicit_single_pipeline_stage() {
+        let config = json!({
+            "model": "model", "system": "gpu", "backend": "vllm",
+            "worker_type": "aggregated"
+        });
+        for pp in [None, Some(1)] {
+            let mut config = config.clone();
+            if let Some(pp) = pp {
+                config["pp"] = json!(pp);
+            }
+            let args =
+                MockEngineArgs::from_json_str(&json!({"ais_perf_config": config}).to_string())
+                    .unwrap();
+            assert_eq!(args.ais_perf_config, Some(config));
+            assert_eq!(args.ais_gpus_per_worker(), 1);
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingRawSink {
+        attempts: Mutex<Vec<u64>>,
+    }
+
+    impl RawKvEventSink for FailingRawSink {
+        fn publish(&self, event: RawKvEvent) -> anyhow::Result<()> {
+            self.attempts.lock().unwrap().push(event.event.event_id);
+            if event.event.event_id == 2 {
+                anyhow::bail!("injected raw sink failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn raw_sink_batch_fallback_attempts_later_events_after_failure() {
+        let sink = FailingRawSink::default();
+        let error = sink
+            .publish_batch(
+                (1..=3)
+                    .map(|event_id| RawKvEvent {
+                        event: KvCacheEvent {
+                            event_id,
+                            data: dynamo_kv_router::protocols::KvCacheEventData::Cleared,
+                            dp_rank: 0,
+                        },
+                        block_token_ids: None,
+                        storage_tier: StorageTier::Device,
+                    })
+                    .collect(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "injected raw sink failure");
+        assert_eq!(*sink.attempts.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn direct_request_priorities_are_backward_compatible() {
+        let legacy = json!({
+            "tokens": [1, 2],
+            "max_output_tokens": 3,
+            "uuid": null,
+            "dp_rank": 0,
+            "arrival_timestamp_ms": null
+        });
+        let request: DirectRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(request.priority, 0);
+        assert_eq!(request.strict_priority, 0);
+        assert_eq!(request.router_priorities(), (0.0, 0));
+
+        let rendered = serde_json::to_value(&request).unwrap();
+        assert!(rendered.get("priority").is_none());
+        assert!(rendered.get("strict_priority").is_none());
+    }
+
+    #[test]
+    fn direct_request_derives_router_priorities() {
+        let negative: DirectRequest = serde_json::from_value(json!({
+            "tokens": [1],
+            "max_output_tokens": 1,
+            "uuid": null,
+            "dp_rank": 0,
+            "arrival_timestamp_ms": null,
+            "priority": -7,
+            "strict_priority": 4
+        }))
+        .unwrap();
+        assert_eq!(negative.router_priorities(), (0.0, 4));
+
+        let positive = DirectRequest {
+            priority: 9,
+            strict_priority: 5,
+            ..negative
+        };
+        assert_eq!(positive.router_priorities(), (9.0, 5));
+        let rendered = serde_json::to_value(&positive).unwrap();
+        assert_eq!(rendered["priority"], 9);
+        assert_eq!(rendered["strict_priority"], 5);
+    }
 
     #[test]
     fn test_mock_engine_args_json_round_trip_preserves_worker_type_and_nulls() {
         let args = MockEngineArgs::builder()
             .worker_type(WorkerType::Decode)
+            .max_model_len(Some(32768))
             .max_num_seqs(None)
             .max_num_batched_tokens(None)
             .reasoning(None)
@@ -1242,7 +1539,7 @@ mod tests {
             .normalized()
             .unwrap();
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "engine_type": "vllm",
             "num_gpu_blocks": args.num_gpu_blocks,
             "block_size": args.block_size,
@@ -1256,25 +1553,12 @@ mod tests {
             "startup_time": args.startup_time,
             "worker_type": "decode",
             "planner_profile_data": args.planner_profile_data,
-            "aic_backend": args.aic_backend,
-            "aic_system": args.aic_system,
-            "aic_backend_version": args.aic_backend_version,
-            "aic_tp_size": args.aic_tp_size,
-            "aic_model_path": args.aic_model_path,
             "enable_local_indexer": args.enable_local_indexer,
             "bootstrap_port": args.bootstrap_port,
+            "handoff_session_timeout_ms": args.handoff_session_timeout_ms,
             "kv_bytes_per_token": args.kv_bytes_per_token,
             "kv_transfer_bandwidth": args.kv_transfer_bandwidth,
-            "num_g2_blocks": args.num_g2_blocks,
-            "num_g3_blocks": args.num_g3_blocks,
-            "enable_g4_storage": args.enable_g4_storage,
-            "offload_batch_size": args.offload_batch_size,
-            "bandwidth_g1_to_g2_gbps": args.bandwidth_g1_to_g2_gbps,
-            "bandwidth_g2_to_g1_gbps": args.bandwidth_g2_to_g1_gbps,
-            "bandwidth_g2_to_g3_gbps": args.bandwidth_g2_to_g3_gbps,
-            "bandwidth_g3_to_g2_gbps": args.bandwidth_g3_to_g2_gbps,
-            "bandwidth_g2_to_g4_gbps": args.bandwidth_g2_to_g4_gbps,
-            "bandwidth_g4_to_g2_gbps": args.bandwidth_g4_to_g2_gbps,
+            "kv_transfer_timing_mode": "full_prompt",
             "reasoning": args.reasoning,
             "zmq_kv_events_port": args.zmq_kv_events_port,
             "zmq_replay_port": args.zmq_replay_port,
@@ -1283,19 +1567,25 @@ mod tests {
             "sglang": args.sglang,
             "has_perf_model": true,
         });
+        payload["max_model_len"] = serde_json::json!(args.max_model_len);
 
         let restored = MockEngineArgs::from_json_str(&payload.to_string()).unwrap();
 
         assert_eq!(restored.worker_type, WorkerType::Decode);
+        assert_eq!(restored.max_model_len, Some(32768));
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+        assert_eq!(
+            restored.kv_transfer_timing_mode,
+            KvTransferTimingMode::FullPrompt
+        );
     }
 
     #[test]
     fn test_mock_engine_args_accepts_legacy_enum_case_and_writes_lowercase() {
         let args = MockEngineArgs::from_json_str(
             &json!({
-                "engine_type": "Vllm",
+                "engine_type": "VLLM",
                 "worker_type": "Aggregated",
                 "preemption_mode": "Lifo",
             })
@@ -1307,6 +1597,22 @@ mod tests {
         assert_eq!(serialized["engine_type"], "vllm");
         assert_eq!(serialized["worker_type"], "aggregated");
         assert_eq!(serialized["preemption_mode"], "lifo");
+    }
+
+    #[test]
+    fn canonical_ais_quantization_materializes_identity() {
+        let args = MockEngineArgs::from_json_str(
+            &json!({"ais_perf_config": {
+                "model": "model", "system": "h200_sxm", "backend": "vllm",
+                "worker_type": "aggregated", "gemm_quant_mode": "fp8_block",
+                "moe_quant_mode": "w4a16_mxfp4", "fmha_quant_mode": "bfloat16",
+                "kvcache_quant_mode": "fp8", "comm_quant_mode": "fp8"
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(args.ais_gemm_dtype.as_deref(), Some("fp8_block"));
+        assert_eq!(args.ais_kv_cache_dtype.as_deref(), Some("fp8"));
     }
 
     #[test]
@@ -1332,32 +1638,6 @@ mod tests {
             trailing.to_string().contains("trailing characters"),
             "unexpected error: {trailing}",
         );
-    }
-
-    #[test]
-    fn test_unique_block_default_uniqueness() {
-        // Create 10 default UniqueBlock instances
-        let blocks: Vec<UniqueBlock> = (0..10).map(|_| UniqueBlock::default()).collect();
-
-        // Extract UUIDs from each block
-        let mut uuids = Vec::new();
-        for block in blocks {
-            match block {
-                UniqueBlock::PartialBlock(uuid) => uuids.push(uuid),
-                _ => panic!("Expected UuidIdentifier variant"),
-            }
-        }
-
-        // Check that all UUIDs are unique by comparing each with every other
-        for i in 0..uuids.len() {
-            for j in i + 1..uuids.len() {
-                assert_ne!(
-                    uuids[i], uuids[j],
-                    "UUID at index {} and {} are identical",
-                    i, j
-                );
-            }
-        }
     }
 
     #[test]
@@ -1416,95 +1696,76 @@ mod tests {
     }
 
     #[test]
-    fn test_normalized_g3_requires_g2() {
-        let missing_g2 = MockEngineArgs::builder()
-            .num_g3_blocks(Some(10))
-            .kv_bytes_per_token(Some(1024))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap_err();
-        assert!(
-            missing_g2.to_string().contains("requires num_g2_blocks"),
-            "unexpected error: {missing_g2}",
-        );
-    }
-
-    #[test]
-    fn test_normalized_g4_requires_g2() {
-        let missing_g2 = MockEngineArgs::builder()
-            .enable_g4_storage(true)
-            .kv_bytes_per_token(Some(1024))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap_err();
-        assert!(
-            missing_g2.to_string().contains("requires num_g2_blocks"),
-            "unexpected error: {missing_g2}",
-        );
-    }
-
-    #[test]
-    fn test_normalized_rejects_out_of_range_aic_nextn() {
-        // The mocker/replay JSON path must share AicPerfConfig's 1..=5 contract.
+    fn test_normalized_rejects_out_of_range_ais_nextn() {
+        // The mocker/replay JSON path must share AisPerfConfig's 1..=5 contract.
         for bad in [0_usize, 6, usize::MAX] {
             let err = MockEngineArgs::builder()
-                .aic_nextn(Some(bad))
+                .ais_nextn(Some(bad))
                 .build()
                 .unwrap()
                 .normalized()
                 .unwrap_err();
             assert!(
-                err.to_string().contains("aic_nextn"),
+                err.to_string().contains("ais_nextn"),
                 "unexpected error for nextn={bad}: {err}",
             );
         }
         MockEngineArgs::builder()
-            .aic_nextn(Some(3))
+            .ais_nextn(Some(3))
             .build()
             .unwrap()
             .normalized()
-            .expect("in-range aic_nextn should validate");
+            .expect("in-range ais_nextn should validate");
+    }
+
+    #[test]
+    fn test_normalized_rejects_zero_max_model_len() {
+        let error = MockEngineArgs::builder()
+            .max_model_len(Some(0))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("max_model_len"),
+            "unexpected error: {error}",
+        );
     }
 
     #[test]
     fn test_mtp_defaults_and_json_round_trip() {
         let args = MockEngineArgs::builder()
-            .aic_nextn(Some(3))
+            .ais_nextn(Some(3))
             .build()
             .unwrap()
             .normalized()
             .unwrap();
-        assert_eq!(args.aic_nextn_accept_rates.as_deref(), Some("0.85,0.3,0"));
-        assert_eq!(args.aic_mtp_seed, 42);
-        assert_eq!(
-            args.undiscounted_aic_accept_rates().as_deref(),
-            Some("0,0,0")
-        );
+        assert_eq!(args.ais_nextn_accept_rates.as_deref(), Some("0.85,0.3,0"));
+        assert_eq!(args.ais_mtp_seed, 42);
 
         let json = serde_json::to_string(&args).unwrap();
         let round_trip = MockEngineArgs::from_json_str(&json).unwrap();
-        assert_eq!(round_trip.aic_nextn, Some(3));
+        assert_eq!(round_trip.ais_nextn, Some(3));
         assert_eq!(
-            round_trip.aic_nextn_accept_rates.as_deref(),
+            round_trip.ais_nextn_accept_rates.as_deref(),
             Some("0.85,0.3,0")
         );
-        assert_eq!(round_trip.aic_mtp_seed, 42);
+        assert_eq!(round_trip.ais_mtp_seed, 42);
     }
 
     #[test]
     fn test_mtp_rates_are_validated_before_normalization() {
         for rates in ["nan", "inf", "-0.1", "1.1", "bad"] {
             let err = MockEngineArgs::builder()
-                .aic_nextn(Some(1))
-                .aic_nextn_accept_rates(Some(rates.to_string()))
+                .ais_nextn(Some(1))
+                .ais_nextn_accept_rates(Some(rates.to_string()))
                 .build()
                 .unwrap()
                 .normalized()
                 .unwrap_err();
             assert!(
-                err.to_string().contains("aic_nextn_accept_rates"),
+                err.to_string().contains("nextn_accept_rates"),
                 "unexpected error for rates={rates:?}: {err}"
             );
         }
@@ -1513,28 +1774,28 @@ mod tests {
     #[test]
     fn test_mtp_rates_are_padded_and_truncated_to_nextn() {
         let padded = MockEngineArgs::builder()
-            .aic_nextn(Some(3))
-            .aic_nextn_accept_rates(Some("1,0.5".to_string()))
+            .ais_nextn(Some(3))
+            .ais_nextn_accept_rates(Some("1,0.5".to_string()))
             .build()
             .unwrap()
             .normalized()
             .unwrap();
-        assert_eq!(padded.aic_nextn_accept_rates.as_deref(), Some("1,0.5,0"));
+        assert_eq!(padded.ais_nextn_accept_rates.as_deref(), Some("1,0.5,0"));
 
         let truncated = MockEngineArgs::builder()
-            .aic_nextn(Some(2))
-            .aic_nextn_accept_rates(Some("1,0.5,0.25".to_string()))
+            .ais_nextn(Some(2))
+            .ais_nextn_accept_rates(Some("1,0.5,0.25".to_string()))
             .build()
             .unwrap()
             .normalized()
             .unwrap();
-        assert_eq!(truncated.aic_nextn_accept_rates.as_deref(), Some("1,0.5"));
+        assert_eq!(truncated.ais_nextn_accept_rates.as_deref(), Some("1,0.5"));
     }
 
     #[test]
     fn test_mtp_rejects_decode_speedup_ratio() {
         let err = MockEngineArgs::builder()
-            .aic_nextn(Some(1))
+            .ais_nextn(Some(1))
             .decode_speedup_ratio(2.0)
             .build()
             .unwrap()
@@ -1544,68 +1805,41 @@ mod tests {
     }
 
     #[test]
-    fn test_normalized_zero_disables_optional_offload_knobs() {
-        let args = MockEngineArgs::builder()
-            .num_g2_blocks(Some(0))
-            .num_g3_blocks(Some(0))
-            .offload_batch_size(Some(0))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
-
-        assert_eq!(args.num_g2_blocks, None);
-        assert_eq!(args.num_g3_blocks, None);
-        assert!(!args.enable_g4_storage);
-        assert_eq!(args.offload_batch_size, None);
-    }
-
-    #[test]
-    fn test_normalized_zero_g3_does_not_require_g2_or_kv_bytes() {
-        let args = MockEngineArgs::builder()
-            .num_g3_blocks(Some(0))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
-
-        assert_eq!(args.num_g3_blocks, None);
-    }
-
-    #[test]
-    fn test_normalized_g3_allows_missing_kv_bytes_for_cli_auto_compute() {
-        let args = MockEngineArgs::builder()
-            .num_g2_blocks(Some(10))
-            .num_g3_blocks(Some(10))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
-
-        assert_eq!(args.num_g2_blocks, Some(10));
-        assert_eq!(args.num_g3_blocks, Some(10));
-        assert_eq!(args.kv_bytes_per_token, None);
-    }
-
-    #[test]
-    fn test_normalized_g4_allows_missing_kv_bytes_for_cli_auto_compute() {
-        let args = MockEngineArgs::builder()
-            .num_g2_blocks(Some(10))
-            .enable_g4_storage(true)
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
-
-        assert_eq!(args.num_g2_blocks, Some(10));
-        assert!(args.enable_g4_storage);
-        assert_eq!(args.kv_bytes_per_token, None);
-    }
-
-    #[test]
     fn test_normalized_sglang_defaults_block_size_to_one() {
         let args = MockEngineArgs::builder()
             .engine_type(EngineType::Sglang)
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.block_size, 1);
+    }
+
+    #[test]
+    fn test_normalized_shared_scheduler_rejects_block_size_one_for_every_backend() {
+        for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+            let error = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .block_size(1)
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("the vLLM/TRT-LLM scheduler requires block_size to be at least 2"),
+                "engine_type={engine_type:?}, error={error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalized_sglang_accepts_block_size_one() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(1)
             .build()
             .unwrap()
             .normalized()

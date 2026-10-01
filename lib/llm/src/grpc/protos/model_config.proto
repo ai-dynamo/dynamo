@@ -193,7 +193,7 @@ message ModelInstanceGroup
   //@@  .. cpp:var:: string name
   //@@
   //@@     Optional name of this group of instances. If not specified the
-  //@@     name will be formed as <model name>_<group number>. The name of
+  //@@     name will be formed as {model name}_{group number}. The name of
   //@@     individual instances will be further formed by a unique instance
   //@@     number and GPU index:
   //@@
@@ -245,7 +245,7 @@ message ModelInstanceGroup
   //@@     parameter specifies a set of optimization profiles available to this
   //@@     instance group. The inference server will choose the optimal profile
   //@@     based on the shapes of the input tensors. This field should lie
-  //@@     between 0 and <TotalNumberOfOptimizationProfilesInPlanModel> - 1
+  //@@     between 0 and TotalNumberOfOptimizationProfilesInPlanModel - 1
   //@@     and be specified only for TensorRT backend, otherwise an error will
   //@@     be generated. If not specified, the server will select the first
   //@@     optimization profile by default.

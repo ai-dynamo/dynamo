@@ -16,21 +16,22 @@ from __future__ import annotations
 
 import base64
 import os
-import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from io import BytesIO
 from typing import Any, Generator
 
 import pytest
 import requests
 
-from tests.conftest import EtcdServer, NatsServer
-from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.mm_router.utils import (
+    COMMON_PROCESS_KWARGS,
+    build_vllm_gpu_mem_args,
+    make_png_bytes,
+)
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_ports
+from tests.utils.port_utils import reserved_ports
 from tests.utils.router_logs import (
     extract_router_kv_overlap_records,
     wait_for_router_kv_overlap,
@@ -39,8 +40,6 @@ from tests.utils.router_logs import (
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 BLOCK_SIZE = 16
 NAMESPACE = "dynamo"
-THREE_IMAGE_TOTAL_BLOCKS_RANGE = (180, 340)
-SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (60, 160)
 
 pytestmark = [
     pytest.mark.e2e,
@@ -66,13 +65,7 @@ _DOUBLE_IMAGE_FRESH_COLOR = (89, 210, 34)
 _STAIRCASE_IMAGE_FRESH_COLOR = (17, 99, 201)
 _SWAP_ORDER_FRESH_COLORS = [(14, 141, 77), (211, 66, 101), (44, 91, 233)]
 _HTTP_IMAGE_COLORS = [(180, 30, 90), (30, 180, 90), (90, 30, 180)]
-
-
-def _check_ready(response) -> bool:
-    try:
-        return (response.json() or {}).get("status") == "ready"
-    except ValueError:
-        return False
+_HTTP_DATA_URI_COLOR = (60, 120, 210)
 
 
 def _make_process_env(log_level: str = "debug", **extra) -> dict[str, str]:
@@ -86,29 +79,13 @@ def _make_process_env(log_level: str = "debug", **extra) -> dict[str, str]:
 
 
 def _prepare_log_dir(request, suffix: str) -> str:
-    log_dir = f"{request.node.name}_{suffix}"
-    shutil.rmtree(log_dir, ignore_errors=True)
-    return log_dir
-
-
-_COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    # Keep logs file-only; live tee can lag under GPU-parallel CI while tests poll files.
-    "display_output": False,
-    "terminate_all_matching_process_names": False,
-}
-
-
-def _vllm_gpu_mem_args(default_utilization: str) -> list[str]:
-    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
-        "--gpu-memory-utilization",
-        default_utilization,
-    ]
+    return f"{request.node.name}_{suffix}"
 
 
 class VLLMWorkerProcess(ManagedProcess):
     """vLLM backend worker that emits KV events."""
 
-    def __init__(self, request, *, system_port: int, kv_event_port: int):
+    def __init__(self, request, *, system_port: int, kv_event_port: int, fpm_port: int):
         super().__init__(
             command=[
                 "python3",
@@ -120,7 +97,7 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--block-size",
                 str(BLOCK_SIZE),
                 "--enforce-eager",
-                *_vllm_gpu_mem_args("0.40"),
+                *build_vllm_gpu_mem_args("0.40"),
                 "--max-model-len",
                 "4096",
                 "--kv-events-config",
@@ -130,14 +107,19 @@ class VLLMWorkerProcess(ManagedProcess):
                     f'"enable_kv_cache_events": true}}'
                 ),
             ],
-            env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
+            # Forward-pass metrics: unique port for this worker's
+            # InstrumentedScheduler ZMQ PUB (single worker, so no DP block).
+            env=_make_process_env(
+                DYN_SYSTEM_PORT=str(system_port),
+                DYN_FORWARDPASS_METRIC_PORT=str(fpm_port),
+            ),
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready)
+                (f"http://localhost:{system_port}/health", check_health_ready)
             ],
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],
             log_dir=_prepare_log_dir(request, "vllm-worker"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
 
 
@@ -178,18 +160,8 @@ class FrontendProcess(ManagedProcess):
             timeout=240,
             straggler_commands=["-m dynamo.frontend"],
             log_dir=_prepare_log_dir(request, f"vllm-mm-frontend-{transfer_mode}"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
-
-
-@pytest.fixture(scope="module")
-def mm_runtime_services(request):
-    with NatsServer(request, port=0) as nats, EtcdServer(request, port=0) as etcd:
-        os.environ["NATS_SERVER"] = f"nats://localhost:{nats.port}"
-        os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd.port}"
-        yield
-        os.environ.pop("NATS_SERVER", None)
-        os.environ.pop("ETCD_ENDPOINTS", None)
 
 
 @pytest.fixture(scope="module", params=["shm", "nixl", "disabled"])
@@ -197,24 +169,24 @@ def start_vllm_mm_services(
     request, mm_runtime_services
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
     transfer_mode = request.param
-    frontend_port, vllm_port, kv_event_port = allocate_ports(count=3, start_port=10000)
-
-    with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
-        # Worker health check passed; wait briefly for ZMQ publisher to bind.
-        time.sleep(2)
-        with FrontendProcess(
-            request, frontend_port=frontend_port, transfer_mode=transfer_mode
-        ) as frontend_proc:
-            yield frontend_port, frontend_proc
+    with reserved_ports(count=4, start_port=10000) as ports:
+        frontend_port, vllm_port, kv_event_port, fpm_port = ports
+        with VLLMWorkerProcess(
+            request,
+            system_port=vllm_port,
+            kv_event_port=kv_event_port,
+            fpm_port=fpm_port,
+        ):
+            # Worker health check passed; wait briefly for ZMQ publisher to bind.
+            time.sleep(2)
+            with FrontendProcess(
+                request, frontend_port=frontend_port, transfer_mode=transfer_mode
+            ) as frontend_proc:
+                yield frontend_port, frontend_proc
 
 
 def _make_png_bytes(color: tuple[int, int, int], size: int = 1024) -> bytes:
-    from PIL import Image
-
-    img = Image.new("RGB", (size, size), color)
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    return make_png_bytes(color, size)
 
 
 def _make_data_uri(color: tuple[int, int, int], size: int = 1024) -> str:
@@ -267,6 +239,30 @@ def _send_request_get_overlap(
     return overlap, total, recent_logs
 
 
+def _assert_stable_total_blocks(
+    context: str, totals: list[int], recent_logs: str, tolerance: int = 2
+):
+    assert all(total > 0 for total in totals), (
+        f"Expected non-zero total blocks for {context}, got {totals}.\n"
+        f"Recent frontend logs:\n{recent_logs[-4000:]}"
+    )
+    assert max(totals) - min(totals) <= tolerance, (
+        f"Expected total blocks to remain stable for {context}, got {totals}.\n"
+        f"Recent frontend logs:\n{recent_logs[-4000:]}"
+    )
+
+
+def _assert_nearly_full_repeat_overlap(
+    context: str, overlap: int, total: int, recent_logs: str
+):
+    min_expected = max(1, total - 1)
+    assert overlap >= min_expected, (
+        f"Expected repeated {context} overlap to cover nearly all cached blocks, "
+        f"got {overlap}/{total}, expected >= {min_expected}/{total}.\n"
+        f"Recent frontend logs:\n{recent_logs[-4000:]}"
+    )
+
+
 @pytest.mark.pre_merge
 @pytest.mark.profiled_vram_gib(7.6)
 @pytest.mark.requested_vllm_kv_cache_bytes(
@@ -276,11 +272,14 @@ def _send_request_get_overlap(
 def test_vllm_mm_overlap_all(
     start_vllm_mm_services, predownload_models, http_image_server
 ):
-    """Run all MM overlap scenarios under one profiled worker startup.
+    """Run model-independent MM overlap scenarios under one profiled worker startup.
 
     GPU-parallel CI runs each selected test id in its own pytest subprocess.
     Keeping the individual scenario tests out of pre_merge avoids paying vLLM
     startup for each scenario while preserving them for manual development runs.
+    The assertions intentionally avoid model-specific block-count ranges so this
+    suite can also validate Gemma-style unified processors through
+    DYN_TEST_VLLM_MM_MODEL.
     """
     _check_text_only_overlap_repeated_prompt(start_vllm_mm_services, predownload_models)
     _check_repeated_three_images(start_vllm_mm_services, predownload_models)
@@ -380,10 +379,11 @@ def _check_repeated_three_images(start_vllm_mm_services, predownload_models):
         f"Expected third overlap == second, got req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
         f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
-    low, high = THREE_IMAGE_TOTAL_BLOCKS_RANGE
-    assert low <= total_3 <= high, (
-        f"Unexpected total blocks for same 3 images (1024): "
-        f"got {total_3}, expected in [{low}, {high}]"
+    _assert_stable_total_blocks(
+        "same 3-image request", [total_1, total_2, total_3], segment_3
+    )
+    _assert_nearly_full_repeat_overlap(
+        "same 3-image request", overlap_3, total_3, segment_3
     )
 
 
@@ -418,10 +418,11 @@ def _check_repeated_single_image(start_vllm_mm_services, predownload_models):
         f"Expected third overlap == second, got req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
         f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
-    low, high = SINGLE_IMAGE_TOTAL_BLOCKS_RANGE
-    assert low <= total_3 <= high, (
-        f"Unexpected total blocks for same 1 image (1024): "
-        f"got {total_3}, expected in [{low}, {high}]"
+    _assert_stable_total_blocks(
+        "same single-image request", [total_1, total_2, total_3], segment_3
+    )
+    _assert_nearly_full_repeat_overlap(
+        "same single-image request", overlap_3, total_3, segment_3
     )
 
 
@@ -456,6 +457,14 @@ def _check_repeated_two_identical_images(start_vllm_mm_services, predownload_mod
     assert overlap_3 == overlap_2, (
         f"Expected third overlap == second, got req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
         f"Recent frontend logs:\n{segment_3[-4000:]}"
+    )
+    _assert_stable_total_blocks(
+        "same two-identical-image request",
+        [total_1, total_2, total_3],
+        segment_3,
+    )
+    _assert_nearly_full_repeat_overlap(
+        "same two-identical-image request", overlap_3, total_3, segment_3
     )
 
 
@@ -538,10 +547,11 @@ def _check_diff_images_less_than_same(start_vllm_mm_services, predownload_models
         f"Baseline overlap did not reach 2 blocks. got {overlap_baseline}/{total_baseline}.\n"
         f"Recent frontend logs:\n{segment_baseline[-4000:]}"
     )
-    low, high = THREE_IMAGE_TOTAL_BLOCKS_RANGE
-    assert low <= total_baseline <= high, (
-        f"Unexpected total blocks for baseline same-images request: "
-        f"got {total_baseline}, expected in [{low}, {high}]"
+    _assert_nearly_full_repeat_overlap(
+        "baseline same-images request",
+        overlap_baseline_2,
+        total_baseline_2,
+        segment_baseline,
     )
 
     probe_payload = _build_payload(
@@ -598,10 +608,11 @@ def _check_same_images_different_prompt_less_than_same_prompt(
         f"Baseline overlap did not reach 2 blocks. got {overlap_baseline}/{total_baseline}.\n"
         f"Recent frontend logs:\n{segment_baseline[-4000:]}"
     )
-    low, high = THREE_IMAGE_TOTAL_BLOCKS_RANGE
-    assert low <= total_baseline <= high, (
-        f"Unexpected total blocks for baseline same-images request: "
-        f"got {total_baseline}, expected in [{low}, {high}]"
+    _assert_nearly_full_repeat_overlap(
+        "baseline same-images request",
+        overlap_baseline_2,
+        total_baseline_2,
+        segment_baseline,
     )
 
     probe_payload = _build_payload(
@@ -700,24 +711,30 @@ def _make_image_handler(image_map: dict[str, bytes]) -> type:
 @pytest.fixture(scope="module")
 def http_image_server() -> Generator[list[str], None, None]:
     """Serve pre-generated PNG images over HTTP for the duration of the module."""
-    (port,) = allocate_ports(count=1, start_port=18000)
+    with reserved_ports(count=1, start_port=18000) as ports:
+        port = ports[0]
+        image_map: dict[str, bytes] = {}
+        for i, color in enumerate(_HTTP_IMAGE_COLORS):
+            image_map[f"/image_{i}.png"] = _make_png_bytes(color)
+        image_map["/image_data_uri_equivalent.png"] = _make_png_bytes(
+            _HTTP_DATA_URI_COLOR
+        )
 
-    image_map: dict[str, bytes] = {}
-    for i, color in enumerate(_HTTP_IMAGE_COLORS):
-        image_map[f"/image_{i}.png"] = _make_png_bytes(color)
+        server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
 
-    server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    urls = [
-        f"http://127.0.0.1:{port}/image_{i}.png" for i in range(len(_HTTP_IMAGE_COLORS))
-    ]
-    yield urls
-
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
+        urls = [
+            f"http://127.0.0.1:{port}/image_{i}.png"
+            for i in range(len(_HTTP_IMAGE_COLORS))
+        ]
+        urls.append(f"http://127.0.0.1:{port}/image_data_uri_equivalent.png")
+        try:
+            yield urls
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 @pytest.mark.timeout(600)
@@ -728,7 +745,7 @@ def _check_repeated_http_images(
     frontend_port, router_proc = start_vllm_mm_services
 
     payload = _build_payload(
-        http_image_server, prompt="MM routing e2e: repeated same 3 HTTP images."
+        http_image_server[:3], prompt="MM routing e2e: repeated same 3 HTTP images."
     )
     overlap_1, total_1, _ = _send_request_get_overlap(
         frontend_port, router_proc, payload, "http_3_images_req1"
@@ -754,10 +771,11 @@ def _check_repeated_http_images(
         f"Expected third overlap == second, got req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
         f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
-    low, high = THREE_IMAGE_TOTAL_BLOCKS_RANGE
-    assert low <= total_3 <= high, (
-        f"Unexpected total blocks for same 3 HTTP images (1024): "
-        f"got {total_3}, expected in [{low}, {high}]"
+    _assert_stable_total_blocks(
+        "same 3-HTTP-image request", [total_1, total_2, total_3], segment_3
+    )
+    _assert_nearly_full_repeat_overlap(
+        "same 3-HTTP-image request", overlap_3, total_3, segment_3
     )
 
 
@@ -768,10 +786,9 @@ def _check_http_vs_data_uri_same_image(
     """HTTP URL and data URI for the same image should produce identical KV cache hashes."""
     frontend_port, router_proc = start_vllm_mm_services
 
-    # Use the first HTTP image color to build both representations
-    color = _HTTP_IMAGE_COLORS[0]
+    color = _HTTP_DATA_URI_COLOR
     data_uri = _make_data_uri(color)
-    http_url = http_image_server[0]
+    http_url = http_image_server[3]
 
     # Seed KV cache with data URI request
     data_uri_payload = _build_payload(

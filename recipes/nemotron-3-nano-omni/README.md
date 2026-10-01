@@ -21,7 +21,7 @@ source build, no Rust toolchain.
 
 ## Prerequisites
 
-- A Kubernetes cluster with the [Dynamo Operator](../../docs/kubernetes/README.md) installed
+- A Kubernetes cluster with the [Dynamo Operator](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx) installed
 - One NVIDIA GPU per worker replica
 - Shared PVC storage for the Hugging Face model cache
 - Hugging Face access to `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4`
@@ -152,7 +152,7 @@ The Dynamo runtime defaults to NATS for the event plane and connects to a
 NATS server if `NATS_SERVER` is set in the environment (the operator
 auto-injects this on most clusters). On clusters without NATS — or where
 you'd rather avoid the dependency — you can run on TCP request plane + ZMQ
-event plane only. Add to both Frontend and VllmWorker:
+event plane only. Add to both Frontend and worker:
 
 ```yaml
 mainContainer:

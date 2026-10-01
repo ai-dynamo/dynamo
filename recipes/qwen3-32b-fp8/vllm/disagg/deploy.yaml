@@ -17,13 +17,13 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           workingDir: /workspace/examples/backends/vllm
       envs:
         - name: HF_HOME
           value: /opt/models
       replicas: 1
-    VllmPrefillWorker:
+    prefill:
       componentType: worker
       subComponentType: prefill
       envFromSecret: hf-token-secret
@@ -79,7 +79,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           workingDir: /workspace/examples/backends/vllm
           securityContext:
             runAsUser: 0
@@ -97,7 +97,7 @@ spec:
           gpu: "2"
           custom:
             rdma/ib: "2"
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       subComponentType: decode
       envFromSecret: hf-token-secret
@@ -152,7 +152,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           workingDir: /workspace/examples/backends/vllm
           securityContext:
             runAsUser: 0

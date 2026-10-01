@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
@@ -37,16 +38,16 @@ const (
 	DynamoComponentDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
 
 	// MainContainerName is the well-known name of the primary Dynamo workload
-	// container inside a component's `podTemplate.spec.containers`. The operator
-	// injects its defaults (image, command, env, ports, probes, resources,
-	// volume mounts) into this container. If no container with this name is
-	// present in the user-supplied `podTemplate`, the operator auto-generates
-	// it. Any other container in the `podTemplate` is treated as a user-managed
-	// sidecar.
+	// container inside a component's podTemplate.spec.containers. The
+	// podTemplate must include this container with a non-empty image. The
+	// operator injects its defaults (command, env, ports, probes, resources,
+	// volume mounts) into this container. Any other container in the
+	// podTemplate is treated as a user-managed sidecar.
 	MainContainerName = "main"
 )
 
 // DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDeployment.
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx')",message="standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment"
 type DynamoComponentDeploymentSpec struct {
 	// backendFramework specifies the backend framework.
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
@@ -69,7 +70,23 @@ type DynamoComponentDeploymentSpec struct {
 // semantics. Users can add sidecars, init containers, and pod-level configuration
 // directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (!has(self.replicas) && has(self.type) && self.type == 'lpx') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)",message="type is immutable after it is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.type) && self.type == 'lpx')",message="lpx may only be set when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx') || has(self.lpx)",message="lpx is required when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx') || !has(self.podTemplate)",message="LPX Pod templates belong to roles"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.replicas) && self.replicas < 1)",message="replicas must be positive when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.scalingAdapter))",message="scalingAdapter is not supported when type is lpx"
 type DynamoComponentDeploymentSharedSpec struct {
+	// providerOverride configures the primary Grove unit representing this DGD
+	// component. With apiVersion `grove.io/v1alpha1`, target is
+	// `PodCliqueTemplateSpec` for a single-node component or
+	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
+	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
 	// name is the stable logical identifier for this component within its
 	// DynamoGraphDeployment. It must be unique within the parent's
 	// `spec.components` list.
@@ -93,8 +110,21 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// port mapping, frontend detection, planner RBAC, and the pod label
 	// `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are
 	// first-class values, users can set them directly.
+	//
+	// The DGD-only "lpx" type is experimental, requires the operator's
+	// lpx.enabled setting, and may change incompatibly.
 	// +optional
 	ComponentType ComponentType `json:"type,omitempty"`
+
+	// RuntimeVersionOverride declares the Dynamo runtime version in this component's
+	// main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
+	// no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
+	// parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
+	// example "1.4.0". It does not change the image. Setting or changing an override that resolves to
+	// version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
 
 	// globalDynamoNamespace places the component in the global Dynamo
 	// namespace rather than the per-deployment namespace derived from the
@@ -102,16 +132,15 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
-	// podTemplate is the pod template used to create the component's pods.
-	// The operator injects its defaults (image, command, env, ports, probes,
-	// resources, volume mounts) into the container named `"main"` inside
-	// `podTemplate.spec.containers`, merging user overrides by name. If no
-	// container named `"main"` is present, the operator auto-generates it
-	// with standard defaults. All other containers in `podTemplate.spec.containers`
-	// are treated as user-managed sidecars: the operator does not inject
-	// defaults into them, so sidecars must specify required fields (e.g. `image`)
-	// themselves. The validation webhook rejects pod templates where a
-	// non-`"main"` container is missing a required field such as `image`.
+	// podTemplate defines the component's Pod configuration. New components must
+	// include a container named "main" with a non-empty image. Existing components
+	// created without a podTemplate may remain unchanged. The operator merges
+	// defaults into the main container.
+	// For DGD components whose main image tag is not a Dynamo semantic version,
+	// set runtimeVersionOverride explicitly.
+	//
+	// All other containers are user-managed sidecars and must specify their
+	// required fields, including image.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
@@ -123,9 +152,44 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// multinode configures multinode components.
+	// minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
+	// components rendered as a scaling group (multi-node, inter-pod GMS, or
+	// `experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove
+	// PodClique minAvailable for all other single-node components.
+	// This field determines 1) the minimum number of replicas guaranteed to be
+	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+	// termination.
+	//
+	// For Grove-backed DynamoGraphDeployment components, minAvailable defaults to
+	// 1 when omitted and is immutable after creation. Positive replica counts must
+	// be greater than or equal to minAvailable. Replicas may be scaled to 0 as a
+	// special scale-to-zero state; minAvailable remains configured but is not
+	// enforced again until replicas is scaled back to a positive value.
+	//
+	// For non-Grove deployments, setting this field will result in a validation error.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
+
+	// multinode configures worker, prefill, or decode components that span
+	// multiple Pods.
 	// +optional
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
+
+	// roles expose the named Pod-producing parts inside a compound component.
+	// When set for a multinode component, this list must contain exactly one
+	// leader and one worker role. Admission defaults omitted replicas to 1 for
+	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
+	// preserves the implicit multinode role layout.
+	//
+	// LPX components each require an agent role. A DGD may contain independent
+	// LPX components, each with its own conductor role, or a shared draft and
+	// target pair with a conductor role only on the target. Every LPX role
+	// requires its own podTemplate.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Roles []ComponentRoleSpec `json:"roles,omitempty"`
 
 	// sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.
 	// `nil` selects the operator default (8Gi), a positive quantity sets a
@@ -140,18 +204,29 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ModelRef *ModelReference `json:"modelRef,omitempty"`
 
-	// scalingAdapter opts this component into using the
-	// DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
-	// `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
-	// so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-	// the Scale subresource. Omit the field to opt out.
+	// scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.
+	// Setting it (even as an empty object, `scalingAdapter: {}`) creates a DGDSA that owns the
+	// `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the
+	// Scale subresource; omit the field to opt out.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
-	// eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
+	// eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin
 	// components. Only meaningful when `type` is `epp`.
+	//
+	// Deprecated: omit this field for the native Rust EPP. Presence of
+	// `eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config
+	// mount) so existing DGDs keep running across operator upgrades until
+	// migration is started by clearing this field.
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
+
+	// lpx holds LPX integration configuration. Only meaningful when
+	// `type` is `lpx`.
+	//
+	// Experimental: requires the operator's lpx.enabled setting and may change incompatibly.
+	// +optional
+	LPX *LPXConfig `json:"lpx,omitempty"`
 
 	// frontendSidecar optionally designates a container in
 	// `podTemplate.spec.containers` as the frontend sidecar. The value must
@@ -218,6 +293,7 @@ type DynamoComponentDeploymentStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dcd
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
@@ -225,9 +301,8 @@ type DynamoComponentDeploymentStatus struct {
 
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 //
-// v1beta1 is a served version: the API server accepts reads and writes
-// against it, and transparently converts to/from v1alpha1 (still the
-// storage version until a later MR flips it). Conversion goes through the
+// v1beta1 is the storage version. The API server transparently converts
+// to and from the served v1alpha1 version through
 // operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoComponentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -246,10 +321,6 @@ type DynamoComponentDeploymentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoComponentDeployment `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
 // IsReady returns true if the component has processed its latest spec and is `Available`.
@@ -298,6 +369,19 @@ func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
 	return s.Experimental != nil &&
 		s.Experimental.GPUMemoryService != nil &&
 		s.Experimental.GPUMemoryService.Mode == GMSModeInterPod
+}
+
+// IsGroveScalingGroupForced reports whether the ScalingGroup layout is explicitly requested.
+func (s *DynamoComponentDeploymentSharedSpec) IsGroveScalingGroupForced() bool {
+	return s.Experimental != nil &&
+		s.Experimental.Grove != nil &&
+		ptr.Deref(s.Experimental.Grove.ForceScalingGroup, false)
+}
+
+// UsesPCSG reports whether Grove renders this component as a
+// PodCliqueScalingGroup rather than a standalone PodClique.
+func (s *DynamoComponentDeploymentSharedSpec) UsesPCSG() bool {
+	return s.GetNumberOfNodes() > 1 || s.IsInterPodGMSEnabled() || s.IsGroveScalingGroupForced()
 }
 
 // IsInterPodFailoverEnabled reports whether inter-pod GMS failover is configured.

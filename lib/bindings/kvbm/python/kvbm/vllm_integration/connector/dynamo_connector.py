@@ -98,6 +98,11 @@ class DynamoConnector(KVConnectorBase_V1):
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         return self._scheduler.request_finished(request, block_ids)
 
+    @nvtx_annotate(category="scheduler")
+    @override
+    def reset_cache(self) -> bool:
+        return self._scheduler.reset_cache()
+
     # Worker
 
     @nvtx_annotate(category="worker")

@@ -5,9 +5,13 @@ import json
 import logging
 import os
 import shutil
+import threading
+import time
 from enum import Enum
 
+import psutil
 import pytest
+import requests
 
 from tests.conftest import NatsServer
 from tests.fault_tolerance.etcd_ha.utils import (
@@ -16,14 +20,16 @@ from tests.fault_tolerance.etcd_ha.utils import (
     send_inference_request,
     wait_for_processes_to_terminate,
 )
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.device import (
     build_nixl_kv_transfer_config,
+    detect_target_device,
     get_default_vllm_block_size,
 )
 from tests.utils.engine_process import FRONTEND_PORT
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,11 @@ class DynamoWorkerProcess(ManagedProcess):
         etcd_endpoints: list,
         mode: WorkerMode = WorkerMode.AGGREGATED,
     ):
+        # Allocate system port for this worker.
+        self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        # Register port cleanup early so partially constructed workers still release ports.
+        request.addfinalizer(self._release_worker_ports)
+
         command = [
             "python3",
             "-m",
@@ -63,18 +74,19 @@ class DynamoWorkerProcess(ManagedProcess):
             str(get_default_vllm_block_size()),
         ]
 
-        # Set port based on worker type
-        port = "8082" if mode == WorkerMode.PREFILL else "8081"
+        port = str(self.system_port)
 
-        # Configure disaggregation mode, KV transfer, and health checks per worker type
+        # Configure disaggregation mode, KV transfer, and health checks per worker type.
         if mode == WorkerMode.PREFILL:
             command.extend(["--disaggregation-mode", "prefill"])
-            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+            health_check_urls = [
+                (f"http://localhost:{port}/health", check_health_ready)
+            ]
         else:
             if mode == WorkerMode.DECODE:
                 command.extend(["--disaggregation-mode", "decode"])
             health_check_urls = [
-                (f"http://localhost:{port}/health", self.is_ready),
+                (f"http://localhost:{port}/health", check_health_ready),
                 (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
                 (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
             ]
@@ -85,18 +97,33 @@ class DynamoWorkerProcess(ManagedProcess):
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
+        if detect_target_device() == "xpu":
+            visible_devices = [
+                device.strip()
+                for device in env.get("ZE_AFFINITY_MASK", "").split(",")
+                if device.strip()
+            ]
+            env["ZE_AFFINITY_MASK"] = visible_devices[0] if visible_devices else "0"
 
         # Both prefill and decode workers need kv-transfer-config for disaggregated mode
         if mode != WorkerMode.AGGREGATED:
+            nixl_role = "kv_producer" if mode == WorkerMode.PREFILL else "kv_consumer"
             command.extend(
                 [
                     "--kv-transfer-config",
-                    json.dumps(build_nixl_kv_transfer_config()),
+                    json.dumps(build_nixl_kv_transfer_config(nixl_role)),
                 ]
             )
 
-        # KV events config and NIXL side channel port only for prefill worker
+        # Every worker launched with --kv-transfer-config opens a NIXL listener,
+        # so each needs its own port; unset means vLLM's host-wide default 5600.
+        if mode != WorkerMode.AGGREGATED:
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
+
+        # KV events config only for prefill worker
         if mode == WorkerMode.PREFILL:
+            self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
             command.extend(
                 [
                     "--kv-events-config",
@@ -104,15 +131,14 @@ class DynamoWorkerProcess(ManagedProcess):
                         {
                             "publisher": "zmq",
                             "topic": "kv-events",
-                            "endpoint": "tcp://*:20082",
+                            "endpoint": f"tcp://*:{self.kv_event_port}",
                             "enable_kv_cache_events": True,
                         }
                     ),
                 ]
             )
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
 
-        # Set log directory based on worker type
+        # Set log directory based on worker type.
         worker_type = "prefill_worker" if mode == WorkerMode.PREFILL else "worker"
         log_dir = f"{request.node.name}_{worker_type}"
 
@@ -121,6 +147,7 @@ class DynamoWorkerProcess(ManagedProcess):
             shutil.rmtree(log_dir)
             logger.info(f"Cleaned up existing log directory: {log_dir}")
         except FileNotFoundError:
+            # Directory doesn't exist, which is fine.
             pass
 
         super().__init__(
@@ -130,29 +157,36 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=120,
             display_output=True,
             terminate_all_matching_process_names=False,
-            stragglers=[
-                "VLLM::EngineCore",
-            ],
-            straggler_commands=[
-                "-m dynamo.vllm",
-            ],
+            # Ensure any orphaned vLLM engine cores or child helpers are cleaned up
+            stragglers=["VLLM::EngineCore"],
+            straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
 
         self.mode = mode
 
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        worker_type = "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                logger.info(f"{worker_type} status is ready")
-                return True
-            logger.warning(f"{worker_type} status is not ready: {data.get('status')}")
-        except ValueError:
-            logger.warning(f"{worker_type} health response is not valid JSON")
-        return False
+    def _release_worker_ports(self):
+        """Release all worker ports allocated by this test helper."""
+        cleanup_errors = []
+        for port_attr in (
+            "system_port",
+            "kv_event_port",
+            "nixl_side_channel_port",
+        ):
+            port = getattr(self, port_attr, None)
+            if port is None:
+                continue
+
+            try:
+                deallocate_port(port)
+            except Exception as exc:
+                logger.exception("Failed to release %s=%s", port_attr, port)
+                cleanup_errors.append(exc)
+            else:
+                setattr(self, port_attr, None)
+
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
 
 @pytest.mark.gpu_1
@@ -443,3 +477,164 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
                                 "Frontend": frontend,
                             }
                         )
+
+
+# Lease-loss zombie: a non-cancellable in-flight request (modeled by
+# SIGSTOP-ing the vLLM engine) must not wedge worker teardown.
+ZOMBIE_GRACEFUL_SHUTDOWN_TIMEOUT_SECS = 10  # worker-side drain bound
+# Hold the frontend's drain open so it does not abort the request and mask the
+# worker-side behavior under test.
+ZOMBIE_FRONTEND_DRAIN_TIMEOUT_SECS = 300
+ZOMBIE_WORKER_EXIT_DEADLINE_SECS = ZOMBIE_GRACEFUL_SHUTDOWN_TIMEOUT_SECS + 50
+ZOMBIE_INFLIGHT_MAX_TOKENS = 8000
+
+
+def _zombie_verify_serving():
+    r = requests.post(
+        f"http://localhost:{FRONTEND_PORT}/v1/completions",
+        json={
+            "model": FAULT_TOLERANCE_MODEL_NAME,
+            "prompt": "The capital of France is",
+            "max_tokens": 5,
+            "temperature": 0.0,
+        },
+        timeout=120,
+    )
+    assert (
+        r.status_code == 200
+    ), f"pre-fault completion failed: {r.status_code} {r.text}"
+
+
+def _zombie_start_inflight_request():
+    """Fire a long completion in the background so a request is in flight.
+
+    Non-streaming on purpose: the worker's handle_payload runs the full
+    generation before returning, holding the push-endpoint inflight counter.
+    """
+
+    errors: list = []
+
+    def _run():
+        try:
+            requests.post(
+                f"http://localhost:{FRONTEND_PORT}/v1/completions",
+                json={
+                    "model": FAULT_TOLERANCE_MODEL_NAME,
+                    "prompt": "Tell me a very long story.",
+                    "max_tokens": ZOMBIE_INFLIGHT_MAX_TOKENS,
+                    "temperature": 0.0,
+                },
+                timeout=600,
+            )
+        except requests.RequestException as exc:
+            errors.append(exc)
+            logger.info("in-flight request ended: %s", exc)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t, errors
+
+
+def _freeze_vllm_engine_descendants(worker_pid: int) -> list:
+    """SIGSTOP the vLLM engine (rank) subprocess(es) under this worker.
+
+    Scoped to the worker's process tree so concurrent tests/workers on the same
+    host are untouched. A frozen engine cannot finish or abort the in-flight
+    request, so it stays pinned in the endpoint inflight counter -- a
+    non-cancellable inflight.
+    """
+    frozen = []
+    for child in psutil.Process(worker_pid).children(recursive=True):
+        try:
+            if "EngineCore" in child.name() or "EngineCore" in " ".join(
+                child.cmdline()
+            ):
+                child.suspend()
+                frozen.append(child.pid)
+                logger.info("SIGSTOP vLLM engine pid=%s", child.pid)
+        except psutil.Error:
+            continue
+    assert frozen, "no vLLM EngineCore descendant of the worker to freeze"
+    return frozen
+
+
+def _resume_kill(pids: list) -> None:
+    """Resume then kill frozen engines so they can't hang teardown or hold a GPU."""
+    for pid in pids:
+        try:
+            proc = psutil.Process(pid)
+            proc.resume()
+            proc.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
+@pytest.mark.gpu_1
+@pytest.mark.xpu_1
+@pytest.mark.e2e
+@pytest.mark.nightly
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(420)
+@pytest.mark.parametrize("request_plane", ["tcp", "nats"])
+def test_etcd_lease_loss_zombie_vllm_frozen_engine(
+    request, monkeypatch, request_plane, predownload_models
+):
+    """A worker that loses its etcd lease with a non-cancellable in-flight
+    request must still exit.
+
+    Repro: freeze the vLLM engine mid-generation so the request can neither
+    complete nor be aborted, then kill etcd. With the bounded endpoint drain the
+    worker times out the drain and exits; the unbounded drain wedges (zombie).
+
+    Parametrized over both request planes: the bounded drain must cover the
+    default ``tcp`` plane (SharedTcpServer) as well as ``nats`` (PushEndpoint).
+    """
+    # Hold the frontend's drain open so only the worker behavior is measured.
+    monkeypatch.setenv("DYN_REQUEST_PLANE", request_plane)
+    monkeypatch.setenv(
+        "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS",
+        str(ZOMBIE_FRONTEND_DRAIN_TIMEOUT_SECS),
+    )
+
+    with NatsServer(request):
+        with EtcdCluster(request, num_replicas=1) as etcd_cluster:
+            etcd_endpoints = etcd_cluster.get_client_endpoints()
+            with DynamoFrontendProcess(request, etcd_endpoints):
+                worker = DynamoWorkerProcess(
+                    request, etcd_endpoints, mode=WorkerMode.AGGREGATED
+                )
+                worker.env["DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS"] = str(
+                    ZOMBIE_GRACEFUL_SHUTDOWN_TIMEOUT_SECS
+                )
+                with worker:
+                    _zombie_verify_serving()
+
+                    logger.info("Starting long in-flight request")
+                    (
+                        inflight_thread,
+                        inflight_errors,
+                    ) = _zombie_start_inflight_request()
+                    time.sleep(5)  # let it reach decode
+                    assert inflight_thread.is_alive(), (
+                        "in-flight request ended before engine freeze: "
+                        f"{inflight_errors!r}"
+                    )
+
+                    # Freeze the engine: the in-flight request is now
+                    # non-cancellable (cannot complete or be aborted). Resume/kill
+                    # in finally before the worker context unwinds, so a SIGSTOP-ed
+                    # engine can't hang teardown or strand a GPU-holding process.
+                    frozen_pids = _freeze_vllm_engine_descendants(worker.proc.pid)
+                    try:
+                        time.sleep(1)
+
+                        logger.info("Terminating ETCD to induce lease loss")
+                        etcd_cluster.stop()
+
+                        # Bounded drain -> worker exits; unbounded -> zombie.
+                        wait_for_processes_to_terminate(
+                            {"Worker": worker},
+                            timeout=ZOMBIE_WORKER_EXIT_DEADLINE_SECS,
+                        )
+                    finally:
+                        _resume_kill(frozen_pids)

@@ -28,8 +28,14 @@ use crate::disagg::DisaggregationMode;
 /// ```
 #[derive(Args, Clone, Debug)]
 pub struct CommonArgs {
-    /// Dynamo namespace for discovery routing.
-    #[arg(long, default_value = "dynamo", env = "DYN_NAMESPACE")]
+    /// Dynamo namespace for discovery routing. `DYN_NAMESPACE_WORKER_SUFFIX`
+    /// is appended as `-{suffix}` unless it is empty or already present.
+    #[arg(
+        long,
+        default_value = "dynamo",
+        env = "DYN_NAMESPACE",
+        value_parser = parse_worker_namespace
+    )]
     pub namespace: String,
 
     /// Component name within the namespace.
@@ -50,10 +56,29 @@ pub struct CommonArgs {
     #[arg(long, env = "DYN_CUSTOM_JINJA_TEMPLATE")]
     pub custom_jinja_template: Option<PathBuf>,
 
-    /// Disaggregation role: `agg` (default), `prefill`, or `decode`.
+    /// Dynamo frontend tool-call parser name for this model.
+    #[arg(long = "dyn-tool-call-parser", env = "DYN_TOOL_CALL_PARSER")]
+    pub dyn_tool_call_parser: Option<String>,
+
+    /// Dynamo frontend reasoning parser name for this model.
+    #[arg(long = "dyn-reasoning-parser", env = "DYN_REASONING_PARSER")]
+    pub dyn_reasoning_parser: Option<String>,
+
+    /// Exclude tools from the chat template when tool_choice is none.
+    #[arg(
+        long = "exclude-tools-when-tool-choice-none",
+        env = "DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub exclude_tools_when_tool_choice_none: bool,
+
+    /// Disaggregation role: `agg` (default), `prefill`, `decode`, or `encode`.
     /// Prefill workers register with `ModelType::empty()` and
-    /// `WorkerType::Prefill` regardless of `endpoint_types`; decode workers
-    /// do not advertise a local KV indexer.
+    /// `WorkerType::Prefill` regardless of `endpoint_types`; decode and encode
+    /// workers do not advertise a local KV indexer. Encode workers register as
+    /// `WorkerType::Encode` and are not exposed on the public chat/completions
+    /// surface.
     #[arg(
         long,
         value_enum,
@@ -61,4 +86,74 @@ pub struct CommonArgs {
         env = "DYN_DISAGGREGATION_MODE",
     )]
     pub disaggregation_mode: DisaggregationMode,
+
+    /// Declare an upstream Encode peer in this worker's topology `needs`.
+    /// Meaningful only on `--disaggregation-mode agg` and `prefill`.
+    /// Setting it on `decode` or `encode` is rejected at startup.
+    ///
+    /// Scope: Rust backends consuming `CommonArgs` via clap. Python
+    /// backends populate this from their own runtime config -- the Python
+    /// shim does not read this env var.
+    #[arg(long, default_value_t = false, env = "DYN_ROUTE_TO_ENCODER")]
+    pub route_to_encoder: bool,
+
+    /// Publish this worker's engine control/update routes on the RL request-plane endpoint.
+    #[arg(long, default_value_t = false, env = "DYN_ENABLE_RL")]
+    pub enable_rl: bool,
+}
+
+fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
+    let Ok(suffix) = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX") else {
+        return Ok(namespace.to_owned());
+    };
+    if suffix.is_empty() {
+        return Ok(namespace.to_owned());
+    }
+    let suffix = format!("-{suffix}");
+    if namespace.ends_with(&suffix) {
+        return Ok(namespace.to_owned());
+    }
+    Ok(format!("{namespace}{suffix}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::CommonArgs;
+
+    #[derive(Parser)]
+    struct TestArgs {
+        #[command(flatten)]
+        common: CommonArgs,
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn worker_suffix_is_applied_once_to_namespace() {
+        for (namespace, suffix, argv, expected) in [
+            (Some("dynamo"), Some("qa1"), &["test"][..], "dynamo-qa1"),
+            (Some("dynamo-qa1"), Some("qa1"), &["test"][..], "dynamo-qa1"),
+            (Some("dynamo"), Some(""), &["test"][..], "dynamo"),
+            (Some("dynamo"), None, &["test"][..], "dynamo"),
+            (None, Some("qa1"), &["test"][..], "dynamo-qa1"),
+            (
+                Some("ignored"),
+                Some("qa1"),
+                &["test", "--namespace", "cli"][..],
+                "cli-qa1",
+            ),
+        ] {
+            temp_env::with_vars(
+                [
+                    ("DYN_NAMESPACE", namespace),
+                    ("DYN_NAMESPACE_WORKER_SUFFIX", suffix),
+                ],
+                || {
+                    let args = TestArgs::try_parse_from(argv).unwrap();
+                    assert_eq!(args.common.namespace, expected);
+                },
+            );
+        }
+    }
 }

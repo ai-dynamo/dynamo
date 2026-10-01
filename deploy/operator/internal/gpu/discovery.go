@@ -78,6 +78,7 @@ const (
 	tokenSXM       = "SXM"
 	tokenHGX       = "HGX"
 	tokenDGX       = "DGX"
+	tokenHBM3      = "HBM3"
 	tokenPCIE      = "PCIE"
 	formFactorSXM  = "sxm"
 	formFactorPCIe = "pcie"
@@ -87,6 +88,7 @@ const (
 const (
 	tokenGB200  = "GB200"
 	tokenGB10   = "GB10"
+	tokenB300   = "B300"
 	tokenB200   = "B200"
 	tokenH200   = "H200"
 	tokenH100   = "H100"
@@ -129,6 +131,7 @@ var gpuRules = []gpuRule{
 	// Blackwell
 	{token: tokenGB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM},
 	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
+	{token: tokenB300, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB300SXM},
 	{token: tokenB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB200SXM},
 
 	// Hopper
@@ -956,6 +959,11 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
 			continue
 		}
+
+		// B300 must not match GB300, but compact product names can attach its SXM suffix.
+		if rule.token == tokenB300 && !containsB300ModelToken(gpuProduct) {
+			continue
+		}
 		if strings.Contains(normalized, rule.token) {
 			if rule.singleSKU != "" {
 				return rule.singleSKU
@@ -1007,6 +1015,24 @@ func containsModelToken(input, token string) bool {
 	return false
 }
 
+func containsB300ModelToken(input string) bool {
+	upper := strings.ToUpper(input)
+	for start := 0; start < len(upper); {
+		idx := strings.Index(upper[start:], tokenB300)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		end := idx + len(tokenB300)
+		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) &&
+			(end == len(upper) || !isASCIIAlphaNum(upper[end]) || strings.HasPrefix(upper[end:], tokenSXM)) {
+			return true
+		}
+		start = idx + 1
+	}
+	return false
+}
+
 func isASCIIAlphaNum(ch byte) bool {
 	return (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
 }
@@ -1022,7 +1048,8 @@ func detectFormFactor(normalized string) string {
 	switch {
 	case strings.Contains(normalized, tokenSXM),
 		strings.Contains(normalized, tokenHGX),
-		strings.Contains(normalized, tokenDGX):
+		strings.Contains(normalized, tokenDGX),
+		strings.Contains(normalized, tokenHBM3):
 		return formFactorSXM
 	case strings.Contains(normalized, tokenPCIE):
 		return formFactorPCIe

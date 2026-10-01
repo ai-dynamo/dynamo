@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# terminationGracePeriodSeconds wiring. On SIGTERM the agent restores each
+# managed GPU's default power cap from the reconcile loop's `finally`, AFTER any
+# in-flight pod LIST returns. The value must be operator-configurable (sttts P1
+# follow-up: 30s could SIGKILL the agent mid-cleanup on a throttled apiserver)
+# and default to 60s, on BOTH the DaemonSet and the dev pod.
+
+suite: terminationGracePeriodSeconds wiring
+release:
+  name: power-agent
+  namespace: dynamo-system
+
+tests:
+  - it: DaemonSet defaults the grace period to 60s
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.0.0
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 60
+
+  - it: DaemonSet grace period is operator-overridable
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.0.0
+      terminationGracePeriodSeconds: 120
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 120
+
+  - it: DaemonSet rejects grace period below the safe minimum
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.0.0
+      terminationGracePeriodSeconds: 59
+    asserts:
+      - failedTemplate:
+          errorPattern: "terminationGracePeriodSeconds=59 is too low"
+
+  - it: dev pod defaults the grace period to 60s
+    templates:
+      - templates/dev-pod.yaml
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+    asserts:
+      - equal:
+          path: spec.terminationGracePeriodSeconds
+          value: 60
+
+  - it: dev pod grace period is operator-overridable
+    templates:
+      - templates/dev-pod.yaml
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      terminationGracePeriodSeconds: 90
+    asserts:
+      - equal:
+          path: spec.terminationGracePeriodSeconds
+          value: 90
+
+  - it: dev pod rejects grace period below the safe minimum
+    templates:
+      - templates/dev-pod.yaml
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      terminationGracePeriodSeconds: 59
+    asserts:
+      - failedTemplate:
+          errorPattern: "terminationGracePeriodSeconds=59 is too low"

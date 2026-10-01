@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -106,12 +106,209 @@ async def test_decode_mode_runs_to_completion_when_prefill_result_provided():
     assert "disaggregated_params" not in terminal
 
 
+async def test_decode_mode_rejects_raw_multimodal_payload():
+    engine = SampleLLMEngine(
+        max_tokens=1,
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.DECODE,
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image": [{"url": "data:image/png;base64,AA=="}]},
+        "prefill_result": {"disaggregated_params": {"sample_handle": "from-test"}},
+    }
+
+    with pytest.raises(ValueError, match="decode worker should not receive raw"):
+        await _collect(engine, request)
+
+
 async def test_from_args_propagates_mode_to_worker_config():
     engine, worker_config = await SampleLLMEngine.from_args(
         ["--disaggregation-mode", "prefill"]
     )
     assert engine.disaggregation_mode is DisaggregationMode.PREFILL
     assert worker_config.disaggregation_mode is DisaggregationMode.PREFILL
+
+
+async def test_aggregated_mode_processes_multimodal_kwargs_locally(monkeypatch):
+    engine = SampleLLMEngine(max_tokens=1, delay=0.0)
+    encode = AsyncMock(wraps=engine._encode_multimodal)
+    monkeypatch.setattr(engine, "_encode_multimodal", encode)
+    request = {
+        "token_ids": [1, 2],
+        "multi_modal_data": {"image": [{"url": "data:image/png;base64,AA=="}]},
+        "mm_processor_kwargs": {"min_pixels": 64},
+    }
+
+    chunks = await _collect(engine, request)
+
+    assert chunks[-1]["finish_reason"] == "length"
+    assert chunks[-1]["engine_data"]["sample_multimodal"]["multimodal_kwargs"] == {
+        "multi_modal_data": request["multi_modal_data"],
+        "mm_processor_kwargs": request["mm_processor_kwargs"],
+    }
+    encode.assert_awaited_once_with(request)
+
+
+async def test_encode_mode_emits_single_terminal_with_encoder_result():
+    engine = SampleLLMEngine(
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.ENCODE,
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image": [{"url": "data:image/png;base64,AA=="}]},
+    }
+
+    chunks = await _collect(engine, request)
+
+    assert len(chunks) == 1
+    terminal = chunks[0]
+    assert terminal["token_ids"] == []
+    assert terminal["finish_reason"] == "stop"
+    assert terminal["completion_usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 0,
+        "total_tokens": 3,
+    }
+    encoder_result = terminal["encoder_result"]
+    assert encoder_result["handle"].startswith("sample-encoder:")
+    assert (
+        encoder_result["multimodal_kwargs"]["multi_modal_data"]
+        == request["multi_modal_data"]
+    )
+
+
+@pytest.mark.parametrize("stop_checks", [[True], [False, True]])
+async def test_encode_mode_observes_cancellation(stop_checks):
+    engine = SampleLLMEngine(
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.ENCODE,
+    )
+    context = _ctx()
+    context.is_stopped.side_effect = stop_checks
+
+    chunks = [
+        chunk
+        async for chunk in engine.generate(
+            {"token_ids": [1, 2, 3], "multi_modal_data": {"image": []}}, context
+        )
+    ]
+
+    assert chunks == [
+        {
+            "token_ids": [],
+            "index": 0,
+            "finish_reason": "cancelled",
+            "completion_usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 0,
+                "total_tokens": 3,
+            },
+        }
+    ]
+
+
+async def test_encoder_routed_worker_requires_encoder_result():
+    engine = SampleLLMEngine(
+        max_tokens=1,
+        delay=0.0,
+        route_to_encoder=True,
+    )
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image": [{"url": "data:image/png;base64,AA=="}]},
+    }
+
+    with pytest.raises(ValueError, match="no encoder_result"):
+        await _collect(engine, request)
+
+
+async def test_encoder_routed_worker_rejects_malformed_encoder_result():
+    engine = SampleLLMEngine(
+        max_tokens=1,
+        delay=0.0,
+        route_to_encoder=True,
+    )
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image": [{"url": "data:image/png;base64,AA=="}]},
+        "encoder_result": {"handle": "not-a-sample-handle"},
+    }
+
+    with pytest.raises(ValueError, match=r"encoder_result\.handle"):
+        await _collect(engine, request)
+
+
+async def test_multimodal_epd_handoff_contract():
+    """Exercise Encode -> Prefill -> Decode using separate role instances."""
+    encode = SampleLLMEngine(
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.ENCODE,
+    )
+    prefill = SampleLLMEngine(
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        route_to_encoder=True,
+    )
+    decode = SampleLLMEngine(
+        max_tokens=2,
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.DECODE,
+    )
+    multimodal_request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image": [{"url": "data:image/png;base64,AA=="}]},
+    }
+
+    [encode_terminal] = await _collect(encode, multimodal_request)
+    [prefill_terminal] = await _collect(
+        prefill,
+        {
+            **multimodal_request,
+            "encoder_result": encode_terminal["encoder_result"],
+            "stop_conditions": {"max_tokens": 8},
+        },
+    )
+    decode_chunks = await _collect(
+        decode,
+        {
+            "token_ids": multimodal_request["token_ids"],
+            "prefill_result": {
+                "disaggregated_params": prefill_terminal["disaggregated_params"]
+            },
+        },
+    )
+
+    assert prefill_terminal["finish_reason"] == "length"
+    assert (
+        prefill_terminal["engine_data"]["sample_multimodal"]
+        == encode_terminal["encoder_result"]
+    )
+    assert len(decode_chunks) == 2
+    assert decode_chunks[-1]["finish_reason"] == "length"
+
+
+async def test_from_args_propagates_encode_routing():
+    engine, worker_config = await SampleLLMEngine.from_args(
+        ["--disaggregation-mode", "prefill", "--route-to-encoder"]
+    )
+
+    assert engine.route_to_encoder is True
+    assert worker_config.route_to_encoder is True
+
+
+async def test_from_args_can_disable_kv_routing():
+    _, worker_config = await SampleLLMEngine.from_args(["--disable-kv-routing"])
+
+    assert worker_config.enable_kv_routing is False
+
+
+async def test_encode_mode_opts_out_of_kv_publishers():
+    engine = SampleLLMEngine(disaggregation_mode=DisaggregationMode.ENCODE)
+
+    assert await engine.kv_event_sources() == []
+    assert engine.component_metrics_dp_ranks() == []
 
 
 async def test_source_descriptors_have_expected_shape():

@@ -9,7 +9,6 @@ use dynamo_runtime::{
 };
 use futures::StreamExt;
 use rand::Rng;
-use reqwest;
 use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE, backend};
 use tokio::time::{Duration, sleep};
 

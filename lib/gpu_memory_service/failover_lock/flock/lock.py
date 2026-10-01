@@ -30,6 +30,18 @@ class FlockFailoverLock(FailoverLock):
         self._lock_path = lock_path
         self._fd: int | None = None
         self._engine_id: str | None = None
+        # True once acquire() had to wait for a predecessor to release the lock
+        # (a real failover), False if it acquired immediately (initial bootup).
+        self._was_contended: bool = False
+
+    @property
+    def was_contended(self) -> bool:
+        """Whether the most recent acquire() blocked on a predecessor.
+
+        True  -> a predecessor held the lock and released/died: a real failover.
+        False -> the lock was free on the first try: an initial bootup, not a switch.
+        """
+        return self._was_contended
 
     async def acquire(
         self,
@@ -43,6 +55,9 @@ class FlockFailoverLock(FailoverLock):
         every ``poll_interval`` seconds (default 100ms).
         Polling keeps us from blocking the event loop.
         """
+        # Reset per acquire so was_contended reflects *this* acquisition, not a
+        # prior one (a reused lock object must not report a stale contended flag).
+        self._was_contended = False
         # O_CREAT: create the file if it doesn't exist
         # O_RDWR:  open for reading and writing (flock requires a valid fd,
         #          and we write our engine_id into the file after acquiring)
@@ -58,6 +73,9 @@ class FlockFailoverLock(FailoverLock):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
+                    # A predecessor holds the lock: this acquire is a real
+                    # failover (contended), not an immediate initial bootup.
+                    self._was_contended = True
                     if timeout is not None:
                         elapsed = time.monotonic() - start
                         if elapsed >= timeout:

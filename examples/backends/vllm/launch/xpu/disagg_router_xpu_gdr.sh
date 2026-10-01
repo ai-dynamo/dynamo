@@ -23,10 +23,11 @@ export UCX_TLS=ib,rc,ze_copy
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
 # edit --router-mode to random / round-robin / kv
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
-    --router-reset-states &
+    --http-port "$HTTP_PORT" &
 
 # two decode workers
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
@@ -34,6 +35,7 @@ ZE_AFFINITY_MASK=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
+    --disaggregation-mode decode \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
@@ -41,17 +43,19 @@ ZE_AFFINITY_MASK=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
+    --disaggregation-mode decode \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557", "enable_kv_cache_events":true}' &
 
 # two prefill workers
-# When registered with --is-prefill-worker, these workers are automatically detected
-# by the frontend, which activates an internal prefill router for KV-aware prefill routing
+# When registered with --disaggregation-mode prefill, these workers are
+# automatically detected by the frontend, which activates an internal prefill
+# router for KV-aware prefill routing.
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
 ZE_AFFINITY_MASK=2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
-    --is-prefill-worker \
+    --disaggregation-mode prefill \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558", "enable_kv_cache_events":true}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
@@ -59,7 +63,7 @@ ZE_AFFINITY_MASK=3 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
-    --is-prefill-worker \
+    --disaggregation-mode prefill \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559", "enable_kv_cache_events":true}' &
 
 wait_any_exit

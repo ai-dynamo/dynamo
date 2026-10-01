@@ -58,9 +58,8 @@ fn create_disk_offload_filter(
     runtime: &tokio::runtime::Handle,
 ) -> Result<Option<Arc<FrequencyFilter>>> {
     // Check if disk offload filter is disabled via environment variable
-    let disable_filter = std::env::var(env_kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER)
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    let disable_filter =
+        dynamo_runtime::config::env_is_truthy(env_kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER);
 
     if disable_filter {
         return Ok(None);

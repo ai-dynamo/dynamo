@@ -18,7 +18,7 @@ This recipe demonstrates the performance difference when embedding cache is enab
 
 To reproduce the results in the table, the following is required:
 
-1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 2. **GB200**
 3. **HuggingFace token** configured:
    ```bash
@@ -48,7 +48,7 @@ kubectl apply -f data-gen/generate-datasets-job.yaml -n ${NAMESPACE}
 
 1. Exact cache hit rates cannot be explicitly controlled via dataset due to potential LRU embedding cache eviction policies; however, decreasing the image pool relative to the number of requests allows for proportionally higher probabilities of seeing duplicate images and cache hits. Increasing the embedding cache capacity also allows for higher cache hit rate because it will evict less.
 
-**2. Agg embedding cache uses vLLM's native `ec_both` ECConnector role, supported in vLLM 0.17+. No patches required. See [multimodal-vllm.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache) for more details.**
+**2. Agg embedding cache uses vLLM's native `ec_both` ECConnector role, supported in vLLM 0.17+. No patches required. See [multimodal-vllm.md](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#embedding-cache) for more details.**
 
 3. Replace placeholders in `*.yaml` before running:
    - `storageClassName: "your-storage-class-name"` in `model-cache/model-cache.yaml`

@@ -24,10 +24,24 @@ use once_cell::sync::OnceCell;
 use std::{
     mem::ManuallyDrop,
     sync::{Arc, atomic::Ordering},
+    time::Duration,
 };
 use tokio::{signal, sync::Mutex, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
+
+const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
+
+pub(crate) fn graceful_shutdown_timeout() -> Duration {
+    let timeout_secs = std::env::var(
+        config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    )
+    .ok()
+    .and_then(|s| s.parse::<u64>().ok())
+    .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
+
+    Duration::from_secs(timeout_secs)
+}
 
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone, Debug)]
@@ -44,6 +58,7 @@ pub struct Runtime {
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
+    shutdown_started: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
@@ -62,6 +77,7 @@ impl Runtime {
 
         // create endpoint shutdown token as a child of the main token
         let endpoint_shutdown_token = cancellation_token.child_token();
+        let shutdown_started = endpoint_shutdown_token.child_token();
 
         // secondary runtime for background ectd/nats tasks
         let secondary = match secondary {
@@ -85,6 +101,7 @@ impl Runtime {
             secondary,
             cancellation_token,
             endpoint_shutdown_token,
+            shutdown_started,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             compute_pool,
             block_in_place_permits,
@@ -253,6 +270,20 @@ impl Runtime {
         Runtime::new(primary, Some(secondary))
     }
 
+    /// Like [`Runtime::from_handle`], but also attaches the compute pool and `block_in_place`
+    /// permits that `config` implies, the way [`Runtime::from_settings`] does.
+    ///
+    /// For when the Tokio runtime is owned elsewhere — a process-wide `OnceCell`, say — so only a
+    /// handle can be borrowed, but the [`RuntimeConfig`] behind it is known.
+    pub fn from_handle_with_config(
+        handle: tokio::runtime::Handle,
+        config: &RuntimeConfig,
+    ) -> anyhow::Result<Runtime> {
+        let primary = RuntimeType::External(handle.clone());
+        let secondary = RuntimeType::External(handle);
+        Runtime::new_with_config(primary, Some(secondary), config)
+    }
+
     /// Create a [`Runtime`] instance from the settings
     /// See [`config::RuntimeConfig::from_settings`]
     pub fn from_settings() -> anyhow::Result<Runtime> {
@@ -307,8 +338,27 @@ impl Runtime {
         self.compute_pool.as_ref()
     }
 
+    /// Withdraw readiness before application draining without stopping the
+    /// endpoints or transports still needed to complete that drain.
+    pub fn mark_shutting_down(&self) {
+        if !self.shutdown_started.is_cancelled() {
+            tracing::info!("Runtime readiness withdrawn for shutdown");
+            self.shutdown_started.cancel();
+        }
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_started.is_cancelled()
+    }
+
+    /// Observe shutdown from its start, rather than waiting for transport teardown.
+    pub fn shutdown_started_token(&self) -> CancellationToken {
+        self.shutdown_started.child_token()
+    }
+
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
+        self.mark_shutting_down();
         tracing::info!("Runtime shutdown initiated");
 
         // Spawn the shutdown coordination task BEFORE cancelling tokens
@@ -330,13 +380,22 @@ impl Runtime {
             tracing::info!("Active graceful endpoints: {count}");
 
             if count != 0 {
-                tracker.wait_for_completion().await;
+                let timeout = graceful_shutdown_timeout();
+                if tokio::time::timeout(timeout, tracker.wait_for_completion())
+                    .await
+                    .is_err()
+                {
+                    let remaining = tracker.get_count();
+                    tracing::error!(
+                        timeout_secs = timeout.as_secs(),
+                        remaining_endpoints = remaining,
+                        "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
+                    );
+                }
             }
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
-            tracing::info!(
-                "Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected"
-            );
+            tracing::info!("Phase 3: Connections to backend services will now be disconnected");
             main_token.cancel();
         });
     }
@@ -389,5 +448,47 @@ impl Drop for RuntimeType {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::environment_names::runtime as env_runtime;
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_cancels_main_token_after_graceful_timeout() {
+        temp_env::async_with_vars(
+            [(
+                env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                Some("5"),
+            )],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let tracker = runtime.graceful_shutdown_tracker();
+                let _guard = tracker.register_task();
+                let main_token = runtime.primary_token();
+                let endpoint_token = runtime.child_token();
+
+                runtime.shutdown();
+                tokio::task::yield_now().await;
+
+                assert!(endpoint_token.is_cancelled());
+                assert!(!main_token.is_cancelled());
+                assert_eq!(tracker.get_count(), 1);
+
+                tokio::time::advance(Duration::from_secs(4)).await;
+                tokio::task::yield_now().await;
+
+                assert!(!main_token.is_cancelled());
+
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+
+                assert!(main_token.is_cancelled());
+                assert_eq!(tracker.get_count(), 1);
+            },
+        )
+        .await;
     }
 }

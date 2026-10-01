@@ -34,7 +34,7 @@ spec:
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub==1.11.0
+              pip install --no-cache-dir huggingface_hub==1.16.4
               hf download $MODEL_NAME --revision $MODEL_REVISION
           resources:
             requests:

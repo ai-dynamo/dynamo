@@ -119,6 +119,7 @@ jobs:
               "https://api.github.com/repos/${owner}/${repo}/pulls/${pr_number}/files?per_page=100&page=${page}")"
             if printf '%s' "${files_json}" | jq -e '
               any(.[]; .filename |
+                startswith(".agents/skills/") or
                 startswith("skills/") or
                 startswith("team-skills/") or
                 startswith("rules/team-rules/") or
@@ -138,7 +139,7 @@ jobs:
             {
               echo "## NVSkills CI request"
               echo
-              echo "Skipped: no changes under \`skills/\`, \`team-skills/\`, \`rules/team-rules/\`, or \`plugins/\`."
+              echo "Skipped: no changes under \`.agents/skills/\`, \`skills/\`, \`team-skills/\`, \`rules/team-rules/\`, or \`plugins/\`."
             } >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi

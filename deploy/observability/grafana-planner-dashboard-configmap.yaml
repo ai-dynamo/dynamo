@@ -27,7 +27,7 @@ data:
           }
         ]
       },
-      "description": "Dynamo Planner metrics dashboard - Worker counts, observed/predicted metrics, and correction factors",
+      "description": "Dynamo Planner metrics dashboard - Worker counts, observed/predicted metrics",
       "editable": true,
       "fiscalYearStartMonth": 0,
       "graphTooltip": 1,
@@ -470,6 +470,74 @@ data:
                     "value": "ITL (ms)"
                   }
                 ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "SLA TTFT"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF6B6B",
+                      "mode": "fixed"
+                    }
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "left"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "TTFT (ms)"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [10, 10],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "SLA ITL"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#4ECDC4",
+                      "mode": "fixed"
+                    }
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "ITL (ms)"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [10, 10],
+                      "fill": "dash"
+                    }
+                  }
+                ]
               }
             ]
           },
@@ -508,6 +576,20 @@ data:
               "legendFormat": "ITL",
               "range": true,
               "refId": "B"
+            },
+            {
+              "editorMode": "code",
+              "expr": "dynamo_planner_sla_target_ttft_ms{namespace=~\"$namespace\"}",
+              "legendFormat": "SLA TTFT",
+              "range": true,
+              "refId": "C"
+            },
+            {
+              "editorMode": "code",
+              "expr": "dynamo_planner_sla_target_itl_ms{namespace=~\"$namespace\"}",
+              "legendFormat": "SLA ITL",
+              "range": true,
+              "refId": "D"
             }
           ],
           "title": "Observed Latency (TTFT & ITL)",
@@ -1175,294 +1257,6 @@ data:
             }
           ],
           "title": "Predicted Replica Counts",
-          "type": "timeseries"
-        },
-        {
-          "collapsed": false,
-          "gridPos": {
-            "h": 1,
-            "w": 24,
-            "x": 0,
-            "y": 22
-          },
-          "id": 103,
-          "panels": [],
-          "title": "⚙️ Correction Factors",
-          "type": "row"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "Current prefill correction factor (TTFT observed / TTFT expected)",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "decimals": 3,
-              "mappings": [],
-              "max": 2,
-              "min": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "#73BF69",
-                    "value": null
-                  },
-                  {
-                    "color": "#FF9830",
-                    "value": 1.2
-                  },
-                  {
-                    "color": "#F2495C",
-                    "value": 1.5
-                  }
-                ]
-              },
-              "unit": "none"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 5,
-            "w": 4,
-            "x": 0,
-            "y": 23
-          },
-          "id": 30,
-          "options": {
-            "minVizHeight": 75,
-            "minVizWidth": 75,
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showThresholdLabels": false,
-            "showThresholdMarkers": true,
-            "sizing": "auto"
-          },
-          "pluginVersion": "12.0.1",
-          "targets": [
-            {
-              "editorMode": "code",
-              "expr": "dynamo_planner_p_correction_factor{namespace=~\"$namespace\"}",
-              "legendFormat": "Prefill CF",
-              "range": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Prefill Correction Factor",
-          "type": "gauge"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "Current decode correction factor (ITL observed / ITL expected)",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "decimals": 3,
-              "mappings": [],
-              "max": 2,
-              "min": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "#73BF69",
-                    "value": null
-                  },
-                  {
-                    "color": "#FF9830",
-                    "value": 1.2
-                  },
-                  {
-                    "color": "#F2495C",
-                    "value": 1.5
-                  }
-                ]
-              },
-              "unit": "none"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 5,
-            "w": 4,
-            "x": 4,
-            "y": 23
-          },
-          "id": 31,
-          "options": {
-            "minVizHeight": 75,
-            "minVizWidth": 75,
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": ["lastNotNull"],
-              "fields": "",
-              "values": false
-            },
-            "showThresholdLabels": false,
-            "showThresholdMarkers": true,
-            "sizing": "auto"
-          },
-          "pluginVersion": "12.0.1",
-          "targets": [
-            {
-              "editorMode": "code",
-              "expr": "dynamo_planner_d_correction_factor{namespace=~\"$namespace\"}",
-              "legendFormat": "Decode CF",
-              "range": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Decode Correction Factor",
-          "type": "gauge"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "Correction factor history over time. Values close to 1.0 indicate accurate predictions.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "Factor",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "opacity",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "smooth",
-                "lineWidth": 2,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "line+area"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "transparent",
-                    "value": null
-                  },
-                  {
-                    "color": "rgba(255, 152, 48, 0.1)",
-                    "value": 1.2
-                  },
-                  {
-                    "color": "rgba(242, 73, 92, 0.1)",
-                    "value": 1.5
-                  }
-                ]
-              },
-              "unit": "none"
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Prefill CF"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#CE93D8",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Decode CF"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#81D4FA",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 5,
-            "w": 16,
-            "x": 8,
-            "y": 23
-          },
-          "id": 32,
-          "options": {
-            "legend": {
-              "calcs": ["lastNotNull", "mean", "min", "max"],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.0.1",
-          "targets": [
-            {
-              "editorMode": "code",
-              "expr": "dynamo_planner_p_correction_factor{namespace=~\"$namespace\"}",
-              "legendFormat": "Prefill CF",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "editorMode": "code",
-              "expr": "dynamo_planner_d_correction_factor{namespace=~\"$namespace\"}",
-              "legendFormat": "Decode CF",
-              "range": true,
-              "refId": "B"
-            }
-          ],
-          "title": "Correction Factor History",
           "type": "timeseries"
         }
       ],

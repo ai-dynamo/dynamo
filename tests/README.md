@@ -547,7 +547,7 @@ Tests must be deterministic. A flaky test -- one that sometimes passes and somet
    **Other in-repo retry sites** (in case you need to roll your own for a different layer):
    - `tests/frontend/test_frontend_api_surface_compliance.py:_retry_network_op` -- sync, network-only exception list.
    - `tests/router/helper.py:send_request_with_retry` -- async, status-code-driven (aiohttp).
-   - `tests/utils/managed_deployment.py` -- sync connect retry with 1.5x backoff.
+   - `tests/deploy/dgd_utils.py` -- sync connect retry with 1.5x backoff.
    - `components/src/dynamo/planner/connectors/remote_client.py` -- sync exponential backoff (`2**attempt`).
 3. **If retry is not enough either**, quarantine the test to prevent it from blocking other developers:
    - `@pytest.mark.skip(reason="Flaky: <ticket link>")` -- disables the test entirely. Use when the test provides no signal in its current state.

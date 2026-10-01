@@ -62,6 +62,14 @@ EOF
     esac
 done
 
+# Hybrid GDN families (Qwen3.5/Qwen3.6) need extra_buffer scheduling for
+# MambaRadixCache to engage; default no_buffer silently disables prefix
+# cache. Evaluated after CLI parsing so --model overrides take effect.
+MAMBA_ARGS=()
+case "${MODEL}" in
+    *Qwen3.5*|*Qwen3.6*) MAMBA_ARGS=(--mamba-scheduler-strategy extra_buffer) ;;
+esac
+
 print_launch_banner --multimodal --no-curl \
     "MM Exact Routing (SGLang)" "${MODEL}" "${HTTP_PORT}" \
     "NUM_WORKERS:  ${NUM_WORKERS}" \
@@ -119,6 +127,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     python -m dynamo.sglang \
         --model-path "${MODEL}" \
         --served-model-name "${MODEL}" \
+        --frontend-decoding \
         --page-size "${BLOCK_SIZE}" \
         --context-length "${MAX_MODEL_LEN}" \
         --tp 1 \
@@ -126,6 +135,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --kv-events-config "${KV_EVENTS_CONFIG}" \
         --enable-metrics \
         --disable-piecewise-cuda-graph \
+        "${MAMBA_ARGS[@]}" \
         ${GPU_MEM_ARGS} ${SGLANG_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
 done
 
@@ -171,7 +181,7 @@ done
 echo
 echo "Architecture: Rust frontend (MM-aware KV router) -> ${NUM_WORKERS}x SGLang workers"
 echo "  - mm_hashes forwarded to SGLang GenerateReqInput.mm_hashes -> matching pad_value"
-echo "  - Image dims via header-only HTTP fetch (Range: bytes=0-65535)"
+echo "  - Images and videos decoded once in the frontend and transferred over NIXL"
 echo "  - No PyO3, no GIL, no Python deps in the routing path"
 echo
 echo "Press Ctrl+C to stop all services"

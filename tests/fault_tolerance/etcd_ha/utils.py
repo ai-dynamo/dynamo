@@ -37,16 +37,21 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             "DYN_LOG": "debug",
             "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
         }
-        # WARNING: terminate_all_matching_process_names=True is NOT pytest-xdist safe!
-        # DANGER: Kills ALL dynamo-frontend processes system-wide, including other parallel tests.
-        # For parallel-safe alternative, use terminate_all_matching_process_names=False.
-        # See tests/kvbm_integration/common.py:llm_server_kvbm for example.
-        # TODO: Switch to terminate_all_matching_process_names=False with dynamic ports
+        # terminate_all_matching_process_names=False is required here: the frontend
+        # is launched as `python -m dynamo.frontend`, so its _command_name is the
+        # generic "python". With True, ManagedProcess.__enter__ would SIGTERM/SIGKILL
+        # every "python" process on the host on startup — including this test's own
+        # etcd cluster and vLLM worker (and sibling framework jobs). That orphans
+        # etcd ("connection refused"), so the HA failover the test waits for never
+        # completes and the test hangs until the 600s pytest-timeout fires.
+        # Each test manages its frontend via a `with` block (cleaned up on exit) and
+        # runs in its own container on the fixed FRONTEND_PORT, so the system-wide
+        # name-based sweep is both unnecessary and unsafe here.
         super().__init__(
             request,
             router_mode="round-robin",
             extra_env=extra_env,
-            terminate_all_matching_process_names=True,  # TODO: Change to False
+            terminate_all_matching_process_names=False,
         )
 
 
@@ -150,6 +155,7 @@ class EtcdCluster:
         # Reserve contiguous ports for the full cluster to avoid collisions with
         # other tests that may also run local etcd instances.
         reserved_ports = allocate_contiguous_ports(1, num_replicas * 2, base_port)
+        request.addfinalizer(lambda ports=reserved_ports: deallocate_ports(ports))
         self._reserved_ports = reserved_ports
         self.base_port = reserved_ports[0]
         self.replicas: List[Optional[EtcdReplicaServer]] = []

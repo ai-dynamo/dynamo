@@ -6,9 +6,9 @@ Global Router Handler for hierarchical routing to worker pools.
 
 Supports two modes:
 - "disagg": Routes prefill and decode requests to separate pool types
-  based on (ISL, TTFT) and (context_length, ITL) respectively.
+  based on (ISL, TTFT) and (request token count, ITL) respectively.
 - "agg": Routes generate requests to unified pools that handle both
-  prefill and decode, based on (ISL, ITL).
+  prefill and decode, based on (TTFT, ITL) or optionally (ISL, TTFT, ITL).
 
 Both modes support priority-based pool overrides from agent hints.
 """
@@ -269,17 +269,16 @@ class GlobalRouterHandler:
         """
         Handle decode requests from the frontend (disagg mode).
 
-        Selects the appropriate decode pool based on context length, ITL target,
+        Selects the appropriate decode pool based on request token count, ITL target,
         and optional priority, then forwards the request to the local
         router in that pool.
         """
         assert self.config.decode_pool_selection_strategy is not None
         assert self.config.decode_pool_dynamo_namespaces is not None
 
-        # Extract context length (input tokens + any previously generated)
+        # The strategy field retains the context_length name, but decode routing
+        # currently sees the request token IDs before generation begins.
         token_ids = request.get("token_ids", [])
-        # context_length should be averaged ISL + OSL // 2
-        # TODO: predict OSL based on ISL
         context_length = len(token_ids)
 
         router_params = request.get("router") or {}
@@ -328,12 +327,16 @@ class GlobalRouterHandler:
         """
         Handle generate requests (agg mode).
 
-        Selects the appropriate agg pool based on TTFT target, ITL target, and
-        optional priority, then forwards the request to the local router in
-        that pool. The pool's workers handle both prefill and decode.
+        Selects the appropriate agg pool based on TTFT target, ITL target,
+        optional ISL, and optional priority, then forwards the request to the
+        local router in that pool. The pool's workers handle both prefill and
+        decode.
         """
         assert self.config.agg_pool_selection_strategy is not None
         assert self.config.agg_pool_dynamo_namespaces is not None
+
+        token_ids = request.get("token_ids", [])
+        isl = len(token_ids)
 
         # Extract SLA targets from nvext.router (forwarded by the preprocessor
         # as the `router` field on PreprocessedRequest), fallback to CLI defaults.
@@ -355,6 +358,7 @@ class GlobalRouterHandler:
             ttft_target_ms=ttft_target_ms,
             itl_target_ms=itl_target_ms,
             priority=priority,
+            isl=isl,
         )
         namespace = self.config.agg_pool_dynamo_namespaces[pool_idx]
         assert self.config.agg_pool_priorities is not None
@@ -365,9 +369,15 @@ class GlobalRouterHandler:
         )
 
         logger.info(
-            f"Routing agg request: TTFT_target={ttft_target_ms}ms, "
-            f"ITL_target={itl_target_ms}ms, priority={priority} -> "
-            f"pool {pool_idx} ({namespace}); retry_order={pool_order}"
+            "Routing agg request: ISL=%s, TTFT_target=%sms, ITL_target=%sms, "
+            "priority=%s -> pool %s (%s); retry_order=%s",
+            isl,
+            ttft_target_ms,
+            itl_target_ms,
+            priority,
+            pool_idx,
+            namespace,
+            pool_order,
         )
 
         # Forward request to local router and stream back responses

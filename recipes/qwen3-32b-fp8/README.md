@@ -12,7 +12,7 @@ Production-ready deployments for **Qwen3-32B-FP8** with FP8 quantization using T
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 2. **GPU cluster** with H100/H200/A100 GPUs
 3. **HuggingFace token** with access to Qwen models
 

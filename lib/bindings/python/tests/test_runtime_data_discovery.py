@@ -3,9 +3,11 @@
 
 import asyncio
 import json
+import pathlib
 
 import pytest
 
+from dynamo._core import ModelDeploymentCard
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -292,5 +294,185 @@ async def test_prefill_dual_emit_model_type_validation(temp_file_store):
                 worker_type=WorkerType.Prefill,
                 needs=[],
             )
+    finally:
+        rt.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_lora_registration_persists_base_and_lora_model_cards(temp_file_store):
+    rt = _runtime()
+    try:
+        ep = rt.endpoint("test.ns.generate")
+        await ep.register_endpoint_instance()
+
+        await register_model(
+            ModelInput.Tensor,
+            ModelType.TensorBased,
+            ep,
+            "base-model",
+            worker_type=WorkerType.Aggregated,
+        )
+        await register_model(
+            ModelInput.Tensor,
+            ModelType.TensorBased,
+            ep,
+            "base-model",
+            worker_type=WorkerType.Aggregated,
+            lora_name="adapterA",
+            base_model_path="base-model",
+        )
+
+        model_card_files = sorted(pathlib.Path(temp_file_store).glob("v1/mdc/**/*"))
+        model_card_json = [
+            json.loads(path.read_text()) for path in model_card_files if path.is_file()
+        ]
+
+        base_cards = [
+            card
+            for card in model_card_json
+            if card["card_json"]["display_name"] == "base-model"
+        ]
+        lora_cards = [
+            card
+            for card in model_card_json
+            if card["card_json"]["display_name"] == "adapterA"
+        ]
+
+        assert len(base_cards) == 1
+        assert len(lora_cards) == 1
+
+        # Base card may omit source_path when it equals display_name/model_name
+        # to preserve legacy MDC checksums.
+        assert base_cards[0]["card_json"].get("source_path") in (None, "base-model")
+
+        assert lora_cards[0]["card_json"]["source_path"] == "base-model"
+        assert lora_cards[0]["card_json"]["lora"] == {"name": "adapterA"}
+        # model_suffix is the slugified LoRA name
+        assert lora_cards[0]["model_suffix"] == "adaptera"
+    finally:
+        rt.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_tensor_registration_preserves_distinct_source_path(temp_file_store):
+    rt = _runtime()
+    try:
+        ep = rt.endpoint("test.tensor_source_path.generate")
+        await ep.register_endpoint_instance()
+
+        await register_model(
+            ModelInput.Tensor,
+            ModelType.TensorBased,
+            ep,
+            "/models/base",
+            model_name="served-name",
+            worker_type=WorkerType.Aggregated,
+        )
+
+        model_card_files = sorted(pathlib.Path(temp_file_store).glob("v1/mdc/**/*"))
+        model_card_json = [
+            json.loads(path.read_text()) for path in model_card_files if path.is_file()
+        ]
+
+        matching_cards = [
+            card
+            for card in model_card_json
+            if card["card_json"]["display_name"] == "served-name"
+        ]
+
+        assert len(matching_cards) == 1
+        assert matching_cards[0]["card_json"]["source_path"] == "/models/base"
+        assert "lora" not in matching_cards[0]["card_json"]
+    finally:
+        rt.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_external_audio_registration_skips_model_assets(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("DYN_FILE_KV", str(tmp_path))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    rt = _runtime()
+    try:
+        ep = rt.endpoint("test.audio.generate")
+        await ep.register_endpoint_instance()
+
+        model_name = "external/audio-proxy"
+        await register_model(
+            ModelInput.Text,
+            ModelType.Audios,
+            ep,
+            model_name,
+            worker_type=WorkerType.Aggregated,
+            model_aliases=["tts-alias"],
+            skip_model_assets=True,
+        )
+
+        model_card_files = tmp_path.glob("v1/mdc/**/*")
+        cards = [
+            json.loads(path.read_text()) for path in model_card_files if path.is_file()
+        ]
+        assert len(cards) == 1
+        card = cards[0]["card_json"]
+        assert card["display_name"] == model_name
+        assert card["model_type"] == "Audios"
+        assert card["model_info"] is None
+        assert card["aliases"] == ["tts-alias"]
+    finally:
+        rt.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_audio_registration_preserves_builder_metadata_and_checksum(
+    temp_file_store, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    (model_path / "config.json").write_text(
+        json.dumps({"model_type": "test_audio", "max_position_embeddings": 2048})
+    )
+    rt = _runtime()
+    try:
+        for component, model_type in (
+            ("audio", ModelType.Audios),
+            ("full_builder", ModelType.Chat),
+        ):
+            ep = rt.endpoint(f"test.{component}.generate")
+            await ep.register_endpoint_instance()
+            await register_model(
+                ModelInput.Text,
+                model_type,
+                ep,
+                str(model_path),
+                model_name="tts",
+                model_aliases=["tts-alias"],
+                worker_type=WorkerType.Aggregated,
+                self_host_metadata=False,
+            )
+
+        cards = [
+            json.loads(path.read_text())["card_json"]
+            for path in pathlib.Path(temp_file_store).glob("v1/mdc/**/*")
+            if path.is_file()
+        ]
+        assert len(cards) == 2
+        audio = next(card for card in cards if card["model_type"] == "Audios")
+        full_builder = next(card for card in cards if card["model_type"] == "Chat")
+        assert audio["model_info"] is not None
+        assert audio["context_length"] == 2048
+        assert audio["kv_cache_block_size"] == 16
+        assert audio["aliases"] == ["tts-alias"]
+
+        # Chat still uses the original builder path. Normalize only the surface;
+        # all metadata and the native checksum-derived directory must match.
+        full_builder["model_type"] = "Audios"
+        assert audio == full_builder
+        assert ModelDeploymentCard.from_json_str(json.dumps(audio)).local_dir() == (
+            ModelDeploymentCard.from_json_str(json.dumps(full_builder)).local_dir()
+        )
     finally:
         rt.shutdown()

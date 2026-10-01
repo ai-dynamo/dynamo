@@ -1,0 +1,9 @@
+{
+  "version": "1.0",
+  "added_tokens": [
+    {"id": 200, "content": "<eos>", "special": true},
+    {"id": 201, "content": "<bos>", "special": true},
+    {"id": 202, "content": "<pad>", "special": true}
+  ],
+  "model": {"type": "BPE", "vocab": {}, "merges": []}
+}

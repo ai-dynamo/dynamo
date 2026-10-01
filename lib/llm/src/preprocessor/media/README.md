@@ -44,7 +44,7 @@ register_model(
 ## Known Limitations
 
 > [!WARNING]
-> **Incompatible with `Dockerfile.frontend`**: Frontend media decoding is not supported when using `Dockerfile.frontend`. The frontend image built from `Dockerfile.frontend` does not include the required NIXL/UCX dependencies.
+> **Incompatible with `Dockerfile.frontend`**: Frontend media decoding, including libjpeg-turbo image decoding, is not supported when using `Dockerfile.frontend`. The standalone frontend image does not include the required NIXL/UCX dependencies or `libturbojpeg` runtime library.
 
 > [!WARNING]
 > **Requires GPU node**: The frontend must run on a node with GPU access. During media processing, decoded tensors are written to GPU memory via NIXL, which requires `libcuda.so.1` to be available. Running the frontend on a CPU-only node will fail with something like: `Failed to initialize required backends: [UCX: No UCX plugin found]`.
@@ -52,7 +52,14 @@ register_model(
 > [!WARNING]
 > **Video decoding**: Video decoding needs to be enabled via the `dynamo-llm/media-ffmpeg` rust feature. The following ffmpeg dynamic libraries must be available on the system: `libavcodec`, `libavdevice`, `libavfilter`, `libavformat`, `libswresample`, `libswscale`. These are available in dynamo dockerfiles rendered with `enable_media_ffmpeg` set to true in `container/context.yaml`.
 
+> [!WARNING]
+> **Supported input codecs**: The in-tree ffmpeg is built with a narrow decoder allowlist (VP8/VP9 video in mp4/webm/mkv) — it carries only the media formats we build and use, not ffmpeg's full default set (see `container/templates/wheel_builder.Dockerfile`). Other codecs, including H.264 and H.265, are intentionally **not** decodable in software; decoding them would require enabling the NVDEC hardware decoders (`h264_cuvid`/`hevc_cuvid`), which is not wired up today.
+
 ## Image decoding options
+
+### JPEG decoding
+- The frontend uses libjpeg-turbo's TurboJPEG API for JPEG inputs by default. Set `DYN_MM_ENABLE_LIBJPEG=0` on the frontend process to use `image::ImageReader` instead.
+- Dynamo backend runtime images include `libturbojpeg`; custom images must provide `libturbojpeg.so.0` or Dynamo logs a one-time warning and falls back to `image::ImageReader`. The standalone frontend image is excluded as described above. Non-JPEG inputs and JPEGs that TurboJPEG cannot decode also fall back to `image::ImageReader`.
 
 ### Limits (not overridable at runtime via `media_io_kwargs`)
 - **limits.max_image_width** (uint32, > 0): If the image width exceeds this value, abort the decoding.

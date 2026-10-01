@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Read media bytes from the non-HTTP sources the hardware decoder can use.
+
+``fetch_bytes`` only speaks HTTP(S), so ``file://`` and ``data:`` media never
+produced bytes at the routing layer and could not reach NVDEC -- they fell
+through to the software decoder instead. The codec-compliant runtime images
+ship no software video decoder, so that fallback no longer resolves and those
+schemes lost video support entirely. This module supplies the missing bytes so
+H.264/H.265 from a local file or a data URI decodes on the GPU like any other
+source.
+
+``file://`` stays behind ``validate_local_path``: local access is refused
+unless ``DYN_MM_LOCAL_PATH`` is set, paths are resolved before the prefix check
+(so symlinks cannot escape), and this adds no read surface beyond what the
+existing media connectors already allow under the same policy.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import binascii
+import logging
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
+
+from dynamo.common.http.url_validator import (
+    SOURCE_LABEL_LIMIT,
+    UrlValidationError,
+    UrlValidationPolicy,
+    describe_media_source,
+    validate_local_path,
+)
+
+logger = logging.getLogger(__name__)
+
+# describe_media_source now lives beside the validators, which have to bound a
+# client-supplied source in their own messages and cannot import this package
+# (it pulls in torch). Re-exported here because callers import it from here.
+__all__ = [
+    "LOCAL_MEDIA_SCHEMES",
+    "SOURCE_LABEL_LIMIT",
+    "decode_data_uri",
+    "describe_media_source",
+    "is_local_media_url",
+    "read_local_media_bytes",
+]
+
+# Schemes this module can turn into bytes. http(s) is deliberately absent: it
+# belongs to fetch_bytes, which applies SSRF revalidation on every redirect hop.
+LOCAL_MEDIA_SCHEMES = frozenset({"file", "data"})
+
+
+def is_local_media_url(url: str) -> bool:
+    """True when :func:`read_local_media_bytes` can produce bytes for ``url``."""
+    return urlparse(url).scheme in LOCAL_MEDIA_SCHEMES
+
+
+def decode_data_uri(url: str, max_bytes: int | None = None) -> bytes:
+    """Decode a ``data:`` URI body to bytes.
+
+    Only base64 payloads are accepted: a percent-encoded body would have to be
+    re-encoded to bytes by guessing a charset, and media data URIs are base64
+    in practice. ``max_bytes`` bounds the decoded size before anything is
+    decoded, as ``fetch_bytes`` bounds a download.
+    """
+    _, _, remainder = url.partition(":")
+    meta, sep, payload = remainder.partition(",")
+    if not sep:
+        raise UrlValidationError("Malformed data URI: missing ',' separator")
+    if "base64" not in meta.split(";"):
+        raise UrlValidationError("Unsupported data URI: expected base64 payload")
+    if max_bytes is not None:
+        # unquote() below copies its whole input, so a client can defeat the
+        # size guard just by percent-escaping a huge payload: the guard would
+        # only fire after that copy already ran. Percent-unescaping a string
+        # never grows it (each `%XY` triplet collapses to one byte), so the
+        # RAW payload length upper-bounds len(body) and therefore the decoded
+        # byte count -- reject on that bound first, len() is O(1). The "- 2"
+        # gives padding the same benefit of the doubt the exact check below
+        # gives it, so this can only reject what the exact check would also
+        # reject.
+        if len(payload) // 4 * 3 - 2 > max_bytes:
+            raise UrlValidationError(
+                f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
+            )
+    body = unquote(payload)
+    if max_bytes is not None:
+        padding = min(2, len(body) - len(body.rstrip("=")))
+        if len(body) // 4 * 3 - padding > max_bytes:
+            raise UrlValidationError(
+                f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
+            )
+    try:
+        return base64.b64decode(body, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise UrlValidationError(f"Malformed base64 in data URI: {exc}") from exc
+
+
+async def read_local_media_bytes(url: str, policy: UrlValidationPolicy) -> bytes:
+    """Return the bytes behind a ``file://`` or ``data:`` media URL.
+
+    Raises ``UrlValidationError`` when the scheme is unsupported, when local
+    access is disabled or the path escapes ``allowed_local_path``, or when a
+    data URI is malformed.
+    """
+    scheme = urlparse(url).scheme
+    if scheme == "data":
+        return decode_data_uri(url)
+    if scheme != "file":
+        raise UrlValidationError(f"Unsupported local media scheme: {scheme!r}")
+
+    # url2pathname handles the platform's file:// -> path rules; the policy
+    # check below is what actually authorizes the read.
+    parsed = urlparse(url)
+    path = validate_local_path(url2pathname(parsed.path), policy)
+    return await asyncio.to_thread(path.read_bytes)

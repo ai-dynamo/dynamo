@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict
+from dataclasses import dataclass, replace
+from typing import Any, Dict, Optional
 
 import torch
 from PIL import Image
@@ -23,9 +23,12 @@ class QwenGridParams:
     min_pixels: int
     max_pixels: int
     vision_hidden_dim: int
+    decode_embedding_dim: int
 
 
-def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
+def load_qwen_grid_params(
+    model_name: str, trust_remote_code: bool = False
+) -> QwenGridParams | None:
     """Load Qwen VL grid parameters from model config.
 
     Reads AutoImageProcessor and vision_config at init time so that
@@ -35,10 +38,10 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
     """
     try:
         processor = AutoImageProcessor.from_pretrained(
-            model_name, trust_remote_code=True
+            model_name, trust_remote_code=trust_remote_code
         )
         vision_config = AutoConfig.from_pretrained(
-            model_name, trust_remote_code=True
+            model_name, trust_remote_code=trust_remote_code
         ).vision_config
 
         patch_size: int = processor.patch_size
@@ -63,6 +66,10 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
         vision_hidden_dim: int = getattr(
             vision_config, "out_hidden_size", vision_config.hidden_size
         )
+        deepstack_visual_indexes = (
+            getattr(vision_config, "deepstack_visual_indexes", []) or []
+        )
+        decode_embedding_dim = vision_hidden_dim * (1 + len(deepstack_visual_indexes))
 
         return QwenGridParams(
             patch_size=patch_size,
@@ -71,6 +78,7 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             vision_hidden_dim=vision_hidden_dim,
+            decode_embedding_dim=decode_embedding_dim,
         )
     except (OSError, ValueError) as exc:
         logger.warning(
@@ -101,7 +109,7 @@ def _compute_qwen_grid_thw(
     Returns:
         (grid_thw, embeddings_shape) or (None, None) on failure.
         grid_thw: list of [grid_t, grid_h, grid_w] per image.
-        embeddings_shape: [total_tokens, vision_hidden_dim].
+        embeddings_shape: [total_tokens, decode_embedding_dim].
     """
     if isinstance(image_data, Image.Image):
         images = [image_data]
@@ -132,12 +140,13 @@ def _compute_qwen_grid_thw(
         grid_thw.append([grid_t, grid_h, grid_w])
         total_tokens += (grid_t * grid_h * grid_w) // merge_sq
 
-    return grid_thw, [total_tokens, params.vision_hidden_dim]
+    return grid_thw, [total_tokens, params.decode_embedding_dim]
 
 
 def build_qwen_embedding_params(
     multi_modal_data: Dict[str, Any],
     grid_params: QwenGridParams | None,
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any] | None:
     """Build embedding parameters for Qwen VL decode.
 
@@ -161,6 +170,9 @@ def build_qwen_embedding_params(
         multi_modal_data: The multimodal data dict from prefill processing.
         grid_params: Cached Qwen VL processor parameters, or None if
             loading failed at init time.
+        mm_processor_kwargs: Per-request image processor overrides. The
+            ``min_pixels`` and ``max_pixels`` values must match the prefill
+            processor so decode reconstructs the same grid.
 
     Returns:
         Dict with ``image_grid_thw`` and ``embeddings_shape``, or None if
@@ -182,7 +194,21 @@ def build_qwen_embedding_params(
             embedding_params["embeddings_shape"] = list(image_embeds.shape)
     elif image_data is not None and grid_params is not None:
         # Path 2: PIL images — compute grid_thw from image dimensions
-        grid_thw, embeddings_shape = _compute_qwen_grid_thw(image_data, grid_params)
+        overrides = mm_processor_kwargs or {}
+        min_pixels = overrides.get("min_pixels")
+        max_pixels = overrides.get("max_pixels")
+        effective_grid_params = replace(
+            grid_params,
+            min_pixels=(
+                grid_params.min_pixels if min_pixels is None else int(min_pixels)
+            ),
+            max_pixels=(
+                grid_params.max_pixels if max_pixels is None else int(max_pixels)
+            ),
+        )
+        grid_thw, embeddings_shape = _compute_qwen_grid_thw(
+            image_data, effective_grid_params
+        )
         if grid_thw is not None:
             embedding_params["image_grid_thw"] = grid_thw
             embedding_params["embeddings_shape"] = embeddings_shape

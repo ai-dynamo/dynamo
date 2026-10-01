@@ -49,6 +49,7 @@ fn create_mock_response_chunk(
             service_tier: None,
         },
         nvext: None,
+        llm_metrics: None,
     };
 
     Annotated {
@@ -554,6 +555,7 @@ mod tests {
             None, // No tool_choice in this test
             None, // No tool_definitions in this test
             false,
+            false,
             reasoning_parsed_stream,
         );
 
@@ -669,6 +671,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             reasoning_parsed_stream,
         );
 
@@ -768,6 +771,7 @@ mod tests {
             Some("harmony".to_string()),
             None, // No tool_choice in this test
             None, // No tool_definitions in this test
+            false,
             false,
             reasoning_parsed_stream,
         );

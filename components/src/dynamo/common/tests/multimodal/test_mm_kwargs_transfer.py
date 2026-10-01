@@ -3,11 +3,13 @@
 
 """Unit tests for MM kwargs transfer (NIXL sender/receiver + SHM sender/receiver)."""
 
+import asyncio
 import pickle
 from unittest.mock import MagicMock
 
 import pytest
 
+from dynamo.common.multimodal import mm_kwargs_transfer
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
     MmKwargsShmReceiver,
@@ -122,6 +124,126 @@ class TestMmKwargsNixlSender:
         assert feats[0].mm_hash == "hash_0"
         assert feats[1].data is None
         assert feats[2].mm_hash == "hash_2"
+
+
+class TestMmKwargsNixlSenderCleanup:
+    """cleanup() must be bounded and must always release registered buffers."""
+
+    class _FakeOp:
+        """Stands in for ReadableOperation: completion never resolves."""
+
+        def __init__(self, never_completes: bool = True):
+            self.released = False
+            self._never_completes = never_completes
+
+        async def wait_for_completion(self) -> None:
+            if self._never_completes:
+                await asyncio.Event().wait()  # pends forever
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            self.released = True
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    async def test_cleanup_is_bounded_and_releases_when_never_read(self, monkeypatch):
+        """A backend that never reads must not pin the buffer forever.
+
+        Before this was bounded, cleanup() awaited the completion future
+        indefinitely; the pending coroutine held the operation alive and its
+        NIXL registration was never dropped, so the frontend leaked the full
+        payload for every un-read request.
+        """
+        monkeypatch.setattr(mm_kwargs_transfer, "MM_NIXL_CLEANUP_TIMEOUT_S", 0.05)
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+        ops = [self._FakeOp(), self._FakeOp()]
+
+        await asyncio.wait_for(sender.cleanup(ops), timeout=5)
+
+        assert all(op.released for op in ops), "buffers must be released on timeout"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    async def test_cleanup_releases_on_normal_completion(self, monkeypatch):
+        """The happy path still releases."""
+        monkeypatch.setattr(mm_kwargs_transfer, "MM_NIXL_CLEANUP_TIMEOUT_S", 5.0)
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+        ops = [self._FakeOp(never_completes=False)]
+
+        await sender.cleanup(ops)
+
+        assert ops[0].released
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    async def test_one_failing_op_does_not_release_a_still_pending_op_early(
+        self, monkeypatch
+    ):
+        """A failing completion must not cut the wait short for its siblings.
+
+        Without ``return_exceptions=True``, ``gather`` propagates the first
+        error while the other completion coroutines are still running, and the
+        release below would then deregister a buffer whose backend read is
+        still in flight.
+        """
+        monkeypatch.setattr(mm_kwargs_transfer, "MM_NIXL_CLEANUP_TIMEOUT_S", 5.0)
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+
+        released_while_pending = []
+
+        class _RaisingOp(TestMmKwargsNixlSenderCleanup._FakeOp):
+            async def wait_for_completion(self) -> None:
+                raise RuntimeError("transfer failed")
+
+        class _SlowOp(TestMmKwargsNixlSenderCleanup._FakeOp):
+            def __init__(self):
+                super().__init__(never_completes=False)
+                self.done = False
+
+            async def wait_for_completion(self) -> None:
+                await asyncio.sleep(0.2)
+                self.done = True
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                if not self.done:
+                    released_while_pending.append(self)
+                super().__exit__(exc_type, exc_value, traceback)
+
+        slow = _SlowOp()
+        # cleanup() is best-effort and does not raise: the caller awaits it
+        # from a bare finally, where a raise would replace an in-flight
+        # CancelledError.
+        await sender.cleanup([_RaisingOp(), slow])
+
+        assert slow.done, "cleanup returned before the pending transfer finished"
+        assert not released_while_pending, "released a buffer whose read was in flight"
+        assert slow.released, "sibling buffer was not released"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    async def test_release_failure_does_not_stop_remaining_releases(self):
+        """A failing release must not stop the remaining buffers being freed."""
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+
+        class _BadRelease(TestMmKwargsNixlSenderCleanup._FakeOp):
+            def __init__(self):
+                super().__init__(never_completes=False)
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                raise RuntimeError("deregister failed")
+
+        good = TestMmKwargsNixlSenderCleanup._FakeOp(never_completes=False)
+        # Best-effort: the failure is logged, not raised, and the loop continues.
+        await sender.cleanup([_BadRelease(), good])
+
+        assert (
+            good.released
+        ), "a later buffer was skipped after an earlier release failed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    async def test_cleanup_with_no_items_is_a_noop(self):
+        sender = MmKwargsNixlSender.__new__(MmKwargsNixlSender)
+        await sender.cleanup([])
 
 
 class TestMmKwargsShmTransfer:

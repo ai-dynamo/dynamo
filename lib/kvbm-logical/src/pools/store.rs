@@ -612,6 +612,31 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         out
     }
 
+    /// Batched active-or-inactive scattered lookup under **one** store-mutex
+    /// acquisition. Unlike [`match_prefix_locked_batch`](Self::match_prefix_locked_batch),
+    /// this preserves one output position per input hash and continues after
+    /// misses.
+    ///
+    /// Each position uses [`acquire_for_hash_locked`](Self::acquire_for_hash_locked),
+    /// so active lookup, eager `Primary -> Inactive` recovery, and inactive
+    /// resurrection remain atomic with respect to every other position in the
+    /// batch. Repeated hashes are resolved independently: an inactive hit in
+    /// the first occurrence is resurrected, and subsequent occurrences clone
+    /// that now-active primary.
+    ///
+    /// Frequency tracking is deliberately disabled while the store lock is
+    /// held. The caller applies one touch per hit after this method returns.
+    pub(crate) fn match_scattered_locked_batch(
+        self: &Arc<Self>,
+        hashes: &[SequenceHash],
+    ) -> Vec<Option<Arc<ImmutableBlockInner<T>>>> {
+        let mut inner = self.inner.lock();
+        hashes
+            .iter()
+            .map(|&hash| self.acquire_for_hash_locked(&mut inner, hash, /*touch*/ false))
+            .collect()
+    }
+
     /// Atomic registration of a [`CompleteBlock`]: lookup-then-transition
     /// under one store-mutex acquisition. Closes the register-vs-register
     /// race for the same sequence hash.
@@ -626,29 +651,99 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         handle: BlockRegistrationHandle,
         policy: BlockDuplicationPolicy,
     ) -> Arc<ImmutableBlockInner<T>> {
-        let block_id = block.block_id();
-        let seq_hash = block.sequence_hash();
-        debug_assert_eq!(seq_hash, handle.seq_hash());
-
         // Disarm the guard up front so the slot stays in `Staged` state
         // when we transition; we re-arm only on the Reject path.
         let mut block = block;
         block.disarm();
 
         let mut inner = self.inner.lock();
-        let existing = self.acquire_for_hash_locked(&mut inner, seq_hash, false);
+        let result = self.register_completed_block_locked(&mut inner, &mut block, &handle, policy);
 
-        // Whether we added a new presence-bearing slot (Primary or
-        // Duplicate). Reject does not, since the slot returns to Reset.
-        let mut presence_added = false;
+        drop(inner);
 
-        let result = if let Some(existing_primary) = existing {
+        // mark_present takes the attachments lock; lock-order
+        // (attachments → store) is satisfied because the store lock has
+        // already been released. Skip on Reject — no new presence-bearing
+        // slot was created. The locked helper guarantees that fresh/Allow
+        // outcomes use the candidate slot, while Reject returns the distinct
+        // existing primary (enforced by its same-block collision assertion).
+        let presence_added = result.block_id() == block.block_id();
+        if presence_added {
+            handle.mark_present::<T>();
+        }
+
+        // Block guard drops here: armed=false on Allow/fresh paths
+        // (slot already transitioned), armed=true on Reject (releases
+        // Staged → Reset).
+        drop(block);
+        result
+    }
+
+    /// Register a batch while acquiring the store mutex only once.
+    pub(crate) fn register_completed_blocks(
+        self: &Arc<Self>,
+        mut blocks: Vec<CompleteBlock<T>>,
+        handles: Vec<BlockRegistrationHandle>,
+        policy: BlockDuplicationPolicy,
+    ) -> Vec<Arc<ImmutableBlockInner<T>>> {
+        assert_eq!(
+            blocks.len(),
+            handles.len(),
+            "each completed block must have a registration handle"
+        );
+
+        let outcomes = {
+            let mut outcomes = Vec::with_capacity(blocks.len());
+            let mut inner = self.inner.lock();
+            for (block, handle) in blocks.iter_mut().zip(&handles) {
+                block.disarm();
+                outcomes
+                    .push(self.register_completed_block_locked(&mut inner, block, handle, policy));
+            }
+            outcomes
+        };
+
+        // Presence attachments and re-armed Reject-guard drops both acquire
+        // locks outside the store. Keep them after the one batch critical
+        // section to preserve attachments -> store lock ordering.
+        for ((block, handle), outcome) in blocks.iter().zip(&handles).zip(&outcomes) {
+            // Fresh and Allow outcomes retain the candidate block ID; Reject
+            // returns the different existing primary ID and re-arms `block`.
+            let presence_added = outcome.block_id() == block.block_id();
+            if presence_added {
+                handle.mark_present::<T>();
+            }
+        }
+        drop(blocks);
+        outcomes
+    }
+
+    /// Register a completed candidate while the store mutex is held.
+    ///
+    /// The returned block ID equals the candidate block ID exactly when this
+    /// call creates a presence-bearing slot (fresh primary or allowed
+    /// duplicate). A rejected duplicate re-arms the candidate guard and
+    /// returns the existing primary, whose distinct ID is enforced by the
+    /// same-block collision assertion below.
+    fn register_completed_block_locked(
+        self: &Arc<Self>,
+        inner: &mut BlockStoreInner<T>,
+        block: &mut CompleteBlock<T>,
+        handle: &BlockRegistrationHandle,
+        policy: BlockDuplicationPolicy,
+    ) -> Arc<ImmutableBlockInner<T>> {
+        let block_id = block.block_id();
+        let seq_hash = block.sequence_hash();
+        debug_assert_eq!(seq_hash, handle.seq_hash());
+        let existing = self.acquire_for_hash_locked(inner, seq_hash, false);
+
+        if let Some(existing_primary) = existing {
             assert_ne!(
                 existing_primary.block_id(),
                 block_id,
                 "register_completed_block: collision with same block_id {block_id}"
             );
-            match policy {
+            return match policy {
                 BlockDuplicationPolicy::Allow => {
                     debug_assert!(matches!(
                         inner.slots[block_id].state,
@@ -667,50 +762,29 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                         inner: Arc::downgrade(&inner_arc),
                     };
                     self.metrics.inc_duplicate_blocks();
-                    presence_added = true;
                     inner_arc
                 }
                 BlockDuplicationPolicy::Reject => {
                     self.metrics.inc_registration_dedup();
-                    // Re-arm so the block guard's drop releases the slot
-                    // (Staged → Reset) when it falls out of scope below.
                     block.rearm();
                     existing_primary
                 }
-            }
-        } else {
-            // Fresh primary.
-            debug_assert!(matches!(
-                inner.slots[block_id].state,
-                SlotState::Staged { .. }
-            ));
-            let inner_arc =
-                ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash, handle.clone());
-            inner.slots[block_id].state = SlotState::Primary {
-                seq_hash,
-                handle: handle.clone(),
-                inner: Arc::downgrade(&inner_arc),
             };
-            inner.active_by_hash.insert(seq_hash, block_id);
-            presence_added = true;
-            inner_arc
-        };
-
-        drop(inner);
-
-        // mark_present takes the attachments lock; lock-order
-        // (attachments → store) is satisfied because the store lock has
-        // already been released. Skip on Reject — no new presence-bearing
-        // slot was created.
-        if presence_added {
-            handle.mark_present::<T>();
         }
 
-        // Block guard drops here: armed=false on Allow/fresh paths
-        // (slot already transitioned), armed=true on Reject (releases
-        // Staged → Reset).
-        drop(block);
-        result
+        debug_assert!(matches!(
+            inner.slots[block_id].state,
+            SlotState::Staged { .. }
+        ));
+        let inner_arc =
+            ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash, handle.clone());
+        inner.slots[block_id].state = SlotState::Primary {
+            seq_hash,
+            handle: handle.clone(),
+            inner: Arc::downgrade(&inner_arc),
+        };
+        inner.active_by_hash.insert(seq_hash, block_id);
+        inner_arc
     }
 
     /// Internal helper: under the store lock, transition a Primary slot to

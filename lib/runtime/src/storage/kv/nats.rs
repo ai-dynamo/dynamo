@@ -52,6 +52,13 @@ impl Store for NATSStore {
         // TODO: Track and delete any owned keys
         // The TTL should ensure NATS does it, but best we do it immediately
     }
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        if self.client.client().connection_state() != async_nats::connection::State::Connected {
+            return Err(StoreError::NATSError("NATS is disconnected".into()));
+        }
+        Ok(())
+    }
 }
 
 impl NATSStore {
@@ -129,6 +136,46 @@ impl Bucket for NATSBucket {
         }
     }
 
+    async fn compare_and_replace(
+        &self,
+        key: &kv::Key,
+        expected: bytes::Bytes,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError> {
+        let entry = self
+            .nats_store
+            .entry(key)
+            .await
+            .map_err(|error| StoreError::NATSError(error.to_string()))?
+            .ok_or_else(|| StoreError::MissingKey(key.to_string()))?;
+        if matches!(entry.operation, Operation::Delete | Operation::Purge) {
+            return Err(StoreError::MissingKey(key.to_string()));
+        }
+        if entry.value != expected {
+            return Err(StoreError::Retry);
+        }
+
+        match self.nats_store.update(key, value, entry.revision).await {
+            Ok(revision) => Ok(StoreOutcome::Created(revision)),
+            Err(error)
+                if error.kind()
+                    == async_nats::jetstream::kv::UpdateErrorKind::WrongLastRevision =>
+            {
+                match self.nats_store.entry(key).await {
+                    Ok(None) => Err(StoreError::MissingKey(key.to_string())),
+                    Ok(Some(entry))
+                        if matches!(entry.operation, Operation::Delete | Operation::Purge) =>
+                    {
+                        Err(StoreError::MissingKey(key.to_string()))
+                    }
+                    Ok(Some(_)) => Err(StoreError::Retry),
+                    Err(error) => Err(StoreError::NATSError(error.to_string())),
+                }
+            }
+            Err(error) => Err(StoreError::NATSError(error.to_string())),
+        }
+    }
+
     async fn get(&self, key: &kv::Key) -> Result<Option<bytes::Bytes>, StoreError> {
         self.nats_store
             .get(key)
@@ -143,13 +190,16 @@ impl Bucket for NATSBucket {
             .map_err(|e| StoreError::NATSError(e.to_string()))
     }
 
+    /// Replays the existing entries as individual [`kv::WatchEvent::Put`] events, not as the
+    /// initial [`kv::WatchEvent::Resync`] the [`kv::Bucket::watch`] contract asks for. Discovery
+    /// does not select this store, so nothing depends on that order here.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = kv::WatchEvent> + Send + 'life0>>, StoreError>
     {
         let watch_stream = self
             .nats_store
-            .watch_all()
+            .watch_with_history(">")
             .await
             .map_err(|e| StoreError::NATSError(e.to_string()))?;
         // Map the `Entry` to `Entry.value` which is Bytes of the stored value.
@@ -272,4 +322,71 @@ impl NATSBucket {
 /// things).
 fn single_name(namespace: &str, name: &Slug) -> String {
     format!("{namespace}_{name}")
+}
+
+#[cfg(feature = "integration")]
+#[cfg(test)]
+mod compare_and_replace_tests {
+    use std::sync::Arc;
+
+    use tokio::sync::Barrier;
+
+    use super::*;
+    use crate::storage::kv::{Bucket as _, Key, Store as _};
+
+    #[tokio::test]
+    async fn delete_wins_race_with_compare_and_replace() {
+        let client = crate::transports::nats::ClientOptions::default()
+            .connect()
+            .await
+            .unwrap();
+        let endpoint = EndpointId {
+            namespace: "test".to_string(),
+            component: "storage".to_string(),
+            name: "compare-and-replace".to_string(),
+        };
+        let store = NATSStore::new(client, endpoint);
+        let bucket_name = format!("compare_and_replace_{}", uuid::Uuid::new_v4());
+        let jetstream_bucket_name = single_name("test", &Slug::slugify(&bucket_name));
+        let bucket = Arc::new(
+            store
+                .get_or_create_bucket(&bucket_name, None)
+                .await
+                .unwrap(),
+        );
+        let key = Key::new("model".to_string());
+        bucket.insert(&key, "old".into(), 0).await.unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let task_bucket = bucket.clone();
+        let task_key = key.clone();
+        let task_barrier = barrier.clone();
+        let update = tokio::spawn(async move {
+            task_barrier.wait().await;
+            task_bucket
+                .compare_and_replace(&task_key, "old".into(), "new".into())
+                .await
+        });
+        let task_bucket = bucket.clone();
+        let task_key = key.clone();
+        let task_barrier = barrier.clone();
+        let delete = tokio::spawn(async move {
+            task_barrier.wait().await;
+            task_bucket.delete(&task_key).await
+        });
+
+        barrier.wait().await;
+        let update_result = update.await.unwrap();
+        delete.await.unwrap().unwrap();
+        assert!(update_result.is_ok() || matches!(update_result, Err(StoreError::MissingKey(_))));
+        assert_eq!(bucket.get(&key).await.unwrap(), None);
+
+        drop(bucket);
+        store
+            .client
+            .jetstream()
+            .delete_key_value(&jetstream_bucket_name)
+            .await
+            .unwrap();
+    }
 }

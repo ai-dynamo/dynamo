@@ -13,7 +13,7 @@ use crate::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
 
 use super::backend::Indexer;
 use super::registry::ListenerRecord;
-use crate::services::zmq::{
+use crate::services::common::zmq::{
     MultipartMessage, SharedSocket, connect_dealer_socket, connect_sub_socket, recv_multipart,
     send_multipart,
 };
@@ -185,7 +185,7 @@ impl ListenerLoop {
         cursor_from_watermark(self.watermark.load(Ordering::Acquire))
     }
 
-    async fn replay_gap(&mut self, start_seq: u64, end_seq: u64) -> u64 {
+    async fn replay_gap(&mut self, start_seq: u64, end_seq: u64) -> Result<u64, String> {
         tracing::info!(
             self.worker_id,
             self.dp_rank,
@@ -201,7 +201,7 @@ impl ListenerLoop {
                 gap_size = end_seq.saturating_sub(start_seq),
                 "No replay endpoint configured; batches lost"
             );
-            return 0;
+            return Ok(0);
         };
 
         let worker_id = self.worker_id;
@@ -212,7 +212,7 @@ impl ListenerLoop {
         let req_frames = vec![Vec::new(), start_seq.to_be_bytes().to_vec()];
         if let Err(error) = send_multipart(replay_socket, req_frames).await {
             tracing::error!(worker_id, dp_rank, error = %error, "Failed to send replay request");
-            return 0;
+            return Ok(0);
         }
 
         let mut replay_progress = ReplayRecoveryProgress::new(start_seq, end_seq);
@@ -229,22 +229,24 @@ impl ListenerLoop {
                     }
                 }
             };
-            if msg.len() < 3 {
-                tracing::warn!(
-                    worker_id,
-                    dp_rank,
-                    "Unexpected replay frame count: {}",
-                    msg.len()
-                );
-                break;
-            }
-
-            let payload = msg.get(2).expect("frame count checked above");
+            // DEALER strips the ROUTER identity. vLLM includes the PUB topic;
+            // SGLang sends only the delimiter, sequence number, and payload.
+            let (seq_bytes, payload) = match msg.as_slice() {
+                [_, seq, payload] | [_, _, seq, payload] => (seq, payload),
+                _ => {
+                    tracing::warn!(
+                        worker_id,
+                        dp_rank,
+                        "Unexpected replay frame count: {}",
+                        msg.len()
+                    );
+                    break;
+                }
+            };
             if payload.is_empty() {
                 break;
             }
 
-            let seq_bytes = msg.get(1).expect("frame count checked above");
             if seq_bytes.len() != 8 {
                 tracing::warn!(
                     worker_id,
@@ -275,7 +277,14 @@ impl ListenerLoop {
                 let router_event = placement_event
                     .into_router_event()
                     .expect("local worker placement must convert to router event");
-                indexer.apply_event_routed(router_event).await;
+                indexer
+                    .apply_event_routed(router_event)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "failed to apply replayed event for worker {worker_id} dp_rank {dp_rank}: {error}"
+                        )
+                    })?;
             }
             watermark.store(seq, Ordering::Release);
             replay_progress.record_batch(seq);
@@ -285,10 +294,10 @@ impl ListenerLoop {
 
         let replayed = replay_progress.replayed();
         tracing::info!(worker_id, dp_rank, replayed, "Replay complete");
-        replayed
+        Ok(replayed)
     }
 
-    async fn handle_gap(&mut self, seq: u64) {
+    async fn handle_gap(&mut self, seq: u64) -> Result<(), String> {
         match self.cursor().observe(seq) {
             CursorObservation::Initial { got } if got > 0 => {
                 tracing::warn!(
@@ -298,7 +307,7 @@ impl ListenerLoop {
                     got,
                     "Gap detected: expected seq 0, got {got}"
                 );
-                self.replay_gap(0, got).await;
+                self.replay_gap(0, got).await?;
             }
             CursorObservation::Gap { expected, got } => {
                 tracing::warn!(
@@ -308,16 +317,16 @@ impl ListenerLoop {
                     got,
                     "Gap detected: expected seq {expected}, got {got}"
                 );
-                self.replay_gap(expected, got).await;
+                self.replay_gap(expected, got).await?;
             }
             CursorObservation::Initial { .. }
             | CursorObservation::Contiguous { .. }
-            | CursorObservation::Stale { .. }
-            | CursorObservation::FreshAfterBarrier { .. } => {}
+            | CursorObservation::Stale { .. } => {}
         }
+        Ok(())
     }
 
-    async fn apply_live_batch(&mut self, seq: u64, payload: &[u8]) {
+    async fn apply_live_batch(&mut self, seq: u64, payload: &[u8]) -> Result<(), String> {
         let batch = match decode_event_batch(payload) {
             Ok(batch) => batch,
             Err(error) => {
@@ -326,7 +335,7 @@ impl ListenerLoop {
                     self.dp_rank,
                     "Failed to decode KvEventBatch: {error}"
                 );
-                return;
+                return Ok(());
             }
         };
 
@@ -344,13 +353,22 @@ impl ListenerLoop {
             let router_event = placement_event
                 .into_router_event()
                 .expect("local worker placement must convert to router event");
-            self.indexer.apply_event_routed(router_event).await;
+            self.indexer
+                .apply_event_routed(router_event)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "failed to apply live event for worker {} dp_rank {}: {error}",
+                        self.worker_id, self.dp_rank
+                    )
+                })?;
             self.messages_processed += 1;
         }
         self.watermark.store(seq, Ordering::Release);
+        Ok(())
     }
 
-    async fn handle_message(&mut self, msg: MultipartMessage) {
+    async fn handle_message(&mut self, msg: MultipartMessage) -> Result<(), String> {
         if msg.len() != 3 {
             tracing::warn!(
                 self.worker_id,
@@ -358,7 +376,7 @@ impl ListenerLoop {
                 "Unexpected ZMQ frame count: {}",
                 msg.len()
             );
-            return;
+            return Ok(());
         }
 
         let seq_bytes = msg.get(1).expect("frame count checked above");
@@ -369,18 +387,18 @@ impl ListenerLoop {
                 "Invalid sequence number length: {}",
                 seq_bytes.len()
             );
-            return;
+            return Ok(());
         }
 
         let seq = u64::from_be_bytes(seq_bytes[..8].try_into().expect("length checked above"));
-        self.handle_gap(seq).await;
+        self.handle_gap(seq).await?;
 
         if matches!(self.cursor().observe(seq), CursorObservation::Stale { .. }) {
-            return;
+            return Ok(());
         }
 
         let payload = msg.get(2).expect("frame count checked above");
-        self.apply_live_batch(seq, payload).await;
+        self.apply_live_batch(seq, payload).await
     }
 
     async fn run(mut self) -> Result<(), String> {
@@ -412,7 +430,7 @@ impl ListenerLoop {
                 }
             };
 
-            self.handle_message(msg).await;
+            self.handle_message(msg).await?;
         }
     }
 }
@@ -539,119 +557,84 @@ async fn connect_replay_socket(
 
 #[cfg(test)]
 mod tests {
-    use super::{WATERMARK_UNSET, cursor_from_watermark};
-    use crate::recovery::CursorObservation;
-    use crate::services::zmq::{
-        SharedSocket, bind_pub_socket, connect_sub_socket, recv_multipart, send_multipart,
-    };
+    use super::*;
+    use crate::protocols::compute_block_hash_for_seq;
+    use crate::services::indexer::backend::create_indexer;
+    use std::time::Duration;
 
-    #[test]
-    fn initial_gap_replays_from_zero_and_replayed_seq_becomes_stale() {
-        let replay_start = match cursor_from_watermark(WATERMARK_UNSET).observe(5) {
-            CursorObservation::Initial { got } if got > 0 => Some(0),
-            CursorObservation::Gap { expected, .. } => Some(expected),
-            _ => None,
-        };
-        assert_eq!(replay_start, Some(0));
-        assert!(matches!(
-            cursor_from_watermark(5).observe(5),
-            CursorObservation::Stale {
-                got: 5,
-                last_applied: Some(5),
+    #[rstest::rstest]
+    #[case::sglang(false)]
+    #[case::vllm(true)]
+    #[tokio::test]
+    async fn replay_accepts_engine_framing(#[case] include_topic: bool) {
+        let context = zmq::Context::new();
+        let router = context.socket(zmq::ROUTER).unwrap();
+        router.set_linger(0).unwrap();
+        router.set_rcvtimeo(5000).unwrap();
+        router.set_sndtimeo(5000).unwrap();
+        router.bind("tcp://127.0.0.1:*").unwrap();
+        let endpoint = router.get_last_endpoint().unwrap().unwrap();
+        let replay_socket = connect_dealer_socket(&endpoint).unwrap();
+        let publisher = context.socket(zmq::PUB).unwrap();
+        publisher.bind("tcp://127.0.0.1:*").unwrap();
+        let live_socket =
+            connect_sub_socket(&publisher.get_last_endpoint().unwrap().unwrap()).unwrap();
+
+        let server = tokio::task::spawn_blocking(move || {
+            let request = router.recv_multipart(0).unwrap();
+            assert_eq!(&request[1..], &[vec![], 0_u64.to_be_bytes().to_vec()]);
+            for seq in 0_u64..=2 {
+                let mut frames = vec![request[0].clone(), vec![]];
+                if include_topic {
+                    frames.push(b"kv-events".to_vec());
+                }
+                if seq == 2 {
+                    frames.extend([u64::MAX.to_be_bytes().to_vec(), vec![]]);
+                } else {
+                    let event = (
+                        "BlockStored",
+                        vec![seq + 100],
+                        if seq == 0 { None } else { Some(100_u64) },
+                        vec![1_u32 + seq as u32; 4],
+                        4_usize,
+                        Option::<u64>::None,
+                        "GPU",
+                    );
+                    let payload = rmp_serde::to_vec(&(0.0_f64, vec![event], Some(0_i32))).unwrap();
+                    frames.extend([seq.to_be_bytes().to_vec(), payload]);
+                }
+                router.send_multipart(frames, 0).unwrap();
             }
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn zmq_buffers_messages_during_brief_delay() {
-        let reserved_listener = reserve_open_port();
-        let endpoint = format!(
-            "tcp://127.0.0.1:{}",
-            reserved_listener
-                .local_addr()
-                .expect("failed to read reserved listener address")
-                .port()
-        );
-        drop(reserved_listener);
-        let pub_socket = bind_pub_socket(&endpoint).unwrap();
-        let mut sub_socket = connect_sub_socket(&endpoint).unwrap();
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<SharedSocket>(1);
-        tokio::spawn(async move {
-            let _ = recv_multipart(&sub_socket).await.unwrap();
-            let _ = tx.send(sub_socket).await;
+            // Keep the socket open until the client consumes the queued replies.
+            assert_eq!(router.recv_multipart(0).unwrap()[1], b"done");
         });
-        loop {
-            send_multipart(&pub_socket, vec![b"probe".to_vec()])
-                .await
-                .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Ok(sub) = rx.try_recv() {
-                sub_socket = sub;
-                break;
-            }
-        }
-
-        let num_messages = 10u64;
-
-        for i in 0..num_messages {
-            send_multipart(&pub_socket, vec![i.to_le_bytes().to_vec()])
-                .await
-                .unwrap();
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        for i in 0u64..num_messages {
-            let msg = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                recv_multipart(&sub_socket),
-            )
-            .await
-            .expect("timed out waiting for ZMQ message")
-            .unwrap();
-
-            let payload = msg.first().unwrap();
-            let received = u64::from_le_bytes(payload[..8].try_into().unwrap());
-            assert_eq!(received, i, "message {i} arrived out of order");
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn zmq_subscriber_connects_before_publisher_bind() {
-        let reserved_listener = reserve_open_port();
-        let endpoint = format!(
-            "tcp://127.0.0.1:{}",
-            reserved_listener
-                .local_addr()
-                .expect("failed to read reserved listener address")
-                .port()
+        let indexer = create_indexer(4, 1);
+        let watermark = Arc::new(AtomicU64::new(WATERMARK_UNSET));
+        let cancel = CancellationToken::new();
+        let mut listener = ListenerLoop::new(
+            1,
+            0,
+            4,
+            indexer.clone(),
+            cancel.clone(),
+            live_socket,
+            Some(replay_socket.clone()),
+            watermark.clone(),
         );
-        drop(reserved_listener);
-        let sub_socket = connect_sub_socket(&endpoint).unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let pub_socket = bind_pub_socket(&endpoint).unwrap();
-        for _ in 0..5 {
-            send_multipart(&pub_socket, vec![b"probe".to_vec()])
-                .await
-                .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            recv_multipart(&sub_socket),
-        )
-        .await
-        .expect("timed out waiting for ZMQ message")
-        .unwrap();
-
-        assert_eq!(msg, vec![b"probe".to_vec()]);
-    }
-
-    fn reserve_open_port() -> std::net::TcpListener {
-        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind probe listener")
+        let replayed = tokio::time::timeout(Duration::from_secs(5), listener.replay_gap(0, 2))
+            .await
+            .expect("replay completion marker")
+            .unwrap();
+        send_multipart(&replay_socket, vec![b"done".to_vec()])
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(replayed, 2);
+        assert_eq!(watermark.load(Ordering::Acquire), 1);
+        indexer.dump_events().await.expect("flush indexer");
+        let hashes = compute_block_hash_for_seq(&[1, 1, 1, 1, 2, 2, 2, 2], 4, Default::default());
+        let matches = indexer.find_matches(hashes).await.unwrap();
+        assert_eq!(matches.scores.get(&WorkerWithDpRank::new(1, 0)), Some(&2));
+        cancel.cancel();
     }
 }

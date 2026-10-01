@@ -1,0 +1,432 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Environment Variables
+subtitle: Every environment variable that controls Dynamo metrics, tracing, logging, health checks, and request capture.
+---
+
+This page catalogs the environment variables that govern Dynamo observability. Set them on every
+frontend, router, or worker that should emit a signal. For local procedures, see
+[Observe a Local Deployment](../../cli/operations/observability.mdx) and
+[Observe a Local Deployment](../../cli/operations/observability.mdx#check-deployment-health).
+
+The canonical list of variable names lives in [`lib/runtime/src/config/environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs), which groups them by area (logging, OTLP, system server, canary, request trace). The logging and OTLP variables are read in [`lib/runtime/src/logging.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/logging.rs) `setup_logging()`; the `DYN_SYSTEM_*` and health variables are read by the system-status server. The backend log-level variables (`VLLM_LOGGING_LEVEL`, `TLLM_LOG_LEVEL`) are read by the respective engines, not the Dynamo runtime.
+
+Every variable on this page is set the same way whether you run locally or on Kubernetes — the same name, only the value or convention differs. A few fields note an **Operator preset**: the value the Dynamo operator injects on Kubernetes, which your own configuration overrides. Kubernetes-only *metrics enablement* is controlled by CRD annotations and Helm values rather than environment variables — see [Operator Metrics](operator-metrics.mdx#kubernetes-enablement-knobs).
+
+<Info>
+  Prometheus metric families in Dynamo are registered lazily: each label set is created the first time it fires, so a freshly-started process shows empty metric families until the first relevant request. An idle cluster does not mean scraping is broken.
+</Info>
+
+## Setting these variables
+
+Every Dynamo process reads its own environment at startup, so set these on each process you want to emit signals — the frontend, the router, and each worker. The tabs below cover the two ways to do that; everything inside applies to whichever environment you pick.
+
+<Card>
+<Tabs>
+  <Tab title="Local">
+    Export the variables in the shell before launching each process, then start the frontend and one or more workers:
+
+    ```bash
+    export DYN_SYSTEM_PORT=8081
+    export DYN_LOGGING_CONSOLE_FORMAT=jsonl
+    export DYN_LOG=info
+
+    # Frontend (serves dynamo_frontend_* on DYN_HTTP_PORT, default 8000)
+    python -m dynamo.frontend &
+
+    # vLLM worker (serves dynamo_component_* on DYN_SYSTEM_PORT)
+    python -m dynamo.vllm --model Qwen/Qwen3-0.6B &
+    ```
+
+    Use `python -m dynamo.sglang` or `python -m dynamo.trtllm` for the other backends, and `python -m dynamo.router` for a standalone router.
+  </Tab>
+  <Tab title="Kubernetes">
+    Set the variables on the [`DynamoGraphDeployment`](../kubernetes-api/dynamo-graph-deployment.mdx) (DGD) — at graph level in `spec.envs` (prepended to every component) or per-component under `services.<name>.extraPodSpec.mainContainer.env`. A component-level entry overrides a graph-level one of the same name.
+
+    ```yaml
+    apiVersion: nvidia.com/v1alpha1
+    kind: DynamoGraphDeployment
+    metadata:
+      name: vllm-agg-tracing
+    spec:
+      envs:                              # applied to every component
+        - name: DYN_LOGGING_CONSOLE_FORMAT
+          value: "jsonl"
+        - name: OTEL_EXPORT_ENABLED
+          value: "true"
+        - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          value: "http://tempo.observability.svc.cluster.local:4317"
+      services:
+        Frontend:
+          componentType: frontend
+          extraPodSpec:
+            mainContainer:
+              env:                       # applied to this component only
+                - name: OTEL_SERVICE_NAME
+                  value: "dynamo-frontend"
+    ```
+
+    <Note>
+      A [`DynamoGraphDeploymentRequest`](../kubernetes-api/dynamo-graph-deployment-request.mdx) (DGDR) has no environment-variable fields of its own. To set these under a DGDR, put them in the embedded DGD it produces via `spec.overrides.dgd`. You never set these on the operator deployment itself — the operator only writes them into the workload pods it creates; it never reads them from its own environment.
+    </Note>
+  </Tab>
+</Tabs>
+</Card>
+
+## System and metrics
+
+<ParamField path="DYN_SYSTEM_PORT" type="integer" default="-1 (disabled)">
+  Port for the backend component's system-status server, which serves `/metrics` and the health endpoints. Disabled by default; local examples use `8081`. Must be set explicitly for backend workers and the standalone router to expose metrics.
+
+  **Operator preset:** `9090` on worker, prefill, decode, and planner pods.
+</ParamField>
+
+<ParamField path="DYN_HTTP_PORT" type="integer" default="8000">
+  Frontend HTTP port, where `dynamo_frontend_*` metrics are served at `/metrics`. Also configurable via the `--http-port` flag.
+
+  **Operator preset:** `8000` on frontend pods.
+</ParamField>
+
+<ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
+  Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
+
+  This variable alone does not produce a scrapeable endpoint: set `NIXL_TELEMETRY_EXPORTER` as well. `NIXL_TELEMETRY_PROMETHEUS_PORT` then chooses the port, and while it is optional, leaving it unset lands the exporter on a port the operator already uses. Both are described below.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>1</Badge> <Badge intent="note" minimal>yes</Badge> <Badge intent="note" minimal>on</Badge> <Badge intent="note" minimal>true</Badge> <Badge intent="note" minimal>enable</Badge> <Badge intent="note" minimal>n</Badge> <Badge intent="note" minimal>0</Badge> <Badge intent="note" minimal>no</Badge> <Badge intent="note" minimal>off</Badge> <Badge intent="note" minimal>false</Badge> <Badge intent="note" minimal>disable</Badge></span>
+
+  NIXL compares the value case-insensitively but does not trim whitespace, so `Y` and `TRUE` are accepted while ` y` and `y ` are errors. Any other value is also an error.
+
+  For SGLang operator port declarations, use `y` (case-insensitive). Other literal truthy values retain their existing port declarations to avoid rolling unchanged workloads on operator upgrade. Changing the custom resource value to `y` opts in to the additional rank ports and rolls the workload. Runtime telemetry still accepts all the truthy values listed above.
+
+  **Operator preset:** `n` on worker, prefill, and decode pods.
+</ParamField>
+
+<ParamField path="NIXL_TELEMETRY_EXPORTER" type="string">
+  NIXL telemetry exporter to use, e.g. `prometheus`.
+
+  Required for a Prometheus endpoint, with the exact lowercase value `prometheus`. NIXL has no default exporter: when this variable is unset, telemetry is collected in-process without opening a Prometheus port. Other valid exporters, such as `doca`, use their own configuration; an exporter that NIXL cannot load makes agent construction fail.
+
+  **Operator preset:** `prometheus` on worker, prefill, and decode pods.
+</ParamField>
+
+<ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer" default="9090 (NIXL fallback)">
+  Port for NIXL's Prometheus exporter — a separate port from the Dynamo metrics port. Each NIXL agent binds its own exporter, so every agent needs a port of its own; two agents pointed at the same port leave the second exporter unable to bind.
+
+  Give each worker a non-overlapping value when workers share a network namespace. Because each value is the base of an eight-port range (see below), `19090` for the prefill worker leaves `19098` as the next free base for the decode worker.
+
+  Within a single worker, treat this as the **base** of a range rather than one port. SGLang runs one scheduler process per node-local GPU and each builds its own NIXL agent, so Dynamo gives node-local rank *i* the port `base + i` and the operator declares the whole range on the pod as `nixl`, `nixl-1`, … so Prometheus scrapes every rank. Leave room for as many consecutive ports as the pod has GPUs (up to 8).
+
+  Optional: with the exporter selected, NIXL binds a listener whether or not this is set. `19090` is Dynamo's convention rather than a NIXL default, and with this variable unset the exporter falls back to its own built-in `9090` — which is the `DYN_SYSTEM_PORT` operator preset, so set it explicitly to keep the two apart. A malformed or out-of-range value is not a fallback. NIXL 1.3.2 logs the exporter creation failure and continues without an exporter; NIXL 1.4.0 raises an error during agent construction. Dynamo's own port validation rejects these values before worker startup, independently of that version-specific NIXL behavior. NIXL accepts `0` as an ephemeral port, but Dynamo rejects it because that port cannot be declared or configured as a scrape target.
+
+  Set a literal port between 1 and 65535, in decimal or hexadecimal (for example, `0x4a92` for `19090`). When reserving SGLang Prometheus rank ports, the operator rejects a value taken from `valueFrom`: it cannot resolve that value to declare the range as container ports.
+
+  **Operator preset:** `19090` on worker, prefill, and decode pods.
+</ParamField>
+
+## OpenTelemetry (traces and logs)
+
+<ParamField path="OTEL_EXPORT_ENABLED" type="boolean" default="false">
+  Master switch for OTLP export. Gates both traces and runtime logs. Request trace records require the separate `otel` request-trace sink.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_ENDPOINT" type="string">
+  Generic endpoint for traces and logs. For `grpc`, Dynamo uses it as-is. For `http/protobuf`, Dynamo appends `/v1/traces` or `/v1/logs`. When unset, each signal uses its protocol default.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" type="string">
+  Trace-only endpoint, used as-is. Falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4317` for `grpc` or `http://localhost:4318/v1/traces` for `http/protobuf`.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" type="string">
+  Log-only endpoint, used as-is. Falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4317` for `grpc` or `http://localhost:4318/v1/logs` for `http/protobuf`. It does not fall back to the traces endpoint.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_PROTOCOL" type="string" default="grpc">
+  Default OTLP transport for traces and logs.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>grpc</Badge> <Badge intent="note" minimal>http/protobuf</Badge></span>
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_TRACES_PROTOCOL" type="string">
+  Trace-only protocol override. Falls back to `OTEL_EXPORTER_OTLP_PROTOCOL`.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_LOGS_PROTOCOL" type="string">
+  Log-only protocol override. Falls back to `OTEL_EXPORTER_OTLP_PROTOCOL`.
+</ParamField>
+
+<ParamField path="OTEL_TRACES_SAMPLE_RATIO" type="number">
+  Head-sampling ratio in `[0.0, 1.0]`. Unset exports every trace. For example, `0.01` retains approximately one percent of traces.
+</ParamField>
+
+<ParamField path="OTEL_SERVICE_NAME" type="string" default="dynamo">
+  Service name attached to exported telemetry. Use a per-component value such as `dynamo-frontend` to distinguish services.
+</ParamField>
+
+## Logging
+
+<ParamField path="DYN_LOGGING_CONSOLE_FORMAT" type="string" default="readable">
+  Console output format. Supported values are `readable` and `jsonl`; surrounding whitespace is ignored. When unset or blank, Dynamo falls back to `DYN_LOGGING_JSONL` for backward compatibility. This setting does not control OTLP export.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>readable</Badge> <Badge intent="note" minimal>jsonl</Badge></span>
+</ParamField>
+
+<ParamField path="DYN_LOGGING_JSONL" type="boolean" default="false">
+  Legacy JSONL switch used when `DYN_LOGGING_CONSOLE_FORMAT` is unset or blank. It also remains a local trace-context enablement signal for backward compatibility when the new setting explicitly selects readable output.
+</ParamField>
+
+<ParamField path="DYN_LOGGING_SPAN_EVENTS" type="boolean" default="false">
+  Emit span entry/close events (`SPAN_FIRST_ENTRY`, `SPAN_CLOSED` messages).
+</ParamField>
+
+<ParamField path="DYN_LOG" type="string" default="info">
+  Log level, optionally per target: `<default_level>,<module_path>=<level>,...`. Example: `info,dynamo_runtime::system_status_server:trace`.
+</ParamField>
+
+<ParamField path="DYN_LOG_USE_LOCAL_TZ" type="boolean" default="false">
+  Use the local timezone for log timestamps. Default is UTC.
+</ParamField>
+
+<ParamField path="DYN_LOGGING_CONFIG_PATH" type="string">
+  Path to a custom TOML logging configuration. Unset by default.
+</ParamField>
+
+<ParamField path="VLLM_LOGGING_LEVEL" type="string" default="INFO">
+  vLLM backend log level. Completely independent of `DYN_LOG`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>DEBUG</Badge> <Badge intent="note" minimal>INFO</Badge> <Badge intent="note" minimal>WARNING</Badge> <Badge intent="note" minimal>ERROR</Badge> <Badge intent="note" minimal>CRITICAL</Badge></span>
+</ParamField>
+
+<ParamField path="TLLM_LOG_LEVEL" type="string" default="INFO">
+  TensorRT-LLM backend log level. Independent of `DYN_LOG` and read **once at import time** — it must be set before the process starts.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>TRACE</Badge> <Badge intent="note" minimal>DEBUG</Badge> <Badge intent="note" minimal>INFO</Badge> <Badge intent="note" minimal>WARNING</Badge> <Badge intent="note" minimal>ERROR</Badge> <Badge intent="note" minimal>INTERNAL_ERROR</Badge></span>
+</ParamField>
+
+<ParamField path="DYN_SKIP_SGLANG_LOG_FORMATTING" type="boolean" default="false">
+  Disable Dynamo's SGLang log configuration so you can manage the SGLang engine's logging independently (e.g. via the worker's `--log-level` flag).
+</ParamField>
+
+## Health checks
+
+<ParamField path="DYN_HTTP_SVC_HEALTH_PATH" type="string" default="/health">
+  Path of the frontend health endpoint.
+</ParamField>
+
+<ParamField path="DYN_HTTP_SVC_LIVE_PATH" type="string" default="/live">
+  Path of the frontend liveness endpoint.
+</ParamField>
+
+<ParamField path="DYN_SYSTEM_STARTING_HEALTH_STATUS" type="string" default="notready">
+  Initial health status a component reports before its required endpoints are served.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ready</Badge> <Badge intent="note" minimal>notready</Badge></span>
+</ParamField>
+
+<ParamField path="DYN_SYSTEM_HEALTH_PATH" type="string" default="/health">
+  Path of the health endpoint on the system-status server.
+</ParamField>
+
+<ParamField path="DYN_SYSTEM_LIVE_PATH" type="string" default="/live">
+  Path of the liveness endpoint on the system-status server.
+</ParamField>
+
+<ParamField path="DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" type="string">
+  Deprecated compatibility variable. The current runtime logs a warning and does not use this value
+  to select endpoints for system health.
+
+  **Operator preset:** `["generate"]` on worker, prefill, and decode pods.
+</ParamField>
+
+<ParamField path="DYN_HEALTH_CHECK_ENABLED" type="boolean" default="false">
+  Enables canary health checks, which actively probe worker endpoints during idle periods. Defaults to `false`. The shadow-engine failover path may re-enable it per engine. (The health-check *guide* describes canary checks as "automatically enabled" in Kubernetes — that reflects the intended failover behavior, not the base value the operator injects.)
+
+  **Operator preset:** `false` on worker, prefill, and decode pods.
+</ParamField>
+
+<ParamField path="DYN_CANARY_WAIT_TIME" type="integer" default="10">
+  Seconds of endpoint idle time before a canary health check is sent. Lower values check more frequently.
+</ParamField>
+
+<ParamField path="DYN_HEALTH_CHECK_REQUEST_TIMEOUT" type="integer" default="3">
+  Maximum seconds to wait for a canary health-check response before marking the endpoint unhealthy.
+</ParamField>
+
+<ParamField path="DYN_HEALTH_CHECK_PAYLOAD" type="string">
+  Optional canary payload override for unified backends. Accepts a JSON object or
+  `@/path/to/payload.json` and takes precedence over the backend's default payload.
+</ParamField>
+
+## Forward Pass Metrics tracing
+
+<ParamField path="DYN_FPM_TRACE" type="boolean">
+  Enables Forward Pass Metrics persistence. Equivalent to the worker `--fpm-trace` switch.
+</ParamField>
+
+<ParamField path="DYN_FPM_OUTPUT_PATH" type="string" default="/tmp/dynamo-fpm">
+  Output prefix for `<prefix>.<producer-id>.<index>.jsonl.gz` files.
+</ParamField>
+
+<ParamField path="DYN_FPM_MODE" type="string" default="sampled">
+  Capture mode: `sampled` writes the latest changed value per worker and data-parallel rank; `full` writes every valid payload.
+</ParamField>
+
+<ParamField path="DYN_FPM_SAMPLE_INTERVAL_MS" type="integer" default="5000">
+  Sampling interval used by `sampled` mode.
+</ParamField>
+
+<ParamField path="DYN_FPM_JSONL_GZ_ROLL_BYTES" type="integer" default="268435456">
+  Segment roll threshold in uncompressed JSONL bytes.
+</ParamField>
+
+<ParamField path="DYN_FPM_MAX_SEGMENTS" type="integer" default="4">
+  Number of segments retained independently for each producer.
+</ParamField>
+
+See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for topology support and file semantics.
+
+## FPM self-benchmark collection
+
+These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mode`), which measures whole-model forward-pass latencies for the FPM performance database. They have no effect on serving.
+
+<ParamField path="DYN_BENCH_KV_WARMUP" type="string" default="on">
+  KV warm-up master switch. When on, eligible decode benchmark points read attention KV produced by real prefill chains. By default, eligibility requires a MoE model with expert parallelism and no recurrent-state layers. With `DYN_BENCHMARK_RANDOMIZE_KDA_STATE=true`, hybrid MoE models are also eligible without expert parallelism; their attention KV is real and their recurrent states remain synthetic. Set `off` to force the legacy synthetic-KV path.
+
+  All eligible configurations require prefix caching, a loadable tokenizer, and enough seeding dataset content for the model length. Configurations that do not meet these requirements skip warm-up and record the reason. Under attention data parallelism the decision is group-wide: if any rank is ineligible, every rank uses synthetic KV; if any rank's warm-up stage fails to build or cannot reserve its shadow blocks, every rank falls back to synthetic KV for that stage.
+</ParamField>
+
+<ParamField path="DYN_BENCHMARK_RANDOMIZE_KDA_STATE" type="boolean" default="false">
+  **Experimental.** Equivalent to `--benchmark-randomize-kda-state`. Requires `--benchmark-mode decode` or `agg`, recurrent cache groups, and the standard vLLM GPU worker with either model runner V1 or V2; custom workers and GMS are unsupported. Applies to every node, including headless workers.
+
+  Initializes each decode measurement request's private KDA/Mamba state with deterministic uniform values in `[-0.01, 0.01]`, in the cache tensors' existing dtypes. The generator is seeded by request ID, layer, rank, and tensor index without changing the model's RNG stream. Initialization completes in the discarded admission step; steady decode steps update these states normally. Initialization is disabled before serving starts.
+
+  With `DYN_BENCH_KV_WARMUP=on`, hybrid MoE models can use real attention KV from prefill chains even without expert parallelism. Their recurrent states remain synthetic; the source chain's states are never borrowed or modified. Existing dataset, prefix-cache, and capacity requirements still apply. Without a usable chain, attention KV follows the existing synthetic fallback.
+
+  Artifacts distinguish `real_attention_kv_random_kda` from `fake_attention_kv_random_kda` and record the distribution in `recurrent_state`. These values are performance-test inputs, not valid context history or a guarantee of real-workload performance parity.
+</ParamField>
+
+<ParamField path="DYN_BENCH_KV_WARMUP_DATASET" type="string">
+  Seeding-text dataset: a local path or an `http(s)` URL. Defaults to the ShareGPT V3 conversation dump; the default download is verified against a digest pinned in code.
+</ParamField>
+
+<ParamField path="DYN_BENCH_KV_WARMUP_CACHE_DIR" type="string">
+  Cache directory for a downloaded dataset. Defaults to `fpm_datasets/` next to `HF_HOME`, falling back to `/tmp/fpm_datasets`.
+</ParamField>
+
+<ParamField path="DYN_BENCH_KV_WARMUP_SHA256" type="string">
+  Expected sha256 of the dataset file. Required to pin a custom `DYN_BENCH_KV_WARMUP_DATASET` download; overrides the built-in digest for the default dataset.
+</ParamField>
+
+<ParamField path="DYN_BENCH_GIANT_KV_THRESHOLD" type="integer" default="1000000">
+  Total-KV-read threshold (tokens) above which a fake-injected decode point is measured with repeated steady steps. Points served from the real-KV warm-up chains always repeat. Set `0` to apply repeat protection to every point.
+</ParamField>
+
+<ParamField path="DYN_BENCH_GIANT_KV_REPEATS" type="integer" default="3">
+  Steady-step repeat count for real-KV points and for fake-injected points above the threshold; the recorded latency is the median. The warm-up chains reserve this many steady writes per request.
+</ParamField>
+
+<ParamField path="DYN_BENCH_PREFILL_CONTENT" type="string">
+  Content source for synthetic benchmark prompts: unset keeps salt-seeded random token ids; `sharegpt` draws deterministic windows from a real-text token pool; `sharegpt_chain` reuses the KV warm-up chain texts so seeded and measured requests share one construction.
+</ParamField>
+
+<ParamField path="DYN_BENCH_PREFILL_REAL_SEED" type="string" default="off">
+  Real-KV seeding for prefill points that read past KV. Accepts `on`, `1`, or `true` (case-insensitive); anything else keeps the synthetic prefix blocks that are registered in the prefix cache but never computed. When on, the seeded prefix is first computed by a real, unbooked prefill pass (staging; slots already deep enough are not re-run), an unbooked same-shape warm shot follows, and only then does the timed request hit the real KV in the prefix cache. The expected hit length is validated before admission; on a miss the chain is re-staged once and the point is skipped on a second miss (`real_seed_injection_failed`, `real_seed_warm_injection_failed`, `real_seed_cache_validation_failed`). All ranks of an attention-DP group must agree on the setting (it is part of the grid-invariants digest). Dense-attention models measure the same either way; sparse-attention and hybrid-KV models need it for deep past-KV points.
+</ParamField>
+
+<ParamField path="DYN_BENCH_POOL_TAG" type="string">
+  Optional tag mixed into the real-text pool draw so repeated collections sample different content windows under otherwise identical settings.
+</ParamField>
+
+Every result and skipped-point entry in the artifact carries a `kv_seed_regime` field plus `kvwarm` and `synthetic_prompts` metadata blocks, so downstream consumers can filter by seeding provenance. Decode rows carry `real_kv`, `fake_fallback`, `legacy` (warm-up switched off), `skip:<reason>` (gate rejected the configuration), or `unstamped` (decode point that never reached injection). Prefill rows that read past KV carry `real_prefix` (real-KV seeding on) or `fake_prefix` (synthetic prefix blocks); other prefill rows are `not_applicable`.
+
+## Request tracing
+
+<ParamField path="DYN_REQUEST_TRACE" type="boolean">
+  Master switch. When enabled without an explicit record selection, emits `request_end,tool`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_RECORDS" type="string" default="request_end,tool">
+  Comma-separated record types: `request_end`, `request_payload`, and `tool`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="file">
+  Comma-separated sinks: `file`, `stderr`, `nats`, `otel`, and `s3`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_PATH" type="string" default="/tmp/dynamo-request-trace">
+  Literal JSONL path or gzip segment prefix, depending on `DYN_REQUEST_TRACE_FILE_FORMAT`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_FORMAT" type="string" default="jsonl_gz">
+  File encoding: `jsonl` or rotating `jsonl_gz`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_CAPACITY" type="integer" default="1024">
+  Best-effort in-process broadcast capacity.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_NATS_SUBJECT" type="string" default="dynamo.request_trace.v1">
+  Subject used by the `nats` sink.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES" type="integer" default="4194304">
+  Maximum serialized OTLP payload attribute size. Oversized payload rows emit an incomplete marker.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_BUFFER_BYTES" type="integer" default="1048576">
+  File batching threshold in bytes.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS" type="integer" default="1000">
+  Periodic file flush interval in milliseconds.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_ROLL_BYTES" type="integer" default="268435456">
+  Gzip roll threshold in uncompressed bytes.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_ROLL_LINES" type="integer">
+  Optional gzip roll threshold in records.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_BUCKET" type="string">
+  Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`. When it is unset, the `s3` sink fails to initialize: Dynamo logs a warning carrying the underlying error, starts no sink from that `DYN_REQUEST_TRACE_SINKS` list, and keeps serving. Startup does not fail. See [Sink Behavior](request-traces.mdx#sink-behavior).
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_REGION" type="string">
+  Region override for the `s3` sink. When unset, the client uses `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_PREFIX" type="string">
+  Object key prefix for the `s3` sink. When unset, records land at the bucket root. Keys are `{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES" type="integer" default="67108864">
+  Batch roll threshold for the `s3` sink in uncompressed bytes. When the pending batch reaches this size it is gzipped and uploaded as one object.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS" type="integer" default="10000">
+  Periodic flush interval for the `s3` sink in milliseconds. A partial batch is uploaded when this elapses so low-volume traces still reach S3.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT" type="string">
+  Optional ZMQ PULL bind address for harness tool events. Configure it on only one process.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC" type="string" default="agent-tool-events">
+  First-frame ZMQ topic filter.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST" type="string">
+  Comma- or whitespace-separated allowlist of HTTP header names captured on `request_payload` rows. Values are not redacted.
+</ParamField>
+
+See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sink behavior, and record semantics.
+
+## Related
+
+- [Metrics Catalog](metrics-catalog.mdx) — the `dynamo_*` metrics these variables expose.
+- [Metric Labels](metric-labels.mdx) — the dimensions attached to those metrics.
+- [Operator Metrics](operator-metrics.mdx) — Kubernetes-only metrics enablement knobs.
+- [Local Resource Monitor (Local)](local-resource-monitor-local.mdx) — host-side per-process exporter.

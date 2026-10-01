@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-cloud-provider
+spec:
+  services:
+    Frontend:
+      extraPodSpec:
+        imagePullSecrets: &imagePullSecrets
+          - name: nvcr-pull-secret
+    PrefillWorker:
+      extraPodSpec:
+        imagePullSecrets: *imagePullSecrets
+    DecodeWorker:
+      extraPodSpec:
+        imagePullSecrets: *imagePullSecrets

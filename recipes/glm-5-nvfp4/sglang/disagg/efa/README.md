@@ -9,7 +9,7 @@ Compared to the non-EFA recipe (UCX/RoCE), this variant:
 - Runs containers `privileged: true` so `fi_mr_reg` can pin VRAM for RDMA.
 - Sets `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` — without this, SGLang defaults to UCX, which silently falls back to TCP on kernel ≥ 6.8.
 
-Please see the [Dynamo on EFA](../../../../../docs/kubernetes/cloud-providers/eks/efa.md) for more on EFA.
+Please see the [Dynamo on EFA](../../../../../docs/fern/pages/kubernetes/installation/rdma-setup/efa-on-aws.mdx) for more on EFA.
 
 ## Topology
 
@@ -176,4 +176,3 @@ With 20× larger per-request KV cache, LIBFABRIC is **39% higher throughput** an
 
 - [ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/pull/12019) — `efa_mr_is_cuda` patch
 - [README.md](../../../README.md) — non-EFA variant of this recipe
-

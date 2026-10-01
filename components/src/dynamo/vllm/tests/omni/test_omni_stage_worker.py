@@ -13,13 +13,17 @@ import pytest
 import yaml
 
 try:
+    from PIL import Image
+
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
+        _create_engine,
         _ensure_stage_connectors,
         _normalize_single_stage_runtime_devices,
         _prepare_connector_payload,
         _Proxy,
         _stage_config_to_dict,
+        _uses_nixl_connector,
     )
     from dynamo.vllm.omni.utils import _build_sampling_params
 except ImportError:
@@ -28,7 +32,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
@@ -495,6 +499,12 @@ def test_prepare_connector_payload_preserves_empty_attr_positions():
     assert payload["_dynamo_completion_output_attrs"] == [{}]
 
 
+def test_stage_connectors_without_config_file():
+    resolved_path = _ensure_stage_connectors(None, [])
+    assert resolved_path is None
+    assert not _uses_nixl_connector(resolved_path, [])
+
+
 def test_ensure_stage_connectors_adds_missing_shared_memory_edge(tmp_path):
     config_path = tmp_path / "glm_image.yaml"
     config_path.write_text(
@@ -735,3 +745,219 @@ async def test_sampling_params_propagate_in_stage_output():
         "height": 480,
         "width": 832,
     }
+
+
+@pytest.mark.asyncio
+async def test_final_stage_router_connector_sends_object_payload_wrapper():
+    """Final->router connector path should send object payload (not tensor-encoded blobs)."""
+    last_result = SimpleNamespace(
+        outputs=[SimpleNamespace(token_ids=[7], cumulative_token_ids=[7])],
+        final_output_type="text",
+    )
+    engine = _MockEngine(output=last_result)
+    router_connector = MagicMock()
+    router_connector.put.return_value = (True, 16, {"rdma": "meta"})
+
+    worker = _make_worker(
+        engine=engine,
+        connectors={("0", "router"): router_connector},
+        stage_id=0,
+        stage_config=_make_stage_config(final_output=True),
+    )
+
+    chunks = [
+        chunk async for chunk in worker.generate({"prompt": "hello"}, _MockContext())
+    ]
+
+    assert len(chunks) == 1
+    assert chunks[0] == {
+        "stage_connector_refs": {"0": {"rdma": "meta"}},
+        "finished": True,
+    }
+
+    router_connector.put.assert_called_once()
+    sent_payload = router_connector.put.call_args.args[3]
+    assert isinstance(sent_payload, dict)
+    assert sent_payload["engine_inputs"] is last_result
+    assert "_dynamo_completion_output_attrs" in sent_payload
+
+
+@pytest.mark.asyncio
+async def test_fetch_stage_inputs_accepts_deserialized_object_payload():
+    """Upstream connector payload can be the deserialized object directly."""
+    fetched_output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[4, 5])])
+    connector = MagicMock()
+    connector.get.return_value = fetched_output
+
+    worker = _make_worker_at_stage(
+        1,
+        connectors={("0", "1"): connector},
+        engine_input_source=[0],
+    )
+    stage_list = await worker._fetch_stage_inputs({0: {"name": "ref0"}}, "req-obj")
+
+    assert len(stage_list) == 1
+    restored = stage_list[0].engine_outputs[0]
+    assert restored is fetched_output
+    assert restored.outputs[0].cumulative_token_ids == [4, 5]
+
+
+def _single_stage_deploy_config(stage_config, deploy_config_path=None):
+    """Run _create_engine with AsyncOmni stubbed, returning the deploy dict it wrote."""
+    captured = {}
+
+    def _fake_async_omni(**kwargs):
+        with open(kwargs["deploy_config"]) as handle:
+            captured.update(yaml.safe_load(handle))
+        return MagicMock()
+
+    pipeline = SimpleNamespace(
+        model_type="pipe",
+        stages=(SimpleNamespace(stage_id=0),),
+        default_deploy_config_name=None,
+    )
+    pipeline.get_stage = lambda stage_id: (
+        pipeline.stages[0] if stage_id == 0 else None
+    )
+
+    factory = MagicMock()
+    factory.get_pipeline_config.return_value = pipeline
+
+    with (
+        patch("dynamo.vllm.omni.stage_worker.AsyncOmni", _fake_async_omni),
+        patch("dynamo.vllm.omni.stage_worker.StageConfigFactory", factory),
+        patch("dynamo.vllm.omni.stage_worker.register_pipeline"),
+        patch("dynamo.vllm.omni.stage_worker.replace", lambda obj, **kw: obj),
+        patch.dict("dynamo.vllm.omni.stage_worker.OMNI_PIPELINES", {}, clear=False),
+    ):
+        _create_engine("model", stage_config, "llm", 0, False, deploy_config_path)
+
+    return captured, factory
+
+
+def test_create_engine_carries_runtime_env_into_deploy_config():
+    deploy, _ = _single_stage_deploy_config(
+        SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="talker"),
+            runtime=SimpleNamespace(devices="0", env={"OMP_NUM_THREADS": "4"}),
+            final_output_type="audio",
+        )
+    )
+
+    entry = deploy["stages"][0]
+    assert entry["env"] == {"OMP_NUM_THREADS": "4"}
+    assert entry["devices"] == "0"
+
+
+def test_create_engine_omits_env_when_stage_declares_none():
+    deploy, _ = _single_stage_deploy_config(
+        SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="talker"),
+            runtime=SimpleNamespace(devices="0"),
+            final_output_type="audio",
+        )
+    )
+
+    assert "env" not in deploy["stages"][0]
+
+
+@pytest.mark.parametrize(
+    "pipeline,stage_id,model_stage,sampling",
+    [
+        ("qwen3_tts", 1, "code2wav", {"temperature": 0.0, "max_tokens": 8}),
+        ("wan2_2_ti2v", 0, "dit", {"num_inference_steps": 3}),
+        ("glm_image", 1, "dit", {"num_inference_steps": 3}),
+    ],
+)
+def test_create_engine_preserves_resolved_stage_config(
+    monkeypatch, tmp_path, pipeline, stage_id, model_stage, sampling
+):
+    from vllm_omni.config import resolve_omni_config
+    from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
+
+    from dynamo.vllm.omni.utils import resolve_stage_configs
+
+    model = str(tmp_path)
+    (tmp_path / "config.json").write_text('{"model_type": "qwen3_tts"}')
+    deploy_path = tmp_path / "deploy.yaml"
+    deploy_path.write_text(
+        yaml.safe_dump(
+            {
+                "pipeline": pipeline,
+                "async_chunk": False,
+                "stages": [{"stage_id": i} for i in range(stage_id)]
+                + [
+                    {
+                        "stage_id": stage_id,
+                        "devices": "0",
+                        "env": {"OMP_NUM_THREADS": "4"},
+                        "default_sampling_params": sampling,
+                    }
+                ],
+            }
+        )
+    )
+    upstream = resolve_omni_config(
+        model,
+        trust_remote_code=False,
+        deploy_config_path=str(deploy_path),
+        cli_overrides={},
+        stage_overrides=None,
+        strategy_config_path=None,
+    )
+    if not hasattr(upstream.stage_configs[stage_id], "stage_pipeline_config"):
+        pytest.skip(
+            "Requires typed Omni stage configs; the legacy YAML round trip is unsupported"
+        )
+
+    _, stages = resolve_stage_configs(
+        model, trust_remote_code=False, deploy_config_path=str(deploy_path)
+    )
+    stage = stages[stage_id]
+    assert stage.engine_args.model_stage == model_stage
+    assert stage.engine_input_source == ([0] if stage_id else [])
+    params = _build_sampling_params(stage, None)[0]
+    for name, value in sampling.items():
+        assert getattr(params, name) == value
+
+    if pipeline == "glm_image":
+        source_image = Image.new("RGB", (32, 32))
+        worker = _make_worker(stage_config=stage, stage_id=stage_id)
+        upstream = _Proxy(
+            engine_outputs=[
+                SimpleNamespace(outputs=[SimpleNamespace(cumulative_token_ids=[1])])
+            ]
+        )
+        prompt = {
+            "prompt": "Turn the image blue",
+            "height": 32,
+            "width": 32,
+            "multi_modal_data": {"image": source_image},
+        }
+        result = worker._process_stage_inputs([upstream], prompt)
+        assert result["pil_image"] is source_image
+
+    resolved = []
+
+    def capture_engine(**kwargs):
+        _, single_stage = resolve_stage_configs(
+            kwargs["model"],
+            trust_remote_code=kwargs["trust_remote_code"],
+            deploy_config_path=kwargs["deploy_config"],
+        )
+        resolved.extend(single_stage)
+        return MagicMock()
+
+    monkeypatch.setattr("dynamo.vllm.omni.stage_worker.AsyncOmni", capture_engine)
+    registry_before = set(OMNI_PIPELINES)
+    _create_engine(model, stage, stage.stage_type, stage_id, False, str(deploy_path))
+    assert set(OMNI_PIPELINES) == registry_before
+    assert len(resolved) == 1
+    actual = resolved[0]
+    assert actual.stage_id == 0
+    assert actual.engine_args.model_stage == model_stage
+    assert actual.runtime.devices == "0"
+    assert actual.runtime.env == {"OMP_NUM_THREADS": "4"}
+    assert actual.engine_input_source == []
+    for name, value in sampling.items():
+        assert actual.default_sampling_params[name] == value

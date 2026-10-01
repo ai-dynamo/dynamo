@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import re
 import socket
@@ -143,11 +144,41 @@ class CancellableRequest:
         self._active_sockets.clear()
 
         # Also close at the requests level for cleanup
-        if self.response:
+        if self.response is not None:
             self.response.close()
         for adapter in self.session.adapters.values():
             adapter.close()
         self.session.close()
+
+    def raise_for_early_failure(self) -> None:
+        """Raise when a request finishes with an error before reaching a worker."""
+        request_thread = self._request_thread
+        if request_thread is None or request_thread.is_alive():
+            return
+
+        if self.exception is not None:
+            exception = self.exception
+            self.cancel()
+            raise AssertionError(
+                f"Request failed before reaching the worker: {exception}"
+            ) from exception
+
+        if self.response is None:
+            self.cancel()
+            raise AssertionError(
+                "Request finished before reaching the worker without a response"
+            )
+
+        if not 200 <= self.response.status_code < 300:
+            status_code = self.response.status_code
+            response_body = self.response.text.strip()
+            if len(response_body) > 1000:
+                response_body = f"{response_body[:1000]}..."
+            self.cancel()
+            raise AssertionError(
+                "Request failed before reaching the worker: "
+                f"HTTP {status_code}: {response_body}"
+            )
 
     def get_response(self):
         """Get the response or raise exception if there was one"""
@@ -159,18 +190,12 @@ class CancellableRequest:
 
 
 def send_completion_request(
-    prompt: str, max_tokens: int, frontend_port: int
+    prompt: str,
+    max_tokens: int,
+    frontend_port: int,
+    timeout_s: float | None = None,
 ) -> CancellableRequest:
-    """Send a completion request to the frontend
-
-    Args:
-        prompt: The prompt for completion
-        max_tokens: Maximum tokens to generate
-        frontend_port: Port where the frontend is running
-
-    Returns:
-        A CancellableRequest object that can be explicitly cancelled
-    """
+    """Send a cancellable completion request to the frontend."""
     payload = {
         "model": FAULT_TOLERANCE_MODEL_NAME,
         "prompt": prompt,
@@ -189,24 +214,19 @@ def send_completion_request(
         f"http://localhost:{frontend_port}/v1/completions",
         headers=headers,
         json=payload,
+        timeout=timeout_s,
     )
     return cancellable_req
 
 
 def send_chat_completion_request(
-    prompt: str, max_tokens: int, frontend_port: int, stream: bool = False
+    prompt: str,
+    max_tokens: int,
+    frontend_port: int,
+    stream: bool = False,
+    timeout_s: float | None = None,
 ) -> CancellableRequest:
-    """Send a chat completion request to the frontend
-
-    Args:
-        prompt: The prompt for chat completion
-        max_tokens: Maximum tokens to generate
-        frontend_port: Port where the frontend is running
-        stream: Whether to stream the response
-
-    Returns:
-        A CancellableRequest object that can be explicitly cancelled
-    """
+    """Send a cancellable chat request to the frontend."""
     payload = {
         "model": FAULT_TOLERANCE_MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
@@ -227,6 +247,7 @@ def send_chat_completion_request(
         headers=headers,
         json=payload,
         stream=stream,
+        timeout=timeout_s,
     )
     return cancellable_req
 
@@ -235,27 +256,24 @@ def send_cancellable_request(
     frontend_port: int,
     request_type: str = "completion",
     use_long_prompt: bool = False,
+    max_tokens: int = 16384,
+    timeout_s: float | None = None,
 ) -> CancellableRequest:
-    """Send a request that can be manually cancelled.
-
-    Args:
-        frontend_port: Port where the frontend is running
-        request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
-        use_long_prompt: Whether to use an extremely long prompt
-
-    Returns:
-        A CancellableRequest object that can be explicitly cancelled
-    """
+    """Send a request that can be manually cancelled."""
     prompt = "Tell me a very long and detailed story about the history of artificial intelligence, including all major milestones, researchers, and breakthroughs?"
     if use_long_prompt:
         prompt += " Make sure it is" + " long" * 16000 + "!"
 
     if request_type == "completion":
-        return send_completion_request(prompt, 16384, frontend_port)
+        return send_completion_request(prompt, max_tokens, frontend_port, timeout_s)
     elif request_type == "chat_completion":
-        return send_chat_completion_request(prompt, 16384, frontend_port, stream=False)
+        return send_chat_completion_request(
+            prompt, max_tokens, frontend_port, stream=False, timeout_s=timeout_s
+        )
     elif request_type == "chat_completion_stream":
-        return send_chat_completion_request(prompt, 16384, frontend_port, stream=True)
+        return send_chat_completion_request(
+            prompt, max_tokens, frontend_port, stream=True, timeout_s=timeout_s
+        )
     else:
         raise ValueError(f"Unknown request type: {request_type}")
 
@@ -263,12 +281,21 @@ def send_cancellable_request(
 def read_streaming_responses(
     cancellable_req: CancellableRequest,
     expected_count: int = 5,
+    deadline_s: float | None = None,
+    drain: bool = False,
+    require_content: bool = False,
 ) -> None:
     """Read a specific number of responses from a streaming request.
 
     Args:
         cancellable_req: The CancellableRequest object with an active stream
         expected_count: Number of responses to read before returning
+        deadline_s: Absolute wall-clock budget for reading the required stream.
+        drain: Continue reading after expected_count until a successful terminal
+            response and ``[DONE]`` marker are received.
+        require_content: Require at least one nonempty generated-text fragment.
+            This is useful for drained health probes that must prove generation,
+            not merely a syntactically complete metadata-only response.
 
     Raises:
         pytest.fail if stream ends before expected_count responses
@@ -283,19 +310,114 @@ def read_streaming_responses(
 
     response = cast(requests.Response, response_raw)  # Type narrowing after checks
     response_count = 0
-    for line in response.iter_lines():
-        response_count += 1
-        logger.info(
-            f"Received streaming response {response_count}: {line.decode()[:100]}"
-        )
+    saw_finish_reason = False
+    saw_done = False
+    saw_content = False
+    deadline = None if deadline_s is None else time.monotonic() + deadline_s
+    deadline_expired = threading.Event()
+    deadline_timer = None
+
+    if deadline_s is not None:
+
+        def expire_stream() -> None:
+            deadline_expired.set()
+            cancellable_req.cancel()
+
+        deadline_timer = threading.Timer(deadline_s, expire_stream)
+        deadline_timer.daemon = True
+        deadline_timer.start()
+
+    def fail_if_deadline_expired() -> None:
+        if deadline_expired.is_set() or (
+            deadline is not None and time.monotonic() >= deadline
+        ):
+            cancellable_req.cancel()
+            pytest.fail(
+                "Streaming response did not reach the required count and terminal "
+                f"state within {deadline_s}s; count={response_count}, "
+                f"expected={expected_count}"
+            )
+
+    try:
+        try:
+            for line in response.iter_lines():
+                fail_if_deadline_expired()
+                if not line:
+                    continue
+                if not line.startswith(b"data:"):
+                    logger.debug("Ignoring non-data SSE line: %s", line[:100])
+                    continue
+
+                payload = line.removeprefix(b"data:").strip()
+                if payload == b"[DONE]":
+                    saw_done = True
+                    break
+
+                try:
+                    event = json.loads(payload)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    cancellable_req.cancel()
+                    pytest.fail(f"Invalid JSON in streaming response: {error}")
+
+                if not isinstance(event, dict):
+                    cancellable_req.cancel()
+                    pytest.fail(
+                        "Streaming response event must be a JSON object, "
+                        f"got {type(event).__name__}"
+                    )
+
+                if event.get("error") is not None:
+                    cancellable_req.cancel()
+                    pytest.fail(
+                        f"Streaming response ended with an error: {event['error']}"
+                    )
+
+                response_count += 1
+                saw_finish_reason = saw_finish_reason or any(
+                    choice.get("finish_reason") is not None
+                    for choice in event.get("choices", [])
+                )
+                saw_content = saw_content or any(
+                    isinstance(fragment, str) and bool(fragment)
+                    for choice in event.get("choices", [])
+                    for fragment in (
+                        (choice.get("delta") or {}).get("content"),
+                        choice.get("text"),
+                    )
+                )
+                logger.info(
+                    "Received streaming response %s: %.100s", response_count, event
+                )
+                if (
+                    response_count >= expected_count
+                    and not drain
+                    and (not require_content or saw_content)
+                ):
+                    fail_if_deadline_expired()
+                    logger.info("Successfully read %s responses", response_count)
+                    return
+        except Exception:
+            fail_if_deadline_expired()
+            raise
+
+        fail_if_deadline_expired()
+        if drain and not saw_done:
+            pytest.fail("Streaming response ended without a [DONE] marker")
+        if drain and not saw_finish_reason:
+            pytest.fail("Streaming response ended without a successful finish reason")
+        if require_content and not saw_content:
+            pytest.fail("Streaming response ended without generated content")
         if response_count >= expected_count:
-            logger.info(f"Successfully read {response_count} responses")
+            logger.info("Successfully drained %s responses", response_count)
             return
 
-    # If we get here, stream ended too early
-    pytest.fail(
-        f"Stream ended after only {response_count} lines - expected to read at least {expected_count}"
-    )
+        pytest.fail(
+            "Stream ended after only "
+            f"{response_count} lines - expected to read at least {expected_count}"
+        )
+    finally:
+        if deadline_timer is not None:
+            deadline_timer.cancel()
 
 
 def _parse_frontend_cancellation_metric(
@@ -555,6 +677,7 @@ def poll_for_pattern(
     max_wait_ms: int = 500,
     poll_interval_ms: int = 5,
     match_type: str = "endswith",  # "contains" or "endswith"
+    cancellable_request: CancellableRequest | None = None,
 ) -> tuple[str, int]:
     """
     Poll process log for a specific pattern.
@@ -566,6 +689,7 @@ def poll_for_pattern(
         max_wait_ms: Maximum time to wait for the pattern in milliseconds
         poll_interval_ms: Interval between polls in milliseconds
         match_type: How to match the pattern - "contains" or "endswith"
+        cancellable_request: Request to check for an early HTTP or transport failure
 
     Returns:
         Tuple of (matched_content, new_log_offset) where matched_content is:
@@ -614,9 +738,15 @@ def poll_for_pattern(
         # Update offset for next poll
         current_offset = len(log_content)
 
+        if cancellable_request is not None:
+            cancellable_request.raise_for_early_failure()
+
         # Wait before next poll
         time.sleep(poll_interval_ms / 1000.0)
         iteration += 1
+
+    if cancellable_request is not None:
+        cancellable_request.raise_for_early_failure()
 
     raise AssertionError(
         f"Failed to find '{pattern}' pattern after {max_iterations} iterations ({max_wait_ms}ms)"

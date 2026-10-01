@@ -112,7 +112,7 @@ VLLM_MULTIMODAL_PROFILES = [
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+                tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
             ),
             ...
         },
@@ -158,7 +158,9 @@ profiles:
   the LFS-tracked PNG as a `data:image/png;base64,...` URL.
   Materialization is deferred to first `.body` read so pytest
   collection doesn't fail when LFS hasn't pulled the image yet
-- `make_video_payload(expected_phrases)` — local test video
+- `make_video_payload(expected_phrases)` — local test video (the triangle
+  fixture; pass `MULTIMODAL_VIDEO_EXPECTED` rather than a literal, so the
+  expectation cannot drift from the footage)
 - `make_audio_payload(expected_phrases)` — remote test WAV
 
 Backend-specific files (`vllm.py`, future `trtllm.py`, etc.) compose

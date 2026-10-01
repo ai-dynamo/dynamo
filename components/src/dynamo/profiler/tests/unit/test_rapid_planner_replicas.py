@@ -7,7 +7,7 @@ Background
 ----------
 `docs/components/profiler/profiler-guide.md` documents the "Autoscale" picking
 mode as picking prefill / decode engines "each with 1 replica" and letting the
-planner scale at runtime. The picker (`aiconfigurator.sdk.picking.pick_autoscale`)
+planner scale at runtime. The picker (`aisimulate.sdk.picking.pick_autoscale`)
 honours this by hardcoding `(p)workers=1` / `(d)workers=1` on every returned
 row. However, AIC's generator (`module_bridge.task_config_to_generator_config`)
 then rescales workers by `total_gpus // gpus_per_replica` whenever `total_gpus`
@@ -32,7 +32,7 @@ pytestmark = [
 ]
 
 try:
-    from aiconfigurator.sdk.task import TaskConfig
+    from aisimulate.sdk.task_v2 import Task
 
     from dynamo.profiler.rapid import _generate_dgd_from_pick
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
@@ -86,13 +86,16 @@ def _make_picked_row(
     return pd.DataFrame([row])
 
 
-def _make_task() -> TaskConfig:
-    """Build a disagg `TaskConfig` with `total_gpus=8` matching `_make_dgdr()`."""
-    return TaskConfig(
+def _make_task() -> Task:
+    """Build a disagg `Task` with `total_gpus=8` matching `_make_dgdr()`."""
+    return Task(
         serving_mode="disagg",
-        model_path="Qwen/Qwen3-30B-A3B",
-        system_name="b200_sxm",
-        backend_name="vllm",
+        prefill_model_path="Qwen/Qwen3-30B-A3B",
+        decode_model_path="Qwen/Qwen3-30B-A3B",
+        prefill_system_name="b200_sxm",
+        decode_system_name="b200_sxm",
+        prefill_backend_name="vllm",
+        decode_backend_name="vllm",
         total_gpus=8,
         isl=4096,
         osl=1024,
@@ -138,7 +141,7 @@ class TestAutoscaleSuppressesRescale:
         assert captured["total_gpus"] == 0
 
     def test_autoscale_restores_total_gpus_after_call(self):
-        """The try/finally must restore tc.total_gpus so the TaskConfig is reusable."""
+        """The try/finally must restore tc.total_gpus so the Task is reusable."""
         captured = _capture_aic_call(_make_dgdr(), _make_picked_row(), "autoscale")
         assert captured["restored_total_gpus"] == 8
 

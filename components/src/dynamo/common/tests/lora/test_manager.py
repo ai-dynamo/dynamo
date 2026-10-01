@@ -127,3 +127,21 @@ class TestGetLoraManagerConcurrency:
         )
         assert all(r is results[0] for r in results)
         assert all(isinstance(r, CountingLoRAManager) for r in results)
+
+
+def test_is_cached_passes_source_uri_to_rust_downloader(monkeypatch):
+    seen: list[str] = []
+
+    class RecordingDownloader:
+        def __init__(self, cache_path=None):
+            pass
+
+        def is_cached(self, lora_uri: str) -> bool:
+            seen.append(lora_uri)
+            return True
+
+    monkeypatch.setattr(manager_module, "LoRADownloader", RecordingDownloader)
+    manager = manager_module.LoRAManager()
+
+    assert manager.is_cached("hf://org/adapter")
+    assert seen == ["hf://org/adapter"]

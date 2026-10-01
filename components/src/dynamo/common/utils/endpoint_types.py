@@ -11,14 +11,15 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
 
     Args:
         endpoint_types_str: Comma-separated list of endpoint types.
-                          Valid values: 'chat', 'completions'
-                          Examples: 'chat', 'completions', 'chat,completions'
+                          Valid values: 'chat', 'completions', or 'none'
+                          Examples: 'chat', 'completions', 'chat,completions', 'none'
 
     Returns:
         ModelType flags combined with bitwise OR
 
     Raises:
-        ValueError: If any invalid endpoint type is provided or string is empty
+        ValueError: If any invalid endpoint type is provided, 'none' is mixed
+            with other endpoint types, or the string is empty
 
     Examples:
         >>> parse_endpoint_types("chat")
@@ -27,6 +28,8 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
         ModelType.Completions
         >>> parse_endpoint_types("chat,completions")
         ModelType.Chat | ModelType.Completions
+        >>> parse_endpoint_types("none")
+        ModelType.Empty
     """
     if not endpoint_types_str or not endpoint_types_str.strip():
         raise ValueError("Endpoint types string cannot be empty")
@@ -36,6 +39,13 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
     if not types:
         raise ValueError("No valid endpoint types provided")
 
+    if "none" in types:
+        if len(types) > 1:
+            raise ValueError(
+                "Endpoint type 'none' cannot be combined with other endpoint types"
+            )
+        return ModelType.Empty
+
     result: ModelType | None = None
     for t in types:
         if t == "chat":
@@ -44,7 +54,8 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
             flag = ModelType.Completions
         else:
             raise ValueError(
-                f"Invalid endpoint type: '{t}'. Valid options: 'chat', 'completions'"
+                f"Invalid endpoint type: '{t}'. Valid options: "
+                "'chat', 'completions', 'none'"
             )
 
         result = flag if result is None else result | flag

@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -77,6 +78,7 @@ func TestDCD_RoundTrip_Empty(t *testing.T) {
 
 func TestDCD_RoundTrip_Minimal(t *testing.T) {
 	replicas := int32(3)
+	minAvailable := int32(2)
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
@@ -85,11 +87,54 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 				ComponentName: "min",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				Replicas:      &replicas,
+				MinAvailable:  &minAvailable,
 			},
 		},
 	}
 	got := dcdRoundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_RoundTrip_ExplicitMultinodeRoles(t *testing.T) {
+	t.Log("Build a hub DCD with a complete explicit multinode role schema")
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "multinode", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "multinode",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 4},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name:     v1beta1.ComponentRoleLeader,
+						Replicas: ptr.To(int32(1)),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "leader:latest",
+						}}}},
+					},
+					{
+						Name:     v1beta1.ComponentRoleWorker,
+						Replicas: ptr.To(int32(3)),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "worker:latest",
+						}}}},
+						ProviderOverride: &v1beta1.ProviderOverride{
+							APIVersion: "grove.io/v1alpha1",
+							Target:     "PodCliqueTemplateSpec",
+							Value:      apiextensionsv1.JSON{Raw: []byte(`{"topologyConstraint":{"pack":{"required":"rack"}}}`)},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Round-trip the shared role structure through v1alpha1")
+	got := dcdRoundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -621,6 +666,48 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 	}
 }
 
+// The grove block has no v1alpha1 representation and must survive the spoke
+// round-trip both alone (whole hub-only block preserved) and alongside
+// alpha-representable fields (sparse preservation merged back).
+func TestDCD_RoundTrip_ExperimentalGrove(t *testing.T) {
+	tests := []struct {
+		name         string
+		experimental *v1beta1.ExperimentalSpec
+	}{
+		{
+			name: "grove.forceScalingGroup only",
+			experimental: &v1beta1.ExperimentalSpec{
+				Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
+			},
+		},
+		{
+			name: "grove.forceScalingGroup alongside alpha-representable GMS",
+			experimental: &v1beta1.ExperimentalSpec{
+				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+				Grove:            &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &v1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "exp-grouping", Namespace: "ns"},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+						ComponentName: "exp-grouping",
+						ComponentType: v1beta1.ComponentTypeWorker,
+						Experimental:  tt.experimental.DeepCopy(),
+					},
+				},
+			}
+			got := dcdRoundTripFromV1beta1(t, src)
+			if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) {
 	alpha := &DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "alpha-enums", Namespace: "ns"},
@@ -715,6 +802,8 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 			Component: &v1beta1.ComponentReplicaStatus{
 				ComponentKind:   v1beta1.ComponentKindDeployment,
 				ComponentNames:  []string{"dcd-0"},
+				GPUsPerEngine:   ptr.To(int64(2)),
+				GPUsPerReplica:  ptr.To(int64(3)),
 				Replicas:        3,
 				UpdatedReplicas: 3,
 				ReadyReplicas:   ptr.To(int32(3)),

@@ -25,9 +25,11 @@ use dashmap::mapref::entry::Entry;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::Arc;
 
+#[cfg(feature = "bench")]
+use super::WorkerObservationState;
 use super::{
-    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer,
-    WorkerLookupStats, WorkerTask,
+    EventKind, EventWarningKind, KvIndexerMetrics, KvRouterError, PreBoundEventCounters,
+    SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::{
@@ -162,9 +164,20 @@ pub struct PositionalIndexer {
     jump_size: usize,
 
     search_mode: SearchMode,
+    lifecycle: super::HashLifecycle,
 }
 
 impl PositionalIndexer {
+    pub fn new_with_delegate(
+        jump_size: usize,
+        search_mode: SearchMode,
+        delegate: Arc<dyn super::KvIndexerDelegate>,
+    ) -> Self {
+        let mut backend = Self::new_with_mode(jump_size, search_mode);
+        backend.lifecycle = super::HashLifecycle::new(delegate);
+        backend
+    }
+
     /// Create a new PositionalIndexer.
     ///
     /// The search mode defaults to whatever [`DYN_ROUTER_POSITIONAL_SEARCH_MODE`] selects
@@ -190,6 +203,7 @@ impl PositionalIndexer {
             index: DashMap::with_hasher(FxBuildHasher),
             jump_size,
             search_mode,
+            lifecycle: super::HashLifecycle::default(),
         }
     }
 
@@ -212,6 +226,8 @@ impl SyncIndexer for PositionalIndexer {
     ) -> anyhow::Result<()> {
         let mut worker_blocks = FxHashMap::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
+        #[cfg(feature = "bench")]
+        let mut observation = WorkerObservationState::default();
 
         while let Ok(task) = event_receiver.recv() {
             match task {
@@ -237,15 +253,46 @@ impl SyncIndexer for PositionalIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::ApproximateLru(task) => task.complete(Err(KvRouterError::Unsupported(
+                    "approximate LRU requires ConcurrentRadixTreeCompressed".to_string(),
+                ))),
+                #[cfg(feature = "bench")]
+                WorkerTask::InstallObservation { writer, resp } => {
+                    observation.install(writer, resp);
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::ObservedEvent {
+                    event,
+                    correlation_id,
+                } => {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event, counters.as_ref());
+                    observation.record(correlation_id, result.is_ok());
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::SealObservation(resp) => observation.seal(resp),
+                #[cfg(feature = "bench")]
+                WorkerTask::HarvestObservation(resp) => observation.harvest(resp),
                 WorkerTask::Anchor { worker, anchor } => {
                     if let Err(error) = self.apply_anchor(worker, anchor) {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker(worker_id) => {
-                    self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
+                WorkerTask::RemoveWorker {
+                    worker_id, resp, ..
+                } => {
+                    self.remove_worker_blocks_impl(&mut worker_blocks, worker_id);
+                    let _ = resp.send(());
                 }
-                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                WorkerTask::RemoveWorkerDpRank {
+                    worker_id, dp_rank, ..
+                } => {
                     self.remove_worker_dp_rank_impl(&mut worker_blocks, worker_id, dp_rank);
                 }
                 WorkerTask::CleanupStaleChildren => {
@@ -264,6 +311,16 @@ impl SyncIndexer for PositionalIndexer {
                             .map(|(worker, worker_map)| (*worker, worker_map.len())),
                     );
                     let _ = sender.send(stats);
+                }
+                WorkerTask::ContainsWorkerBlock {
+                    worker,
+                    block_hash,
+                    resp,
+                } => {
+                    let resident = worker_blocks
+                        .get(&worker)
+                        .is_some_and(|worker_blocks| worker_blocks.contains_key(&block_hash));
+                    let _ = resp.send(resident);
                 }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
@@ -321,7 +378,7 @@ impl PositionalIndexer {
                 Ok(())
             }
             KvCacheEventData::Cleared => {
-                self.clear_worker_blocks_impl(worker_blocks, worker_id);
+                self.remove_worker_dp_rank_impl(worker_blocks, worker_id, worker.dp_rank);
                 Ok(())
             }
         }
@@ -382,6 +439,7 @@ impl PositionalIndexer {
                 }
             }
 
+            self.lifecycle.insert(worker, seq_hash);
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
             match worker_blocks_entry.insert(seq_hash, (position, local_hash)) {
                 Some(existing) if existing == (position, local_hash) => {}
@@ -433,19 +491,10 @@ impl PositionalIndexer {
             if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
                 let _ = entry.remove(*seq_hash, worker);
             }
+            self.lifecycle.remove(worker, *seq_hash);
         }
 
         Ok(())
-    }
-
-    /// Clear all blocks for a specific worker_id (all dp_ranks), but keep worker tracked.
-    /// Static version for use in worker threads.
-    fn clear_worker_blocks_impl(
-        &self,
-        worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
-        worker_id: WorkerId,
-    ) {
-        self.remove_or_clear_worker_blocks_impl(worker_blocks, worker_id, true);
     }
 
     fn remove_worker_dp_rank_impl(
@@ -460,18 +509,15 @@ impl PositionalIndexer {
                 if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
                     let _ = entry.remove(*seq_hash, key);
                 }
+                self.lifecycle.remove(key, *seq_hash);
             }
         }
     }
 
-    /// Helper function to remove or clear blocks for a worker.
-    /// If `keep_worker` is true, the worker remains tracked with empty blocks.
-    /// If `keep_worker` is false, the worker is completely removed.
-    fn remove_or_clear_worker_blocks_impl(
+    fn remove_worker_blocks_impl(
         &self,
         worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
         worker_id: WorkerId,
-        keep_worker: bool,
     ) {
         let workers: Vec<WorkerWithDpRank> = worker_blocks
             .iter()
@@ -485,12 +531,8 @@ impl PositionalIndexer {
                     if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
                         let _ = entry.remove(*seq_hash, worker);
                     }
+                    self.lifecycle.remove(worker, *seq_hash);
                 }
-            }
-
-            if keep_worker {
-                // Re-insert worker with empty map to keep it tracked
-                worker_blocks.insert(worker, FxHashMap::default());
             }
         }
     }
@@ -513,7 +555,12 @@ impl PositionalIndexer {
             for (pos, local_hash, seq_hash) in blocks {
                 events.push(RouterEvent {
                     worker_id: worker.worker_id,
+                    state_source: None,
+                    session_id: None,
                     storage_tier: crate::protocols::StorageTier::Device,
+                    residency_domain: crate::protocols::WireResidencyDomain::explicit(
+                        crate::protocols::ResidencyDomain::Worker,
+                    ),
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {

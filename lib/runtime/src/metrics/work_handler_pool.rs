@@ -37,13 +37,12 @@ pub static WORK_HANDLER_QUEUE_CAPACITY: Lazy<IntGauge> = Lazy::new(|| {
     .expect("work_handler_queue_capacity gauge")
 });
 
-/// Total times `work_tx.send().await` returned an error, which for tokio's
-/// bounded mpsc only happens when the receiver (dispatcher task) is gone — the
-/// channel applies backpressure on "full" rather than returning an error.
+/// Requests rejected before TCP worker dispatch because the bounded work queue
+/// was full or the dispatcher channel was closed.
 pub static WORK_HANDLER_ENQUEUE_REJECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     IntCounter::new(
         work_handler_metric_name(work_handler::ENQUEUE_REJECTED_TOTAL),
-        "Times enqueuing work failed because the dispatcher channel was closed",
+        "Requests rejected before TCP worker dispatch because the work queue was full or closed",
     )
     .expect("work_handler_enqueue_rejected_total counter")
 });

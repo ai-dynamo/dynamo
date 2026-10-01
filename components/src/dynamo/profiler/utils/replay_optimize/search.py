@@ -159,6 +159,11 @@ def _iter_agg_tp_states_with_max_workers(
         workers = max_total_gpus // tp
         if workers < 1:
             continue
+        if not _supports_agg_router_mode(
+            workers=workers,
+            router_mode=router_mode,
+        ):
+            continue
         states.append(
             DenseAggReplayState(
                 tp=tp,
@@ -175,15 +180,17 @@ def _select_initial_state(
     *,
     prefill_tps: Sequence[int],
     decode_tps: Sequence[int],
+    router_mode: Literal["kv_router", "round_robin"],
     overlap_score_credit: float,
+    prefill_load_scale: float,
     max_total_gpus: int,
 ) -> DenseReplayState:
     initial_states = _iter_tp_states_with_equal_workers(
         prefill_tps=prefill_tps,
         decode_tps=decode_tps,
-        router_mode="round_robin",
+        router_mode=router_mode,
         overlap_score_credit=overlap_score_credit,
-        prefill_load_scale=1.0,
+        prefill_load_scale=prefill_load_scale,
         max_total_gpus=max_total_gpus,
     )
     if initial_states:
@@ -198,13 +205,16 @@ def _select_initial_state(
 def _select_initial_agg_state(
     *,
     tps: Sequence[int],
+    router_mode: Literal["kv_router", "round_robin"],
+    overlap_score_credit: float,
+    prefill_load_scale: float,
     max_total_gpus: int,
 ) -> DenseAggReplayState:
     states = _iter_agg_tp_states_with_max_workers(
         tps=tps,
-        router_mode="round_robin",
-        overlap_score_credit=0.0,
-        prefill_load_scale=1.0,
+        router_mode=router_mode,
+        overlap_score_credit=overlap_score_credit,
+        prefill_load_scale=prefill_load_scale,
         max_total_gpus=max_total_gpus,
     )
     if states:
@@ -284,10 +294,22 @@ def optimize_dense_disagg_with_replay(
         )
 
     cache: dict[DenseReplayState, dict[str, float | int | bool | str]] = {}
+    initial_router_states = _router_states(
+        router_mode=spec.router.mode,
+        overlap_score_credits=overlap_credits,
+        prefill_load_scales=prefill_load_scales,
+    )
+    (
+        initial_router_mode,
+        initial_overlap_credit,
+        initial_prefill_load_scale,
+    ) = initial_router_states[0]
     incumbent = _select_initial_state(
         prefill_tps=prefill_tps,
         decode_tps=decode_tps,
-        overlap_score_credit=overlap_credits[0],
+        router_mode=initial_router_mode,
+        overlap_score_credit=initial_overlap_credit,
+        prefill_load_scale=initial_prefill_load_scale,
         max_total_gpus=spec.hardware.totalGpus,
     )
 
@@ -401,8 +423,22 @@ def optimize_dense_agg_with_replay(
         )
 
     cache: dict[DenseAggReplayState, dict[str, float | int | bool | str]] = {}
+    initial_router_states = _router_states(
+        router_mode=spec.router.mode,
+        overlap_score_credits=overlap_credits,
+        prefill_load_scales=prefill_load_scales,
+    )
+    (
+        initial_router_mode,
+        initial_overlap_credit,
+        initial_prefill_load_scale,
+    ) = initial_router_states[0]
     incumbent = _select_initial_agg_state(
-        tps=tps, max_total_gpus=spec.hardware.totalGpus
+        tps=tps,
+        router_mode=initial_router_mode,
+        overlap_score_credit=initial_overlap_credit,
+        prefill_load_scale=initial_prefill_load_scale,
+        max_total_gpus=spec.hardware.totalGpus,
     )
 
     executor = (

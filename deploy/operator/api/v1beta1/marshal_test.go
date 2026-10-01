@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 )
 
 // unmarshalToMap is a small helper so the assertions below read against the
@@ -46,6 +47,135 @@ func TestNormalizeJSON_OuterFieldWinsEmbeddedCollision(t *testing.T) {
 	}
 	if string(normalized) != "{}" {
 		t.Fatalf("expected outer value-typed field to win collision and be stripped, got %s", string(normalized))
+	}
+}
+
+func TestNormalizeJSON_PreservesLargeInteger(t *testing.T) {
+	const raw = `{"spec":{"components":[{"podTemplate":{"spec":{"terminationGracePeriodSeconds":9007199254740993}}}]}}`
+
+	t.Log("Normalize a DGD containing an int64 value beyond exact float64 precision")
+	normalized, err := normalizeV1Beta1JSON([]byte(raw), reflect.TypeOf(DynamoGraphDeployment{}))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+
+	t.Log("Verify normalization preserves the original integer token")
+	const want = `"terminationGracePeriodSeconds":9007199254740993`
+	if !bytes.Contains(normalized, []byte(want)) {
+		t.Fatalf("normalized JSON does not contain %s: %s", want, normalized)
+	}
+}
+
+func TestRootMarshal_PreservesEmptyMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		obj  any
+	}{
+		{
+			name: "DynamoGraphDeployment",
+			obj: &DynamoGraphDeployment{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "nvidia.com/v1beta1",
+					Kind:       "DynamoGraphDeployment",
+				},
+			},
+		},
+		{
+			name: "DynamoComponentDeployment",
+			obj: &DynamoComponentDeployment{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "nvidia.com/v1beta1",
+					Kind:       "DynamoComponentDeployment",
+				},
+			},
+		},
+		{
+			name: "DynamoGraphDeploymentRequest",
+			obj: &DynamoGraphDeploymentRequest{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "nvidia.com/v1beta1",
+					Kind:       "DynamoGraphDeploymentRequest",
+				},
+			},
+		},
+		{
+			name: "DynamoGraphDeploymentScalingAdapter",
+			obj: &DynamoGraphDeploymentScalingAdapter{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "nvidia.com/v1beta1",
+					Kind:       "DynamoGraphDeploymentScalingAdapter",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Marshal a v1beta1 root object with empty metadata")
+			raw, err := json.Marshal(tt.obj)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+
+			t.Log("Verify the root metadata envelope is preserved")
+			root := unmarshalToMap(t, raw)
+			metadata, found := root["metadata"]
+			if !found {
+				t.Fatalf("root metadata is missing from %s", raw)
+			}
+			metadataMap, ok := metadata.(map[string]any)
+			if !ok {
+				t.Fatalf("root metadata has type %T, want object", metadata)
+			}
+			if len(metadataMap) != 0 {
+				t.Fatalf("root metadata = %v, want empty object", metadataMap)
+			}
+		})
+	}
+}
+
+func TestDGDMarshal_PreservesForceScalingGroupPresence(t *testing.T) {
+	tests := []struct {
+		name        string
+		value       *bool
+		wantPresent bool
+		wantValue   bool
+	}{
+		{name: "omitted"},
+		{name: "explicit false", value: ptr.To(false), wantPresent: true},
+		{name: "true", value: ptr.To(true), wantPresent: true, wantValue: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Marshal a DGD through the v1beta1 wire representation")
+			dgd := &DynamoGraphDeployment{
+				Spec: DynamoGraphDeploymentSpec{
+					Components: []DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "worker",
+						Experimental: &ExperimentalSpec{
+							Grove: &GroveSpec{ForceScalingGroup: tt.value},
+						},
+					}},
+				},
+			}
+			raw, err := json.Marshal(dgd)
+			if err != nil {
+				t.Fatalf("marshal DGD: %v", err)
+			}
+
+			t.Log("Verify explicit false remains distinguishable from an omitted field")
+			root := unmarshalToMap(t, raw)
+			components := root["spec"].(map[string]any)["components"].([]any)
+			grove := components[0].(map[string]any)["experimental"].(map[string]any)["grove"].(map[string]any)
+			got, present := grove["forceScalingGroup"]
+			if present != tt.wantPresent {
+				t.Fatalf("forceScalingGroup presence = %t, want %t; JSON: %s", present, tt.wantPresent, raw)
+			}
+			if present && got != tt.wantValue {
+				t.Fatalf("forceScalingGroup = %v, want %t; JSON: %s", got, tt.wantValue, raw)
+			}
+		})
 	}
 }
 

@@ -32,9 +32,6 @@ spec:
             - dynamo.frontend
             - --router-mode
             - kv
-            - --router-reset-states
-            - --request-plane
-            - nats
           env:
             - name: POD_UID
               valueFrom:
@@ -62,8 +59,6 @@ spec:
             - --extra-engine-args
             - /config/agg.yaml
             - --publish-events-and-metrics
-            - --request-plane
-            - nats
             - --kv-block-size
             - "32"
             - --dyn-tool-call-parser
@@ -175,7 +170,6 @@ data:
         - cutlass
         - cublaslt
         - cuda_core
-    num_postprocess_workers: 8
     print_iter_log: true
     stream_interval: 10
     tensor_parallel_size: 8

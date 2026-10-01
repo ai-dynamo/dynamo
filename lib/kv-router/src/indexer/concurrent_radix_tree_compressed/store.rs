@@ -67,6 +67,8 @@ impl ConcurrentRadixTreeCompressed {
     ) -> Result<StoreParentResolution, KvCacheEventError> {
         loop {
             let node = self.lookup_store_parent_node(lookup, worker, parent_hash, op, id)?;
+            // NOTE(perf): Combining coverage rejection and edge planning into
+            // one state snapshot regressed throughput. Keep these phases separate.
             self.reject_uncovered_store_parent(lookup, worker, &node, parent_hash, id)?;
 
             let Some(plan) = node.plan_store_parent_edge(parent_hash, &op.blocks) else {
@@ -150,6 +152,7 @@ impl ConcurrentRadixTreeCompressed {
 
         let wl = lookup.get_mut(&worker).unwrap();
         wl.remove(&parent_hash);
+        self.release_hash(worker, parent_hash);
         Err(KvCacheEventError::ParentBlockNotFound)
     }
 
@@ -178,7 +181,7 @@ impl ConcurrentRadixTreeCompressed {
             StoreParentResolution::ReusedExistingEdge {
                 node,
                 coverage_changed,
-            } => Self::finish_with_lookup_update(
+            } => self.finish_with_lookup_update(
                 lookup,
                 worker,
                 &op.blocks,
@@ -190,6 +193,7 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     fn finish_with_lookup_update(
+        &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         blocks: &[KvCacheStoredBlockData],
@@ -197,7 +201,7 @@ impl ConcurrentRadixTreeCompressed {
         duplicate_store: bool,
     ) -> StoreInsertOutcome {
         let wl = lookup.get_mut(&worker).unwrap();
-        let lookup_changed = Self::update_lookup_for_blocks(wl, blocks, node);
+        let lookup_changed = self.update_lookup_for_blocks(worker, wl, blocks, node);
 
         StoreInsertOutcome {
             duplicate_store: duplicate_store && !lookup_changed,
@@ -213,8 +217,8 @@ impl ConcurrentRadixTreeCompressed {
         self.apply_split_lookup(lookup, finish.split);
 
         let wl = lookup.get_mut(&worker).unwrap();
-        Self::update_lookup_for_blocks(wl, finish.prefix_blocks, finish.prefix_node);
-        Self::update_lookup_for_blocks(wl, finish.tail_blocks, finish.tail_node);
+        self.update_lookup_for_blocks(worker, wl, finish.prefix_blocks, finish.prefix_node);
+        self.update_lookup_for_blocks(worker, wl, finish.tail_blocks, finish.tail_node);
 
         StoreInsertOutcome {
             duplicate_store: false,
@@ -248,12 +252,6 @@ impl ConcurrentRadixTreeCompressed {
             .child_lookup_plan(cursor.last_ext_hash, first_local);
 
         let shape_version = match plan {
-            ParentChildPlan::Stale => {
-                return Ok(StoreInsertStep::RetryParent {
-                    parent: cursor.parent.clone(),
-                    parent_is_anchor: cursor.parent_is_anchor,
-                });
-            }
             ParentChildPlan::StaleParent { hash } => {
                 let Some(resolved) =
                     self.resolve_lookup(lookup, worker, hash, LookupRepairDirection::TowardTail)
@@ -274,7 +272,8 @@ impl ConcurrentRadixTreeCompressed {
                 });
             }
             ParentChildPlan::Descend(child) => return Ok(StoreInsertStep::Descend(child)),
-            ParentChildPlan::MissingChild { shape_version } => shape_version,
+            ParentChildPlan::InteriorParent { shape_version }
+            | ParentChildPlan::MissingChild { shape_version } => shape_version,
         };
 
         if let Some(parent_hash) = cursor.last_ext_hash
@@ -294,7 +293,7 @@ impl ConcurrentRadixTreeCompressed {
                         });
                     }
                     ParentEdgeAction::ReuseExistingEdge { coverage_changed } => {
-                        return Ok(StoreInsertStep::Done(Self::finish_with_lookup_update(
+                        return Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
                             lookup,
                             worker,
                             remaining,
@@ -333,7 +332,7 @@ impl ConcurrentRadixTreeCompressed {
                     });
                 }
                 Some(true) => {
-                    return Ok(StoreInsertStep::Done(Self::finish_with_lookup_update(
+                    return Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
                         lookup,
                         worker,
                         remaining,
@@ -364,7 +363,7 @@ impl ConcurrentRadixTreeCompressed {
                     });
                 }
                 Some(true) => {
-                    return Ok(StoreInsertStep::Done(Self::finish_with_lookup_update(
+                    return Ok(StoreInsertStep::Done(self.finish_with_lookup_update(
                         lookup,
                         worker,
                         remaining,
@@ -386,7 +385,7 @@ impl ConcurrentRadixTreeCompressed {
             }),
             InsertChildOutcome::Existing(child) => Ok(StoreInsertStep::Descend(child)),
             InsertChildOutcome::Inserted(new_node) => Ok(StoreInsertStep::Done(
-                Self::finish_with_lookup_update(lookup, worker, remaining, &new_node, false),
+                self.finish_with_lookup_update(lookup, worker, remaining, &new_node, false),
             )),
         }
     }
@@ -420,16 +419,7 @@ impl ConcurrentRadixTreeCompressed {
                     ) else {
                         continue;
                     };
-                    if let Some((expected, actual)) = scan.block_hash_mismatch {
-                        duplicate_store = false;
-                        tracing::warn!(
-                            ?expected,
-                            ?actual,
-                            "block_hash mismatch: sequence hashes should be uniform across workers"
-                        );
-                    }
-
-                    return ChildInsertStep::Done(Self::finish_with_lookup_update(
+                    return ChildInsertStep::Done(self.finish_with_lookup_update(
                         lookup,
                         worker,
                         remaining,
@@ -451,14 +441,6 @@ impl ConcurrentRadixTreeCompressed {
                 ) else {
                     continue;
                 };
-                if let Some((expected, actual)) = scan.block_hash_mismatch {
-                    tracing::warn!(
-                        ?expected,
-                        ?actual,
-                        "block_hash mismatch: sequence hashes should be uniform across workers"
-                    );
-                }
-
                 return ChildInsertStep::Done(self.finish_after_split_lookup(
                     lookup,
                     worker,
@@ -479,21 +461,13 @@ impl ConcurrentRadixTreeCompressed {
             else {
                 continue;
             };
-            if let Some((expected, actual)) = scan.block_hash_mismatch {
-                duplicate_store = false;
-                tracing::warn!(
-                    ?expected,
-                    ?actual,
-                    "block_hash mismatch: sequence hashes should be uniform across workers"
-                );
-            }
             if promoted {
                 duplicate_store = false;
             }
 
             let wl = lookup.get_mut(&worker).unwrap();
             let lookup_changed =
-                Self::update_lookup_for_blocks(wl, &remaining[..scan.edge_len], child);
+                self.update_lookup_for_blocks(worker, wl, &remaining[..scan.edge_len], child);
             if lookup_changed {
                 duplicate_store = false;
             }
@@ -571,5 +545,17 @@ impl ConcurrentRadixTreeCompressed {
         }
 
         Ok(StoreInsertOutcome { duplicate_store })
+    }
+
+    #[cfg(test)]
+    pub(super) fn insert_blocks_from_for_test(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker: WorkerWithDpRank,
+        parent: &SharedNode,
+        seed_hash: ExternalSequenceBlockHash,
+        blocks: &[KvCacheStoredBlockData],
+    ) -> Result<StoreInsertOutcome, KvCacheEventError> {
+        self.insert_blocks_from(lookup, worker, parent, false, Some(seed_hash), blocks)
     }
 }

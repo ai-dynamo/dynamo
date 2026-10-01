@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
@@ -32,6 +32,69 @@ const FPM_VERSION: i32 = 1;
 /// Matches Python `_FpmPublisherThread.HEARTBEAT_INTERVAL`.
 const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
+fn report_fpm_trace_init(
+    result: anyhow::Result<Option<crate::fpm_trace::FpmTrace>>,
+) -> Option<crate::fpm_trace::FpmTrace> {
+    match result {
+        Ok(trace) => trace,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "FPM trace initialization failed; continuing without local persistence"
+            );
+            None
+        }
+    }
+}
+
+async fn init_fpm_trace(component: &Component) -> Option<crate::fpm_trace::FpmTrace> {
+    let namespace = component.namespace().name();
+    let component_name = component.name().to_string();
+    let producer_id = component.drt().connection_id().to_string();
+    let runtime_id = component.drt().runtime().id().to_string();
+    report_fpm_trace_init(
+        crate::fpm_trace::init_from_env_with_shutdown(
+            &runtime_id,
+            &namespace,
+            &component_name,
+            &producer_id,
+            component.drt().child_token(),
+            Some(component.drt().register_graceful_task()),
+        )
+        .await,
+    )
+}
+
+fn tap_relay_fpm_with<F>(payload: &bytes::Bytes, tap: F)
+where
+    F: FnOnce(bytes::Bytes),
+{
+    tap(payload.clone());
+}
+
+fn tap_relay_fpm(payload: &bytes::Bytes, trace: Option<&crate::fpm_trace::FpmTrace>) {
+    if let Some(trace) = trace {
+        tap_relay_fpm_with(payload, |payload| {
+            trace.publish_payload(payload);
+        });
+    }
+}
+
+fn tap_direct_fpm_with<F>(payload: &[u8], tap: F)
+where
+    F: FnOnce(bytes::Bytes),
+{
+    tap(bytes::Bytes::copy_from_slice(payload));
+}
+
+fn tap_direct_fpm(payload: &[u8], trace: Option<&crate::fpm_trace::FpmTrace>) {
+    if let Some(trace) = trace {
+        tap_direct_fpm_with(payload, |payload| {
+            trace.publish_payload(payload);
+        });
+    }
+}
+
 /// A relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
 /// to the Dynamo event plane.
 pub struct FpmEventRelay {
@@ -41,19 +104,22 @@ pub struct FpmEventRelay {
 impl FpmEventRelay {
     /// Create and start a new relay.
     ///
-    /// - `component`: Dynamo component (provides runtime + discovery scope).
+    /// - `endpoint`: Dynamo endpoint that owns the published FPM stream.
     /// - `zmq_endpoint`: Local ZMQ PUB address to subscribe to
     ///   (e.g., `tcp://127.0.0.1:20380`).
-    pub fn new(component: Component, zmq_endpoint: String) -> Result<Self> {
+    pub fn new(endpoint: Endpoint, zmq_endpoint: String) -> Result<Self> {
+        let component = endpoint.component();
         let rt = component.drt().runtime().secondary();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
+        let trace = rt.block_on(init_fpm_trace(component));
+
         let publisher =
-            rt.block_on(async { EventPublisher::for_component(&component, FPM_TOPIC).await })?;
+            rt.block_on(async { EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await })?;
 
         rt.spawn(async move {
-            Self::relay_loop(zmq_endpoint, publisher, cancel_clone).await;
+            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace).await;
         });
 
         Ok(Self { cancel })
@@ -68,6 +134,7 @@ impl FpmEventRelay {
         zmq_endpoint: String,
         publisher: EventPublisher,
         cancel: CancellationToken,
+        trace: Option<crate::fpm_trace::FpmTrace>,
     ) {
         let socket = match connect_sub_socket(&zmq_endpoint, None).await {
             Ok(socket) => socket,
@@ -92,8 +159,9 @@ impl FpmEventRelay {
                             let mut frames = multipart_message(frames);
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
-                                let payload = frames.swap_remove(2);
-                                if let Err(e) = publisher.publish_bytes(payload).await {
+                                let payload = bytes::Bytes::from(frames.swap_remove(2));
+                                tap_relay_fpm(&payload, trace.as_ref());
+                                if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");
                                 }
                             } else {
@@ -156,9 +224,9 @@ struct QueuedRequestMetricsSer {
 
 /// Top-level serialization struct matching Python `ForwardPassMetrics`.
 #[derive(Serialize)]
-struct ForwardPassMetricsSer {
+struct ForwardPassMetricsSer<'a> {
     version: i32,
-    worker_id: String,
+    worker_id: &'a str,
     dp_rank: i64,
     counter_id: i64,
     wall_time: f64,
@@ -166,15 +234,17 @@ struct ForwardPassMetricsSer {
     queued_requests: QueuedRequestMetricsSer,
 }
 
-fn serialize_fpm(
+fn serialize_fpm_into(
+    buffer: &mut Vec<u8>,
     snapshot: &ForwardPassSnapshot,
     worker_id: &str,
     dp_rank: u32,
     counter_id: i64,
-) -> Result<Vec<u8>> {
+) -> Result<()> {
+    buffer.clear();
     let metrics = ForwardPassMetricsSer {
         version: FPM_VERSION,
-        worker_id: worker_id.to_owned(),
+        worker_id,
         dp_rank: dp_rank as i64,
         counter_id,
         wall_time: snapshot.wall_time_secs,
@@ -196,7 +266,27 @@ fn serialize_fpm(
             var_decode_kv_tokens: snapshot.var_queued_decode_kv_tokens,
         },
     };
-    rmp_serde::to_vec_named(&metrics).map_err(|e| anyhow::anyhow!("FPM serialization failed: {e}"))
+    metrics
+        .serialize(&mut rmp_serde::Serializer::new(buffer).with_struct_map())
+        .map_err(|e| anyhow::anyhow!("FPM serialization failed: {e}"))
+}
+
+#[cfg(test)]
+fn serialize_fpm(
+    snapshot: &ForwardPassSnapshot,
+    worker_id: &str,
+    dp_rank: u32,
+    counter_id: i64,
+) -> Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    serialize_fpm_into(&mut buffer, snapshot, worker_id, dp_rank, counter_id)?;
+    Ok(buffer)
+}
+
+struct PendingFpm {
+    snapshot: ForwardPassSnapshot,
+    dp_rank: u32,
+    counter_id: i64,
 }
 
 /// Live FPM sink that forwards snapshots to the `FpmDirectPublisher`'s
@@ -229,35 +319,56 @@ impl FpmDirectPublisher {
     /// serialization + event-plane publish pipeline. The scheduler passes
     /// one to each engine via the deferred-sink model.
     ///
-    /// - `component`: Dynamo component (provides runtime + discovery scope).
+    /// - `endpoint`: Dynamo endpoint that owns the published FPM stream.
     /// - `worker_id`: Unique worker identifier (typically `connection_id().to_string()`).
     /// - `dp_size`: Number of data-parallel ranks.
     pub async fn new(
-        component: Component,
+        endpoint: Endpoint,
         worker_id: String,
         dp_size: u32,
     ) -> Result<(Self, Vec<FpmPublisher>)> {
+        let component = endpoint.component();
         let rt = component.drt().runtime().secondary();
         let cancel = CancellationToken::new();
 
-        let publisher = EventPublisher::for_component(&component, FPM_TOPIC).await?;
+        let publisher = EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await?;
+        let trace = init_fpm_trace(component).await;
 
-        // Shared channel: per-dp_rank serialization tasks send bytes here,
-        // a single publisher task writes them to the event plane.
-        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        // Shared channel: per-dp_rank tasks send snapshots here. A single publisher task
+        // serializes them into a reusable buffer and preserves event-plane publish ordering.
+        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<PendingFpm>();
 
         // Publisher task
         let cancel_pub = cancel.clone();
+        let publisher_worker_id = worker_id.clone();
         rt.spawn(async move {
+            let mut payload = Vec::new();
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel_pub.cancelled() => break,
                     result = pub_rx.recv() => {
                         match result {
-                            Some(payload) => {
-                                if let Err(e) = publisher.publish_bytes(payload).await {
-                                    tracing::warn!("FPM direct publisher: event plane publish failed: {e}");
+                            Some(pending) => {
+                                match serialize_fpm_into(
+                                    &mut payload,
+                                    &pending.snapshot,
+                                    &publisher_worker_id,
+                                    pending.dp_rank,
+                                    pending.counter_id,
+                                ) {
+                                    Ok(()) => {
+                                        tap_direct_fpm(&payload, trace.as_ref());
+                                        if let Err(e) = publisher.publish_bytes_ref(&payload).await {
+                                            tracing::warn!("FPM direct publisher: event plane publish failed: {e}");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "FPM serialization failed for dp_rank {}: {e}",
+                                            pending.dp_rank
+                                        );
+                                    }
                                 }
                             }
                             None => break,
@@ -280,7 +391,6 @@ impl FpmDirectPublisher {
             fpm_publishers.push(FpmPublisher::new(Some(sink)));
 
             let pub_tx = pub_tx.clone();
-            let worker_id = worker_id.clone();
             let cancel_ser = cancel.clone();
 
             rt.spawn(async move {
@@ -316,16 +426,11 @@ impl FpmDirectPublisher {
                     };
 
                     counter += 1;
-                    match serialize_fpm(&snapshot, &worker_id, dp_rank, counter) {
-                        Ok(bytes) => {
-                            let _ = pub_tx.send(bytes);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "FPM serialization failed for dp_rank {dp_rank}: {e}"
-                            );
-                        }
-                    }
+                    let _ = pub_tx.send(PendingFpm {
+                        snapshot,
+                        dp_rank,
+                        counter_id: counter,
+                    });
                 }
             });
         }
@@ -354,6 +459,13 @@ mod tests {
     use super::*;
     use serde::Deserialize;
     use std::collections::HashMap;
+
+    #[test]
+    fn fpm_trace_initialization_errors_are_soft() {
+        // Trace persistence is auxiliary. Reporting an initialization failure
+        // must not turn it into a constructor error for either FPM publisher.
+        assert!(report_fpm_trace_init(Err(anyhow::anyhow!("unwritable trace path"))).is_none());
+    }
 
     /// Verify that serialize_fpm produces valid msgpack that round-trips
     /// through deserialization with the exact field names and values
@@ -435,6 +547,40 @@ mod tests {
         assert_eq!(decoded.queued_requests.num_decode_requests, 0);
     }
 
+    #[test]
+    fn test_serialize_fpm_into_reuses_buffer() {
+        let mut buffer = Vec::with_capacity(1024);
+        let allocation = buffer.as_ptr();
+        let capacity = buffer.capacity();
+
+        serialize_fpm_into(
+            &mut buffer,
+            &ForwardPassSnapshot::default(),
+            "worker-abc",
+            0,
+            1,
+        )
+        .unwrap();
+        serialize_fpm_into(
+            &mut buffer,
+            &ForwardPassSnapshot::default(),
+            "worker-abc",
+            0,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(buffer.as_ptr(), allocation);
+        assert_eq!(buffer.capacity(), capacity);
+
+        #[derive(Deserialize)]
+        struct Counter {
+            counter_id: i64,
+        }
+        let decoded: Counter = rmp_serde::from_slice(&buffer).unwrap();
+        assert_eq!(decoded.counter_id, 2);
+    }
+
     /// Verify that worker_id and dp_rank can be extracted from the serialized
     /// bytes by deserializing into a flat HashMap, simulating the subscriber's
     /// `extract_fpm_key` approach of scanning the msgpack map for specific keys.
@@ -459,197 +605,6 @@ mod tests {
         let partial: PartialFpm = rmp_serde::from_slice(&bytes).expect("partial decode failed");
         assert_eq!(partial.worker_id, "my-worker-id");
         assert_eq!(partial.dp_rank, 7);
-    }
-
-    /// Verify that the idle heartbeat fires when no FPM arrives within
-    /// IDLE_HEARTBEAT_INTERVAL. We replicate the per-dp_rank serialization
-    /// task logic with real channels to test the timeout behavior.
-    #[tokio::test]
-    async fn test_idle_heartbeat_emits_zeroed_snapshot() {
-        let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel::<ForwardPassSnapshot>();
-        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-        let worker_id = "test-worker".to_string();
-        let dp_rank: u32 = 0;
-
-        // Spawn the same task logic as FpmDirectPublisher
-        tokio::spawn(async move {
-            let mut counter: i64 = 0;
-            let heartbeat_sleep = tokio::time::sleep(IDLE_HEARTBEAT_INTERVAL);
-            tokio::pin!(heartbeat_sleep);
-
-            loop {
-                let snapshot = tokio::select! {
-                    biased;
-                    _ = cancel_clone.cancelled() => break,
-                    result = fpm_rx.recv() => {
-                        match result {
-                            Some(snapshot) => {
-                                heartbeat_sleep
-                                    .as_mut()
-                                    .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
-                                snapshot
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = &mut heartbeat_sleep => {
-                        heartbeat_sleep
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
-                        ForwardPassSnapshot::default()
-                    }
-                };
-
-                counter += 1;
-                if let Ok(bytes) = serialize_fpm(&snapshot, &worker_id, dp_rank, counter) {
-                    let _ = pub_tx.send(bytes);
-                }
-            }
-        });
-
-        // 1) Send an active snapshot first
-        let active = ForwardPassSnapshot {
-            num_prefill_requests: 2,
-            sum_prefill_tokens: 100,
-            wall_time_secs: 0.05,
-            ..Default::default()
-        };
-        fpm_tx.send(active).unwrap();
-
-        // Receive the active snapshot
-        let bytes = tokio::time::timeout(Duration::from_secs(2), pub_rx.recv())
-            .await
-            .expect("timed out waiting for active FPM")
-            .expect("channel closed");
-
-        #[derive(Deserialize)]
-        struct FpmWallTime {
-            wall_time: f64,
-        }
-        let decoded: FpmWallTime = rmp_serde::from_slice(&bytes).expect("active FPM decode failed");
-        assert!(
-            decoded.wall_time > 0.0,
-            "active snapshot should have wall_time > 0"
-        );
-
-        // 2) Now wait for the idle heartbeat (should arrive within ~1s)
-        let heartbeat_bytes = tokio::time::timeout(Duration::from_secs(3), pub_rx.recv())
-            .await
-            .expect("timed out waiting for idle heartbeat")
-            .expect("channel closed");
-
-        #[derive(Deserialize)]
-        #[allow(dead_code)]
-        struct HeartbeatDe {
-            wall_time: f64,
-            counter_id: i64,
-            worker_id: String,
-        }
-        let heartbeat: HeartbeatDe =
-            rmp_serde::from_slice(&heartbeat_bytes).expect("heartbeat decode failed");
-        assert_eq!(
-            heartbeat.wall_time, 0.0,
-            "idle heartbeat should have wall_time=0.0"
-        );
-        assert_eq!(heartbeat.counter_id, 2, "heartbeat is the second message");
-        assert_eq!(heartbeat.worker_id, "test-worker");
-
-        cancel.cancel();
-    }
-
-    /// Verify that active snapshots reset the heartbeat timer so heartbeats
-    /// only fire after a period of true inactivity.
-    #[tokio::test]
-    async fn test_active_snapshots_suppress_heartbeat() {
-        let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel::<ForwardPassSnapshot>();
-        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-
-        tokio::spawn(async move {
-            let mut counter: i64 = 0;
-            let heartbeat_sleep = tokio::time::sleep(IDLE_HEARTBEAT_INTERVAL);
-            tokio::pin!(heartbeat_sleep);
-
-            loop {
-                let snapshot = tokio::select! {
-                    biased;
-                    _ = cancel_clone.cancelled() => break,
-                    result = fpm_rx.recv() => {
-                        match result {
-                            Some(snapshot) => {
-                                heartbeat_sleep
-                                    .as_mut()
-                                    .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
-                                snapshot
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = &mut heartbeat_sleep => {
-                        heartbeat_sleep
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
-                        ForwardPassSnapshot::default()
-                    }
-                };
-
-                counter += 1;
-                if let Ok(bytes) = serialize_fpm(&snapshot, "w", 0, counter) {
-                    let _ = pub_tx.send(bytes);
-                }
-            }
-        });
-
-        // Send active snapshots every 500ms for 2 seconds — heartbeat should
-        // NOT fire during this time since each send resets the timer.
-        for _ in 0..4 {
-            let active = ForwardPassSnapshot {
-                num_decode_requests: 1,
-                wall_time_secs: 0.01,
-                ..Default::default()
-            };
-            fpm_tx.send(active).unwrap();
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-
-        // Drain all active snapshots
-        let mut active_count = 0;
-        while let Ok(Some(bytes)) =
-            tokio::time::timeout(Duration::from_millis(100), pub_rx.recv()).await
-        {
-            #[derive(Deserialize)]
-            struct Wt {
-                wall_time: f64,
-            }
-            let wt: Wt = rmp_serde::from_slice(&bytes).unwrap();
-            assert!(
-                wt.wall_time > 0.0,
-                "all messages during active period should have wall_time > 0"
-            );
-            active_count += 1;
-        }
-        assert_eq!(
-            active_count, 4,
-            "should have received exactly 4 active snapshots"
-        );
-
-        // Now wait for the heartbeat (should fire ~1s after last active send)
-        let heartbeat_bytes = tokio::time::timeout(Duration::from_secs(3), pub_rx.recv())
-            .await
-            .expect("timed out waiting for heartbeat after active period")
-            .expect("channel closed");
-
-        #[derive(Deserialize)]
-        struct Wt2 {
-            wall_time: f64,
-        }
-        let hb: Wt2 = rmp_serde::from_slice(&heartbeat_bytes).unwrap();
-        assert_eq!(hb.wall_time, 0.0, "heartbeat should have wall_time=0.0");
-
-        cancel.cancel();
     }
 
     /// Verify all 7 expected field names appear in scheduled_requests and

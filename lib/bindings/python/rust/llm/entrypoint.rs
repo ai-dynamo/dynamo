@@ -7,10 +7,16 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pyo3::{exceptions::PyException, exceptions::PyValueError, prelude::*};
+use pyo3::{
+    exceptions::{PyException, PyValueError},
+    prelude::*,
+};
 use pyo3_async_runtimes::TaskLocals;
 
+use dynamo_kv_router::TrackingHashAlgorithm as RsTrackingHashAlgorithm;
 use dynamo_kv_router::config::{
+    ApproximateCachePolicyKind as RsApproximateCachePolicyKind,
+    ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind,
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
     apply_deprecated_overlap_score_weight_override,
 };
@@ -18,15 +24,19 @@ use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
-use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
+use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
+use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
+use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_llm::reasoning_field::ReasoningField;
+use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
-use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
+use super::ais_callback::{create_ais_callback, create_ais_prefill_load_estimator};
 use super::replay::MockEngineArgs as PyMockEngineArgs;
 use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
@@ -77,127 +87,51 @@ impl KvRouterConfig {
 
 #[pyclass]
 #[derive(Clone, Debug)]
-pub struct AicPerfConfig {
-    aic_backend: String,
-    aic_system: String,
-    aic_backend_version: Option<String>,
-    aic_tp_size: usize,
-    aic_model_path: String,
-    aic_moe_tp_size: Option<usize>,
-    aic_moe_ep_size: Option<usize>,
-    aic_attention_dp_size: Option<usize>,
-    aic_nextn: Option<usize>,
-    aic_nextn_accept_rates: Option<String>,
+pub struct AisPerfConfig {
+    config: serde_json::Value,
 }
 
-impl AicPerfConfig {
-    pub(crate) fn backend_name(&self) -> &str {
-        &self.aic_backend
+impl AisPerfConfig {
+    pub(crate) fn config(&self) -> &serde_json::Value {
+        &self.config
     }
+}
 
-    pub(crate) fn system(&self) -> &str {
-        &self.aic_system
-    }
-
-    pub(crate) fn backend_version(&self) -> Option<&str> {
-        self.aic_backend_version.as_deref()
-    }
-
-    pub(crate) fn tp_size(&self) -> usize {
-        self.aic_tp_size
-    }
-
-    pub(crate) fn model_path(&self) -> &str {
-        &self.aic_model_path
-    }
-
-    pub(crate) fn moe_tp_size(&self) -> Option<usize> {
-        self.aic_moe_tp_size
-    }
-
-    pub(crate) fn moe_ep_size(&self) -> Option<usize> {
-        self.aic_moe_ep_size
-    }
-
-    pub(crate) fn attention_dp_size(&self) -> Option<usize> {
-        self.aic_attention_dp_size
-    }
-
-    pub(crate) fn nextn(&self) -> Option<usize> {
-        self.aic_nextn
-    }
-
-    pub(crate) fn nextn_accept_rates(&self) -> Option<&str> {
-        self.aic_nextn_accept_rates.as_deref()
-    }
+pub(super) fn normalize_ais_perf_config(
+    py: Python<'_>,
+    config: &Bound<'_, PyAny>,
+) -> PyResult<serde_json::Value> {
+    let mapping = if config.hasattr("to_dict")? {
+        config.call_method0("to_dict")?
+    } else {
+        py.import("builtins")?.call_method1("dict", (config,))?
+    };
+    let canonical = py
+        .import("aisimulate_core.sdk")?
+        .getattr("ForwardPassPerfModelConfig")?
+        .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
+    Ok(pythonize::depythonize(&canonical.call_method0("to_dict")?)?)
 }
 
 #[pymethods]
-impl AicPerfConfig {
+impl AisPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        aic_backend: String,
-        aic_system: String,
-        aic_model_path: String,
-        aic_tp_size: usize,
-        aic_backend_version: Option<String>,
-        aic_moe_tp_size: Option<usize>,
-        aic_moe_ep_size: Option<usize>,
-        aic_attention_dp_size: Option<usize>,
-        aic_nextn: Option<usize>,
-        aic_nextn_accept_rates: Option<String>,
-    ) -> PyResult<Self> {
-        if aic_backend.is_empty() {
-            return Err(PyValueError::new_err("aic_backend must be non-empty"));
-        }
-        if aic_system.is_empty() {
-            return Err(PyValueError::new_err("aic_system must be non-empty"));
-        }
-        if aic_model_path.is_empty() {
-            return Err(PyValueError::new_err("aic_model_path must be non-empty"));
-        }
-        if aic_tp_size == 0 {
-            return Err(PyValueError::new_err("aic_tp_size must be >= 1"));
-        }
-        for (name, value) in [
-            ("aic_moe_tp_size", aic_moe_tp_size),
-            ("aic_moe_ep_size", aic_moe_ep_size),
-            ("aic_attention_dp_size", aic_attention_dp_size),
-        ] {
-            if matches!(value, Some(0)) {
-                return Err(PyValueError::new_err(format!("{name} must be >= 1")));
-            }
-        }
-        // AIC caps MTP draft tokens at 5; >5 would IndexError in calc_expectation.
-        if let Some(nextn) = aic_nextn
-            && !(1..=5).contains(&nextn)
-        {
-            return Err(PyValueError::new_err(
-                "aic_nextn must be 1..=5 when set (omit to disable spec dec)",
-            ));
-        }
-
+    fn new(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<Self> {
         Ok(Self {
-            aic_backend,
-            aic_system,
-            aic_backend_version,
-            aic_tp_size,
-            aic_model_path,
-            aic_moe_tp_size,
-            aic_moe_ep_size,
-            aic_attention_dp_size,
-            aic_nextn,
-            aic_nextn_accept_rates,
+            config: normalize_ais_perf_config(py, config)?,
         })
+    }
+
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let text = serde_json::to_string(&self.config).map_err(to_pyerr)?;
+        Ok(py.import("json")?.call_method1("loads", (text,))?.unbind())
     }
 }
 
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, enable_session_prefix_index=false, shared_cache_multiplier=None, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -205,28 +139,39 @@ impl KvRouterConfig {
         disk_cache_hit_weight: f64,
         router_temperature: f64,
         use_kv_events: bool,
-        durable_kv_events: bool,
         router_replica_sync: bool,
         router_track_active_blocks: bool,
         router_track_output_blocks: bool,
         router_assume_kv_reuse: bool,
         router_track_prefill_tokens: bool,
         router_prefill_load_model: &str,
-        router_snapshot_threshold: Option<u32>,
-        router_reset_states: bool,
         router_ttl_secs: f64,
+        router_approximate_cache_policy: &str,
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
         router_queue_policy: &str,
         use_remote_indexer: bool,
         serve_indexer: bool,
-        shared_cache_multiplier: f64,
+        enable_session_prefix_index: bool,
+        shared_cache_multiplier: Option<f64>,
         shared_cache_type: &str,
         router_predicted_ttl_secs: Option<f64>,
+        conditional_disagg_enabled: bool,
+        conditional_disagg_policy: &str,
+        conditional_disagg_eff_isl_threshold: usize,
+        conditional_disagg_eff_isl_ratio_threshold: f64,
+        conditional_disagg_prefill_busy_threshold: Option<f64>,
+        conditional_disagg_decode_busy_threshold: Option<f64>,
         mut overlap_score_credit: f64,
         overlap_score_credit_decay: f64,
         mut prefill_load_scale: f64,
-        router_queue_by_incoming_missing_isl: Option<Vec<(usize, usize)>>,
+        decode_active_request_weight: f64,
+        router_policy_config: Option<String>,
+        router_prefill_policy: Option<String>,
+        router_decode_policy: Option<String>,
+        router_tracking_hash: &str,
+        router_tracking_key_file: Option<PathBuf>,
+        router_tracking_key_id: Option<String>,
     ) -> PyResult<Self> {
         if let Some(value) = overlap_score_weight {
             apply_deprecated_overlap_score_weight(
@@ -236,52 +181,68 @@ impl KvRouterConfig {
             );
         }
 
-        let inner = RsKvRouterConfig {
+        let mut inner = RsKvRouterConfig {
             overlap_score_credit,
             overlap_score_credit_decay,
             prefill_load_scale,
+            decode_active_request_weight,
             host_cache_hit_weight,
             disk_cache_hit_weight,
             router_temperature,
             use_kv_events,
-            durable_kv_events,
             router_replica_sync,
             router_track_active_blocks,
             router_track_output_blocks,
             router_assume_kv_reuse,
             router_track_prefill_tokens,
+            router_tracking_hash: router_tracking_hash
+                .parse::<RsTrackingHashAlgorithm>()
+                .map_err(PyValueError::new_err)?,
+            router_tracking_key_file,
+            router_tracking_key_id,
             router_prefill_load_model: router_prefill_load_model
                 .parse::<RsRouterPrefillLoadModel>()
                 .map_err(PyValueError::new_err)?,
-            router_snapshot_threshold,
-            router_reset_states,
             router_ttl_secs,
+            router_approximate_cache_policy: router_approximate_cache_policy
+                .parse::<RsApproximateCachePolicyKind>()
+                .map_err(PyValueError::new_err)?,
             router_queue_threshold,
-            router_queue_by_incoming_missing_isl: router_queue_by_incoming_missing_isl
-                .map(dynamo_kv_router::scheduling::config::RouterQueueDepthTiers::try_from)
-                .transpose()
-                .map_err(PyValueError::new_err)?
-                .unwrap_or_else(
-                    dynamo_kv_router::scheduling::config::RouterQueueDepthTiers::unbounded_cap,
-                ),
+            router_policy_config,
+            router_prefill_policy,
+            router_decode_policy,
+            policy_model_name: None,
+            policy_config_cache: Default::default(),
             router_event_threads,
             skip_initial_worker_wait: false,
             router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,
             use_remote_indexer,
             serve_indexer,
+            enable_session_prefix_index,
             shared_cache_multiplier,
             shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
+            conditional_disagg_enabled,
+            conditional_disagg_policy: conditional_disagg_policy
+                .parse::<RsConditionalDisaggPolicyKind>()
+                .map_err(PyValueError::new_err)?,
+            conditional_disagg_eff_isl_threshold,
+            conditional_disagg_eff_isl_ratio_threshold,
+            conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold,
             router_predicted_ttl_secs,
         };
+        inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
     }
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
-        let inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
-            PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
+        let mut inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
+            PyValueError::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
+        inner.apply_policy_config().map_err(PyValueError::new_err)?;
+        validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
     }
 
@@ -349,13 +310,28 @@ impl KvRouterConfig {
         Ok(())
     }
 
-    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, overlap_score_credit_decay=None, prefill_load_scale=None))]
+    #[getter]
+    fn decode_active_request_weight(&self) -> f64 {
+        self.inner.decode_active_request_weight
+    }
+
+    #[setter]
+    fn set_decode_active_request_weight(&mut self, value: f64) -> PyResult<()> {
+        let mut inner = self.inner.clone();
+        inner.decode_active_request_weight = value;
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
+        Ok(())
+    }
+
+    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, overlap_score_credit_decay=None, prefill_load_scale=None, decode_active_request_weight=None))]
     fn with_overrides(
         &self,
         overlap_score_weight: Option<f64>,
         overlap_score_credit: Option<f64>,
         overlap_score_credit_decay: Option<f64>,
         prefill_load_scale: Option<f64>,
+        decode_active_request_weight: Option<f64>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         if let Some(credit) = overlap_score_credit {
@@ -366,6 +342,9 @@ impl KvRouterConfig {
         }
         if let Some(scale) = prefill_load_scale {
             inner.prefill_load_scale = scale;
+        }
+        if let Some(weight) = decode_active_request_weight {
+            inner.decode_active_request_weight = weight;
         }
         if let Some(weight) = overlap_score_weight {
             apply_deprecated_overlap_score_weight(
@@ -394,13 +373,15 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
-    enforce_disagg: bool,
+    session_affinity_ttl_secs: Option<u64>,
+    session_affinity_mode: RsSessionAffinityMode,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -408,15 +389,37 @@ impl RouterConfig {
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
-    ) -> Self {
-        Self {
+        session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: &str,
+    ) -> PyResult<Self> {
+        if enforce_disagg {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "enforce_disagg is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+                );
+            });
+        }
+        super::kv::check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
+        RsLoadThresholdConfig {
+            active_decode_blocks_threshold,
+            active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac,
+        }
+        .validate()
+        .map_err(PyValueError::new_err)?;
+        let session_affinity_mode = session_affinity_mode
+            .parse()
+            .map_err(PyValueError::new_err)?;
+        Ok(Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            enforce_disagg,
-        }
+            session_affinity_ttl_secs,
+            session_affinity_mode,
+        })
     }
 }
 
@@ -430,7 +433,9 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
-            enforce_disagg: rc.enforce_disagg,
+            enforce_disagg: false,
+            session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
+            session_affinity_mode: rc.session_affinity_mode,
         }
     }
 }
@@ -463,11 +468,14 @@ pub(crate) struct EntrypointArgs {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    metrics_config: Option<MetricsConfig>,
+    frontend_api_config: Option<FrontendApiConfig>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
     mocker_engine_args: Option<PyMockEngineArgs>,
-    runtime_config: Option<ModelRuntimeConfig>,
+    runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
@@ -475,14 +483,14 @@ pub(crate) struct EntrypointArgs {
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
-    aic_perf_config: Option<AicPerfConfig>,
+    ais_perf_config: Option<AisPerfConfig>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -507,17 +515,29 @@ impl EntrypointArgs {
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
-        aic_perf_config: Option<AicPerfConfig>,
+        ais_perf_config: Option<AisPerfConfig>,
+        tls_client_ca_cert_path: Option<PathBuf>,
+        metrics_prefix: Option<String>,
+        enable_anthropic_api: Option<bool>,
+        strip_anthropic_preamble: Option<bool>,
+        enable_streaming_tool_dispatch: Option<bool>,
+        enable_streaming_reasoning_dispatch: Option<bool>,
+        reasoning_field_name: Option<String>,
+        tokenizer_backend: Option<String>,
+        tokenizer_fallback: Option<bool>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
-        if let Some(runtime_config) = &runtime_config {
-            runtime_config.validate_config()?;
-        }
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
         {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "tls_cert_path and tls_key_path must be provided together",
+            ));
+        }
+        if tls_client_ca_cert_path.is_some() && (tls_cert_path.is_none() || tls_key_path.is_none())
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tls_client_ca_cert_path requires tls_cert_path and tls_key_path",
             ));
         }
 
@@ -537,6 +557,33 @@ impl EntrypointArgs {
             })
             .transpose()?;
 
+        let tokenizer_backend = tokenizer_backend
+            .map(|backend| {
+                backend
+                    .parse::<TokenizerBackend>()
+                    .map_err(PyValueError::new_err)
+            })
+            .transpose()?;
+        let reasoning_field = reasoning_field_name
+            .map(|name| {
+                name.parse::<ReasoningField>()
+                    .map_err(|err| PyValueError::new_err(err.to_string()))
+            })
+            .transpose()?;
+
+        let mut runtime_config = runtime_config.unwrap_or_default();
+        if let Some(tokenizer_backend) = tokenizer_backend {
+            runtime_config
+                .inner
+                .set_tokenizer_backend(Some(tokenizer_backend));
+        }
+        if let Some(tokenizer_fallback) = tokenizer_fallback {
+            runtime_config
+                .inner
+                .set_tokenizer_fallback_enabled(Some(tokenizer_fallback));
+        }
+        runtime_config.validate_config()?;
+
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -548,8 +595,17 @@ impl EntrypointArgs {
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             http_metrics_port,
+            metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
+            frontend_api_config: FrontendApiConfig::from_optional_flags(
+                enable_anthropic_api,
+                strip_anthropic_preamble,
+                enable_streaming_tool_dispatch,
+                enable_streaming_reasoning_dispatch,
+                reasoning_field,
+            ),
             tls_cert_path,
             tls_key_path,
+            tls_client_ca_cert_path,
             extra_engine_args,
             mocker_engine_args,
             runtime_config,
@@ -560,7 +616,7 @@ impl EntrypointArgs {
             migration_limit,
             migration_max_seq_len,
             chat_engine_factory,
-            aic_perf_config,
+            ais_perf_config,
         })
     }
 }
@@ -595,15 +651,23 @@ pub fn make_engine<'p>(
         .migration_max_seq_len(args.migration_max_seq_len)
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
-        .http_metrics_port(args.http_metrics_port)
+        .http_metrics_port(args.http_metrics_port);
+    if let Some(metrics_config) = args.metrics_config.clone() {
+        builder.metrics_config(metrics_config);
+    }
+    if let Some(frontend_api_config) = args.frontend_api_config.clone() {
+        builder.frontend_api_config(frontend_api_config);
+    }
+    builder
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
+        .tls_client_ca_cert_path(args.tls_client_ca_cert_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
-        .runtime_config(args.runtime_config.clone().unwrap_or_default().inner)
+        .runtime_config(args.runtime_config.clone().inner)
         .namespace(args.namespace.clone())
         .namespace_prefix(args.namespace_prefix.clone());
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         if let Some(model_path) = args.model_path.clone() {
             let local_path = if model_path.exists() {
                 model_path
@@ -708,24 +772,10 @@ async fn select_engine(
             //  Convert Python chat engine factory to Rust callback
             let chat_engine_factory = args.chat_engine_factory.map(py_engine_factory_to_callback);
             let prefill_load_estimator = args
-                .aic_perf_config
+                .ais_perf_config
                 .as_ref()
                 .map(|config| {
-                    Python::with_gil(|py| {
-                        create_aic_prefill_load_estimator(
-                            py,
-                            config.backend_name(),
-                            config.system(),
-                            config.model_path(),
-                            config.tp_size(),
-                            config.backend_version(),
-                            config.moe_tp_size(),
-                            config.moe_ep_size(),
-                            config.attention_dp_size(),
-                            config.nextn(),
-                            config.nextn_accept_rates(),
-                        )
-                    })
+                    Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
                 })
                 .transpose()?;
             RsEngineConfig::Dynamic {
@@ -738,13 +788,21 @@ async fn select_engine(
             let mut mocker_args = if let Some(mocker_engine_args) = args.mocker_engine_args {
                 mocker_engine_args.inner()
             } else if let Some(extra_args_path) = args.extra_engine_args {
-                RsMockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to load mocker args from {:?}: {}",
-                        extra_args_path,
-                        e
-                    )
-                })?
+                tokio::fs::read_to_string(&extra_args_path)
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|config_json| {
+                        Python::with_gil(|py| {
+                            Ok(PyMockEngineArgs::from_json(py, &config_json)?.inner())
+                        })
+                    })
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to load mocker args from {:?}: {}",
+                            extra_args_path,
+                            e
+                        )
+                    })?
             } else {
                 tracing::warn!(
                     "No extra_engine_args specified for mocker engine. Using default mocker args."
@@ -752,53 +810,9 @@ async fn select_engine(
                 RsMockEngineArgs::default()
             };
 
-            // If aic_backend is set, create Python AIC callback and override perf_model
-            if let Some(ref backend_name) = mocker_args.aic_backend {
-                let backend = backend_name.clone();
-                let system = mocker_args.aic_system.as_deref().unwrap_or("h200_sxm");
-                let model_name = mocker_args
-                    .aic_model_path
-                    .as_deref()
-                    .unwrap_or_else(|| local_model.card().source_path());
-                let backend_version = mocker_args.aic_backend_version.as_deref();
-                let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
-                let moe_tp_size = mocker_args.aic_moe_tp_size;
-                let moe_ep_size = mocker_args.aic_moe_ep_size;
-                let attention_dp_size = mocker_args.aic_attention_dp_size;
-                let nextn = mocker_args.aic_nextn;
-                let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
-                match Python::with_gil(|py| {
-                    create_aic_callback(
-                        py,
-                        &backend,
-                        system,
-                        model_name,
-                        tp_size,
-                        backend_version,
-                        moe_tp_size,
-                        moe_ep_size,
-                        attention_dp_size,
-                        nextn,
-                        undiscounted_accept_rates.as_deref(),
-                    )
-                }) {
-                    Ok(callback) => {
-                        tracing::info!(
-                            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
-                            backend,
-                            system,
-                            model_name,
-                            backend_version
-                        );
-                        mocker_args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "Failed to create AIC callback (--aic-perf-model was requested): {}",
-                            e
-                        ));
-                    }
-                }
+            if let Some(config) = mocker_args.ais_perf_config.as_ref() {
+                let callback = Python::with_gil(|py| create_ais_callback(py, config))?;
+                mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
             }
 
             let endpoint = local_model.endpoint_id().clone();
@@ -819,19 +833,51 @@ async fn select_engine(
 }
 
 #[pyfunction]
-#[pyo3(signature = (distributed_runtime, input, engine_config))]
+#[pyo3(signature = (distributed_runtime, input, engine_config, frontend_route_extensions=None))]
 pub fn run_input<'p>(
     py: Python<'p>,
     distributed_runtime: super::DistributedRuntime,
     input: &str,
     engine_config: EngineConfig,
+    frontend_route_extensions: Option<PyObject>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        dynamo_llm::entrypoint::input::run_input(
+    let frontend_route_extensions =
+        super::frontend_routes::frontend_route_extensions_from_py(py, frontend_route_extensions)?;
+    let plugins = crate::router_plugins(
+        &engine_config
+            .inner
+            .local_model()
+            .router_config()
+            .kv_router_config,
+    )
+    .map_err(to_pyerr)?;
+    validate_router_plugin_input(
+        &plugins,
+        &input_enum,
+        engine_config
+            .inner
+            .local_model()
+            .router_config()
+            .router_mode
+            .is_kv_routing(),
+    )
+    .map_err(PyValueError::new_err)?;
+    crate::future_into_py(py, async move {
+        if matches!(&input_enum, Input::Http) {
+            HttpFrontend::default()
+                .frontend_route_extensions(frontend_route_extensions)
+                .plugins(plugins)
+                .run(distributed_runtime.inner.clone(), engine_config.inner)
+                .await
+                .map_err(to_pyerr)?;
+            return Ok(());
+        }
+        dynamo_llm::entrypoint::input::run_input_with_frontend_route_extensions(
             distributed_runtime.inner.clone(),
             input_enum,
             engine_config.inner,
+            frontend_route_extensions,
         )
         .await
         .map_err(to_pyerr)?;
@@ -839,9 +885,57 @@ pub fn run_input<'p>(
     })
 }
 
+fn validate_router_plugin_input(
+    plugins: &dynamo_kv_router::plugins::RouterPlugins,
+    input: &Input,
+    is_kv_routing: bool,
+) -> Result<(), &'static str> {
+    if plugins.has_custom_plugins() {
+        if !is_kv_routing {
+            return Err("linked router plugins require --router-mode kv");
+        }
+        if !matches!(input, Input::Http) {
+            return Err("linked router plugins require HTTP frontend input");
+        }
+    }
+    Ok(())
+}
+
 pub fn to_pyerr<E>(err: E) -> PyErr
 where
     E: Display,
 {
     PyException::new_err(format!("{}", err))
+}
+
+#[cfg(test)]
+mod plugin_input_tests {
+    use super::*;
+    use dynamo_kv_router::plugins::RouterPlugins;
+
+    #[test]
+    fn resolved_builtin_supports_stock_inputs_and_routing_modes() {
+        let plugins = crate::router_plugins(&RsKvRouterConfig::default()).unwrap();
+        assert!(plugins.worker_selection().is_some());
+        for input in [Input::Http, Input::Grpc, Input::Stdin, Input::Text] {
+            for is_kv in [false, true] {
+                assert!(validate_router_plugin_input(&plugins, &input, is_kv).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_policy_retains_frontend_restrictions() {
+        let plugins = RouterPlugins::default()
+            .with_worker_selection(dynamo_custom_policy_builtin::default_factory());
+        assert!(validate_router_plugin_input(&plugins, &Input::Http, true).is_ok());
+        assert_eq!(
+            validate_router_plugin_input(&plugins, &Input::Http, false),
+            Err("linked router plugins require --router-mode kv")
+        );
+        assert_eq!(
+            validate_router_plugin_input(&plugins, &Input::Grpc, true),
+            Err("linked router plugins require HTTP frontend input")
+        );
+    }
 }

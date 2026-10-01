@@ -1,0 +1,301 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: DynoSim Replay CLI Reference
+subtitle: Command options, YAML sections, constraints, and output for aisimulate predict
+---
+
+`aisimulate predict --stack dynamo` evaluates one concrete workload and deployment configuration
+through the Dynamo simulation stack. AISimulate owns the traffic and engine schema. The `ai-dynamo`
+package supplies the Dynamo runner and the optional `router` and `planner` configuration adapters.
+
+For an end-to-end workflow, see
+[Run a DynoSim Simulation](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx). To
+search configuration domains, see
+[Sweep DynoSim Configurations](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx).
+
+<Warning>
+The former Replay `online` mode has no replacement in the unified AISimulate CLI yet. `aisimulate
+predict` and `aisimulate recommend` are offline-only. The separate `python3 -m dynamo.mocker`
+command remains available for launching live workers but does not provide replay orchestration.
+</Warning>
+
+## Command
+
+```bash
+aisimulate predict --stack dynamo --config prediction.yaml
+```
+
+<ParamField path="-c, --config" type="path" required={true}>
+  YAML prediction configuration. Prediction files contain concrete values and reject search
+  domains, presets, `optimization`, and `optimizer`.
+</ParamField>
+
+<ParamField path="--stack" type="string" default="engine">
+  Execution stack. Set this option to `dynamo` to load the Dynamo runner and the Router and Planner
+  adapters registered by `ai-dynamo`.
+</ParamField>
+
+<ParamField path="--set" type="PATH=YAML_VALUE" default="null">
+  Override a schema-valid configuration path after loading the YAML file. Repeat the option for
+  multiple overrides. Values are parsed as YAML, and later assignments win. Sequence indexes are
+  not supported.
+</ParamField>
+
+<ParamField path="--output-dir" type="path" default="./aisimulate-output">
+  Directory for `prediction.json` and optional per-request output.
+</ParamField>
+
+<ParamField path="--overwrite" type="flag" default="false">
+  Replace known AISimulate output files in an existing nonempty output directory. Unrelated files
+  are preserved.
+</ParamField>
+
+<ParamField path="--format" type="string" default="table">
+  Standard-output format.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>table</Badge> <Badge intent="note" minimal>json</Badge></span>
+</ParamField>
+
+<ParamField path="--capture-per-request" type="flag" default="false">
+  Write one record per request to `requests.jsonl`.
+</ParamField>
+
+## Configuration Sections
+
+The YAML document uses these top-level sections:
+
+| Section | Required | Owner | Purpose |
+|---|---|---|---|
+| `traffic` | No | AISimulate | Request source, load pattern, and stopping condition |
+| `engine` | Yes | AISimulate | Model, backend, hardware, topology, worker parallelism, scheduler, KV cache, and timing |
+| `router` | No | Dynamo adapter | Round-robin or KV-aware routing |
+| `planner` | No | Dynamo adapter | Planner policy and scaling behavior |
+| `evaluation` | No | AISimulate | Service-level objective (SLO) thresholds used for reporting |
+
+Unknown fields are rejected. `predict` accepts only concrete values. Use `aisimulate recommend` for
+`choices`, `range`, or `preset` domains.
+
+## Dynamo Prediction Example
+
+```yaml
+traffic:
+  source:
+    type: synthetic
+    input_tokens: 1024
+    output_tokens: 128
+  load:
+    type: constant_rate
+    requests_per_second: 8
+  stop:
+    requests: 100
+engine:
+  mode: aggregated
+  model: meta-llama/Meta-Llama-3.1-8B-Instruct
+  hardware: h200_sxm
+  backend: vllm
+  context_length: max
+  workers:
+    aggregated:
+      parallelism:
+        replicas: 2
+        tensor: 1
+        pipeline: 1
+        attention_data: 1
+        moe_tensor: 1
+        moe_expert: 1
+      scheduler:
+        max_batched_tokens: 8192
+        max_sequences: 256
+      kv_cache:
+        block_size: 64
+        prefix_caching: true
+        capacity: {type: default, memory_fraction: 0.9}
+      timing: {type: default}
+      startup_seconds: 0
+router:
+  policy: round_robin
+  prefill_load_model: {type: none}
+planner:
+  policy: disabled
+evaluation:
+  sla: {ttft_ms: 500, itl_ms: 50}
+```
+
+## Traffic Rules
+
+`traffic` contains `source`, `load`, and `stop` mappings.
+
+- Omitting the entire section creates 100 independent synthetic requests at concurrency 10, with
+  1,024 input tokens and 128 output tokens per request.
+- `source.type: synthetic` creates independent requests with `input_tokens` and `output_tokens`.
+- `source.type: synthetic-session` creates ordered multi-turn sessions.
+- `source.type: trace` reads one or more paths. Supported formats include `mooncake`,
+  `mooncake-delta`, `agentic_mooncake`, `weka`, `applied_compute_agentic`, and `dynamo`.
+- `load.type: concurrency` keeps a fixed number of requests or sessions active.
+- `load.type: constant_rate` schedules evenly spaced arrivals from `requests_per_second` or
+  `sessions_per_second`.
+- `load.type: poisson` uses the matching rate with exponential inter-arrival times and an optional
+  `seed`, which defaults to 42.
+- `load.type: trace_timestamps` preserves trace timing and accepts a positive `speedup`.
+- `stop.requests` applies to independent requests. `stop.sessions` applies to session sources.
+- `stop.requests_per_load_unit` and `stop.sessions_per_load_unit` derive the count from the concrete
+  concurrency or arrival rate.
+- `stop.max_virtual_time_seconds` is a soft virtual-time cutoff. Requests admitted before the
+  cutoff may finish afterward.
+
+For Dynamo request traces, omit `traffic.source.block_size`; Dynamo derives it from the source and
+rejects mixed block sizes across shards. For Weka corpora, AISimulate derives the block size from the
+source. An explicitly configured Weka block size is only an assertion against the published source
+metadata. Dynamo format accepts multiple trace shards. Weka accepts one file or directory; other
+formats accept exactly one file.
+
+For Weka traces, `traffic.source.nested_timestamp_basis` controls how nested timestamps
+are interpreted:
+
+- `auto` (the default) scans the entire corpus and selects one basis for all nested requests.
+  If any replayable child timestamp precedes its parent marker, it selects `relative`;
+  otherwise, it selects `absolute`. A corpus without replayable nested requests resolves to
+  `not_applicable`. It does not choose a separate basis for each child or file.
+- `absolute` uses timestamps directly and rejects a child timestamp before its parent marker,
+  apart from the importer's timestamp-rounding tolerance.
+- `relative` adds the parent marker's timestamp to each child timestamp.
+
+Explicit `absolute` and `relative` overrides take precedence over inference. For example, a marker
+at 1 second with a child timestamp of 2 seconds is interpreted as 3 seconds with `relative`, and
+as 2 seconds with `absolute`. `auto` chooses 2 seconds for that corpus unless another child
+provides evidence for relative timestamps.
+
+AISimulate's Weka importer also changes two behaviors from the former Dynamo importer:
+
+- A source request with `out: 0` retains zero output tokens and runs as a prefill-only request.
+  The former importer used `max(1, out)`. Output-token counts, throughput, and timing metrics
+  can therefore change for the same corpus.
+- A missing or null `api_time` remains absent (`None`) in `recorded_api_time_ms`, preserving
+  the distinction from an explicit zero. Dependency classification uses a zero-duration
+  interval at the request timestamp when that duration is unknown. These requests were
+  previously rejected. The fallback can affect inferred dependency edges and replay timing;
+  it does not assert that the measured API duration was zero.
+
+`mooncake-delta`, `agentic_mooncake`, and `weka` require aggregated engine mode.
+The two agentic formats also require `trace_timestamps` and reject the virtual-time cutoff.
+`applied_compute_agentic` requires concurrency load.
+With the Dynamo stack, omit `planner` or set `planner.policy: disabled` for `mooncake-delta`,
+`agentic_mooncake`, and Dynamo traces that carry `agent_context` records.
+
+### Typed agentic replay through the Dynamo API
+
+AISimulate owns public Weka ingestion, validation, and lowering into the canonical
+`ValidatedAgenticGraph`. The lower-level
+`dynamo.replay.run_trace_replay(...)` API keeps `trace_format="weka"` as a compatibility adapter,
+but delegates graph construction directly to `aisimulate-core` before Dynamo composes its Router
+and Mocker runtime behavior.
+
+Use `weka_nested_timestamp_basis="absolute"` or `"relative"` to override nested timestamp
+interpretation in `run_trace_replay(...)`. Omitting it preserves the `auto` heuristic.
+
+Set `agentic_lanes` to a positive integer to replay a fixed number of trajectories concurrently.
+Plays are stable-sorted and stride-assigned to lanes. A lane starts its next play only after its
+current play is quiescent, and lanes do not steal work. Agentic replay rejects
+`replay_concurrency` and Planner scaling. A Weka corpus may retain multiple source-model labels as
+provenance, but the current runtime projects every node onto the single configured
+`execution_model`. Per-node heterogeneous timing models are not yet supported.
+
+```python
+from dynamo.mocker import MockEngineArgs
+from dynamo.replay import run_trace_replay
+
+report = run_trace_replay(
+    trace_files="traces/weka-agentx",
+    trace_format="weka",
+    execution_model="Qwen/Qwen3-32B-FP8",
+    agentic_lanes=12,
+    router_mode="kv_router",
+    num_workers=4,
+    extra_engine_args=MockEngineArgs(engine_type="vllm", block_size=64),
+)
+```
+
+Agentic reports retain the sorted source-model labels in `agentic_graph.source_models` and record
+the explicit projection policy and target in `agentic_model_projection`.
+
+Weka reports also expose the resolved timestamp basis as the string
+`weka_nested_timestamp_basis`: `absolute`, `relative`, or `not_applicable`. For offline
+`run_trace_replay(...)`, read `report.summary["weka_nested_timestamp_basis"]`; online replay
+includes the same field in its summary dictionary. The Dynamo runner includes it in
+`report.metadata`, including when raw-report capture is disabled. The requested basis remains
+in the workload configuration.
+
+Agentic Mooncake v2 begins with a required versioned header:
+
+```json
+{"schema":"dynamo.agentic_mooncake","version":2,"block_size":64,"hash_id_scope":"local","source":{"format":"weka","digest":"<corpus-digest>"}}
+```
+
+Each request row contains a globally unique `request_id`, nonempty `play_id`, `session_id`, `model`,
+exact input and output metadata, `hash_ids`, and `not_before_ms`. Optional
+`source_play_ordinal` and `recorded_api_time_ms` fields preserve source ordering and recorded timing
+evidence. The optional `dependencies` array contains typed incoming edges. Each edge identifies its
+predecessor, a `dispatch` or `completion` trigger, a nonnegative delay, and a `sequence`, `spawn`,
+`join`, or `replay_barrier` relation.
+
+Agentic Mooncake v2 remains an optional materialized interchange format. Dynamo intentionally does
+not ship a Weka parser, lowering implementation, or Weka-to-v2 converter; those source semantics
+and any future materialization tooling belong to AISimulate.
+
+## Engine and Adapter Rules
+
+- `engine.mode: aggregated` requires `engine.workers.aggregated`.
+- `engine.mode: disaggregated` requires `engine.workers.prefill`,
+  `engine.workers.decode`, and `engine.kv_transfer`.
+- `aisimulate predict` and `aisimulate recommend` currently support TensorRT-LLM only in
+  aggregated mode. This is an offline simulation limitation; Dynamo runtime deployments support
+  TensorRT-LLM disaggregated serving.
+- Each `parallelism` mapping is concrete and contains `replicas`, `tensor`, `pipeline`,
+  `attention_data`, `moe_tensor`, and `moe_expert`.
+- `engine.context_length` defaults to `max`, which AISimulate resolves from the model's Hugging Face
+  configuration. Default KV block sizes are 64 for vLLM, 1 for SGLang, and 32 for TensorRT-LLM.
+- Scheduler defaults are 8,192 batched tokens for every role and 256 sequences for aggregated and
+  decode workers. Prefill workers default to one sequence.
+- `timing.type: default` uses the AIConfigurator forward-pass model shipped in the `aisimulate`
+  wheel. `fixed` requires both `prefill_ms` and `decode_ms`; `polynomial` selects the built-in
+  polynomial model.
+- `router.policy: kv_router` requires more than one routable worker. Set
+  `router.prefill_load_model.type` to `none` or `aic`.
+- `planner.policy` is `disabled` or `enabled`. When enabled, `planner.max_num_gpus` limits the
+  Planner runtime budget; it is distinct from recommendation candidate constraints.
+- `evaluation.sla` accepts either `e2e_ms` alone or `ttft_ms` and `itl_ms` together. The two forms
+  are mutually exclusive.
+
+## Overrides
+
+`--set` accepts dot-separated, schema-valid paths. The field does not need to be present in the
+input YAML:
+
+```bash
+aisimulate predict \
+  --stack dynamo \
+  --config prediction.yaml \
+  --set engine.workers.aggregated.parallelism.replicas=4 \
+  --set router.policy=kv_router
+```
+
+An override cannot create an unknown field. Override a complete mapping when changing a tagged
+configuration shape, such as `traffic.source`.
+
+## Output
+
+The output directory contains:
+
+```text
+aisimulate-output/
+├── prediction.json
+└── requests.jsonl
+```
+
+`prediction.json` preserves the Dynamo runner report, including summary metrics and available
+Planner diagnostics. `requests.jsonl` is present only with `--capture-per-request`. `--format`
+changes standard output but not durable files.
+
+The command exits with `0` on success, `1` for execution failure, `2` for CLI or configuration
+errors, and `130` when interrupted.

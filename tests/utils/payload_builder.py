@@ -11,14 +11,20 @@ from tests.utils.payloads import (
     CachedTokensChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
+    ClassifyPayload,
+    ClearKVBlocksPayload,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
+    ElasticEPScalePayload,
     EmbeddingPayload,
     GuidedDecodingChatPayload,
     ImagesPayload,
+    ImageTokenMetricsPayload,
     KvEventMetricsPayload,
     LMCacheMetricsPayload,
+    LoraTestChatPayload,
     MetricsPayload,
+    PoolingPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
     RouterNvextChatPayload,
@@ -41,6 +47,17 @@ Aeloria holds a secret so profound that it has the potential to reshape the very
 will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. \
 Your Task: Character Background: Develop a detailed background for your character. Describe their motivations \
 for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends."""
+
+# Deliberately distinct from other cache-test prompts and long enough to span
+# multiple vLLM cache blocks.
+CLEAR_KV_BLOCKS_PROMPT = """This is the vLLM block-clearing verification prompt, identified by the unique \
+phrase cobalt-orchid-riverstone. Imagine a research station built beside a quiet polar observatory where engineers \
+catalog unusual signals from distant stars. Describe how the team prepares its instruments, checks redundant clocks, \
+records atmospheric conditions, and compares each observation with the previous night. Include the roles of the lead \
+astronomer, systems engineer, data archivist, and safety coordinator. Explain why repeatable procedures matter when a \
+faint signal could be caused by weather, hardware drift, software timing, or a genuine astronomical event. Then give a \
+brief account of the team's morning review, including how they preserve raw measurements, annotate anomalies, and plan \
+the next observation window. Keep the answer factual and concise while retaining the cobalt-orchid-riverstone marker."""
 
 
 def chat_payload_default(
@@ -137,6 +154,56 @@ def cached_tokens_chat_payload(
         or ["Aeloria", "Eldoria", "explorer", "ancient", "character", "background"],
         min_cached_tokens=min_cached_tokens,
         router_nvext_expectation=router_nvext_expectation,
+    )
+
+
+def lora_chat_payload(
+    lora_name: str,
+    s3_uri: str,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    repeat_count: int = 2,
+    expected_response: Optional[list] = None,
+    expected_log: Optional[list] = None,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+) -> LoraTestChatPayload:
+    """Create a LoRA-enabled chat payload for testing."""
+    return LoraTestChatPayload(
+        body={
+            "model": lora_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is deep learning? Answer in one sentence.",
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        },
+        lora_name=lora_name,
+        s3_uri=s3_uri,
+        system_port=system_port,
+        repeat_count=repeat_count,
+        expected_response=expected_response
+        or ["learning", "neural", "network", "AI", "model"],
+        expected_log=expected_log or [],
+    )
+
+
+def clear_kv_blocks_payload(
+    max_tokens: int = 16,
+    timeout: int = 60,
+) -> ClearKVBlocksPayload:
+    """Create an admin-then-infer payload for vLLM cache clearing."""
+    return ClearKVBlocksPayload(
+        body={
+            "messages": [{"role": "user", "content": CLEAR_KV_BLOCKS_PROMPT}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        timeout=timeout,
     )
 
 
@@ -319,6 +386,20 @@ def metric_payload_default(
         return MetricsPayload(**common_args)
 
 
+def image_token_metrics_payload(
+    min_num_requests: int = 1,
+    expected_log: Optional[List[str]] = None,
+) -> ImageTokenMetricsPayload:
+    """Create a frontend image-token aggregate metrics check."""
+    return ImageTokenMetricsPayload(
+        body={},
+        repeat_count=1,
+        expected_log=expected_log or [],
+        expected_response=[],
+        min_num_requests=min_num_requests,
+    )
+
+
 def kv_events_metrics_payload(
     *,
     event_type: str = "stored",
@@ -485,6 +566,64 @@ def embedding_payload(
     )
 
 
+PoolingInput = Union[str, List[str], List[int], List[List[int]]]
+
+
+def _pooling_input_count(input_data: PoolingInput) -> int:
+    if isinstance(input_data, str):
+        return 1
+    if input_data and isinstance(input_data[0], int):
+        return 1
+    return len(input_data)
+
+
+def classify_payload(
+    input_data: PoolingInput,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    expected_prompt_tokens: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> ClassifyPayload:
+    body: Dict[str, Any] = {"input": input_data}
+    if extra_body:
+        body.update(extra_body)
+    expected_count = _pooling_input_count(input_data)
+
+    return ClassifyPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response or [f"Classified {expected_count} inputs"],
+        expected_prompt_tokens=expected_prompt_tokens,
+    )
+
+
+def pooling_payload(
+    input_data: PoolingInput,
+    task: Optional[str] = None,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    expected_prompt_tokens: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> PoolingPayload:
+    body: Dict[str, Any] = {"input": input_data}
+    if task is not None:
+        body["task"] = task
+    if extra_body:
+        body.update(extra_body)
+    expected_count = _pooling_input_count(input_data)
+
+    return PoolingPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response or [f"Pooled {expected_count} inputs"],
+        expected_prompt_tokens=expected_prompt_tokens,
+    )
+
+
 # Build small request-based health checks for chat and completions
 # these should only be used as a last resort. Generally want to use an actual health check
 
@@ -499,19 +638,23 @@ def make_chat_health_check(port: int, model: str):
             stream=False,
         ).with_model(model)
         payload.port = port
-        try:
-            resp = send_request(
-                payload.url(),
-                payload.body,
-                timeout=min(max(1.0, remaining_timeout), 5.0),
-                method=payload.method,
-                log_level=10,
+        # Let ManagedProcess log the actual health-check failure.
+        resp = send_request(
+            payload.url(),
+            payload.body,
+            timeout=min(max(1.0, remaining_timeout), 5.0),
+            method=payload.method,
+            log_level=10,
+        )
+        # raise_for_status() omits the response body.
+        if not resp.ok:
+            raise RuntimeError(
+                f"chat health check got HTTP {resp.status_code} from {resp.url}: "
+                f"{resp.text[:500]!r}"
             )
-            # Validate structure only; expected_response is empty
-            _ = payload.response_handler(resp)
-            return True
-        except Exception:
-            return False
+        # Validate structure only; expected_response is empty
+        payload.response_handler(resp)
+        return True
 
     return _check_chat_endpoint
 
@@ -526,20 +669,26 @@ def make_completions_health_check(port: int, model: str):
             stream=False,
         ).with_model(model)
         payload.port = port
-        try:
-            resp = send_request(
-                payload.url(),
-                payload.body,
-                timeout=min(max(1.0, remaining_timeout), 5.0),
-                method=payload.method,
-                log_level=10,
+        # See make_chat_health_check: no try/except, so ManagedProcess._check_func's
+        # own exception logging can surface the real failure reason.
+        resp = send_request(
+            payload.url(),
+            payload.body,
+            timeout=min(max(1.0, remaining_timeout), 5.0),
+            method=payload.method,
+            log_level=10,
+        )
+        # See make_chat_health_check: surface the response body, since
+        # raise_for_status() alone only reports the status line.
+        if not resp.ok:
+            raise RuntimeError(
+                f"completions health check got HTTP {resp.status_code} from "
+                f"{resp.url}: {resp.text[:500]!r}"
             )
-            out = payload.response_handler(resp)
-            if not out:
-                raise ValueError("")
-            return True
-        except Exception:
-            return False
+        out = payload.response_handler(resp)
+        if not out:
+            raise ValueError(f"completions health check got empty response: {out!r}")
+        return True
 
     return _check_completions_endpoint
 
@@ -766,4 +915,28 @@ def anthropic_messages_stream_payload_default(
         expected_log=expected_log or [],
         expected_response=expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def elastic_ep_scale_payload(
+    new_data_parallel_size: int,
+    content: str = TEXT_PROMPT,
+    max_tokens: int = 64,
+    expected_response: Optional[List[str]] = None,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    timeout: int = 300,
+) -> ElasticEPScalePayload:
+    """Scale the live data-parallel size, then verify a chat still completes."""
+    return ElasticEPScalePayload(
+        body={
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        new_data_parallel_size=new_data_parallel_size,
+        system_port=system_port,
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+        timeout=timeout,
     )

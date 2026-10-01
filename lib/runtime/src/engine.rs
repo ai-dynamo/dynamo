@@ -91,6 +91,7 @@ pub type EngineUnary<Resp> = Pin<Box<dyn AsyncEngineUnary<Resp>>>;
 /// at the [`crate::pipeline`] alias layer for documentary clarity at use sites.
 pub type EngineStream<T> = Pin<Box<dyn AsyncEngineStream<T>>>;
 pub type Context = Arc<dyn AsyncEngineContext>;
+pub type EngineContextGuard = Arc<dyn Any + Send + Sync>;
 
 impl<T: Data> From<EngineStream<T>> for DataStream<T> {
     fn from(stream: EngineStream<T>) -> Self {
@@ -157,6 +158,11 @@ pub trait AsyncEngineContext: Send + Sync + Debug {
     /// child AsyncEngineContext, in the order they are linked, and then the method on this
     /// AsyncEngineContext continues.
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>);
+
+    /// Retain request-scoped state until the engine context is dropped.
+    fn retain(&self, guard: EngineContextGuard) {
+        drop(guard);
+    }
 }
 
 /// Provides access to the [`AsyncEngineContext`] associated with an engine operation.

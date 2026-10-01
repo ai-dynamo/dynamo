@@ -20,7 +20,7 @@ use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
-use crate::protocols::openai::nvext::WorkerIdInfo;
+use crate::protocols::common::extensions::WorkerIdInfo;
 
 /// Worker type constants for Prometheus metric labels.
 /// These are stored in RequestTracker at routing time to avoid costly MDC lookups
@@ -165,7 +165,7 @@ pub struct RequestTracker {
     router_queue_depth: OnceLock<usize>,
 
     /// When the prefill result arrived at the router (disaggregated, original path only).
-    /// Set in execute_prefill() after the first output is received from the prefill worker.
+    /// Set after the first output is received from the prefill worker.
     prefill_complete_time: OnceLock<Instant>,
 
     /// Timing computed in another process — a standalone router built on the
@@ -179,6 +179,11 @@ pub struct RequestTracker {
     /// re-tokenizing. Lives here rather than on `routing_data` because the preprocessor
     /// drains `routing_data` before the delta generator runs. First-write-wins.
     external_query_token_ids: OnceLock<Vec<u32>>,
+
+    /// Frontend-rendered prompt tokens retained only for an explicit
+    /// `nvext.extra_fields=["prompt_token_ids"]` response request.
+    /// First-write-wins because one response generator owns one prompt.
+    prompt_token_ids: OnceLock<Vec<u32>>,
 }
 
 /// Data a standalone router (running the `PushRouter` bindings in its own process)
@@ -238,6 +243,7 @@ impl RequestTracker {
             prefill_complete_time: OnceLock::new(),
             external_timing: OnceLock::new(),
             external_query_token_ids: OnceLock::new(),
+            prompt_token_ids: OnceLock::new(),
         }
     }
 
@@ -258,6 +264,12 @@ impl RequestTracker {
 
     pub fn record_finish(&self) {
         *self.request_finish_time.lock() = Some(Instant::now());
+    }
+
+    pub(crate) fn record_finish_if_missing(&self) {
+        self.request_finish_time
+            .lock()
+            .get_or_insert_with(Instant::now);
     }
 
     /// Record KV cache hit information. Returns true if this was the first call.
@@ -633,6 +645,12 @@ impl RequestTracker {
         let _ = self.external_query_token_ids.set(token_ids);
     }
 
+    /// Retain the frontend's authoritative rendered prompt token sequence for
+    /// opt-in response emission. First-write-wins.
+    pub fn set_prompt_token_ids(&self, token_ids: Vec<u32>) {
+        let _ = self.prompt_token_ids.set(token_ids);
+    }
+
     /// Overlay worker attribution forwarded by a standalone router (on the first chunk's
     /// `routing_data.worker_id`) onto this tracker so `get_worker_info`, the metrics
     /// annotation, and `build_response_nvext` surface it on the split-router path.
@@ -655,6 +673,11 @@ impl RequestTracker {
     /// The query-only tokenized prompt forwarded from a standalone router, if any.
     pub fn query_token_ids(&self) -> Option<&[u32]> {
         self.external_query_token_ids.get().map(Vec::as_slice)
+    }
+
+    /// The frontend-rendered prompt token sequence, when explicitly retained.
+    pub fn prompt_token_ids(&self) -> Option<&[u32]> {
+        self.prompt_token_ids.get().map(Vec::as_slice)
     }
 
     /// Per-request timing. Starts from this process's own measurements; in the split-router
@@ -893,6 +916,19 @@ mod tests {
     }
 
     #[test]
+    fn test_prompt_token_ids_round_trip() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.prompt_token_ids().is_none());
+
+        tracker.set_prompt_token_ids(vec![101, 102, 103]);
+        assert_eq!(tracker.prompt_token_ids(), Some(&[101u32, 102, 103][..]));
+
+        // One request has one authoritative rendered prompt.
+        tracker.set_prompt_token_ids(vec![999]);
+        assert_eq!(tracker.prompt_token_ids(), Some(&[101u32, 102, 103][..]));
+    }
+
+    #[test]
     fn test_set_external_worker_info_round_trip() {
         let tracker = RequestTracker::new();
         assert!(tracker.get_worker_info().is_none());
@@ -1091,7 +1127,7 @@ mod tests {
         // Simulate the buggy prefill-phase sequence:
         // 1. RequestGuard::on_item() calls record_first_token() during prefill
         tracker.record_first_token();
-        // 2. execute_prefill() calls record_prefill_complete() immediately after
+        // 2. Prefill stream consumption calls record_prefill_complete() immediately after
         tracker.record_prefill_complete();
 
         // The OLD computation (first_token_time - prefill_complete_time) would be 0
