@@ -58,6 +58,100 @@ fn request() -> PreprocessedRequest {
         .unwrap()
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn cache_history_replica_sync_requires_both_flags() {
+    use dynamo_runtime::discovery::{DiscoveryQuery, EventChannelQuery};
+
+    for history_enabled in [true, false] {
+        for replica_sync in [true, false] {
+            temp_env::async_with_vars(
+                [(
+                    cache_history::CACHE_REUSE_HISTORY_ENABLED_ENV,
+                    Some(if history_enabled { "true" } else { "false" }),
+                )],
+                async {
+                    let runtime = Runtime::from_current().unwrap();
+                    let distributed =
+                        DistributedRuntime::new(runtime, DistributedConfig::process_local())
+                            .await
+                            .unwrap();
+                    let endpoint = distributed
+                        .namespace(format!("history-gate-{}", uuid::Uuid::new_v4()))
+                        .unwrap()
+                        .component("workers")
+                        .unwrap()
+                        .endpoint("generate");
+                    let query = DiscoveryQuery::EventChannels(EventChannelQuery::endpoint_topic(
+                        endpoint.id(),
+                        "cache-history-v1",
+                    ));
+                    let client = endpoint.client().await.unwrap();
+                    let (_workers_tx, workers) = watch::channel(HashMap::new());
+                    let config = KvRouterConfig {
+                        skip_initial_worker_wait: true,
+                        use_kv_events: false,
+                        router_track_active_blocks: false,
+                        router_replica_sync: replica_sync,
+                        ..Default::default()
+                    };
+                    let chooser = KvRouter::new(
+                        endpoint,
+                        client.clone(),
+                        workers,
+                        None,
+                        16,
+                        SelectionPolicySource::Registry,
+                        Some(config),
+                        None,
+                        "decode",
+                        None,
+                        false,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    let inner = PushRouter::from_client(client, RouterMode::KV)
+                        .await
+                        .unwrap();
+                    let host = RoutingHost::new(inner, Arc::new(chooser), None).unwrap();
+                    assert_eq!(host.cache_history.is_some(), history_enabled);
+                    let expected = usize::from(history_enabled && replica_sync);
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        let start = Instant::now();
+                        loop {
+                            let count = distributed
+                                .discovery()
+                                .list(query.clone())
+                                .await
+                                .unwrap()
+                                .len();
+                            if expected == 0 {
+                                assert_eq!(
+                                    count, 0,
+                                    "history={history_enabled}, sync={replica_sync}"
+                                );
+                                if start.elapsed() >= Duration::from_millis(200) {
+                                    break;
+                                }
+                            } else if count == expected {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("cache history publisher did not follow the enable flags");
+                    drop(host);
+                    distributed.shutdown();
+                },
+            )
+            .await;
+        }
+    }
+}
+
 async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
     RoutingLoadContext::start(
         client.clone(),

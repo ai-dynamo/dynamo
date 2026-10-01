@@ -29,7 +29,12 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
+    kv_router::{
+        KvRouter,
+        cache_history::{self, CacheHistory},
+        metrics::RouterRequestMetrics,
+        to_worker_selection_session_context,
+    },
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -57,7 +62,7 @@ use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cle
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
-use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
+use request_guard::{CacheHistoryTracking, KvRequestCleanup, LoraLoadGuard, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
@@ -296,6 +301,7 @@ pub struct RoutingHost {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     policy: RoutingPolicy,
     request_metrics: Arc<RouterRequestMetrics>,
+    cache_history: Option<Arc<CacheHistory>>,
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
@@ -435,6 +441,12 @@ impl RoutingHost {
         // and the standalone router create RoutingHost, so this covers both.
         let request_metrics =
             RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
+        let cache_history =
+            cache_history::enabled().then(|| CacheHistory::from_env(kv_router.block_size()));
+        if let Some(history) = &cache_history {
+            request_metrics.set_cache_history_capacity(history.stats());
+            history.start_replica_sync(&kv_router, request_metrics.clone());
+        }
 
         RoutingHost {
             inner,
@@ -444,6 +456,7 @@ impl RoutingHost {
                 .as_ref()
                 .map(AffinityCoordinator::mode)
                 .unwrap_or_default(),
+            cache_history,
             affinity,
             hosted_occupancy: None,
             lora: None,
@@ -521,6 +534,7 @@ impl RoutingHost {
                 .as_ref()
                 .map(AffinityCoordinator::mode)
                 .unwrap_or_default(),
+            cache_history: None,
             affinity,
             hosted_occupancy,
             lora: lora
