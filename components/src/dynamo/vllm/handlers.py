@@ -3493,7 +3493,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     finish_reason,
                     stop_reason,
                 ) in prepared_outputs:
-                    out = {
+                    out: Dict[str, Any] = {
                         "index": output_idx,
                         "token_ids": token_ids,
                     }
