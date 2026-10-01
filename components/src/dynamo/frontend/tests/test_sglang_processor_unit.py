@@ -5010,9 +5010,27 @@ class TestContinuationFlags:
         "flags, reject",
         [
             ({"add_generation_prompt": False}, True),
-            ({"add_generation_prompt": False, "continue_final_message": True}, True),
+            (
+                {
+                    "add_generation_prompt": None,
+                    "chat_template_kwargs": {"add_generation_prompt": False},
+                },
+                True,
+            ),
+            ({"chat_template_args": {"continue_final_message": True}}, True),
             ({}, False),
             ({"add_generation_prompt": True, "continue_final_message": False}, False),
+            (
+                {
+                    "add_generation_prompt": True,
+                    "continue_final_message": False,
+                    "chat_template_kwargs": {
+                        "add_generation_prompt": False,
+                        "continue_final_message": True,
+                    },
+                },
+                False,
+            ),
         ],
     )
     def test_deepseek_v4_encoder_boundary(self, flags, reject, tokenizer):
@@ -5035,6 +5053,32 @@ class TestContinuationFlags:
                 reasoning_parser_name=None,
             )
             assert result.prompt_token_ids
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            {
+                "add_generation_prompt": True,
+                "chat_template_kwargs": {"continue_final_message": True},
+            },
+            {"chat_template_args": {"continue_final_message": True}},
+        ],
+    )
+    def test_conflicting_effective_flags_are_client_errors(self, tokenizer, flags):
+        with pytest.raises(
+            PreprocessError,
+            match="continue_final_message requires add_generation_prompt=false",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "assistant", "content": "One, two,"}],
+                    **flags,
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
 
 
 class TestThinkingControlParity:  # FRONTEND.10
