@@ -124,10 +124,26 @@ The `--stack` option selects the simulation implementation. The independent `--o
 selects DGD generation.
 
 The `dgd.renderer` field defaults to `aic`. Set it to `direct` to compare the direct Dynamo renderer.
-For a Pareto optimization, use explicit patterns such as `dgd.name: candidate-{index}` and
-`dgd.output_file: candidate-{index}.yaml`. The adapter substitutes a zero-padded index for each
-selected Pareto candidate. Set `dgd.format: kustomize` to add a `kustomization.yaml` that references
-the generated manifests.
+The output target depends on `dgd.format`:
+
+- `manifest` requires `output_file` and rejects `output_dir`.
+- `kustomize` requires `output_dir` and rejects `output_file`. The directory is relative to the CLI
+  `--output-dir` and contains `deploy.yaml` and `kustomization.yaml`.
+
+For example, this writes the Kustomize bundle to `/tmp/dynosim-recommendations/qwen/`:
+
+```yaml
+dgd:
+  name: qwen
+  format: kustomize
+  output_dir: qwen
+  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+  num_gpus_per_node: 8
+```
+
+For a Pareto optimization, use explicit patterns in `name` and the active output field. For example,
+`name: candidate-{index}` with `output_dir: candidate-{index}` creates one independently deployable
+Kustomize bundle per selected candidate. The adapter substitutes a zero-padded index.
 
 </Step>
 <Step title="Predict the best candidate" id="predict-the-best-candidate">
