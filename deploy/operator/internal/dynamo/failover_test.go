@@ -749,7 +749,9 @@ func TestValidateFailoverCheckpoint(t *testing.T) {
 
 		target := component.DeepCopy()
 		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
-		require.Empty(t, ValidateFailoverCheckpointForDCD(target, string(BackendFrameworkVLLM)))
+		require.Empty(t, ValidateFailoverCheckpointForDCD(&v1beta1.DynamoComponentDeployment{Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: *target, BackendFramework: string(BackendFrameworkVLLM),
+		}}))
 
 		twoShadows := component.DeepCopy()
 		twoShadows.Experimental.Failover.NumShadows = 2
@@ -768,7 +770,9 @@ func TestValidateFailoverCheckpoint(t *testing.T) {
 			"--data-parallel-size", "2",
 		}
 
-		violations := ValidateFailoverCheckpointForDCD(target, string(BackendFrameworkVLLM))
+		violations := ValidateFailoverCheckpointForDCD(&v1beta1.DynamoComponentDeployment{Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: *target, BackendFramework: string(BackendFrameworkVLLM),
+		}})
 		require.Len(t, violations, 1)
 		for _, message := range []string{
 			"disaggregation mode must be aggregated",

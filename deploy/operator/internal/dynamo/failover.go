@@ -26,12 +26,15 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 )
@@ -429,19 +432,33 @@ func ValidateFailoverCheckpointForDGD(
 	)
 }
 
-// ValidateAutomaticFailoverCheckpointTarget validates the DCD that restores
+// ValidateFailoverCheckpointForDCD validates the DCD that restores
 // the DGD-owned checkpoint into the configured failover engines.
 func ValidateFailoverCheckpointForDCD(
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	backendFramework string,
+	dcd *v1beta1.DynamoComponentDeployment,
 ) []error {
+	if dcd == nil {
+		return nil
+	}
+	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
 	if !hasCheckpointFailover(component) {
 		return nil
 	}
-	violations := validateFailoverCheckpointProfile(component, backendFramework)
+	violations := validateFailoverCheckpointProfile(component, dcd.Spec.BackendFramework)
 	config := component.Experimental.Checkpoint
 	if config.CheckpointRef == nil || *config.CheckpointRef == "" {
-		violations = append(violations, errors.New("checkpointRef must name the checkpoint to restore"))
+		// Automatic DGD checkpoints are handed off through a UID-bound SnapshotJob
+		// candidate rather than a user-facing checkpointRef.
+		owner := metav1.GetControllerOf(dcd)
+		candidate, present, candidateErr := checkpoint.AutomaticSnapshotJobReferenceFromAnnotations(dcd.Annotations)
+		managed := false
+		if owner != nil && owner.Kind == v1beta1.DynamoGraphDeploymentGVK.Kind {
+			gv, err := schema.ParseGroupVersion(owner.APIVersion)
+			managed = err == nil && gv.Group == v1beta1.GroupVersion.Group
+		}
+		if !managed || !present || candidateErr != nil || candidate == nil {
+			violations = append(violations, errors.New("checkpointRef must name the checkpoint to restore"))
+		}
 	}
 	return wrapFailoverCompatibilityViolations(violations)
 }

@@ -430,6 +430,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name:       "DGD-managed automatic snapshot failover candidate is accepted",
+			deployment: automaticFailoverCandidateForAdmission(nil),
+		},
+		{
+			name: "standalone automatic snapshot failover candidate is rejected",
+			deployment: automaticFailoverCandidateForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.OwnerReferences = nil
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic single-node Worker checkpoint: checkpointRef must name the checkpoint to restore"},
+		},
+		{
+			name: "incomplete automatic snapshot failover candidate is rejected",
+			deployment: automaticFailoverCandidateForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				delete(dcd.Annotations, consts.SnapshotJobCandidateUIDAnnotation)
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic single-node Worker checkpoint: checkpointRef must name the checkpoint to restore"},
+		},
+		{
 			name: "invalid replicas",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.Replicas = &negativeReplicas
@@ -1959,6 +1977,32 @@ func alphaDCDWithSharedSpec(
 		// admission requires that the main image is set
 		if dcd.Spec.ExtraPodSpec == nil {
 			dcd.Spec.ExtraPodSpec = defaultExtraPodSpec
+		}
+	})
+}
+
+func automaticFailoverCandidateForAdmission(mutate func(*nvidiacomv1beta1.DynamoComponentDeployment)) *nvidiacomv1beta1.DynamoComponentDeployment {
+	return betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+		dcd.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+			Kind:       nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind,
+			Name:       "graph", UID: "graph-uid", Controller: k8sptr.To(true),
+		}}
+		dcd.Annotations = map[string]string{
+			consts.RestoreCandidateSourceKindAnnotation: consts.RestoreCandidateSourceSnapshotJob,
+			consts.CheckpointNameAnnotation:             "automatic-checkpoint",
+			consts.SnapshotJobCandidateUIDAnnotation:    "snapshot-job-uid",
+		}
+		dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+			GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+			Failover:         &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+			Checkpoint:       &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true, StartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint},
+		}
+		dcd.Spec.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
+			"nvidia.com/gpu": resource.MustParse("1"),
+		}
+		if mutate != nil {
+			mutate(dcd)
 		}
 	})
 }
