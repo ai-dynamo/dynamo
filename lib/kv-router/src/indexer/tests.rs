@@ -2689,7 +2689,7 @@ mod local_indexer_tests {
             KvCacheEvent {
                 event_id: 1,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
-                    shared_cache_eligible: false,
+                    shared_cache_eligible: true,
                     parent_hash: None,
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
@@ -2701,6 +2701,7 @@ mod local_indexer_tests {
                 dp_rank: 0,
             },
         );
+        let expected_data = test_event.event.data.clone();
 
         local_indexer
             .apply_event_with_buffer(test_event)
@@ -2714,23 +2715,38 @@ mod local_indexer_tests {
         assert_eq!(buffered_events[0].worker_id, worker_id);
 
         // Test serialization round-trip
-        let response = WorkerKvQueryResponse::Events {
-            events: buffered_events,
-            last_event_id: 1,
-        };
-        let serialized = serde_json::to_vec(&response).unwrap();
-        let deserialized: WorkerKvQueryResponse = serde_json::from_slice(&serialized).unwrap();
-
-        let (events, last_event_id) = match deserialized {
+        let responses = [
             WorkerKvQueryResponse::Events {
-                events,
-                last_event_id,
-            } => (events, last_event_id),
-            _ => panic!("Expected Events variant"),
-        };
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].worker_id, worker_id);
-        assert_eq!(last_event_id, 1);
+                events: buffered_events,
+                last_event_id: 1,
+            },
+            local_indexer.get_events_in_id_range(None, None).await,
+        ];
+        assert!(matches!(
+            &responses[1],
+            WorkerKvQueryResponse::TreeDump { .. }
+        ));
+        for response in responses {
+            let serialized = serde_json::to_vec(&response).unwrap();
+            let deserialized: WorkerKvQueryResponse = serde_json::from_slice(&serialized).unwrap();
+
+            let (events, last_event_id) = match deserialized {
+                WorkerKvQueryResponse::Events {
+                    events,
+                    last_event_id,
+                }
+                | WorkerKvQueryResponse::TreeDump {
+                    events,
+                    last_event_id,
+                    ..
+                } => (events, last_event_id),
+                other => panic!("Expected Events or TreeDump, got: {other:?}"),
+            };
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].worker_id, worker_id);
+            assert_eq!(events[0].event.data, expected_data);
+            assert_eq!(last_event_id, 1);
+        }
     }
 
     #[tokio::test]

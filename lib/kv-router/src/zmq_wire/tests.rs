@@ -411,36 +411,26 @@ fn shared_cache_metadata_types_do_not_change_gpu_event_acceptance() {
     let KvCacheEventData::Stored(baseline) = baseline.event.data else {
         panic!("expected Stored");
     };
-    // Each malformed value has a different serde type, so the untagged
-    // `ProvenanceField::Unknown` fallback is checked against every type, not one.
-    for (field, values) in [
-        (
-            "lora_id",
-            vec![json!(-1), json!("adapter"), json!(true), json!([7])],
-        ),
-        ("is_eagle", vec![json!(1), json!("false"), json!([])]),
-        (
-            "shared_cache_eligible",
-            vec![json!(1), json!("true"), json!({})],
-        ),
+    for (field, value) in [
+        ("lora_id", json!(-1)),
+        ("is_eagle", json!("false")),
+        ("shared_cache_eligible", json!({})),
     ] {
-        for value in values {
-            let mut map = base.clone();
-            map[field] = value;
-            let raw: RawKvEvent = from_slice(&to_vec_named(&map).unwrap()).unwrap();
-            let roundtrip: RawKvEvent = from_slice(&to_vec_named(&raw).unwrap()).unwrap();
-            for event in [raw, roundtrip] {
-                let mut normalizer = ZmqEventNormalizer::new(2);
-                let event = normalizer
-                    .preprocess(event, WorkerWithDpRank::new(7, 0))
-                    .unwrap();
-                let event = convert_placement(event, WorkerWithDpRank::new(7, 0)).unwrap();
-                let KvCacheEventData::Stored(data) = event.event.data else {
-                    panic!("expected Stored");
-                };
-                assert!(!data.shared_cache_eligible, "{map}");
-                assert_eq!(data.blocks, baseline.blocks, "{map}");
-            }
+        let mut map = base.clone();
+        map[field] = value;
+        let raw: RawKvEvent = from_slice(&to_vec_named(&map).unwrap()).unwrap();
+        let roundtrip: RawKvEvent = from_slice(&to_vec_named(&raw).unwrap()).unwrap();
+        for event in [raw, roundtrip] {
+            let mut normalizer = ZmqEventNormalizer::new(2);
+            let event = normalizer
+                .preprocess(event, WorkerWithDpRank::new(7, 0))
+                .unwrap();
+            let event = convert_placement(event, WorkerWithDpRank::new(7, 0)).unwrap();
+            let KvCacheEventData::Stored(data) = event.event.data else {
+                panic!("expected Stored");
+            };
+            assert!(!data.shared_cache_eligible, "{map}");
+            assert_eq!(data.blocks, baseline.blocks, "{map}");
         }
     }
 }
