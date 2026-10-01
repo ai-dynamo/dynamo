@@ -575,6 +575,14 @@ func IsElasticEPRayLaunch(container *corev1.Container) bool {
 // getExpandedCommandLine flattens Command and Args and splits any space-joined
 // tokens, so flag detection works whether the manifest puts flags in Command or
 // Args and whether they are separate list items or a single combined string.
+//
+// TODO: an "sh -c" script is split on whitespace here (and in getExpandedArgs)
+// rather than read the way the shell reads it, so a flag inside a shell comment
+// ("# --tensor-parallel-size 4") counts as a real occurrence and can be the one
+// parseVLLMLaunchArgs resolves, although vLLM never receives it. Either drop
+// everything from a word starting with "#" to the end of its line before
+// splitting, or parse the script with a shell parser such as mvdan.cc/sh to get
+// exactly the argv vLLM receives (comments, quotes and variables).
 func getExpandedCommandLine(container *corev1.Container) []string {
 	commandLine := make([]string, 0, len(container.Command)+len(container.Args))
 	commandLine = append(commandLine, container.Command...)
