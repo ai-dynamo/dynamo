@@ -202,7 +202,7 @@ class WorkerProcess(ManagedProcess):
                 f"{guardable_gib:.1f} GiB this {total_gib:.1f} GiB GPU can guard"
             )
         fraction = max(self.required_vram_gib / total_gib, 0.01)
-        return f"{fraction:.4f}"
+        return str(fraction)
 
 
 def _send_chat_request(

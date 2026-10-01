@@ -3,6 +3,7 @@
 
 """The frontend test worker must not silently weaken its startup VRAM guard."""
 
+import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -75,6 +76,8 @@ def test_missing_budget_prevents_guard_calculation(nvml):
 def test_guard_uses_declared_budget(nvml):
     worker = SimpleNamespace(required_vram_gib=18.7)
 
-    assert test_vllm.WorkerProcess._gpu_memory_utilization(worker) == "0.2337"
+    utilization = float(test_vllm.WorkerProcess._gpu_memory_utilization(worker))
+    threshold_bytes = math.ceil(80 * 1024**3 * utilization)
+    assert threshold_bytes == math.ceil(worker.required_vram_gib * 1024**3)
     nvml.nvmlDeviceGetHandleByIndex.assert_called_once_with(2)
     nvml.nvmlShutdown.assert_called_once_with()
