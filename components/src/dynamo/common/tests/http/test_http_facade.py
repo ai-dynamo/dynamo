@@ -9,6 +9,7 @@ Per-backend exception mapping lives in
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -127,6 +128,63 @@ async def test_fetch_with_policy_follows_safe_redirect(
         )
     assert result == b"final-bytes"
     assert hops == ["https://example.com/x.png", "https://example.com/final.png"]
+
+
+@pytest.mark.parametrize("timeout, override", [(0.01, None), (1.0, 0.01)])
+async def test_fetch_with_policy_total_timeout_includes_validation(
+    monkeypatch, timeout, override
+) -> None:
+    client = AiohttpClient()
+    client._config.per_call_timeout_override = override
+    cancelled = asyncio.Event()
+
+    async def stalled_validation(url, policy):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(base, "validate_url", stalled_validation)
+    with pytest.raises(mm_http.HttpTimeoutError):
+        await asyncio.wait_for(
+            client.fetch_bytes("https://example.com/a", timeout, policy=_PERMISSIVE),
+            timeout=1.0,
+        )
+    assert cancelled.is_set()
+
+
+async def test_fetch_with_policy_total_timeout_spans_redirects(monkeypatch) -> None:
+    client = AiohttpClient()
+    client._config.per_call_timeout_override = None
+
+    async def delayed_hop(url, timeout, *, max_bytes=None, policy=None):
+        # Each hop fits the per-request budget; the whole chain does not.
+        await asyncio.sleep(0.03)
+        if url.endswith("/a"):
+            return None, "https://example.com/b"
+        return b"body", None
+
+    monkeypatch.setattr(client, "_fetch_body_or_redirect", delayed_hop)
+    with pytest.raises(mm_http.HttpTimeoutError):
+        await client.fetch_bytes("https://example.com/a", 0.05, policy=_PERMISSIVE)
+
+
+@pytest.mark.parametrize("override", [0.0, -1.0, 1.0])
+async def test_fetch_with_policy_total_timeout_override_replaces_caller(
+    monkeypatch, override
+) -> None:
+    client = AiohttpClient()
+    client._config.per_call_timeout_override = override
+
+    async def delayed_body(url, timeout, *, max_bytes=None, policy=None):
+        await asyncio.sleep(0.03)
+        return b"body", None
+
+    monkeypatch.setattr(client, "_fetch_body_or_redirect", delayed_body)
+    assert (
+        await client.fetch_bytes("https://example.com/a", 0.01, policy=_PERMISSIVE)
+        == b"body"
+    )
 
 
 @pytest.mark.parametrize("backend_name", ["aiohttp"])
