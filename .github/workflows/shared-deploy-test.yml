@@ -44,6 +44,15 @@ jobs:
         profile: ${{ fromJSON(inputs.profiles) }}
     name: ${{ matrix.profile }}
     steps:
+      - name: Validate runtime image tag
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [[ -z "${IMAGE_TAG//[[:space:]]/}" ]]; then
+            echo "::error::Runtime image tag is empty; the image build/copy job must succeed before deployment."
+            exit 1
+          fi
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check if vCluster exists

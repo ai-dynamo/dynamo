@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -45,14 +44,16 @@ func newGroveScaler(kubeClient client.Client) *groveScaler {
 // asynchronously from the PodCliqueSet.
 func (s *groveScaler) Reconcile(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	req groveReconcileRequest,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) error {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
+	managedComponents := req.ManagedComponents()
+	pcsName := dynamo.PCSNameForDGD(req.DGD, req.IsDelegated)
 
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
+	for i := range managedComponents {
+		component := &managedComponents[i]
 		componentName := component.ComponentName
 		info := checkpointInfos[componentName]
 		gated := info != nil &&
@@ -71,7 +72,7 @@ func (s *groveScaler) Reconcile(
 		}
 
 		usesPCSG := component.UsesPCSG()
-		resourceName := dynamo.GroveComponentResourceName(dgd, componentName)
+		resourceName := dynamo.GroveComponentResourceName(pcsName, componentName)
 		resourceKind := "PodClique"
 		gvr := consts.PodCliqueGVR
 		if usesPCSG {
@@ -82,7 +83,7 @@ func (s *groveScaler) Reconcile(
 			ctx,
 			gvr,
 			resourceName,
-			dgd.Namespace,
+			req.DGD.Namespace,
 			replicas,
 		); err != nil {
 			logger.Error(
