@@ -717,6 +717,14 @@ mod tests {
                 assert_eq!(session.parent_session_id(), Some("root"));
                 assert_eq!(session.session_final(), Some(false));
                 assert_eq!(
+                    session.agent_headers()["x-codex-turn-metadata"],
+                    ["{future schema}"]
+                );
+                assert_eq!(
+                    session.agent_headers()["x-claude-code-future"],
+                    ["first", "second"]
+                );
+                assert_eq!(
                     session.input_trigger(),
                     Some(WorkerSelectionInputTrigger::ToolResult)
                 );
@@ -729,12 +737,36 @@ mod tests {
 
         let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
         let mut request = base_request(16);
-        request.session_context = Some(SessionContext::new(
-            "session-1".into(),
-            Some("root".into()),
-            Some(false),
-            Some(WorkerSelectionInputTrigger::ToolResult),
+        assert!(
+            SessionContext::new("root".into(), None, None, None)
+                .agent_headers()
+                .is_empty()
+        );
+        let headers = std::sync::Arc::new(std::collections::BTreeMap::from([
+            (
+                "x-codex-turn-metadata".into(),
+                vec!["{future schema}".into()],
+            ),
+            (
+                "x-claude-code-future".into(),
+                vec!["first".into(), "second".into()],
+            ),
+        ]));
+        request.session_context = Some(
+            SessionContext::new(
+                "session-1".into(),
+                Some("root".into()),
+                Some(false),
+                Some(WorkerSelectionInputTrigger::ToolResult),
+            )
+            .with_agent_headers(headers.clone()),
+        );
+        assert!(std::ptr::eq(
+            request.session_context.as_ref().unwrap().agent_headers(),
+            headers.as_ref()
         ));
+        let cloned = request.session_context.clone().unwrap();
+        assert!(std::ptr::eq(cloned.agent_headers(), headers.as_ref()));
         request.expected_output_tokens = Some(128);
         request.priority_jump = 3.0;
         request.strict_priority = 2;

@@ -15,6 +15,39 @@ dynamo-sidecar  Convenience entrypoint mapping vllm/sglang/trtllm to the above
 
 Engine protocols and request conversion remain in each engine's crate.
 
+## Health and startup
+
+Set `DYN_SYSTEM_PORT` to enable the sidecar HTTP server. The standalone sidecar
+executables and Python module launchers (`python -m dynamo.<engine>.sidecar`)
+initialize runtime dependencies, then bind one listener before waiting for
+engine metadata. A startup probe on `/live` remains unsuccessful until the
+listener starts:
+
+- `/live` returns HTTP 200 whenever the listener can respond, including while
+  the engine is absent or loading and after runtime connectivity is lost.
+- `/health` returns HTTP 503 while a required discovery or NATS connection is
+  unavailable, and once shutdown starts.
+  It returns HTTP 200 when those dependencies are reachable, independently of
+  engine readiness and model registration. Discovery reads have a one-second
+  timeout; NATS readiness follows the client connection state. Neither check
+  issues inference requests.
+
+The distributed runtime owns the listener. Sidecar launchers select runtime-only
+probes; integrated workers retain their existing worker-health probe behavior.
+
+The existing `DYN_SYSTEM_LIVE_PATH` and `DYN_SYSTEM_HEALTH_PATH` settings also
+apply. Metrics, metadata, and engine routes are registered on the same listener
+at startup. Keep a separate engine startup/readiness probe: a
+healthy sidecar alone does not mean the engine can serve requests.
+
+Shutdown withdraws sidecar readiness immediately. Metadata discovery before
+`Worker.start()` is cancelled; once engine startup has begun, the existing Worker
+startup, drain, and cleanup ordering remains in effect.
+
+Continuous engine health reconciliation, engine replacement and KV recovery, and
+changes to shutdown drain policy remain separate work. The synchronous engine
+constructors used by embedded callers retain their existing behavior.
+
 ## Build the image
 
 There is no published sidecar image yet. `Dockerfile` builds one CPU-only image

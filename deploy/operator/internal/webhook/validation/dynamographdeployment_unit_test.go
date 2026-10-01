@@ -46,6 +46,20 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 	}
 }
 
+// The public handler rejects changed LPX specs before reaching its independent update validator.
+func TestDynamoGraphDeploymentValidateUpdateLPXGate(t *testing.T) {
+	t.Log("Change an existing LPX component while LPX is disabled")
+	oldDGD := newBetaDGDForValidation()
+	oldDGD.Spec.Components[0].ComponentType = nvidiacomv1beta1.ComponentTypeLPX
+	newDGD := oldDGD.DeepCopy()
+	newDGD.Spec.Components[0].Replicas = k8sptr.To(int32(2))
+
+	t.Log("Invoke the stateful validator independently of the handler's new-state traversal")
+	ctx := features.WithGate(t.Context(), features.Gates{Grove: true})
+	_, err := newDynamoGraphDeploymentTestValidator(t).ValidateUpdate(ctx, oldDGD, newDGD, nil, "", runtimeVersionSourceV1Beta1)
+	assertBetaValidationErrors(t, err, []string{"spec.components[0].type: Forbidden: LPX components require lpx.enabled=true"})
+}
+
 func assertFieldPaths(t *testing.T, errs field.ErrorList, want []string) {
 	t.Helper()
 	got := make([]string, len(errs))
