@@ -146,6 +146,11 @@ on:
         required: false
         type: string
         default: ''
+      sidecar_native_artifact:
+        description: 'Native test executable artifact; enables sequential one-GPU integration tests after sidecar E2E'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -258,6 +263,20 @@ jobs:
               cp -r "${GITHUB_WORKSPACE}/${path}" "${CONTAINER_WORKSPACE}/${path}"
             done
           fi
+      - name: Download native sidecar test
+        if: ${{ inputs.sidecar_native_artifact != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: ${{ inputs.sidecar_native_artifact }}
+          path: native-sidecar-test
+      - name: Install native sidecar test
+        id: install-native-sidecar-test
+        if: ${{ inputs.sidecar_native_artifact != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x native-sidecar-test/native_engine
+          echo "DYNAMO_SIDECAR_NATIVE_TEST=${GITHUB_WORKSPACE}/native-sidecar-test/native_engine" >> "${GITHUB_ENV}"
       - name: Export KVBM MLA backend
         if: ${{ inputs.kvbm_mla_backend != '' }}
         shell: bash
@@ -362,6 +381,25 @@ jobs:
           gpu_tests: 'true'
           verify_gpu: ${{ inputs.verify_gpu }}
 
+      - name: Run sidecar native integration tests
+        id: sidecar-native-tests
+        if: ${{ !cancelled() && steps.install-native-sidecar-test.outcome == 'success' && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        timeout-minutes: 30
+        uses: $/.github/actions/pytest-local
+        with:
+          container_workspace: ${{ inputs.container_workspace }}
+          pytest_marks: ${{ format('(post_merge or nightly) and sidecar_native and {0} and gpu_1', inputs.framework) }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          framework: ${{ inputs.framework }}
+          test_type: "sidecar_native_gpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          enable_coverage: ${{ inputs.enable_coverage }}
+          gpu_tests: 'true'
+          verify_gpu: ${{ inputs.verify_gpu }}
+          dd_flaky_retry_enabled: 'false'
+
       # One JUnit upload per job (one XML per stage inside). The name must keep
       # the test-results-* prefix consumed by the report workflows. Allure and
       # coverage are uploaded per stage by the pytest-local action.
@@ -378,7 +416,7 @@ jobs:
       # test failures go green. Take the verdict only from the status file
       # pytest-local writes last, never from the step outcome. Placed after the
       # upload so results survive a failure here, and once per job rather than
-      # per stage to avoid three more container-hook round trips.
+      # per stage to avoid extra container-hook round trips.
       - name: Verify test stages completed
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         shell: bash
@@ -388,6 +426,7 @@ jobs:
             pre_merge_cpu_e2e ${{ steps.cpu-e2e-tests.outcome }}
             pre_merge_gpu_parallel ${{ steps.gpu-parallel-tests.outcome }}
             pre_merge_gpu ${{ steps.gpu-sequential-tests.outcome }}
+            sidecar_native_gpu ${{ steps.sidecar-native-tests.outcome }}
         run: |
           # Runs inside the job's test container. The planner image is
           # distroless and ships only the binaries listed in
