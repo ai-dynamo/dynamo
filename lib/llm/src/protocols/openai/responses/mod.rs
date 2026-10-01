@@ -372,23 +372,27 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
         .join("")
 }
 
-/// Counterpart to `convert_input_content_to_text` for upstream's
-/// `InputContent`. Reachable only via `FunctionCallOutput::Content`, which is
-/// not Dynamo-owned and therefore carries upstream variants. The sibling
-/// `EasyInputContent::ContentList` is Dynamo-owned and routed through
-/// `convert_input_content_to_text` / `convert_input_content_to_user_content`.
-fn convert_upstream_input_content_to_text(
-    content: &[dynamo_protocols::types::responses::UpstreamInputContent],
-) -> String {
-    use dynamo_protocols::types::responses::UpstreamInputContent;
-    content
-        .iter()
-        .filter_map(|p| match p {
-            UpstreamInputContent::InputText(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
+/// Convert function-call output content to the plain text representation that
+/// Chat Completions tool messages accept.
+///
+/// Images and files have no faithful representation in a tool message. Reject
+/// them instead of silently dropping the parts and potentially sending an empty
+/// tool result to the model.
+fn convert_function_call_output_content_to_text(
+    content: &[InputContent],
+) -> Result<String, anyhow::Error> {
+    for part in content {
+        let unsupported = match part {
+            InputContent::InputText(_) => continue,
+            InputContent::InputImage(_) => "Image",
+            InputContent::InputFile(_) => "File",
+        };
+        return Err(ResponsesConversionError::UnsupportedContent(format!(
+            "{unsupported} function call output content is not yet supported"
+        ))
+        .into());
+    }
+    Ok(convert_input_content_to_text(content))
 }
 
 /// Accumulator for consecutive assistant-side items (OutputMessage, FunctionCall,
@@ -554,7 +558,7 @@ fn convert_input_items_to_messages(
                     let output_text = match &fco.output {
                         FunctionCallOutput::Text(text) => text.clone(),
                         FunctionCallOutput::Content(parts) => {
-                            convert_upstream_input_content_to_text(parts)
+                            convert_function_call_output_content_to_text(parts)?
                         }
                     };
                     messages.push(ChatCompletionRequestMessage::Tool(
@@ -1365,6 +1369,25 @@ mod tests {
         }
     }
 
+    fn make_response_with_function_output(output: FunctionCallOutput) -> NvCreateResponse {
+        NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![InputItem::Item(Item::FunctionCallOutput(
+                    FunctionCallOutputItemParam {
+                        call_id: "call_123".into(),
+                        output,
+                        id: None,
+                        status: None,
+                    },
+                ))]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+            chat_template_args: None,
+        }
+    }
+
     #[test]
     fn test_into_nvcreate_chat_completion_request() {
         let nv_req: NvCreateChatCompletionRequest =
@@ -1861,6 +1884,61 @@ mod tests {
             ChatCompletionRequestMessage::Assistant(_)
         ));
         assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
+    }
+
+    #[test]
+    fn test_function_call_output_text_content_is_preserved() {
+        let output = FunctionCallOutput::Content(vec![
+            InputContent::InputText(InputTextContent {
+                text: "first".into(),
+            }),
+            InputContent::InputText(InputTextContent {
+                text: " second".into(),
+            }),
+        ]);
+
+        let chat_req: NvCreateChatCompletionRequest = make_response_with_function_output(output)
+            .try_into()
+            .unwrap();
+        let ChatCompletionRequestMessage::Tool(message) = &chat_req.inner.messages[0] else {
+            panic!("expected tool message");
+        };
+        assert_eq!(
+            message.content,
+            ChatCompletionRequestToolMessageContent::Text("first second".into())
+        );
+    }
+
+    #[test]
+    fn test_function_call_output_content_rejects_images_and_files() {
+        for (part, expected_error) in [
+            (
+                serde_json::json!({
+                    "type": "input_image",
+                    "image_url": "https://example.com/image.png"
+                }),
+                "Image function call output content is not yet supported",
+            ),
+            (
+                serde_json::json!({
+                    "type": "input_file",
+                    "file_data": "data:text/plain;base64,aGVsbG8="
+                }),
+                "File function call output content is not yet supported",
+            ),
+        ] {
+            let output: FunctionCallOutput =
+                serde_json::from_value(serde_json::json!([part])).unwrap();
+            let error =
+                NvCreateChatCompletionRequest::try_from(make_response_with_function_output(output))
+                    .unwrap_err();
+
+            assert_eq!(error.to_string(), expected_error);
+            assert!(matches!(
+                error.downcast_ref::<ResponsesConversionError>(),
+                Some(ResponsesConversionError::UnsupportedContent(_))
+            ));
+        }
     }
 
     #[test]
