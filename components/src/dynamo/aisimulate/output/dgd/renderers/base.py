@@ -156,6 +156,8 @@ def patch_dgd_manifest(
     metadata["name"] = dgd_name
     if options.namespace:
         metadata["namespace"] = options.namespace
+    else:
+        metadata.pop("namespace", None)
     if evaluation_context:
         annotations = metadata.setdefault("annotations", {})
         if not isinstance(annotations, dict):
