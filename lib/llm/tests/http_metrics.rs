@@ -757,10 +757,24 @@ async fn assert_non_streaming_observes_metrics_before_preflight(
             response.status().is_success(),
             "{path}: request failed: {response:?}"
         );
-        let body = response.text().await.unwrap();
-        assert!(
-            body.contains("gated"),
-            "{path}: response body must carry the gated chunk's content; got:\n{body}"
+        let body: serde_json::Value = response.json().await.unwrap();
+        // Exact content per endpoint shape: chat puts it on the message, the
+        // Responses API on an `output_text` item.
+        let content = if path == "/v1/chat/completions" {
+            body["choices"][0]["message"]["content"].as_str()
+        } else {
+            body["output"].as_array().and_then(|items| {
+                items.iter().find_map(|item| {
+                    item["content"]
+                        .as_array()
+                        .and_then(|parts| parts.iter().find_map(|part| part["text"].as_str()))
+                })
+            })
+        };
+        assert_eq!(
+            content,
+            Some("gated"),
+            "{path}: response must carry exactly the gated chunk's content; got:\n{body}"
         );
 
         // Give the handler time to drop the collector, which flushes OSL.

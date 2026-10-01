@@ -4836,10 +4836,15 @@ mod tests {
             tail
         }
 
-        /// Production stream with payload capture on: positive-count content
-        /// chunks, a finish chunk, then the zero-token usage tail.
+        /// Production stream with payload capture on: a leading data-less
+        /// `llm_metrics` frame (legacy engines; the shape the preflight buffers),
+        /// positive-count content chunks, a finish chunk, then the zero-token
+        /// usage tail.
         fn production_chunks() -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
             vec![
+                chunk_metrics(1, 1)
+                    .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                    .unwrap(),
                 chat_chunk(Some("Hello "), None, Some(chunk_metrics(1, 1))),
                 chat_chunk(Some("world"), None, Some(chunk_metrics(2, 3))),
                 chat_chunk(
@@ -4966,12 +4971,12 @@ mod tests {
             assert_eq!(
                 signature_plain,
                 MetricSignature {
-                    output_tokens_total: 3,
+                    output_tokens_total: 4,
                     isl: (1, INPUT_TOKENS as u64),
                     osl: (1, 3),
                     cached_tokens: (1, TAIL_CACHED_TOKENS as u64),
                     ttft_samples: 1,
-                    itl_samples: 2,
+                    itl_samples: 3,
                 }
             );
 
@@ -4990,41 +4995,6 @@ mod tests {
             let record = outcome.response.expect("capture must produce a record");
             assert_identity(&record);
             assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
-        }
-
-        /// A legacy data-less `llm_metrics` annotation frame leading the stream
-        /// (the shape the preflight buffers) is observed identically with
-        /// capture on or off, and the response identity is unaffected.
-        #[tokio::test]
-        async fn test_capture_forwards_legacy_metrics_frame_identically() {
-            let chunks = || {
-                let mut v = vec![
-                    chunk_metrics(1, 1)
-                        .to_annotation::<NvCreateChatCompletionStreamResponse>()
-                        .unwrap(),
-                ];
-                v.extend(production_chunks());
-                v
-            };
-            let (plain_registry, plain) =
-                observe_and_aggregate(futures::stream::iter(chunks())).await;
-            let (captured, _future) = scan_aggregate_with_future(futures::stream::iter(chunks()));
-            let (capture_registry, capture) = observe_and_aggregate(captured).await;
-
-            let expected = MetricSignature {
-                // The legacy frame adds one output token ahead of the content chunks.
-                output_tokens_total: 4,
-                isl: (1, INPUT_TOKENS as u64),
-                osl: (1, 3),
-                cached_tokens: (1, TAIL_CACHED_TOKENS as u64),
-                ttft_samples: 1,
-                itl_samples: 3,
-            };
-            assert_eq!(signature(&plain_registry), expected);
-            assert_eq!(signature(&capture_registry), expected);
-            let (plain, capture) = (ok(plain), ok(capture));
-            assert_eq!(plain, capture);
-            assert_identity(&plain);
         }
 
         /// A chunk carrying both typed `llm_metrics` and a `payload_usage`
@@ -5095,24 +5065,20 @@ mod tests {
             );
         }
 
-        /// A backend error as the first event is rejected by the preflight with
-        /// capture on or off, and nothing is observed either way.
+        /// A backend error before any data chunk is rejected by the preflight,
+        /// with capture on or off. Without a leading frame nothing is observed;
+        /// with a leading metrics frame that frame is observed (the observer runs
+        /// ahead of the preflight, as on the streaming path) — identically in
+        /// both modes.
         #[tokio::test]
         async fn test_capture_rejects_leading_error_identically() {
-            let chunks = || {
-                vec![
-                    Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
-                        "backend unavailable",
-                    ),
-                ]
+            let frame = || {
+                chunk_metrics(1, 1)
+                    .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                    .unwrap()
             };
-            let (plain_registry, plain) =
-                observe_and_aggregate(futures::stream::iter(chunks())).await;
-            let (captured, future) = scan_aggregate_with_future(futures::stream::iter(chunks()));
-            let (capture_registry, capture) = observe_and_aggregate(captured).await;
-
-            assert_eq!(plain.unwrap_err(), Rejected::Preflight);
-            assert_eq!(capture.unwrap_err(), Rejected::Preflight);
+            let error =
+                || Annotated::<NvCreateChatCompletionStreamResponse>::from_error("backend failed");
             let nothing = MetricSignature {
                 output_tokens_total: 0,
                 isl: (0, 0),
@@ -5121,18 +5087,36 @@ mod tests {
                 ttft_samples: 0,
                 itl_samples: 0,
             };
-            assert_eq!(signature(&plain_registry), nothing);
-            assert_eq!(signature(&capture_registry), nothing);
+            let one_frame = MetricSignature {
+                output_tokens_total: 1,
+                isl: (1, INPUT_TOKENS as u64),
+                osl: (1, 1),
+                cached_tokens: (0, 0),
+                ttft_samples: 1,
+                itl_samples: 0,
+            };
+            for (chunks, expected) in [
+                (vec![error()], nothing),
+                (vec![frame(), error()], one_frame),
+            ] {
+                let (plain_registry, plain) =
+                    observe_and_aggregate(futures::stream::iter(chunks.clone())).await;
+                let (captured, future) = scan_aggregate_with_future(futures::stream::iter(chunks));
+                let (capture_registry, capture) = observe_and_aggregate(captured).await;
 
-            let outcome = future.await;
-            assert!(outcome.response.is_none());
-            assert!(
-                outcome
-                    .drop_reason
-                    .as_deref()
-                    .unwrap()
-                    .contains("backend unavailable")
-            );
+                assert_eq!(plain.unwrap_err(), Rejected::Preflight);
+                assert_eq!(capture.unwrap_err(), Rejected::Preflight);
+                assert_eq!(signature(&plain_registry), expected);
+                assert_eq!(signature(&capture_registry), expected);
+                assert!(
+                    future
+                        .await
+                        .drop_reason
+                        .as_deref()
+                        .unwrap()
+                        .contains("backend failed")
+                );
+            }
         }
     }
 }

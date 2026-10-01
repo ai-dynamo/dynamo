@@ -631,6 +631,9 @@ mod tests {
         let (passthrough, future) = scan_aggregate_with_future(stream::iter(chunks));
         let delivered: Vec<_> = passthrough.take(2).collect().await;
         assert_eq!(delivered.len(), 2);
+        // The error reaches the client unchanged; the handler surfaces it exactly
+        // as it does with capture off.
+        assert!(delivered[1].is_error());
 
         let outcome = future.await;
 
@@ -682,42 +685,6 @@ mod tests {
         assert!(
             reason.contains("backend unavailable"),
             "reason should name the underlying error, got {reason}"
-        );
-    }
-
-    #[tokio::test]
-    async fn error_after_content_is_forwarded_unchanged_and_the_prefix_is_recorded() {
-        let chunks = vec![
-            create_mock_chunk("Hello ".to_string(), 0),
-            Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
-                "invalid sampling parameter",
-            ),
-        ];
-
-        let (passthrough, future) = scan_aggregate_with_future(stream::iter(chunks));
-        let delivered: Vec<_> = passthrough.collect().await;
-        let outcome = future.await;
-
-        // The client-facing stream is untouched: content, then the error itself,
-        // so the handler surfaces it exactly as it does with capture off.
-        assert_eq!(delivered.len(), 2);
-        assert_eq!(extract_content(&delivered[0]), "Hello ");
-        assert!(delivered[1].is_error(), "the error must reach the client");
-
-        let reason = outcome
-            .drop_reason
-            .as_deref()
-            .expect("an errored stream must carry a drop reason");
-        assert!(
-            reason.contains("invalid sampling parameter"),
-            "got {reason}"
-        );
-        let partial = outcome
-            .response
-            .expect("content collected before the error must reach the record");
-        assert_eq!(
-            partial.inner.choices[0].message.content.as_ref().unwrap(),
-            &ChatCompletionMessageContent::Text("Hello ".to_string()),
         );
     }
 }

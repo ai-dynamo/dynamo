@@ -3801,6 +3801,9 @@ async fn chat_completions(
         // Observe metrics as frames arrive, ahead of the backend-error preflight:
         // the preflight buffers leading annotation frames, so observing after it
         // would stamp TTFT/ITL with release time instead of arrival time (#11349).
+        // Consequently a request that fails after a leading metrics frame still
+        // records that frame, as the streaming path does; payload capture does
+        // not change this.
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
@@ -4453,7 +4456,7 @@ async fn responses(
 
         // Same order as non-streaming chat: observe metrics ahead of the
         // backend-error preflight so buffered leading annotation frames do
-        // not shift TTFT/ITL to release time (#11349).
+        // not shift TTFT/ITL to release time (#11349); see the note there.
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = engine_stream.inspect(move |response| {
             process_chat_response_and_observe_metrics(
