@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: DeepSeek V4 Pro Aggregated Perf
+name: DeepSeek V4 Pro Disaggregated Perf
 
 on:
   workflow_call:
@@ -12,6 +12,10 @@ on:
       image_tag:
         type: string
         required: true
+      preflight_only:
+        type: boolean
+        required: false
+        default: false
   workflow_dispatch:
     inputs:
       image_tag:
@@ -33,10 +37,10 @@ concurrency:
 
 jobs:
   perf:
-    name: DeepSeek V4 Pro aggregated perf
+    name: DeepSeek V4 Pro disaggregated perf
     uses: ./.github/workflows/shared-recipe-perf.yml
     with:
-      recipe: deepseek-v4-pro-agg
+      recipe: deepseek-v4-pro-disagg
       source_ref: ${{ inputs.source_ref || github.sha }}
       image_tag: ${{ inputs.image_tag }}
       preflight_only: ${{ inputs.preflight_only || false }}
