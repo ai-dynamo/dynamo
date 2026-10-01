@@ -517,7 +517,7 @@ class TestMmKwargsNixlReceiverPreparation:
             assert desc._nixl_hndl is handle
         for desc in pooled:
             receiver._pool.put(desc)
-        receiver._connector.begin_read.assert_not_awaited()
+        receiver._connector.begin_read.assert_not_called()
         native.initialize_xfer.assert_not_called()
         native.deregister_memory.assert_not_called()
 
