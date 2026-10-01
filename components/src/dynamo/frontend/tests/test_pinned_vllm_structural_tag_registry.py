@@ -4,8 +4,14 @@
 """Pin the real vLLM structural-tag behavior used by Dynamo's auto tool path."""
 
 import pytest
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
-from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+
+try:
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionToolsParam,
+    )
+    from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+except ImportError:
+    pytest.skip("requires the vLLM structural-tag registry", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,

@@ -30,7 +30,10 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from sglang.srt.constrained.reasoner_grammar_backend import ReasonerGrammarObject
-from sglang.srt.constrained.xgrammar_backend import XGrammarGrammar
+from sglang.srt.constrained.xgrammar_backend import (
+    XGrammarGrammar,
+    XGrammarGrammarBackend,
+)
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -100,6 +103,13 @@ def tool_grammar_compiler(tokenizer):
     return xgr.GrammarCompiler(
         xgr.TokenizerInfo.from_huggingface(tokenizer), max_threads=1
     )
+
+
+@pytest.fixture(scope="module")
+def tool_grammar_backend(tokenizer):
+    backend = XGrammarGrammarBackend(tokenizer, vocab_size=len(tokenizer))
+    yield backend
+    backend.executor.shutdown(wait=True)
 
 
 @pytest.fixture(scope="module")
@@ -1671,6 +1681,62 @@ def test_tool_structural_tag_enforced_after_one_reasoning_boundary(
     with pytest.raises(ValueError, match="Tokens not accepted"):
         for token in tokenizer.encode(unknown_call, add_special_tokens=False):
             grammar.accept_token(token)
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.filterwarnings(
+    "ignore:max_rollback_tokens is deprecated.*:DeprecationWarning"
+)
+@pytest.mark.parametrize("parser_name", ["qwen25", "qwen3_coder"])
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
+def test_structural_tag_respects_named_tool_choice(
+    tool_grammar_backend, parser_name, tool_choice
+):
+    """A named choice excludes other declared tools, including legacy tags."""
+    raw_tools = [parity_tool(), parity_tool()]
+    raw_tools[1]["function"]["name"] = "get_forecast"
+    request = {
+        "tools": raw_tools,
+        "tool_choice": (
+            {"type": "function", "function": {"name": "get_forecast"}}
+            if tool_choice == "named"
+            else tool_choice
+        ),
+    }
+    guided = build_tool_call_guided_decoding(
+        request,
+        tool_call_parser_name=parser_name,
+        sglang_tools=convert_tools(raw_tools),
+        structural_tag_mode="on",
+        structural_tag_scope="always",
+    )
+    assert guided is not None
+    grammar = tool_grammar_backend.dispatch_structural_tag(
+        json.dumps(guided["structural_tag"])
+    )
+    assert isinstance(grammar, XGrammarGrammar)
+
+    def accepts_call(name):
+        if parser_name == "qwen25":
+            call = (
+                '<tool_call>\n{"name":"' + name + '", "arguments":'
+                '{"city":"Paris"}}\n</tool_call>'
+            )
+        else:
+            call = (
+                f"<tool_call>\n<function={name}>\n"
+                "<parameter=city>\nParis\n</parameter>\n"
+                "</function>\n</tool_call>"
+            )
+        return grammar.copy().matcher.accept_string(call)
+
+    assert accepts_call("get_forecast")
+    assert accepts_call("get_weather") is (tool_choice != "named")
+    assert [tool["function"]["name"] for tool in raw_tools] == [
+        "get_weather",
+        "get_forecast",
+    ]
 
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice

@@ -42,9 +42,11 @@ from .utils import legacy_guided_decoding
 
 get_model_structural_tag: Any
 try:
-    from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+    from vllm.tool_parsers import structural_tag_registry
 except ImportError:  # Older supported vLLM releases do not expose this registry.
     get_model_structural_tag = None
+else:
+    get_model_structural_tag = structural_tag_registry.get_model_structural_tag
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig

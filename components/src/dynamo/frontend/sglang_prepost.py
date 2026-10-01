@@ -679,6 +679,13 @@ def build_tool_call_guided_decoding(
             raw_tools,
             structural_tag_schema=structural_tag_schema,
         )
+        if is_named_choice:
+            # SGLang's legacy tag builder ignores the name in tool_choice.
+            guidance_tools = [
+                tool
+                for tool in guidance_tools or []
+                if tool.function.name == sglang_tool_choice.function.name
+            ]
         tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         try:
             parser = FunctionCallParser(
