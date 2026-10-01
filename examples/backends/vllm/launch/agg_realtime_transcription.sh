@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="mistralai/Voxtral-Mini-4B-Realtime-2602"
+HF_OVERRIDES=""
 
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -18,6 +18,18 @@ while [[ $# -gt 0 ]]; do
             MODEL="$2"
             shift 2
             ;;
+        --hf-overrides)
+            if [[ $# -lt 2 || "$2" == --* ]]; then
+                echo "Error: --hf-overrides requires a value." >&2
+                exit 2
+            fi
+            HF_OVERRIDES="$2"
+            shift 2
+            ;;
+        --hf-overrides=*)
+            HF_OVERRIDES="${1#*=}"
+            shift
+            ;;
         *)
             EXTRA_ARGS+=("$1")
             shift
@@ -25,16 +37,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# These checkpoints need their native vLLM realtime architecture selected.
-MODEL_ARGS=()
-case "$MODEL" in
-    mistralai/Voxtral-Mini-4B-Realtime-2602)
-        MODEL_ARGS+=(--hf-overrides '{"architectures":["VoxtralRealtimeGeneration"]}')
-        ;;
-    Qwen/Qwen3-ASR-0.6B|Qwen/Qwen3-ASR-1.7B)
-        MODEL_ARGS+=(--hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}')
-        ;;
-esac
+if [[ -z "$HF_OVERRIDES" ]]; then
+    echo "Error: select the model's realtime architecture explicitly with --hf-overrides." >&2
+    echo "Usage: $0 [--model MODEL] --hf-overrides JSON [vLLM args...]" >&2
+    exit 2
+fi
+
+trap 'echo Cleaning up...; kill 0' EXIT
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
@@ -55,7 +64,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --realtime \
     --model "$MODEL" \
     --enforce-eager \
-    "${MODEL_ARGS[@]}" \
+    --hf-overrides "$HF_OVERRIDES" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

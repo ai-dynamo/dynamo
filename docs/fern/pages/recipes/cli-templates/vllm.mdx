@@ -48,21 +48,16 @@ The default model is `Qwen/Qwen3-0.6B`.
 </Accordion>
 <Accordion title="Qwen3-ASR Realtime Transcription">
 
-**Experimental.** Starts a standard vLLM worker for English transcription over the
-OpenAI-compatible `/v1/realtime` WebSocket endpoint. The launch script selects vLLM's native
-`Qwen3ASRRealtimeGeneration` architecture for the Qwen3-ASR checkpoints; vLLM-Omni is not required.
-This architecture is available in vLLM 0.30.0.
+**Experimental.** Transcribe English audio over `/v1/realtime` using vLLM 0.30.0's native
+Qwen3-ASR support. The launch script requires an explicit `--hf-overrides` argument:
 
 ```bash
 ./launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-0.6B \
+    --hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}' \
     --max-model-len 4096 --max-num-seqs 2
 ```
 
-When launching `python -m dynamo.vllm` directly, pass `--realtime` and
-`--hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}'`. The checkpoint's default
-architecture does not implement vLLM's realtime interface and is rejected during worker startup.
-
-In another terminal, send an English speech file and require a delta before committing the audio:
+In another terminal, send a speech file longer than five seconds to check incremental delivery:
 
 ```bash
 python launch/realtime_audio_client.py \
@@ -72,20 +67,8 @@ python launch/realtime_audio_client.py \
     --require-incremental
 ```
 
-The client resamples input to 24 kHz mono PCM16 and sends 100 ms frames while receiving events.
-Use a clip longer than five seconds: vLLM 0.30.0 processes Qwen3-ASR audio in five-second segments,
-then flushes the remaining audio on commit. A successful delivery check prints
-`delta before commit: True`; shorter clips can complete without an earlier delta.
-
-<Warning>
-vLLM 0.30.0's native Qwen3-ASR realtime path can emit language/ASR markers and repeat transcript
-segments. These output issues also reproduce in standalone vLLM. The client checks incremental
-delivery, not transcription accuracy.
-</Warning>
-
-This path accepts explicit `input_audio_buffer.commit` and `input_audio_buffer.clear`. The existing
-English-only session validation and 60-second utterance limit apply. Server voice activity detection,
-transcription prompts, noise reduction, and timestamps are not supported.
+The client sends audio while receiving transcription events. A successful check prints
+`delta before commit: True`. vLLM processes five-second segments and flushes remaining audio on commit.
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
 </Accordion>
