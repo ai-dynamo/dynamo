@@ -99,6 +99,15 @@ export DYNAMO_IMAGE=<dynamo-image>
 envsubst < global-planner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
 ```
 
+The Mocker manifest enables token-native `POST /inference/v1/generate` and configures 32K and 64K prefill/decode pools with `reserve_output_tokens_for_context`. After port-forwarding the Frontend service to `localhost:8000`, this request has a 32,760-token prompt and a 16-token output budget, so both stages select pool 1:
+
+```bash
+python3 -c 'import json; print(json.dumps({"model": "nvidia/Llama-3.1-8B-Instruct-FP8", "token_ids": [1] * 32760, "sampling_params": {"max_tokens": 16, "ignore_eos": True}, "stream": False}))' |
+  curl -sS http://localhost:8000/inference/v1/generate -H 'content-type: application/json' --data-binary @-
+```
+
+The GlobalRouter log records `routing_length=32776` for prefill and `context_length=32776` for decode, with both requests routed to pool 1. Without output reservation, the 32,760-token prompt alone would select the 32K pool and exceed its limit during generation.
+
 ### Intel XPU with DRA Example
 
 For Intel XPU clusters using [Dynamic Resource Allocation (DRA)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/):

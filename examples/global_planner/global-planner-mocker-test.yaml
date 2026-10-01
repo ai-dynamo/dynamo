@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Mocker-based GlobalPlanner test: 2 prefill pools + 2 decode pools.
+# Mocker-based GlobalPlanner test: short/long prefill and decode pools.
 # Each pool SLA Planner reads router histogram metrics from cluster Prometheus
 # and delegates scaling decisions to the GlobalPlanner (no-op mode).
 #
@@ -22,6 +22,7 @@ metadata:
 data:
   global_router_config.json: |
     {
+      "reserve_output_tokens_for_context": true,
       "num_prefill_pools": 2,
       "num_decode_pools": 2,
       "prefill_pool_dynamo_namespaces": [
@@ -34,13 +35,13 @@ data:
       ],
       "prefill_pool_selection_strategy": {
         "ttft_min_ms": 10, "ttft_max_ms": 3000, "ttft_resolution": 2,
-        "isl_min": 0,   "isl_max": 32000, "isl_resolution": 2,
-        "prefill_pool_mapping": [[0,1],[0,1]]
+        "isl_min": 0,   "isl_max": 65536, "isl_resolution": 2,
+        "prefill_pool_mapping": [[0,0],[1,1]]
       },
       "decode_pool_selection_strategy": {
         "itl_min_ms": 10,  "itl_max_ms": 500,   "itl_resolution": 2,
-        "context_length_min": 0, "context_length_max": 32000, "context_length_resolution": 2,
-        "decode_pool_mapping": [[0,1],[0,1]]
+        "context_length_min": 0, "context_length_max": 65536, "context_length_resolution": 2,
+        "decode_pool_mapping": [[0,0],[1,1]]
       }
     }
 ---
@@ -67,6 +68,9 @@ spec:
           - dynamo.frontend
           image: ${DYNAMO_IMAGE}
           name: main
+          env:
+          - name: DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE
+            value: "true"
           workingDir: /workspace
         imagePullSecrets:
         - name: docker-imagepullsecret
@@ -158,6 +162,8 @@ spec:
           - "5.0"
           - --planner-profile-data
           - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+          - --max-model-len
+          - "32768"
           - --is-prefill-worker
           command:
           - python3
@@ -228,6 +234,8 @@ spec:
           - "5.0"
           - --planner-profile-data
           - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+          - --max-model-len
+          - "65536"
           - --is-prefill-worker
           command:
           - python3
@@ -299,6 +307,8 @@ spec:
           - "5.0"
           - --planner-profile-data
           - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+          - --max-model-len
+          - "32768"
           command:
           - python3
           - -m
@@ -369,6 +379,8 @@ spec:
           - "5.0"
           - --planner-profile-data
           - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
+          - --max-model-len
+          - "65536"
           command:
           - python3
           - -m
