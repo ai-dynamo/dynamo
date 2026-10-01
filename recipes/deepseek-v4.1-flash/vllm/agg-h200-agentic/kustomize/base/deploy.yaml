@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: dsv41-flash-vllm-h200-agg
+  name: dsv41-flash-vllm-h200-agg-agentic
 spec:
   backendFramework: vllm
   components:
@@ -37,8 +37,8 @@ spec:
             protocol: TCP
           resources:
             requests:
-              cpu: '4'
-              memory: 8Gi
+              cpu: '16'
+              memory: 128Gi
     replicas: 1
     type: frontend
   - name: Worker
@@ -50,8 +50,6 @@ spec:
           - dynamo.vllm
           - --model
           - deepseek-ai/DeepSeek-V4.1-Flash
-          - --revision
-          - dba1be0a40aa45a94ad051997016db3960a90277
           - --served-model-name
           - deepseek-ai/DeepSeek-V4.1-Flash
           - --tokenizer-mode
@@ -101,8 +99,6 @@ spec:
             value: '3600'
           - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
             value: '300'
-          - name: VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
-            value: '65536'
           image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime@sha256:13ed3609d95c04e868230a30d68371ab73969c6f56c2399ca3a7302e7e0a774b
           imagePullPolicy: IfNotPresent
           name: main
@@ -117,8 +113,8 @@ spec:
             limits:
               nvidia.com/gpu: '4'
             requests:
-              cpu: '8'
-              ephemeral-storage: 16Gi
+              cpu: '16'
+              ephemeral-storage: 64Gi
               memory: 512Gi
               nvidia.com/gpu: '4'
           securityContext:

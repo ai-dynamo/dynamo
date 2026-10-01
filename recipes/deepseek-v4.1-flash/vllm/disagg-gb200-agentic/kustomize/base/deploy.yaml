@@ -4,18 +4,18 @@
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: dsv41-flash-vllm-gb200-disagg-compute-domain
+  name: dsv41-flash-vllm-gb200-disagg-agentic-compute-domain
 spec:
   channel:
     allocationMode: Single
     resourceClaimTemplate:
-      name: dsv41-flash-vllm-gb200-disagg-compute-domain-channel
+      name: dsv41-flash-vllm-gb200-disagg-agentic-compute-domain-channel
   numNodes: 0
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: dsv41-flash-vllm-gb200-disagg
+  name: dsv41-flash-vllm-gb200-disagg-agentic
 spec:
   backendFramework: vllm
   components:
@@ -26,7 +26,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime@sha256:13ed3609d95c04e868230a30d68371ab73969c6f56c2399ca3a7302e7e0a774b
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -50,8 +50,8 @@ spec:
             protocol: TCP
           resources:
             requests:
-              cpu: '4'
-              memory: 8Gi
+              cpu: '16'
+              memory: 128Gi
   - name: PrefillWorker
     type: worker
     replicas: 1
@@ -61,7 +61,7 @@ spec:
         terminationGracePeriodSeconds: 60
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime@sha256:13ed3609d95c04e868230a30d68371ab73969c6f56c2399ca3a7302e7e0a774b
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -126,11 +126,7 @@ spec:
           - name: HF_HUB_OFFLINE
             value: '1'
           - name: UCX_TLS
-            value: cuda_copy,cuda_ipc,tcp,rc
-          - name: UCX_RC_TIMEOUT
-            value: 600s
-          - name: UCX_KEEPALIVE_INTERVAL
-            value: 300s
+            value: cuda_copy,cuda_ipc,tcp
           - name: UCX_CUDA_IPC_ENABLE_MNNVL
             value: y
           - name: UCX_MEMTYPE_CACHE
@@ -141,8 +137,6 @@ spec:
             value: '3600'
           - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
             value: '300'
-          - name: VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
-            value: '65536'
           ports:
           - name: system
             containerPort: 9090
@@ -152,9 +146,9 @@ spec:
             protocol: TCP
           resources:
             requests:
-              cpu: '8'
+              cpu: '16'
               memory: 512Gi
-              ephemeral-storage: 16Gi
+              ephemeral-storage: 64Gi
               nvidia.com/gpu: '4'
             limits:
               nvidia.com/gpu: '4'
@@ -173,7 +167,7 @@ spec:
             mountPath: /shared-model-cache
         resourceClaims:
         - name: compute-domain-channel
-          resourceClaimTemplateName: dsv41-flash-vllm-gb200-disagg-compute-domain-channel
+          resourceClaimTemplateName: dsv41-flash-vllm-gb200-disagg-agentic-compute-domain-channel
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
@@ -187,7 +181,7 @@ spec:
         terminationGracePeriodSeconds: 60
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime@sha256:13ed3609d95c04e868230a30d68371ab73969c6f56c2399ca3a7302e7e0a774b
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -250,11 +244,7 @@ spec:
           - name: HF_HUB_OFFLINE
             value: '1'
           - name: UCX_TLS
-            value: cuda_copy,cuda_ipc,tcp,rc
-          - name: UCX_RC_TIMEOUT
-            value: 600s
-          - name: UCX_KEEPALIVE_INTERVAL
-            value: 300s
+            value: cuda_copy,cuda_ipc,tcp
           - name: UCX_CUDA_IPC_ENABLE_MNNVL
             value: y
           - name: UCX_MEMTYPE_CACHE
@@ -265,8 +255,6 @@ spec:
             value: '3600'
           - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
             value: '300'
-          - name: VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
-            value: '65536'
           ports:
           - name: system
             containerPort: 9090
@@ -276,9 +264,9 @@ spec:
             protocol: TCP
           resources:
             requests:
-              cpu: '8'
+              cpu: '16'
               memory: 512Gi
-              ephemeral-storage: 16Gi
+              ephemeral-storage: 64Gi
               nvidia.com/gpu: '4'
             limits:
               nvidia.com/gpu: '4'
@@ -297,7 +285,7 @@ spec:
             mountPath: /shared-model-cache
         resourceClaims:
         - name: compute-domain-channel
-          resourceClaimTemplateName: dsv41-flash-vllm-gb200-disagg-compute-domain-channel
+          resourceClaimTemplateName: dsv41-flash-vllm-gb200-disagg-agentic-compute-domain-channel
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:

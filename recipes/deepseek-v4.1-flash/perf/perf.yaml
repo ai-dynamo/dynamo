@@ -28,11 +28,11 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
-                - dsv41-flash-vllm-b200-agg
-                - dsv41-flash-vllm-b200-disagg
-                - dsv41-flash-vllm-gb200-agg
-                - dsv41-flash-vllm-gb200-disagg
-                - dsv41-flash-vllm-h200-agg
+                - dsv41-flash-vllm-b200-agg-agentic
+                - dsv41-flash-vllm-b200-disagg-agentic
+                - dsv41-flash-vllm-gb200-agg-agentic
+                - dsv41-flash-vllm-gb200-disagg-agentic
+                - dsv41-flash-vllm-h200-agg-agentic
             topologyKey: kubernetes.io/hostname
       containers:
       - name: perf
@@ -87,7 +87,7 @@ spec:
           echo "Done. Artifacts: ${RUN_DIR}"
         env:
         - name: ENDPOINT
-          value: dsv41-flash-vllm-b200-agg-frontend:8000
+          value: dsv41-flash-vllm-b200-agg-agentic-frontend:8000
         - name: TARGET_MODEL
           value: deepseek-ai/DeepSeek-V4.1-Flash
         - name: TRACE_FILE

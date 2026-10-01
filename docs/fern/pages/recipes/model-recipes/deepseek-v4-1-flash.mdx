@@ -92,8 +92,11 @@ Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use ei
 ## Prerequisites
 
 - A Kubernetes cluster with a compatible Dynamo operator and eight B200/GB200 GPUs or 16 H200 GPUs.
-- Four GPUs per worker, 512 GiB of host memory per worker, and capacity for its shared-memory volume.
+- Per frontend: 16 CPU cores and 128 GiB of host memory.
+- Per worker: four GPUs, 16 CPU cores, 512 GiB of host memory, 64 GiB of ephemeral storage, and capacity for a 200 GiB shared-memory volume.
 - A populated ReadWriteMany model-cache PVC, referenced as `shared-model-cache` by the recipes.
+
+The worker memory and shared-memory requests match the tested configuration.
 
 <div data-recipe-framework="vllm">
 
@@ -104,7 +107,8 @@ Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM Kustomize sources use ei
 
 <div data-recipe-framework="vllm" data-variant="disagg">
 
-- RDMA devices and UCX configured for the cluster.
+- Configure RDMA devices for the cluster. The recipe Kustomization supplies
+  the tested UCX transport settings.
 
 </div>
 
@@ -175,7 +179,7 @@ kustomize build recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic
 </div>
 <div data-recipe-framework="vllm">
 
-Use the [cluster Kustomization guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/templates/kustomize/README.md) to configure node placement, registry access, model storage, and networking. Point its resource at the target's `kustomize/base/deploy.yaml`, then apply:
+Use the [cluster Kustomization guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/templates/kustomize/README.md) to configure node placement, registry access, model storage, and networking. Set its `resources` entry to a relative path from your filled Kustomization to the selected recipe directory, then apply:
 
 ```bash
 export CLUSTER_CONFIG=/path/to/your/filled-cluster-kustomization
@@ -213,7 +217,7 @@ Forward the selected deployment's frontend Service:
 <div data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
 
 ```bash
-kubectl port-forward svc/dsv41-flash-vllm-gb200-agg-frontend 8000:8000 -n "${NAMESPACE}"
+kubectl port-forward svc/dsv41-flash-vllm-gb200-agg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
 ```
 
 </div>
@@ -221,7 +225,7 @@ kubectl port-forward svc/dsv41-flash-vllm-gb200-agg-frontend 8000:8000 -n "${NAM
 <div data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
 
 ```bash
-kubectl port-forward svc/dsv41-flash-vllm-gb200-disagg-frontend 8000:8000 -n "${NAMESPACE}"
+kubectl port-forward svc/dsv41-flash-vllm-gb200-disagg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
 ```
 
 </div>
@@ -229,7 +233,7 @@ kubectl port-forward svc/dsv41-flash-vllm-gb200-disagg-frontend 8000:8000 -n "${
 <div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
 
 ```bash
-kubectl port-forward svc/dsv41-flash-vllm-b200-agg-frontend 8000:8000 -n "${NAMESPACE}"
+kubectl port-forward svc/dsv41-flash-vllm-b200-agg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
 ```
 
 </div>
@@ -237,7 +241,7 @@ kubectl port-forward svc/dsv41-flash-vllm-b200-agg-frontend 8000:8000 -n "${NAME
 <div data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
 
 ```bash
-kubectl port-forward svc/dsv41-flash-vllm-h200-agg-frontend 8000:8000 -n "${NAMESPACE}"
+kubectl port-forward svc/dsv41-flash-vllm-h200-agg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
 ```
 
 </div>
@@ -245,7 +249,7 @@ kubectl port-forward svc/dsv41-flash-vllm-h200-agg-frontend 8000:8000 -n "${NAME
 <div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
 
 ```bash
-kubectl port-forward svc/dsv41-flash-vllm-b200-disagg-frontend 8000:8000 -n "${NAMESPACE}"
+kubectl port-forward svc/dsv41-flash-vllm-b200-disagg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
 ```
 
 </div>
@@ -276,20 +280,20 @@ curl -sS http://localhost:8000/v1/chat/completions \
 
 Check that the response contains an answer.
 
-## Expected Performance
+## Measured Performance
 
 <div data-recipe-framework="vllm">
 
 Results for the agentic workload (64K input tokens, 400 output tokens), using
 eight B200/GB200 GPUs or 16 H200 GPUs. Output throughput includes reasoning tokens.
 
-| Target | Concurrency | Output tok/s/GPU | Output tok/s/user p50 |
-| --- | ---: | ---: | ---: |
-| B200 aggregated | 168 | 990.57 | 54.69 |
-| B200 disaggregated | 184 | 1,087.71 | 82.12 |
-| GB200 aggregated | 168 | 953.08 | 51.83 |
-| GB200 disaggregated | 168 | 1,154.87 | 80.85 |
-| H200 aggregated | 80 | 209.18 | 51.32 |
+| Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | B200 | 168 | 990.57 | 54.69 | 178.66 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | B200 | 184 | 1,087.71 | 82.12 | 135.12 |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | GB200 | 168 | 953.08 | 51.83 | 286.75 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | GB200 | 168 | 1,154.87 | 80.85 | 169.02 |
+| Agentic (64K input, 400 output) | Aggregated (4 × TP4) | vLLM | H200 | 80 | 209.18 | 51.32 | 171.29 |
 
 The measured disaggregated configurations have higher output throughput and
 lower inter-token latency (ITL), with longer time-to-first-token (TTFT) tails. GB200 records 21% higher
@@ -306,20 +310,47 @@ No published benchmark results.
 
 </div>
 
-## Compare All Targets
+## Configurations
 
-See the [vLLM configuration comparison](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/README.md#configurations) for KV precision, attention and MoE backends, batching, memory, and routing settings.
+<div data-recipe-framework="vllm">
 
-| Framework | GPU | Topology | GPUs | Worker layout | Speculation |
-| --- | --- | --- | ---: | --- | --- |
-| vLLM | B200 | Aggregated | 8 | 2 × TP4 | DSpark, 3 draft tokens |
-| vLLM | B200 | Disaggregated | 8 | 1P1D, TP4 per role | DSpark, 3 draft tokens |
-| vLLM | GB200 | Aggregated | 8 | 2 × TP4 | DSpark, 3 draft tokens |
-| vLLM | GB200 | Disaggregated | 8 | 1P1D, TP4 per role | DSpark, 3 draft tokens |
-| vLLM | H200 | Aggregated | 16 | 4 × TP4 | DSpark, 3 draft tokens |
-| SGLang | GB200 | Aggregated | 8 | 2 × TP4, EP4 | DSpark |
-| SGLang | GB200 | Disaggregated | 8 | 1P1D, TP4 and EP4 per role | None |
+All vLLM targets use expert parallelism, expert load balancing (EPLB), KV-aware
+routing, and DSpark with three draft tokens and block verification. Adaptive
+verification is disabled. They serve text using the `deepseek_v41` reasoning
+and tool-call parsers. In the table below, P/D means prefill/decode.
+
+| Setting | B200 / GB200 aggregated | B200 disaggregated | GB200 disaggregated | H200 aggregated |
+| --- | --- | --- | --- | --- |
+| MoE backend | `deep_gemm_mega_moe` | `deep_gemm_mega_moe` | `deep_gemm_mega_moe` | `flashinfer_cutlass` |
+| KV cache dtype | `fp8_ds_mla` | Auto (`nvfp4_ds_mla`) | `fp8_ds_mla` | `fp8_ds_mla` |
+| Attention backend | `FLASHMLA_MEGA_ATTN_DSV41` | `FLASHMLA_MEGA_ATTN_DSV41` | `FLASHMLA_MEGA_ATTN_DSV41` | Runtime default |
+| Sparse indexer | MXFP4 KV, sparse logits | MXFP4 KV, sparse logits | MXFP4 KV, sparse logits | Runtime default |
+| EPLB communicator | `torch_gloo` | `torch_gloo` | `torch_gloo` | Runtime default |
+| Max context tokens | 1,048,576 | Runtime default | 1,048,576 | Model default (1,048,576) |
+| Max sequences | 1,024 | Runtime default | 1,024 | 1,024 |
+| Max batched tokens | 16,384 | 32,768 P / runtime default D | 16,384 | 8,192 |
+| GPU memory utilization | 0.92 | Runtime default | 0.92 | 0.92 |
+| KV block size | 128 | Runtime default | 128 | Runtime default |
+| Max CUDA graph capture size | 512 | 512 P / 1,024 D | 512 P / 1,024 D | 512 |
+| Long-prefill threshold | Unset | 4,096 P | 4,096 P | Unset |
+| Prefix-cache retention interval | 1,024 | 1,024 | 1,024 | 1,024 |
+| Conditional disaggregation | N/A | `isl_bounding` | Enabled, default policy | N/A |
+| KV transfer | N/A | NIXL/UCX over InfiniBand | NIXL/UCX within one NVLink clique | N/A |
+
+Aggregated routing sets the decode-active-request weight to 50. B200
+conditional routing sets the effective-input threshold to 2,048, input-ratio
+threshold to 0.70, and decode-busy threshold to 0.50. See the linked Kustomize
+sources for the complete flags and container images.
+
+</div>
+
+<div data-recipe-framework="sglang">
+
+The SGLang GB200 targets use the `dev.1` runtime. Aggregated serving enables
+DSpark; disaggregated serving uses Mooncake without speculative decoding.
+
+</div>
 
 ## Source
 
-[Recipe sources and operational instructions](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4.1-flash)
+[Recipe sources](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4.1-flash)

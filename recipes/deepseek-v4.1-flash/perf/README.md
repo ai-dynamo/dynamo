@@ -14,11 +14,11 @@ Set `ENDPOINT` and `CONCURRENCY` in [`perf.yaml`](perf.yaml):
 
 | Target | `ENDPOINT` | `CONCURRENCY` |
 | --- | --- | ---: |
-| B200 aggregated | `dsv41-flash-vllm-b200-agg-frontend:8000` | 168 |
-| B200 disaggregated | `dsv41-flash-vllm-b200-disagg-frontend:8000` | 184 |
-| GB200 aggregated | `dsv41-flash-vllm-gb200-agg-frontend:8000` | 168 |
-| GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-frontend:8000` | 168 |
-| H200 aggregated | `dsv41-flash-vllm-h200-agg-frontend:8000` | 80 |
+| B200 aggregated | `dsv41-flash-vllm-b200-agg-agentic-frontend:8000` | 168 |
+| B200 disaggregated | `dsv41-flash-vllm-b200-disagg-agentic-frontend:8000` | 184 |
+| GB200 aggregated | `dsv41-flash-vllm-gb200-agg-agentic-frontend:8000` | 168 |
+| GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-agentic-frontend:8000` | 168 |
+| H200 aggregated | `dsv41-flash-vllm-h200-agg-agentic-frontend:8000` | 80 |
 
 Run one target per namespace. The benchmark Job is scheduled on the same node
 as the frontend.
@@ -56,7 +56,7 @@ export NAMESPACE=your-namespace
 
 ### 1. Deploy the DGD
 
-See the deployment instructions in [the recipe README](../README.md).
+See the [Dynamo recipe documentation](https://docs.nvidia.com/dynamo/dev/recipes/deepseek-v4-1-flash) for deployment instructions.
 
 ### 2. Stage the trace on the PVC
 
@@ -108,13 +108,13 @@ eight B200/GB200 GPUs or 16 H200 GPUs. Output throughput includes reasoning toke
 
 Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
 
-| Target | Concurrency | Output tok/s/GPU | Output tok/s/user p50 |
-| --- | ---: | ---: | ---: |
-| B200 aggregated | 168 | 990.57 | 54.69 |
-| B200 disaggregated | 184 | 1,087.71 | 82.12 |
-| GB200 aggregated | 168 | 953.08 | 51.83 |
-| GB200 disaggregated | 168 | 1,154.87 | 80.85 |
-| H200 aggregated | 80 | 209.18 | 51.32 |
+| Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | B200 | 168 | 990.57 | 54.69 | 178.66 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | B200 | 184 | 1,087.71 | 82.12 | 135.12 |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | GB200 | 168 | 953.08 | 51.83 | 286.75 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | GB200 | 168 | 1,154.87 | 80.85 | 169.02 |
+| Agentic (64K input, 400 output) | Aggregated (4 × TP4) | vLLM | H200 | 80 | 209.18 | 51.32 | 171.29 |
 
 ### TTFT Distribution
 
