@@ -41,7 +41,7 @@ impl<W: Copy + Eq + Hash + Ord> LineageIndex<W> {
     /// Creates an index with capacity for `max_positions` positions.
     pub fn new(max_positions: u64) -> Self {
         Self {
-            buckets: DashMap::with_hasher(FxBuildHasher::default()),
+            buckets: DashMap::with_hasher(FxBuildHasher),
             max_positions: AtomicU64::new(max_positions),
             dropped_out_of_range: AtomicU64::new(0),
             swap: parking_lot::RwLock::new(()),
@@ -186,7 +186,7 @@ impl<W: Copy + Eq + Hash + Ord> LineageIndex<W> {
 
             let bucket = {
                 let entry = self.buckets.entry(position).or_insert_with(|| {
-                    Arc::new(DashMap::with_hasher(FxBuildHasher::default()))
+                    Arc::new(DashMap::with_hasher(FxBuildHasher))
                 });
                 Arc::clone(entry.value())
             };
@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn deepest_by_holder_supports_sparse_holdings_and_excludes_other_chains() -> anyhow::Result<()> {
+    fn deepest_by_holder_handles_sparse_holdings() -> anyhow::Result<()> {
         let index = LineageIndex::new(4);
         let hashes = sequence(0, 4)?;
         let other = sequence(100, 4)?;
