@@ -5904,7 +5904,7 @@ mod tests {
                         }));
                     }
                     if let Some(reason) = &choice.finish_reason {
-                        events.push(OutputEvent::Finish(reason.clone()));
+                        events.push(OutputEvent::Finish(*reason));
                     }
                     events
                 })
@@ -6731,10 +6731,10 @@ mod tests {
             let mut finishes = Vec::new();
             for choice in choices {
                 if let Some(ChatCompletionMessageContent::Text(value)) = &choice.delta.content {
-                    text.push_str(&value);
+                    text.push_str(value);
                 }
                 if let Some(value) = &choice.delta.reasoning_content {
-                    reasoning.push_str(&value);
+                    reasoning.push_str(value);
                 }
                 if let Some(value) = choice.finish_reason {
                     finishes.push(value);
@@ -6743,10 +6743,10 @@ mod tests {
                     let entry = calls.entry(call.index).or_default();
                     if let Some(function) = &call.function {
                         if let Some(name) = &function.name {
-                            entry.0.push_str(&name);
+                            entry.0.push_str(name);
                         }
                         if let Some(arguments) = &function.arguments {
-                            entry.1.push_str(&arguments);
+                            entry.1.push_str(arguments);
                         }
                     }
                 }
@@ -6875,7 +6875,7 @@ mod tests {
                 };
                 assert_eq!(
                     fallback.data.as_ref().unwrap().inner.choices,
-                    [expected.clone()]
+                    std::slice::from_ref(&expected)
                 );
                 let mut input = vec![opening, source];
                 if let Some(suffix) = suffix {
