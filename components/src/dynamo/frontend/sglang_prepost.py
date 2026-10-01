@@ -325,7 +325,6 @@ def create_parsers(
 
 
 def _continuation_template_kwargs(request: dict[str, Any]) -> dict[str, bool]:
-    """Resolve nested continuation flags with non-null top-level precedence."""
     nested_kwargs = (
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )

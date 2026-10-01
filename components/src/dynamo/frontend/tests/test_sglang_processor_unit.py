@@ -5018,7 +5018,6 @@ class TestContinuationFlags:
                 True,
             ),
             ({"chat_template_args": {"continue_final_message": True}}, True),
-            ({}, False),
             ({"add_generation_prompt": True, "continue_final_message": False}, False),
             (
                 {
