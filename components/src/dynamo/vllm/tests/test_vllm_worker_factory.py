@@ -26,7 +26,6 @@ from dynamo.vllm.worker_factory import (
     _benchmark_engine_identity,
     _benchmark_worker_probe_path,
     _DecodeWorkerLifecycle,
-    _make_engine_probe,
     _merge_benchmark_rank_results,
     _restore_benchmark_workers,
     _stop_worker_gc_policy,
@@ -2700,19 +2699,14 @@ def _fake_worker(
     rank: int = 2,
     data_parallel_rank=5,
     data_parallel_index=None,
-    tensor_parallel_size=None,
-    pipeline_parallel_size=None,
+    tensor_parallel_size=1,
+    pipeline_parallel_size=1,
     prefill_context_parallel_size=1,
 ):
-    parallel_kwargs = {"data_parallel_rank": data_parallel_rank}
-    if data_parallel_index is not None:
-        parallel_kwargs["data_parallel_index"] = data_parallel_index
-    if tensor_parallel_size is not None:
-        parallel_kwargs["tensor_parallel_size"] = tensor_parallel_size
-    if pipeline_parallel_size is not None:
-        parallel_kwargs["pipeline_parallel_size"] = pipeline_parallel_size
-    if prefill_context_parallel_size is not None:
-        parallel_kwargs["prefill_context_parallel_size"] = prefill_context_parallel_size
+    """A stub worker. Like vLLM's ParallelConfig, its parallel config always has
+    every field, and data_parallel_index starts out equal to data_parallel_rank."""
+    if data_parallel_index is None:
+        data_parallel_index = data_parallel_rank
     return SimpleNamespace(
         rank=rank,
         vllm_config=SimpleNamespace(
@@ -2721,9 +2715,23 @@ def _fake_worker(
                 cudagraph_mode=SimpleNamespace(name="FULL_DECODE_ONLY"),
                 cudagraph_capture_sizes=list(capture_sizes),
             ),
-            parallel_config=SimpleNamespace(**parallel_kwargs),
+            parallel_config=SimpleNamespace(
+                data_parallel_rank=data_parallel_rank,
+                data_parallel_index=data_parallel_index,
+                tensor_parallel_size=tensor_parallel_size,
+                pipeline_parallel_size=pipeline_parallel_size,
+                prefill_context_parallel_size=prefill_context_parallel_size,
+            ),
         ),
     )
+
+
+def _engine_probe(worker) -> dict:
+    """Run the worker-side engine probe on a stub worker, as vLLM does once
+    it has mixed the extension class into the worker class."""
+    from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
+
+    return FpmBenchmarkWorkerExtension.fpm_engine_probe(worker)
 
 
 def _merged_with_engine(
@@ -2790,7 +2798,6 @@ class _ExplodingAttentionLayer:
 
 
 def test_engine_probe_reads_backends_off_the_attention_layers():
-    probe = _make_engine_probe()
     layers = {
         # vLLM stores an *instance* on MLAAttention.prefill_backend (layer
         # 1); the probe must also tolerate a bare class (layer 0).
@@ -2810,7 +2817,7 @@ def test_engine_probe_reads_backends_off_the_attention_layers():
         "model.layers.1.mlp": SimpleNamespace(),
     }
 
-    result = probe(
+    result = _engine_probe(
         _fake_worker(layers, rank=6, tensor_parallel_size=4, pipeline_parallel_size=2)
     )
 
@@ -2863,7 +2870,7 @@ def test_engine_probe_derives_ranks_with_prefill_context_parallelism(
         prefill_context_parallel_size=2,
     )
 
-    result = _make_engine_probe()(worker)
+    result = _engine_probe(worker)
 
     assert result["tp_rank"] == tp_rank
     assert result["pp_rank"] == pp_rank
@@ -2876,45 +2883,47 @@ def test_engine_probe_prefers_data_parallel_index_over_zeroed_rank():
     dense (non-MoE) model under external DP, keeping the true rank only in
     data_parallel_index -- the same trap instrumented_scheduler.py already
     routes around. The probe must not silently report dp_rank=0 here."""
-    probe = _make_engine_probe()
     worker = _fake_worker(
         {}, data_parallel_rank=0, data_parallel_index=3, tensor_parallel_size=4
     )
 
-    result = probe(worker)
+    result = _engine_probe(worker)
 
     assert result["dp_rank"] == 3
 
 
-def test_engine_probe_tp_rank_is_none_without_tensor_parallel_size():
-    """No tensor_parallel_size on the config means the TP-local rank cannot
-    be derived: tp_rank must be None, never the raw global rank (the bug
-    this derivation replaces)."""
-    probe = _make_engine_probe()
-    worker = _fake_worker({}, rank=7)
+def test_engine_probe_reports_unresolved_graph_settings_as_none_and_empty():
+    """vLLM leaves cudagraph_mode and cudagraph_capture_sizes None until it has
+    resolved them; the probe reports that, not a made-up mode or size."""
+    worker = _fake_worker({})
+    compilation_config = worker.vllm_config.compilation_config
+    compilation_config.cudagraph_mode = None
+    compilation_config.cudagraph_capture_sizes = None
 
-    result = probe(worker)
+    result = _engine_probe(worker)
 
-    assert result["tp_rank"] is None
-    assert result["pp_rank"] is None
-    assert result["pcp_rank"] is None
-    assert result["worker_rank"] == 7
+    assert result["cudagraph_mode_resolved"] is None
+    assert result["cudagraph_capture_sizes_resolved"] == []
 
 
-def test_engine_probe_keeps_pp_and_pcp_unknown_without_pcp_size():
-    worker = _fake_worker(
-        {},
-        rank=1,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=2,
-        prefill_context_parallel_size=None,
-    )
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "data_parallel_index",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+    ],
+)
+def test_engine_probe_fails_the_call_when_the_parallel_config_lacks_a_field(missing):
+    """No fallback reply: the call fails, which the launcher records as a
+    failed probe, instead of answering with a guessed rank or the raw global
+    rank in place of the TP-local one."""
+    worker = _fake_worker({}, rank=7, tensor_parallel_size=4)
+    delattr(worker.vllm_config.parallel_config, missing)
 
-    result = _make_engine_probe()(worker)
-
-    assert result["tp_rank"] == 0
-    assert result["pp_rank"] is None
-    assert result["pcp_rank"] is None
+    with pytest.raises(AttributeError, match=missing):
+        _engine_probe(worker)
 
 
 def _worker_probe_response(
@@ -2942,10 +2951,9 @@ def test_attach_engine_resolved_updates_merged_in_memory_and_probe_sidecar(tmp_p
 
     asyncio.run(_attach_engine_resolved(merged, engine_client))
 
-    engine_client.collective_rpc.assert_awaited_once()
-    assert (
-        engine_client.collective_rpc.call_args.kwargs["timeout"]
-        == ENGINE_PROBE_TIMEOUT_SECONDS
+    # By name: vLLM's engine-core client refuses to carry a callable.
+    engine_client.collective_rpc.assert_awaited_once_with(
+        "fpm_engine_probe", timeout=ENGINE_PROBE_TIMEOUT_SECONDS
     )
     # The in-memory document is what get_perf_metrics serves.
     assert merged["engine"]["resolved"] == replies[0]
@@ -3374,7 +3382,7 @@ def test_benchmark_wait_probes_the_engine_before_restoring_workers(monkeypatch):
         calls.append("wait")
         return {"status": "complete"}
 
-    async def fake_attach(_merged, _client):
+    async def fake_attach(_merged, _client, **_kwargs):
         calls.append("probe")
 
     async def fake_stop(_client):
@@ -4155,3 +4163,125 @@ def test_engine_cudagraph_metrics_worker_extension_turns_the_option_off(monkeypa
     # launcher reports, instead of answering as if the option had been turned off.
     with pytest.raises(AttributeError):
         Worker(None).fpm_disable_cudagraph_metrics()
+
+
+# --------------------------------------------------------------------------
+# Engine probe by method name, with and without Dynamo's worker extension
+# --------------------------------------------------------------------------
+
+
+def test_engine_probe_without_the_worker_extension_records_probe_failed(
+    tmp_path, caplog
+):
+    """The workers lack the probe method although the launcher expected it (vLLM
+    did not load the extension class): the RPC fails, and the failure is
+    recorded instead of raised."""
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(
+            # What the engine client raises when a worker lacks the method.
+            side_effect=Exception(
+                "Call to collective_rpc method failed: Worker failed with error "
+                "''Worker' object has no attribute 'fpm_engine_probe''"
+            )
+        )
+    )
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    resolution = merged["engine"]["resolution"]
+    assert resolution.startswith("probe_failed: Exception: Call to collective_rpc")
+    assert "fpm_engine_probe" in resolution
+    assert _read_probe_sidecar(tmp_path)["merged"]["resolution"] == resolution
+    assert "Engine provenance probe failed" in caplog.text
+
+
+def test_attach_engine_resolved_skips_the_probe_under_a_users_worker_extension(
+    tmp_path, caplog
+):
+    """Under the user's own --worker-extension-cls the workers lack the probe
+    method, and calling it makes every worker and engine core log an ERROR. The
+    launcher skips the call, records why in the sidecar, and warns once."""
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock())
+    caplog.set_level(logging.WARNING)
+
+    asyncio.run(
+        _attach_engine_resolved(
+            merged,
+            engine_client,
+            worker_extension_installed=False,
+            user_worker_extension_cls="user.Extension",
+        )
+    )  # must not raise
+
+    engine_client.collective_rpc.assert_not_awaited()
+    resolution = "probe_skipped: worker extension not installed (user.Extension)"
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"] == resolution
+    assert merged["engine"]["attention"]["resolution"] == resolution
+    sidecar = _read_probe_sidecar(tmp_path)
+    for view in (sidecar["merged"], *sidecar["ranks"].values()):
+        assert view["resolved"] is None
+        assert view["resolution"] == resolution
+        assert view["worker_probe"]["responses"] == []
+        assert view["worker_probe"]["error"] == resolution
+    (warning,) = _worker_factory_warnings(caplog)
+    assert warning.exc_info is None
+    assert "user.Extension" in warning.getMessage()
+
+
+@pytest.mark.parametrize(
+    ("bench_cfg", "rpcs", "resolution"),
+    [
+        pytest.param(
+            {"worker_extension_installed": True},
+            ["fpm_engine_probe"],
+            "worker_probe",
+            id="installed",
+        ),
+        # A config without the key is treated as Dynamo's own extension.
+        pytest.param({}, ["fpm_engine_probe"], "worker_probe", id="key-absent"),
+        pytest.param(
+            {
+                "worker_extension_installed": False,
+                "user_worker_extension_cls": "user.Extension",
+            },
+            [],
+            "probe_skipped: worker extension not installed (user.Extension)",
+            id="users-own-class",
+        ),
+    ],
+)
+def test_engine_probe_follows_the_worker_extension_flag_through_the_benchmark_wait(
+    monkeypatch, tmp_path, bench_cfg, rpcs, resolution
+):
+    """The launcher hands the probe the flag that args.py recorded in the
+    benchmark config, so the probe call goes out only when the model workers
+    load one of Dynamo's extension classes."""
+    merged = _merged_with_engine(tmp_path)
+    sent = []
+
+    async def fake_wait(_cfg, _vllm_config):
+        return merged
+
+    async def collective_rpc(method, timeout=None):
+        sent.append(method)
+        return [_worker_probe_response()]
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._stop_worker_gc_policy", AsyncMock()
+    )
+
+    asyncio.run(
+        _await_benchmark_then_restore_workers(
+            bench_cfg, Mock(), SimpleNamespace(collective_rpc=collective_rpc)
+        )
+    )
+
+    assert sent == rpcs
+    assert merged["engine"]["resolution"] == resolution

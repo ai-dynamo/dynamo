@@ -929,114 +929,6 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     os.replace(tmp_path, path)
 
 
-def _make_engine_probe() -> Callable[[Any], dict]:
-    """Build the worker-side engine probe.
-
-    The probe is defined *inside* this function so cloudpickle serialises it
-    by value: the model worker then runs it without importing
-    ``dynamo.vllm.worker_factory``, which would pull the whole launcher stack
-    into the model process. For the same reason its body may reference only
-    builtins and attributes of the worker object it is handed.
-
-    vLLM chooses the attention backend inside the worker
-    (``Attention.__init__`` -> ``get_attn_backend``) and never writes the
-    result back into ``VllmConfig``, so the layer registry in
-    ``compilation_config.static_forward_context`` is the only place the
-    resolved names exist. Same attribute names in vLLM 0.28.0 and 0.29.0.
-    """
-
-    def probe(self):
-        vllm_config = getattr(self, "vllm_config", None)
-        compilation_config = getattr(vllm_config, "compilation_config", None)
-        parallel_config = getattr(vllm_config, "parallel_config", None)
-        context = getattr(compilation_config, "static_forward_context", None) or {}
-        backends = {}
-        prefill_backends = []
-        capture_errors = {}
-        for name, layer in context.items():
-            get_backend = getattr(layer, "get_attn_backend", None)
-            if not callable(get_backend):
-                continue
-            try:
-                backends[str(name)] = get_backend().get_name()
-            except Exception as error:
-                # Provenance is best effort; retain the failed layer as
-                # evidence instead of claiming a complete observation.
-                capture_errors[str(name)] = f"{type(error).__name__}: {error}"
-                continue
-            prefill = getattr(layer, "prefill_backend", None)
-            if prefill is not None:
-                # MLA layers hold a backend instance; tolerate a bare class.
-                prefill_backends.append(
-                    getattr(prefill, "__name__", None) or type(prefill).__name__
-                )
-        unique_prefill = sorted(set(prefill_backends))
-        worker_rank = getattr(self, "rank", None)
-        # vLLM zeroes parallel_config.data_parallel_rank on every engine for a
-        # dense (non-MoE) model under external DP, keeping the true rank only
-        # in data_parallel_index -- the same trap
-        # InstrumentedScheduler._resolve_dp_rank already routes around, so
-        # engine.resolved.dp_rank does not silently disagree with
-        # engine.parallel.data_parallel_rank / dp.rank in the same artifact.
-        dp_rank = getattr(parallel_config, "data_parallel_index", None)
-        if dp_rank is None:
-            dp_rank = getattr(parallel_config, "data_parallel_rank", None)
-        # No live process group is guaranteed wherever this callable runs.
-        # vLLM orders ranks as DP x PP x PCP x TP, so derive the model-parallel
-        # ranks from the worker rank while keeping the explicit DP identity.
-        tensor_parallel_size = getattr(parallel_config, "tensor_parallel_size", None)
-        pipeline_parallel_size = getattr(
-            parallel_config, "pipeline_parallel_size", None
-        )
-        prefill_context_parallel_size = getattr(
-            parallel_config, "prefill_context_parallel_size", None
-        )
-        tp_rank = None
-        pp_rank = None
-        pcp_rank = None
-        if (
-            type(worker_rank) is int
-            and worker_rank >= 0
-            and type(tensor_parallel_size) is int
-            and tensor_parallel_size > 0
-        ):
-            tp_rank = worker_rank % tensor_parallel_size
-            if (
-                type(prefill_context_parallel_size) is int
-                and prefill_context_parallel_size > 0
-            ):
-                pcp_rank = (
-                    worker_rank // tensor_parallel_size
-                ) % prefill_context_parallel_size
-                if type(pipeline_parallel_size) is int and pipeline_parallel_size > 0:
-                    pp_rank = (
-                        worker_rank
-                        // (tensor_parallel_size * prefill_context_parallel_size)
-                    ) % pipeline_parallel_size
-        cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
-        return {
-            "tp_rank": tp_rank,
-            "pp_rank": pp_rank,
-            "pcp_rank": pcp_rank,
-            "worker_rank": worker_rank,
-            "dp_rank": dp_rank,
-            "attention_backends": backends,
-            "mla_prefill_backend": (
-                unique_prefill[0] if len(unique_prefill) == 1 else None
-            ),
-            "cudagraph_mode_resolved": getattr(cudagraph_mode, "name", None),
-            "cudagraph_capture_sizes_resolved": [
-                int(size)
-                for size in (
-                    getattr(compilation_config, "cudagraph_capture_sizes", None) or []
-                )
-            ],
-            "capture_errors": capture_errors,
-        }
-
-    return probe
-
-
 def _worker_probe_responses(results: Any) -> list[dict]:
     """Keep every reply, including malformed or duplicate worker evidence."""
     responses = []
@@ -1309,17 +1201,27 @@ def _warn_provenance_write_failed(path: object) -> None:
     logger.warning("Could not record engine provenance in %s", path, exc_info=True)
 
 
-async def _attach_engine_resolved(merged: dict, engine_client: AsyncLLM) -> None:
+async def _attach_engine_resolved(
+    merged: dict,
+    engine_client: AsyncLLM,
+    *,
+    worker_extension_installed: bool = True,
+    user_worker_extension_cls: str | None = None,
+) -> None:
     """Keep all answers to one bounded, post-collection worker probe.
 
-    The RPC may cover only one DP engine. Missing workers are unobserved,
-    never inferred from another worker's configuration. The answers update
-    the in-memory merged document (served by ``get_perf_metrics``) and are
-    written to one sidecar next to the merged artifact; the rank and merged
-    artifacts on disk are neither read nor rewritten. Probe, sidecar, and
-    recording errors are logged, never raised: they must not discard the
-    valid measurements already on disk or keep the launcher from restoring
-    the workers.
+    The probe is ``FpmBenchmarkWorkerExtension.fpm_engine_probe``, called by
+    name in every model worker. The workers have it only when they load one of
+    Dynamo's extension classes (``worker_extension_installed``): under a
+    user's own ``--worker-extension-cls`` the RPC is not sent and the skip is
+    recorded instead. The RPC may cover only one DP engine. Missing workers
+    are unobserved, never inferred from another worker's configuration. The
+    answers update the in-memory merged document (served by
+    ``get_perf_metrics``) and are written to one sidecar next to the merged
+    artifact; the rank and merged artifacts on disk are neither read nor
+    rewritten. Probe, sidecar, and recording errors are logged, never raised:
+    they must not discard the valid measurements already on disk or keep the
+    launcher from restoring the workers.
     """
     if not isinstance(merged.get("engine"), dict):
         return
@@ -1340,9 +1242,26 @@ async def _attach_engine_resolved(merged: dict, engine_client: AsyncLLM) -> None
             _warn_provenance_write_failed(sidecar_path or merged_output_path)
 
     try:
+        if not worker_extension_installed:
+            # The call would fail in every worker, and vLLM logs each failure at ERROR.
+            logger.warning(
+                "Skipping the engine provenance probe of the model workers after "
+                "the self-benchmark: --worker-extension-cls is %s, not a Dynamo "
+                "worker extension; the worker probe sidecar records no resolved "
+                "worker configuration",
+                user_worker_extension_cls,
+            )
+            record(
+                [],
+                "probe_skipped: worker extension not installed "
+                f"({user_worker_extension_cls})",
+            )
+            return
+        # Bounded here too: collective_rpc's timeout only covers the engine core's
+        # wait for the workers, not ours for the engine core.
         results = await asyncio.wait_for(
             engine_client.collective_rpc(
-                _make_engine_probe(), timeout=ENGINE_PROBE_TIMEOUT_SECONDS
+                "fpm_engine_probe", timeout=ENGINE_PROBE_TIMEOUT_SECONDS
             ),
             timeout=ENGINE_PROBE_TIMEOUT_SECONDS,
         )
@@ -1352,6 +1271,7 @@ async def _attach_engine_resolved(merged: dict, engine_client: AsyncLLM) -> None
             failure = "probe_failed: no valid worker probe responses"
         record(responses, failure)
     except Exception as error:
+        # Not re-raised: vLLM raises a bare Exception when a worker call fails.
         # A bare TimeoutError's str() is empty, and it is the single most
         # likely production failure (a dead or wedged engine) -- the
         # exception type name keeps the recorded reason from being useless.
@@ -1644,7 +1564,12 @@ async def _await_benchmark_then_restore_workers(
                 "handling a self-benchmark failure"
             )
         raise
-    await _attach_engine_resolved(results, engine_client)
+    await _attach_engine_resolved(
+        results,
+        engine_client,
+        worker_extension_installed=bench_cfg.get("worker_extension_installed", True),
+        user_worker_extension_cls=bench_cfg.get("user_worker_extension_cls"),
+    )
     await asyncio.wait_for(
         _restore_benchmark_workers(bench_cfg, engine_client),
         timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,

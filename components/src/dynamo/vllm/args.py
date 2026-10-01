@@ -436,14 +436,15 @@ def update_engine_config_with_dynamo(
                     f"is set to '{existing_ext}'. Remove it or unset "
                     f"DYN_FPM_GC_POLICY."
                 )
-        if cudagraph_metrics_auto_enabled and not (
+        if not (
             defaults.get("worker_extension_cls")
             or getattr(engine_config, "worker_extension_cls", None)
         ):
-            # The launcher turns cudagraph_metrics back off in the model workers
-            # by method name: vLLM's engine-core client cannot carry a callable.
-            # The GC extension above inherits the method; another user class
-            # is kept, and the model workers then keep the option on.
+            # After the benchmark the launcher calls this class's methods in
+            # every model worker by name (the engine probe and the
+            # cudagraph_metrics restore): vLLM's engine-core client cannot carry
+            # a callable. The GC extension above inherits them; another user
+            # class is kept, and the launcher then skips those calls.
             defaults["worker_extension_cls"] = BENCHMARK_WORKER_EXTENSION
             logger.info(
                 "Benchmark mode: injecting worker_extension_cls=%s",

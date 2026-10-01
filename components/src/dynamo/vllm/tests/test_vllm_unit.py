@@ -2095,9 +2095,11 @@ def test_benchmark_cudagraph_metrics_worker_extension_installed_is_recorded(
     assert bench.get("user_worker_extension_cls") == user_class
 
 
-def test_benchmark_cudagraph_metrics_user_enabled_adds_no_worker_extension(
+def test_benchmark_cudagraph_metrics_user_enabled_still_gets_the_worker_extension(
     monkeypatch,
 ):
+    """The engine probe needs the extension in every benchmark run, not only
+    when Dynamo turned cudagraph_metrics on."""
     monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
     dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
     engine_cfg = _make_engine_config_with_runner(
@@ -2106,7 +2108,12 @@ def test_benchmark_cudagraph_metrics_user_enabled_adds_no_worker_extension(
 
     update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
-    assert engine_cfg.worker_extension_cls == ""
+    assert engine_cfg.worker_extension_cls == (
+        "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension"
+    )
+    bench = dynamo_cfg._benchmark_additional_config
+    assert "cudagraph_metrics_auto_enabled" not in bench
+    assert bench["worker_extension_installed"] is True
 
 
 def test_benchmark_cudagraph_metrics_absent_option_is_not_recorded():
