@@ -276,16 +276,10 @@ async def init_worker(
 
     logger.info(f"Auto-discovered {len(model_names)} model(s): {model_names}")
 
-    # Only user-facing classify models get a Dynamo endpoint. In a typical
-    # Triton classify ensemble (ensemble + Python tokenizer + numeric stage),
-    # the tokenizer has no FP32 output and the numeric stage has no STRING
-    # input, so constructing a ClassifyWorkerHandler for either raises and
-    # cancels every sibling task in the TaskGroup below. Dependency models
-    # stay loaded in Triton to serve their ensembles but are not exposed as
-    # Dynamo endpoints.
-    #
-    # The tensor path registers everything: a dependency model may still be
-    # useful to call directly over KServe gRPC for debugging.
+    # See _collect_classify_dependency_models for why only user-facing
+    # ensembles are exposed on /v1/classify. The tensor path registers
+    # everything so a dependency model is still addressable directly over
+    # KServe gRPC for debugging.
     if config.task == "classify":
         deps = _collect_classify_dependency_models(
             server, model_names, model_repository

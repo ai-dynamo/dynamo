@@ -304,11 +304,9 @@ def _make_init_worker_config(
 
 
 def test_init_worker_classify_filters_ensemble_dependencies(init_worker_env, tmp_path):
-    """Only the user-facing ensemble reaches registration; dependency
-    models are filtered out before the TaskGroup fans out, so they cannot
-    cancel it by failing handler construction. The dependencies remain
-    loaded in Triton to serve the ensemble (not asserted here; owned by
-    Triton)."""
+    """Dependencies are filtered before the TaskGroup fans out so a
+    failing-to-construct handler for a dep cannot cancel the valid
+    ensemble sibling task."""
     _write_classify_ensemble_repo(tmp_path)
     _make_server_with_models(
         init_worker_env.server_cls, ["classifier", "numeric", "tokenizer"]
@@ -325,9 +323,8 @@ def test_init_worker_classify_filters_ensemble_dependencies(init_worker_env, tmp
 
 
 def test_init_worker_classify_registers_standalone_model(init_worker_env, tmp_path):
-    """A single-model repo (no ``ensemble_scheduling`` on any config) must
-    register unchanged. Pins the no-op path so a future filter change
-    cannot silently strip the only user-facing model."""
+    """Pin the no-op path: a future filter change must not silently
+    strip the only user-facing model when no ensembles are present."""
     _write_standalone_classifier_repo(tmp_path, model_name="clf")
     _make_server_with_models(init_worker_env.server_cls, ["clf"])
     config = _make_init_worker_config(tmp_path, task="classify")
@@ -343,15 +340,12 @@ def test_init_worker_classify_registers_standalone_model(init_worker_env, tmp_pa
 def test_init_worker_classify_raises_when_only_dependencies_present(
     init_worker_env, tmp_path
 ):
-    """If every ready model is referenced as an ensemble step of some other
-    model, the exposed set is empty. The worker must raise rather than
-    starting with zero bound endpoints and reporting healthy to the
-    orchestrator."""
+    """When every ready model is an ensemble dependency, the worker
+    must raise rather than start with zero endpoints and report healthy
+    to the orchestrator."""
     _write_classify_ensemble_repo(tmp_path)
-    # The ensemble is loaded but reported as not-ready, so server.models()
-    # yields only the two dependencies. Both are referenced by the
-    # ensemble's config, so the filter marks both as dependencies and the
-    # exposed set is empty.
+    # Ensemble loaded but not-ready, so only the two deps appear in
+    # server.models() and the exposed set collapses to empty.
     _make_server_with_models(init_worker_env.server_cls, ["numeric", "tokenizer"])
     config = _make_init_worker_config(tmp_path, task="classify")
 
