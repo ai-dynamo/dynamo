@@ -21129,8 +21129,10 @@ spec:
                           Users must declare the runtime init container in this podTemplate; the
                           operator merges defaults into it but does not create it.
                           The runtime init container must have a non-empty image and restartPolicy: Always.
-                          This mode supports worker, prefill, and decode components only; multinode,
-                          enabled checkpoint, GPU memory service, and failover are not yet supported.
+                          This mode supports worker, prefill, and decode components only. Multinode,
+                          enabled checkpoint, GPU memory service, and failover are rejected because
+                          they are not currently supported in this mode. Support for these features
+                          is planned for a future release.
                           Graph-level env applies to main and runtime; compilationCache and shared memory
                           remain engine-owned. All other containers are user-managed and must specify
                           their required fields, including image.

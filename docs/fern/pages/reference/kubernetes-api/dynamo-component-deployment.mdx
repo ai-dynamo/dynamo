@@ -232,7 +232,7 @@ The operator injects Dynamo environment variables, identity, transport TLS, syst
 
 For DGDs created by operator 1.6.0 or later, both containers preserve [environment variable order](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order): injected defaults come first, then graph-level variables, then the container's own variables. Duplicate names are preserved so later entries can reference or override earlier values. Older DGDs, including those without an operator-origin annotation, retain sorted and de-duplicated rendering.
 
-This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected. Other component types cannot use an init container named `runtime`.
+This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot use an init container named `runtime`.
 
 The same convention applies to `v1alpha1` through `extraPodSpec.initContainers`. Conversion preserves the live init-container list. Adding, renaming, or removing `runtime` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.
 
