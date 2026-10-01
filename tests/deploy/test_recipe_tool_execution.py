@@ -33,11 +33,14 @@ Two gates decide whether this module can say anything at all about a recipe:
 
 from __future__ import annotations
 
+import http.server
 import logging
 import re
 import sys
+import threading
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Any, Callable, NamedTuple, Optional
 
 import pytest
@@ -66,8 +69,13 @@ _MODEL_DISCOVERY_BUDGET = 300.0
 # ``test_availability_probe_stays_within_its_budget``.
 _AVAILABILITY_ATTEMPT_TIMEOUTS = [20.0] * 10
 _AVAILABILITY_BUDGET = 300.0
+# The longest one request may wait to connect, read, write, or get a
+# connection. Failed requests are not retried.
+_REQUEST_TIMEOUT = 120.0
+# Wall-clock deadline for each tool scenario, enforced by run_tool_loop.
+_SCENARIO_DEADLINE = 300.0
 # The two tool scenarios, plus port-forward setup and teardown.
-_SCENARIO_BUDGET = 240.0
+_SCENARIO_BUDGET = 2 * _SCENARIO_DEADLINE + 40.0
 _TIMEOUT_SLACK = 120.0
 
 #: Seconds this module can spend after readiness. ``pytest_collection_modifyitems``
@@ -255,6 +263,44 @@ def _model_from_endpoint(
     return None
 
 
+def _scenario_client(base_url: str) -> OpenAI:
+    """The client the tool scenarios use against a deployment.
+
+    The OpenAI defaults let one request read for 600 s and retry twice, which
+    is longer than a whole scenario deadline.
+    """
+    return OpenAI(
+        api_key="EMPTY",
+        base_url=f"{base_url}/v1",
+        timeout=_REQUEST_TIMEOUT,
+        max_retries=0,
+    )
+
+
+def _run_scenarios(client: OpenAI, model: str, record_property: Any) -> None:
+    """Run both tool scenarios against ``model``, each under its own deadline."""
+    # Requirement: a real subprocess runs and the model reports back a secret
+    # that appears in no prompt. Any deployment serving a tool-calling model
+    # must satisfy this.
+    assert_executes_real_tool_and_uses_output(
+        client, model, deadline=time.monotonic() + _SCENARIO_DEADLINE
+    )
+    logger.info("single-tool execution: PASS")
+
+    # Capability probe: threading one tool's real output into the next call.
+    # Recorded, not asserted -- see the module docstring.
+    try:
+        assert_chained_tools_thread_real_output(
+            client, model, deadline=time.monotonic() + _SCENARIO_DEADLINE
+        )
+        chained = "pass"
+        logger.info("chained-tool execution: PASS")
+    except AssertionError as exc:
+        chained = f"unsupported: {exc}"
+        logger.warning("chained-tool execution: NOT SUPPORTED by %s -- %s", model, exc)
+    record_property("chained_tool_capability", chained)
+
+
 @pytest.mark.framework_only
 @pytest.mark.k8s
 @pytest.mark.deploy
@@ -372,26 +418,7 @@ async def test_recipe_executes_tools_end_to_end(
             attempt_timeouts=_AVAILABILITY_ATTEMPT_TIMEOUTS,
         ), f"model {model} never became available at {base_url}"
 
-        client = OpenAI(api_key="EMPTY", base_url=f"{base_url}/v1")
-
-        # Requirement: a real subprocess runs and the model reports back a
-        # secret that appears in no prompt. Any deployment serving a
-        # tool-calling model must satisfy this.
-        assert_executes_real_tool_and_uses_output(client, model)
-        logger.info("single-tool execution: PASS")
-
-        # Capability probe: threading one tool's real output into the next
-        # call. Recorded, not asserted -- see the module docstring.
-        try:
-            assert_chained_tools_thread_real_output(client, model)
-            chained = "pass"
-            logger.info("chained-tool execution: PASS")
-        except AssertionError as exc:
-            chained = f"unsupported: {exc}"
-            logger.warning(
-                "chained-tool execution: NOT SUPPORTED by %s -- %s", model, exc
-            )
-        record_property("chained_tool_capability", chained)
+        _run_scenarios(_scenario_client(base_url), model, record_property)
 
 
 # ---------------------------------------------------------------------------
@@ -797,3 +824,70 @@ def test_the_derived_timeout_does_not_touch_this_modules_unit_tests():
         _fake_config(1800), [_fake_item(deploying, deploying=True)]
     )
     assert len(deploying) == 1 and deploying[0].args[0] == 1800 + POST_READY_BUDGET
+
+
+@pytest.fixture
+def fake_frontend():
+    """A local HTTP server in place of a deployment's frontend.
+
+    ``mode`` is "error", where every request gets HTTP 500, or "stall", where
+    the request is read and never answered. ``requests`` counts arrivals.
+    """
+    release = threading.Event()
+    frontend = SimpleNamespace(mode="error", requests=0, url="")
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            frontend.requests += 1
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if frontend.mode == "stall":
+                release.wait(timeout=60)
+                return
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error": {"message": "boom"}}')
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    frontend.url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        yield frontend
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.timeout(10)
+def test_a_failed_request_is_not_retried(fake_frontend):
+    """The OpenAI default retries twice, so one failure cost three requests."""
+    with pytest.raises(openai.InternalServerError):
+        _run_scenarios(_scenario_client(fake_frontend.url), "m", lambda *a: None)
+
+    assert fake_frontend.requests == 1
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.timeout(10)
+def test_a_stalled_frontend_cannot_hold_a_scenario_past_its_deadline(
+    fake_frontend, monkeypatch
+):
+    """Without the deadline, the scenario waits the full request timeout."""
+    fake_frontend.mode = "stall"
+    monkeypatch.setattr(sys.modules[__name__], "_SCENARIO_DEADLINE", 0.2)
+
+    start = time.monotonic()
+    with pytest.raises(openai.APITimeoutError):
+        _run_scenarios(_scenario_client(fake_frontend.url), "m", lambda *a: None)
+
+    assert time.monotonic() - start < 5.0
+    assert fake_frontend.requests == 1

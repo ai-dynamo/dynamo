@@ -247,6 +247,20 @@ def run_tool_cli(script: str, arg: str, env_extra: dict[str, str]) -> str:
     return result.stdout.strip()
 
 
+def _capped_timeout(configured: Any, remaining: float) -> Any:
+    """``configured``, but with no phase allowed to wait longer than ``remaining``."""
+    if isinstance(configured, (int, float)):
+        return min(float(configured), remaining)
+    if isinstance(configured, openai.Timeout):
+        return openai.Timeout(
+            connect=min(configured.connect or remaining, remaining),
+            read=min(configured.read or remaining, remaining),
+            write=min(configured.write or remaining, remaining),
+            pool=min(configured.pool or remaining, remaining),
+        )
+    return remaining
+
+
 def run_tool_loop(
     client: OpenAI,
     model: str,
@@ -254,17 +268,34 @@ def run_tool_loop(
     tools: list[dict[str, Any]],
     dispatch: dict[str, Any],
     max_turns: int = MAX_TOOL_TURNS,
+    deadline: float | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Drive a real tool-execution loop until the model answers with text.
 
     Returns (final_text, calls), where `calls` records every tool the model
     asked for and what that tool actually returned -- so a test can assert the
     tool ran, not merely that the final answer looks right.
+
+    ``deadline`` is a ``time.monotonic()`` value. With it, no turn starts after
+    the deadline, and no request waits longer than the time left. A stream that
+    keeps sending tokens is not cut off, so ``max_tokens`` still bounds the
+    last turn.
     """
     calls: list[dict[str, Any]] = []
     convo = list(messages)
-    for _ in range(max_turns):
-        result = stream_chat(client, model, messages=convo, tools=tools)
+    for turn in range(max_turns):
+        turn_client = client
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(
+                    f"scenario passed its deadline after {turn} turn(s); "
+                    f"calls so far: {calls}"
+                )
+            turn_client = client.with_options(
+                timeout=_capped_timeout(client.timeout, remaining)
+            )
+        result = stream_chat(turn_client, model, messages=convo, tools=tools)
         if not result.tool_calls:
             return (result.content or ""), calls
 
@@ -305,11 +336,14 @@ def run_tool_loop(
 # in flaky/xfail markers appropriate to their lane.
 
 
-def assert_executes_real_tool_and_uses_output(client: OpenAI, model: str) -> None:
+def assert_executes_real_tool_and_uses_output(
+    client: OpenAI, model: str, *, deadline: float | None = None
+) -> None:
     """The answer must contain a secret only the executed tool could supply.
 
     The secret is generated per call and never appears in any prompt, so the
     assertion cannot be satisfied by hallucination, memorisation or luck.
+    ``deadline`` is passed to :func:`run_tool_loop`.
     """
     secret = uuid.uuid4().hex[:12]
     tools = [
@@ -351,6 +385,7 @@ def assert_executes_real_tool_and_uses_output(client: OpenAI, model: str) -> Non
         ],
         tools,
         {"lookup_access_code": lookup_access_code},
+        deadline=deadline,
     )
 
     assert calls, "the model never called the tool, so nothing was executed"
@@ -369,13 +404,16 @@ def assert_executes_real_tool_and_uses_output(client: OpenAI, model: str) -> Non
     )
 
 
-def assert_chained_tools_thread_real_output(client: OpenAI, model: str) -> None:
+def assert_chained_tools_thread_real_output(
+    client: OpenAI, model: str, *, deadline: float | None = None
+) -> None:
     """Two real executions, the second satisfiable only via the first.
 
     ``get_quota`` returns -1 unless handed the exact id ``get_user_id``
     produced, and both values are random per call. A correct final number
     therefore proves the model threaded real output from one execution into the
-    next -- the capability that distinguishes models here.
+    next -- the capability that distinguishes models here. ``deadline`` is
+    passed to :func:`run_tool_loop`.
     """
     user_id = f"U-{uuid.uuid4().hex[:8]}"
     quota = str(uuid.uuid4().int % 9000 + 1000)  # 4 digits, unguessable
@@ -435,6 +473,7 @@ def assert_chained_tools_thread_real_output(client: OpenAI, model: str) -> None:
         ],
         tools,
         dispatch,
+        deadline=deadline,
     )
 
     names = [c["name"] for c in calls]
