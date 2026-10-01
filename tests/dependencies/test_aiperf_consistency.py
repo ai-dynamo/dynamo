@@ -37,7 +37,7 @@ def test_epd_aiperf_version_gate_matches_release() -> None:
             for target in node.targets
         )
     ]
-    assert versions == ["0.12.0"]
+    assert versions == ["0.13.0"]
 
 
 def test_aiperf_install_pins_match() -> None:
@@ -54,7 +54,7 @@ def test_aiperf_install_pins_match() -> None:
         if line.startswith("aiperf==")
     )
     assert (
-        benchmark_pin.specifier == container_pin.specifier == SpecifierSet("==0.12.0")
+        benchmark_pin.specifier == container_pin.specifier == SpecifierSet("==0.13.0")
     )
 
 
