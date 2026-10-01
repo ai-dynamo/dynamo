@@ -10,15 +10,14 @@
 import asyncio
 import base64
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import dynamo.vllm.handlers as mod
 import numpy as np
 import pytest
 import torch
-
-import dynamo.vllm.handlers as mod
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -30,6 +29,8 @@ from dynamo.vllm.multimodal_utils.request_processor import (
     PreparedMultimodalInput,
     VllmMultimodalRequestProcessor,
 )
+from vllm.logprobs import Logprob
+from vllm.outputs import CompletionOutput, RequestOutput
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -879,6 +880,80 @@ def _make_decode_handler(
     # aggregated branch in _generate_token_mode reads it, so mirror the default.
     handler._custom_encoder = None
     return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("input_ids", "engine_ids", "opted_in", "first_chunk_only"),
+    [
+        ([1, 99, 2], [1, 99, 99, 99, 2], True, False),
+        ([1, 99, 2], [1, 99, 99, 99, 2], True, True),
+        ([1, 99, 99, 99, 2], [1, 99, 99, 99, 2], True, False),
+        ([1, 2], [1, 2], True, False),
+        ([1, 99, 2], [1, 99, 99, 99, 2], False, False),
+    ],
+    ids=["engine-expands", "first-chunk-prompt", "already-expanded", "text", "opt-out"],
+)
+async def test_engine_data_uses_effective_engine_prompt(
+    input_ids, engine_ids, opted_in, first_chunk_only
+):
+    handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+    request = {
+        "token_ids": input_ids,
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 2},
+        "output_options": {"logprobs": 1},
+    }
+    if opted_in:
+        request["nvext"] = {"extra_fields": ["engine_data"]}
+    handler._multimodal_request_processor.prepare_input = AsyncMock(
+        return_value=PreparedMultimodalInput(
+            request=request, multi_modal_data=None, mm_processor_kwargs=None
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(
+        return_value=PatchedTokensPrompt(prompt_token_ids=input_ids)
+    )
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+
+    async def fake_generate(*args, **kwargs):
+        for i, token in enumerate([11, 12]):
+            yield RequestOutput(
+                request_id="req-engine-prompt",
+                prompt=None,
+                prompt_token_ids=None if first_chunk_only and i else engine_ids,
+                prompt_logprobs=None,
+                outputs=[
+                    CompletionOutput(
+                        index=0,
+                        text="",
+                        token_ids=[token],
+                        cumulative_logprob=None,
+                        logprobs=[{token: Logprob(logprob=-0.1 * (i + 1))}],
+                        finish_reason="stop" if i else None,
+                        stop_reason=None,
+                    )
+                ],
+                finished=bool(i),
+            )
+
+    handler.engine_client = SimpleNamespace(generate=fake_generate, tokenizer=None)
+    chunks = [
+        chunk
+        async for chunk in handler._generate_token_mode(
+            request, MagicMock(), "req-engine-prompt"
+        )
+    ]
+    assert [chunk["token_ids"] for chunk in chunks] == [[11], [12]]
+    assert "engine_data" not in chunks[0]
+    if opted_in:
+        metadata = chunks[-1]["engine_data"]
+        assert metadata["prompt_token_ids"] == engine_ids
+        assert metadata["completion_token_ids"] == [11, 12]
+        assert metadata["completion_logprobs"] == pytest.approx([-0.1, -0.2])
+    else:
+        assert "engine_data" not in chunks[-1]
 
 
 @pytest.mark.asyncio(loop_scope="function")

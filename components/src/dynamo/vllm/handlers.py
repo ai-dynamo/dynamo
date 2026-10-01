@@ -745,7 +745,7 @@ def _accumulate_engine_data(
                 len(logprob_accumulator),
                 len(token_accumulator),
             )
-    if request_prompt_token_ids:
+    if request_prompt_token_ids and "prompt_token_ids" not in engine_data:
         engine_data["prompt_token_ids"] = list(request_prompt_token_ids)
     tok["engine_data"] = engine_data
 
@@ -3399,6 +3399,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
         session_id=None,
+        want_engine_data=False,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3434,8 +3435,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # carries None. Capture the first non-None payload and attach it to
             # the final chunk instead of reading res.prompt_logprobs there.
             prompt_logprobs_payload: Optional[list] = None
+            engine_prompt_token_ids: Optional[list[int]] = None
             async for res in gen:
                 # res is vllm's RequestOutput
+                if want_engine_data and engine_prompt_token_ids is None:
+                    engine_prompt_token_ids = res.prompt_token_ids
                 if (
                     prompt_logprobs_payload is None
                     and getattr(res, "prompt_logprobs", None) is not None
@@ -3508,6 +3512,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
+                        if engine_prompt_token_ids is not None:
+                            out["engine_data"] = {
+                                "prompt_token_ids": list(engine_prompt_token_ids)
+                            }
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
@@ -3991,11 +3999,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # `NvExtResponseFieldSelection.engine_data` so this payload
                 # only reaches clients that asked for it.
                 want_engine_data = _nvext_extra_field_requested(request, "engine_data")
-                # Prompt token IDs the engine actually saw. Either the
-                # pre-tokenized `nvext.token_data` (TITO) or whatever the
-                # preprocessor produced from messages (MITO). We echo them
-                # back in engine_data so the client doesn't have to re-derive
-                # them from a request it might no longer hold.
+                # Fallback when the engine does not report prompt IDs. MITO
+                # image expansion can change these during engine preprocessing.
                 request_prompt_token_ids = (
                     _prompt_token_ids_for_engine_data(request, prompt)
                     if want_engine_data
@@ -4015,6 +4020,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
                         session_id=session_id,
+                        want_engine_data=want_engine_data,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
