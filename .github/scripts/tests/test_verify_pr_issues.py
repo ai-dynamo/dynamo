@@ -58,6 +58,51 @@ class VerifyPRIssuesTests(unittest.TestCase):
             [],
         )
 
+    def test_case_insensitive_identifiers_and_urls(self):
+        cases = [
+            ("gh-123", "ai-dynamo/dynamo#123"),
+            ("gH-123", "ai-dynamo/dynamo#123"),
+            ("AI-DYNAMO/DyNaMo#123", "ai-dynamo/dynamo#123"),
+            (
+                "HTTPS://GITHUB.COM/AI-DYNAMO/DyNaMo/ISSUES/123",
+                "ai-dynamo/dynamo#123",
+            ),
+            ("dyn-321", "DYN-321"),
+            ("dYn-321", "DYN-321"),
+            ("dis-456", "DIS-456"),
+            ("HTTPS://LINEAR.APP/Workspace/ISSUE/dYn-321/Ticket-Title", "DYN-321"),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                refs = verifier.references(text, "ai-dynamo/dynamo")
+                self.assertEqual([ref.ref for ref in refs], [expected])
+
+    def test_deduplicates_case_variants(self):
+        refs = verifier.references(
+            """gh-123 GH-123 #123 Ai-Dynamo/Dynamo#123
+            HTTPS://GITHUB.COM/AI-DYNAMO/DYNAMO/ISSUES/123
+            dyn-321 DYN-321 dYn-321
+            HTTPS://LINEAR.APP/Workspace/ISSUE/dYn-321/Ticket-Title""",
+            "ai-dynamo/dynamo",
+        )
+        self.assertEqual([ref.ref for ref in refs], ["ai-dynamo/dynamo#123", "DYN-321"])
+
+    @patch.object(verifier, "request_json")
+    def test_case_variants_use_canonical_api_identifiers(self, request_json):
+        request_json.side_effect = [
+            {"title": "GitHub issue"},
+            {"data": {"issue": {"identifier": "DYN-321", "title": "Linear ticket"}}},
+        ]
+        code, _, summary = self.run_verifier("AI-DYNAMO/DyNaMo#123 dyn-321")
+        self.assertEqual(code, 0)
+        self.assertIn("2 of 2 referenced issues verified", summary)
+        requests = [call.args[0] for call in request_json.call_args_list]
+        self.assertEqual(
+            requests[0].full_url,
+            "https://api.github.com/repos/ai-dynamo/dynamo/issues/123",
+        )
+        self.assertEqual(json.loads(requests[1].data)["variables"], {"id": "DYN-321"})
+
     @patch.object(verifier, "request_json")
     def test_missing_reference_fails_without_requests(self, request_json):
         code, logs, summary = self.run_verifier()

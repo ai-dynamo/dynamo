@@ -31,11 +31,12 @@ class Result:
 
 
 def references(text: str, repository: str) -> list[Reference]:
-    """Extract unique visible GitHub and Linear references from PR text."""
+    """Extract unique visible references, ignoring identifier and URL casing."""
     text = re.sub(r"<!--[\s\S]*?(?:-->|$)", "", text)
     found = {}
 
     def github_reference(owner: str, repo: str, number: str) -> None:
+        owner, repo = owner.lower(), repo.lower()
         ref = f"{owner}/{repo}#{int(number)}"
         found[ref.lower()] = Reference("github", ref, owner, repo, int(number))
 
@@ -64,10 +65,14 @@ def references(text: str, repository: str) -> list[Reference]:
         flags=re.ASCII,
     )
     owner, repo = repository.split("/", 1)
-    for match in re.finditer(r"(?<![\w/])(?:#|GH-)([1-9]\d*)\b", text, re.ASCII):
+    for match in re.finditer(
+        r"(?<![\w/])(?:#|GH-)([1-9]\d*)\b", text, re.IGNORECASE | re.ASCII
+    ):
         github_reference(owner, repo, match[1])
-    for match in re.finditer(r"\b([A-Z][A-Z0-9]*-[1-9]\d*)\b", text, re.ASCII):
-        ticket = match[1]
+    for match in re.finditer(
+        r"\b([A-Z][A-Z0-9]*-[1-9]\d*)\b", text, re.IGNORECASE | re.ASCII
+    ):
+        ticket = match[1].upper()
         if not ticket.startswith("GH-"):
             found[ticket] = Reference("linear", ticket)
     return list(found.values())
