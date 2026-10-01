@@ -30,14 +30,15 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
 
-    /// Delivery mode of the generated audio. Absent means [`AudioDataSource::B64Json`].
+    /// Delivery mode of the generated audio. Absent means `b64_json`.
     /// Image and video generation use `response_format` for this choice. The
     /// OpenAI audio API uses `response_format` for the codec. Audio uses a
     /// separate field for the delivery mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_source: Option<AudioDataSource>,
 
-    /// Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")
+    /// Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus". If absent,
+    /// the worker uses wav.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<String>,
 
@@ -49,7 +50,8 @@ pub struct NvCreateAudioSpeechRequest {
     pub speed: Option<f64>,
 
     // Qwen3-TTS specific parameters (top-level, matching vLLM-Omni)
-    /// TTS task type: "CustomVoice", "VoiceDesign", or "Base"
+    /// TTS task type, for example CustomVoice, VoiceDesign, or Base.
+    /// The worker validates the value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_type: Option<String>,
 
@@ -77,7 +79,7 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
-    /// NVIDIA extensions (reserved for future use)
+    /// NVIDIA extensions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
 

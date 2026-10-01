@@ -24,6 +24,9 @@
 //!    excluded from the pre-commit hooks, so no hook edits them.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::io;
+use std::path::PathBuf;
 
 use utoipa::openapi::schema::{ArrayItems, SchemaType, Type};
 use utoipa::openapi::{RefOr, Schema};
@@ -228,6 +231,74 @@ impl FieldMeta {
 /// Renders the Python module of one modality.
 pub fn render_module(modality: Modality) -> String {
     render(modality.module_doc(), &modality.classes())
+}
+
+/// Directory of the generated Python modules, relative to this crate.
+pub fn protocols_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../components/src/dynamo/common/protocols")
+}
+
+/// A committed module that differs from the generated text.
+#[derive(Debug)]
+pub struct Drift {
+    pub path: PathBuf,
+    pub line: usize,
+    pub expected: String,
+    pub found: String,
+}
+
+impl fmt::Display for Drift {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} is out of sync with the Rust types at line {}.\n  \
+             expected (from generator): {:?}\n  \
+             found    (committed file): {:?}\n\
+             Regenerate: {REGENERATE_COMMAND}",
+            self.path.display(),
+            self.line,
+            self.expected,
+            self.found,
+        )
+    }
+}
+
+/// Compares the committed module of `modality` with the generated text.
+/// Returns the first difference, or `None` when the two are equal.
+pub fn check_committed(modality: Modality) -> io::Result<Option<Drift>> {
+    let path = protocols_dir().join(modality.python_file_name());
+    let generated = render_module(modality);
+    let committed = std::fs::read_to_string(&path)
+        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
+    let line_of = |text: &str, line: usize| {
+        text.lines()
+            .nth(line - 1)
+            .unwrap_or("<end of file>")
+            .to_string()
+    };
+    Ok(
+        first_divergent_line(&generated, &committed).map(|line| Drift {
+            path,
+            line,
+            expected: line_of(&generated, line),
+            found: line_of(&committed, line),
+        }),
+    )
+}
+
+/// Returns the 1-based number of the first line where `expected` and
+/// `actual` differ, or `None` when they are equal.
+pub fn first_divergent_line(expected: &str, actual: &str) -> Option<usize> {
+    let (mut expected, mut actual) = (expected.lines(), actual.lines());
+    let mut lineno = 0;
+    loop {
+        lineno += 1;
+        match (expected.next(), actual.next()) {
+            (None, None) => return None,
+            (expected, actual) if expected == actual => continue,
+            _ => return Some(lineno),
+        }
+    }
 }
 
 fn render(module_doc: &str, classes: &[ClassSource]) -> String {
@@ -725,6 +796,13 @@ class DemoResponse(BaseModel):
         lines.clear();
         push_docstring(&mut lines, INDENT, "Say \"hi\"");
         assert_eq!(lines, vec![r#"    """Say "hi" """"#]);
+    }
+
+    #[test]
+    fn first_divergent_line_reports_the_first_difference() {
+        assert_eq!(first_divergent_line("a\nb\n", "a\nb\n"), None);
+        assert_eq!(first_divergent_line("a\nb\n", "a\nc\n"), Some(2));
+        assert_eq!(first_divergent_line("a\n", "a\nb\n"), Some(2));
     }
 
     #[test]
