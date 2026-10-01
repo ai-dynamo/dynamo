@@ -282,7 +282,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_input_sequence_tokens" type="histogram">
-  Input sequence length in tokens.
+  Input sequence length per routing attempt, excluding query-only lookups. Labeled by `phase` and `model`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_output_sequence_tokens" type="histogram">
@@ -300,6 +300,24 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
   Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
 </ParamField>
+
+### KV-cache reuse telemetry
+
+The cache reuse funnel shows how much of the incoming prompt could be reused, and how much the worker reports reusing. Each step counts tokens, not requests.
+
+All metric names below start with `dynamo_component_router_`.
+
+| Step | Meaning | Metric suffix |
+| --- | --- | --- |
+| **F0 — Incoming tokens** | Tokens received by the router. | `input_sequence_tokens_sum` |
+| **F1 — Previously seen prefix** | Prefix matching the router's history: potential reuse, even if no longer cached. | `kv_history_cached_prefix_tokens_total` |
+| **F2 — Best available match** | Prefix the router estimates is cached on the best-matching eligible worker. | `kv_best_eligible_cached_prefix_tokens_total` |
+| **F3 — Selected worker's match** | Prefix the router estimates is cached on the worker it chooses. | `kv_selected_cached_prefix_tokens_total` |
+| **F4 — Reported reuse** | Tokens the worker reports reusing. Missing reports count as zero. | `kv_worker_reused_tokens_total` |
+
+F1 is added separately in [the cache reuse history PR](https://github.com/ai-dynamo/dynamo/pull/14889) and requires `DYN_ROUTER_CACHE_REUSE_HISTORY=true`. F2–F4 need no enable flag.
+
+Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
 
 ### Per-request routing overhead
 

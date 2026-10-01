@@ -3341,6 +3341,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     @staticmethod
+    def _kv_cache_hit_engine_data(request_output: RequestOutput) -> Dict[str, Any]:
+        """Expose final cache counters for internal router observability."""
+        prompt_tokens = request_output.prompt_token_ids
+        cached_tokens = request_output.num_cached_tokens
+        if prompt_tokens is None or cached_tokens is None:
+            return {}
+        return {
+            "prompt_tokens": len(prompt_tokens),
+            "reused_tokens": cached_tokens,
+        }
+
+    @staticmethod
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
@@ -3514,6 +3526,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        out.setdefault("engine_data", {})[
+                            "kv_cache_hit"
+                        ] = BaseWorkerHandler._kv_cache_hit_engine_data(res)
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
@@ -4336,6 +4351,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
                     ),
+                    "engine_data": {
+                        "kv_cache_hit": BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                    },
                 }
 
                 # Log prefill completion with LoRA info
