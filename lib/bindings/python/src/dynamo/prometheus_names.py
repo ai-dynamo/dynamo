@@ -127,6 +127,10 @@ class frontend_service:
     NON_MAX_OVERLAP_SELECTIONS_TOTAL = "non_max_overlap_selections_total"
     # Effective KV overlap blocks lost by non-max-overlap selections
     OVERLAP_BLOCKS_LOST = "overlap_blocks_lost"
+    # Time since the selected worker last used a sampled prompt block it still holds (seconds)
+    KV_REUSE_HIT_AGE_SECONDS = "kv_reuse_hit_age_seconds"
+    # Time since the selected worker last used a sampled prompt block it no longer holds (seconds)
+    KV_REUSE_MISS_AGE_SECONDS = "kv_reuse_miss_age_seconds"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -473,6 +477,10 @@ class router:
     NON_MAX_OVERLAP_SELECTIONS_TOTAL = "router_non_max_overlap_selections_total"
     # Effective KV overlap blocks lost by non-max-overlap selections
     OVERLAP_BLOCKS_LOST = "router_overlap_blocks_lost"
+    # Time since the selected worker last used a sampled prompt block it still holds (seconds)
+    KV_REUSE_HIT_AGE_SECONDS = "router_kv_reuse_hit_age_seconds"
+    # Time since the selected worker last used a sampled prompt block it no longer holds (seconds)
+    KV_REUSE_MISS_AGE_SECONDS = "router_kv_reuse_miss_age_seconds"
     # Whether the router currently has a worker/dp_rank registered (1 = registered)
     WORKER_REGISTERED = "router_worker_registered"
 

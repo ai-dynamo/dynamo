@@ -220,6 +220,12 @@ pub mod frontend_service {
     /// Effective KV overlap blocks lost by non-max-overlap selections
     pub const OVERLAP_BLOCKS_LOST: &str = "overlap_blocks_lost";
 
+    /// Time since the selected worker last used a sampled prompt block it still holds (seconds)
+    pub const KV_REUSE_HIT_AGE_SECONDS: &str = "kv_reuse_hit_age_seconds";
+
+    /// Time since the selected worker last used a sampled prompt block it no longer holds (seconds)
+    pub const KV_REUSE_MISS_AGE_SECONDS: &str = "kv_reuse_miss_age_seconds";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
@@ -672,6 +678,12 @@ pub mod router {
 
     /// Effective KV overlap blocks lost by non-max-overlap selections
     pub const OVERLAP_BLOCKS_LOST: &str = "router_overlap_blocks_lost";
+
+    /// Time since the selected worker last used a sampled prompt block it still holds (seconds)
+    pub const KV_REUSE_HIT_AGE_SECONDS: &str = "router_kv_reuse_hit_age_seconds";
+
+    /// Time since the selected worker last used a sampled prompt block it no longer holds (seconds)
+    pub const KV_REUSE_MISS_AGE_SECONDS: &str = "router_kv_reuse_miss_age_seconds";
 
     /// Whether the router currently has a worker/dp_rank registered (1 = registered)
     pub const WORKER_REGISTERED: &str = "router_worker_registered";

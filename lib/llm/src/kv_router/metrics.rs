@@ -18,7 +18,7 @@
 //!   - Standalone router: not created (frontend-only)
 //!
 //! - [`RouterRequestMetrics`]: Per-request aggregate histograms and counters (TTFT, ITL,
-//!   tokens, KV hit rate, and non-max-overlap routing decisions).
+//!   tokens, KV hit rate, non-max-overlap routing decisions, and sampled KV reuse ages).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
 //!   Eagerly created so they appear as zeros before any requests arrive.
 //!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
@@ -62,6 +62,7 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
+use super::reuse_age::ReuseAges;
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
@@ -79,6 +80,11 @@ fn compute_overhead_buckets() -> Vec<f64> {
 /// Buckets for async phases (indexer find_matches, scheduling, total).
 fn async_overhead_buckets() -> Vec<f64> {
     prometheus::exponential_buckets(0.01, 3.0, 17).unwrap()
+}
+
+/// Buckets for KV reuse ages, from blocks still in use (0 s) to multi-hour sessions.
+fn reuse_age_buckets() -> Vec<f64> {
+    generate_log_buckets(0.1, 14_400.0, 16)
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,7 +1043,13 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
+    /// Populated only when `DYN_ROUTER_REUSE_AGE_SAMPLE_RATE` enables sampling.
+    pub kv_reuse_hit_age_seconds: HistogramVec,
+    pub kv_reuse_miss_age_seconds: HistogramVec,
 }
+
+/// Label naming the storage tier that held a reused KV block.
+const KV_TIER_LABEL: &str = "tier";
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
@@ -1156,6 +1168,24 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
                     )
                     .expect("failed to create router_overlap_blocks_lost");
+                let kv_reuse_hit_age_seconds = metrics
+                    .create_histogramvec(
+                        &router_metric(frontend_service::KV_REUSE_HIT_AGE_SECONDS),
+                        "Time since the selected worker last used a sampled prompt block it still holds, by storage tier",
+                        &[labels::WORKER_TYPE, KV_TIER_LABEL],
+                        extra_labels,
+                        Some(reuse_age_buckets()),
+                    )
+                    .expect("failed to create router_kv_reuse_hit_age_seconds");
+                let kv_reuse_miss_age_seconds = metrics
+                    .create_histogramvec(
+                        &router_metric(frontend_service::KV_REUSE_MISS_AGE_SECONDS),
+                        "Time since the selected worker last used a sampled prompt block it no longer holds",
+                        &[labels::WORKER_TYPE],
+                        extra_labels,
+                        Some(reuse_age_buckets()),
+                    )
+                    .expect("failed to create router_kv_reuse_miss_age_seconds");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 Arc::new(Self {
@@ -1171,6 +1201,8 @@ impl RouterRequestMetrics {
                     shared_cache_beyond_blocks,
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
+                    kv_reuse_hit_age_seconds,
+                    kv_reuse_miss_age_seconds,
                 })
             })
             .clone()
@@ -1196,6 +1228,24 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+    }
+
+    /// Record the reuse ages of one routed request's sampled blocks.
+    pub(crate) fn observe_kv_reuse_ages(&self, worker_type: &str, ages: &ReuseAges) {
+        for (tier, age) in &ages.hits {
+            self.kv_reuse_hit_age_seconds
+                .with_label_values(&[worker_type, tier.as_str()])
+                .observe(age.as_secs_f64());
+        }
+        if ages.misses.is_empty() {
+            return;
+        }
+        let misses = self
+            .kv_reuse_miss_age_seconds
+            .with_label_values(&[worker_type]);
+        for age in &ages.misses {
+            misses.observe(age.as_secs_f64());
+        }
     }
 }
 

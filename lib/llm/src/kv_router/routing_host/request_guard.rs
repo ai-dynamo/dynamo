@@ -7,6 +7,7 @@ use crate::{
     kv_router::{
         KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION, request_lease::RequestAttemptLease,
+        reuse_age::ReuseAgeLease,
     },
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -571,6 +572,8 @@ pub(super) struct RequestGuard {
     output_blocks: OutputBlockTracker,
     approximate_lru: Option<ApproximateRequestLease>,
     output_hashes: Option<CanonicalOutputTracker>,
+    /// Holds sampled prompt blocks for reuse-age tracking until the request ends.
+    reuse_age: Option<ReuseAgeLease>,
     record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
@@ -645,6 +648,7 @@ impl RequestGuard {
             ),
             approximate_lru,
             output_hashes,
+            reuse_age: None,
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
@@ -674,6 +678,7 @@ impl RequestGuard {
             output_blocks: OutputBlockTracker::new(false, request.token_ids.len(), 1, None),
             approximate_lru: None,
             output_hashes: None,
+            reuse_age: None,
             record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
@@ -715,6 +720,10 @@ impl RequestGuard {
 
     pub(super) fn has_approximate_lru(&self) -> bool {
         self.approximate_lru.is_some()
+    }
+
+    pub(super) fn hold_reuse_age(&mut self, lease: ReuseAgeLease) {
+        self.reuse_age = Some(lease);
     }
 
     pub(super) async fn acquire_approximate_lru(
@@ -1117,6 +1126,8 @@ mod prefill_start_tests {
             )
             .unwrap(),
             overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
+            kv_reuse_hit_age_seconds: hist_vec("kv_reuse_hit_age_seconds"),
+            kv_reuse_miss_age_seconds: hist_vec("kv_reuse_miss_age_seconds"),
         })
     }
 

@@ -4300,3 +4300,71 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
 
     runtime.shutdown();
 }
+
+fn prompt_request(prompt_tokens: u32) -> PreprocessedRequest {
+    PreprocessedRequest::builder()
+        .model("test".to_string())
+        .token_ids((0..prompt_tokens).collect::<Vec<_>>())
+        .stop_conditions(Default::default())
+        .sampling_options(Default::default())
+        .output_options(Default::default())
+        .build()
+        .unwrap()
+}
+
+async fn track_prompt(
+    router: &RoutingHost,
+    prompt_tokens: u32,
+) -> (SingleIn<PreprocessedRequest>, WorkerSelection, RequestGuard) {
+    let request = Context::new(prompt_request(prompt_tokens));
+    let (mut selection, _) = router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    let guard = router
+        .track_selection(
+            &request,
+            &mut selection,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    (request, selection, guard)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn reuse_age_measures_a_prefix_the_worker_used_before() {
+    let (mut router, runtime) = router(None).await;
+    router.reuse_age = Some(Arc::new(ReuseAgeTracker::new(1.0, 64)));
+    let hit_ages = router
+        .request_metrics
+        .kv_reuse_hit_age_seconds
+        .with_label_values(&["decode", "device"]);
+    let hits_before = hit_ages.get_sample_count();
+
+    let (_request, _selection, first) = track_prompt(&router, 48).await;
+    assert_eq!(
+        hit_ages.get_sample_count(),
+        hits_before,
+        "a prefix no request has used has no age"
+    );
+    drop(first);
+
+    let (_request, selection, _second) = track_prompt(&router, 48).await;
+    let cached_blocks = u64::from(selection.selected_worker_tiers.gpu_blocks);
+    assert!(
+        cached_blocks > 0,
+        "approximate routing records the first prefix"
+    );
+    assert_eq!(hit_ages.get_sample_count(), hits_before + cached_blocks);
+
+    runtime.shutdown();
+}
