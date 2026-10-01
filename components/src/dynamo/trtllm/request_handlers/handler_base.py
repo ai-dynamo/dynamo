@@ -1451,8 +1451,12 @@ class HandlerBase(BaseGenerativeHandler):
                                 "prompt_tokens_details": prompt_tokens_details,
                             }
                             # A generation-only request counts its transferred
-                            # prompt KV as cached, so only context attempts report.
-                            if not generation_only:
+                            # prompt KV as cached, and a multimodal count includes
+                            # expanded image tokens the unexpanded prompt length
+                            # omits, so only text context attempts report.
+                            if not generation_only and not isinstance(
+                                processed_input, dict
+                            ):
                                 kv_cache_hit = _kv_cache_hit_engine_data(
                                     res, num_input_tokens
                                 )
@@ -1667,11 +1671,7 @@ def _kv_cache_hit_engine_data(res, num_input_tokens: int) -> dict:
     cached_tokens = getattr(res, "cached_tokens", None)
     if cached_tokens is None:
         return {}
-    # Same clamp as usage: the engine counts over the expanded multimodal prompt.
-    return {
-        "prompt_tokens": num_input_tokens,
-        "reused_tokens": min(num_input_tokens, int(cached_tokens)),
-    }
+    return {"prompt_tokens": num_input_tokens, "reused_tokens": int(cached_tokens)}
 
 
 def _prompt_tokens_details(res, num_input_tokens: int, generation_only: bool) -> dict:

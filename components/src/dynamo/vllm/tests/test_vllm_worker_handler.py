@@ -600,6 +600,49 @@ class TestReasoningParserForwarding:
             assert "kv_cache_hit" not in engine_data
 
     @pytest.mark.asyncio
+    async def test_generate_tokens_reports_cache_hit_for_first_sample_only(self):
+        """Later n > 1 samples hit the prompt blocks sample 0 just cached."""
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            # Sample 1 finishes first, with a count inflated by sample 0.
+            for index, cached in ((1, 2), (0, 0)):
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=index,
+                            token_ids=[11],
+                            finish_reason="stop",
+                            stop_reason=None,
+                        )
+                    ],
+                    prompt_token_ids=[1, 2],
+                    prompt_logprobs=None,
+                    num_cached_tokens=cached,
+                )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_tokens(
+                PatchedTokensPrompt(prompt_token_ids=[1, 2]),
+                SamplingParams(n=2, max_tokens=1),
+                "req-n2",
+            )
+        ]
+
+        reports = {
+            chunk["index"]: chunk.get("engine_data", {}).get("kv_cache_hit")
+            for chunk in chunks
+        }
+        assert reports == {1: None, 0: {"prompt_tokens": 2, "reused_tokens": 0}}
+
+    @pytest.mark.asyncio
     async def test_generate_tokens_rejects_sampling_mask_length_mismatch(self):
         from vllm.sampling_params import SamplingParams
 

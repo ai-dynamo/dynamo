@@ -189,6 +189,19 @@ def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _warms_parallel_prefix(sampling_params: Any) -> bool:
+    """Whether SGLang caches the prompt with a zero-token request before sampling.
+
+    For n > 1 every sample's cached_tokens then includes that warm-up hit, so
+    none of them measures reuse from before the request.
+    """
+    if isinstance(sampling_params, list):
+        sampling_params = sampling_params[0] if sampling_params else {}
+    if not isinstance(sampling_params, Mapping):
+        return False
+    return (sampling_params.get("n") or 1) > 1
+
+
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     """Extract sampling options that SGLang accepts as sampling params."""
     params = {field: values.get(field) for field in _SAMPLING_OPTION_FIELDS}
@@ -654,6 +667,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 submitted_request_id=submitted_request_id,
                 internal_request_id=sglang_request_id,
                 response_request_id=native_payload.get("rid") or context.id(),
+                report_kv_cache_hit=not _warms_parallel_prefix(
+                    native_payload.get("sampling_params")
+                ),
             ):
                 yield output
             return
@@ -734,6 +750,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    report_kv_cache_hit=not _warms_parallel_prefix(sampling_params),
                 ):
                     yield out
             else:
@@ -824,6 +841,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    report_kv_cache_hit=not _warms_parallel_prefix(sampling_params),
                 ):
                     yield out
             else:
@@ -844,6 +862,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         submitted_request_id: str | None = None,
         internal_request_id: str | None = None,
         response_request_id: str | list[str] | None = None,
+        report_kv_cache_hit: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -899,7 +918,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             },
                         }
                 if (
-                    self._reports_kv_cache_hit
+                    report_kv_cache_hit
+                    and self._reports_kv_cache_hit
                     and isinstance(meta_info, dict)
                     and meta_info.get("finish_reason")
                 ):
@@ -925,6 +945,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
         submitted_request_id: str | None = None,
+        report_kv_cache_hit: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -1033,7 +1054,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # Router-facing, so kept even when metadata is uploaded instead.
                     kv_cache_hit = (
                         _kv_cache_hit_engine_data(meta_info)
-                        if self._reports_kv_cache_hit
+                        if report_kv_cache_hit and self._reports_kv_cache_hit
                         else {}
                     )
                     if kv_cache_hit:

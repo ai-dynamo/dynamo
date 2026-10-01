@@ -887,30 +887,45 @@ class TestGenerateLocally:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("mode", "request_type", "cached_tokens", "expected"),
+        ("mode", "request_type", "multimodal", "cached_tokens", "expected"),
         [
             (
                 DisaggregationMode.AGGREGATED,
                 None,
+                False,
                 2,
                 {"prompt_tokens": 3, "reused_tokens": 2},
             ),
             (
                 DisaggregationMode.PREFILL,
                 "context_only",
-                5,
-                {"prompt_tokens": 3, "reused_tokens": 3},
+                False,
+                1,
+                {"prompt_tokens": 3, "reused_tokens": 1},
             ),
-            (DisaggregationMode.DECODE, "generation_only", 3, None),
-            (DisaggregationMode.AGGREGATED, None, None, None),
+            (DisaggregationMode.DECODE, "generation_only", False, 3, None),
+            (DisaggregationMode.AGGREGATED, None, True, 2, None),
+            (DisaggregationMode.AGGREGATED, None, False, None, None),
         ],
-        ids=["aggregated", "prefill-clamped", "generation-only", "missing-counter"],
+        ids=[
+            "aggregated",
+            "prefill",
+            "generation-only",
+            "multimodal",
+            "missing-counter",
+        ],
     )
     async def test_final_chunk_reports_context_attempt_cache_reuse(
-        self, mode, request_type, cached_tokens, expected
+        self, mode, request_type, multimodal, cached_tokens, expected
     ):
         handler = self._make_handler()
         handler.disaggregation_mode = mode
+        if multimodal:
+            # The multimodal processor hands the engine a prompt dict whose
+            # cached count covers expanded image tokens.
+            handler._prepare_input_for_generation = mock.AsyncMock(
+                return_value={"prompt_token_ids": [1, 2, 3], "multi_modal_data": {}}
+            )
         params = (
             None
             if request_type is None

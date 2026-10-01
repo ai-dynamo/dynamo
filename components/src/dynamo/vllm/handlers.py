@@ -3527,9 +3527,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        # With n > 1 vLLM schedules one child per sample, and
+                        # later children hit the prompt blocks sample 0 just
+                        # cached, so only sample 0 measures prior reuse.
                         kv_cache_hit = (
                             BaseWorkerHandler._kv_cache_hit_engine_data(res)
-                            if report_kv_cache_hit
+                            if report_kv_cache_hit and output_idx == 0
                             else {}
                         )
                         if kv_cache_hit:

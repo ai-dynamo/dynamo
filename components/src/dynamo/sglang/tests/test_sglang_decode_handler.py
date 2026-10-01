@@ -2413,6 +2413,50 @@ async def test_supported_sampling_reaches_engine(mode, n):
     assert all(output["finish_reason"] for output in outputs)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 2])
+async def test_parallel_sampling_omits_kv_cache_hit(n):
+    """SGLang warms the prompt cache before n > 1 samples, so no sample reports."""
+    handler = _new_decode_handler()
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    chunks = [
+        {
+            "index": index,
+            "output_ids": [42],
+            "meta_info": {
+                "id": f"sample-{index}",
+                "finish_reason": {"type": "length"},
+                "prompt_tokens": 2,
+                "completion_tokens": 1,
+                "cached_tokens": 1,
+            },
+        }
+        for index in range(n)
+    ]
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream(chunks))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {"sampling_options": {"n": n}, "stop_conditions": {"max_tokens": 1}}
+
+    outputs = [output async for output in handler.generate(request, context)]
+
+    reports = [output.get("engine_data", {}).get("kv_cache_hit") for output in outputs]
+    expected = {"prompt_tokens": 2, "reused_tokens": 1} if n == 1 else None
+    assert reports == [expected] * n
+
+
 def test_prefill_dp_rank_kwargs_follows_engine_signature():
     from dynamo.sglang._compat import prefill_dp_rank_kwargs
 
