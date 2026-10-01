@@ -4,13 +4,18 @@
 """Unit tests for embedding transfer (local, NIXL write, NIXL read, ring buffer)."""
 
 import asyncio
+import contextvars
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from random import randint
 
 import pytest
 import torch
 
+from dynamo.common.multimodal import embedding_transfer
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     LocalEmbeddingSender,
@@ -110,6 +115,160 @@ class TestLocalEmbeddingTransfer:
         sender = LocalEmbeddingSender()
         receiver = LocalEmbeddingReceiver()
         await benchmark(sender, receiver, from_cuda=True)
+
+
+@pytest.mark.gpu_0
+@pytest.mark.timeout(10)
+class TestLocalEmbeddingWriteOwnership:
+    class _TrackedExecutor(ThreadPoolExecutor):
+        def __init__(self, on_done=None):
+            super().__init__(max_workers=1)
+            self.submitted = []
+            self.on_done = on_done
+
+        def submit(self, *args, **kwargs):
+            future = super().submit(*args, **kwargs)
+            self.submitted.append(future)
+            if self.on_done is not None:
+                future.add_done_callback(self.on_done)
+            return future
+
+    @pytest.mark.parametrize("close_loop", [False, True])
+    def test_cancelled_write_cleans_after_writer_finishes(
+        self, monkeypatch, tmp_path, close_loop
+    ):
+        monkeypatch.setattr(embedding_transfer.tempfile, "tempdir", str(tmp_path))
+        loop = asyncio.new_event_loop()
+        executor = self._TrackedExecutor()
+        loop.set_default_executor(executor)
+        entered = asyncio.Event()
+        release = threading.Event()
+        save_file = embedding_transfer.safetensors_torch.save_file
+
+        def gated_save(tensors, path):
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(timeout=2), "test did not release writer"
+            save_file(tensors, path)
+
+        monkeypatch.setattr(
+            embedding_transfer.safetensors_torch, "save_file", gated_save
+        )
+
+        async def cancel_write():
+            task = asyncio.create_task(
+                LocalEmbeddingSender().send_embeddings(torch.arange(1024))
+            )
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        try:
+            loop.run_until_complete(cancel_write())
+            assert (
+                len(list(tmp_path.iterdir())) == 1
+            ), "active writer still owns its file"
+            if close_loop:
+                loop.close()
+            release.set()
+            # Join the actual executor work, including any worker-side cleanup.
+            executor.submitted[0].result(timeout=2)
+            if not close_loop:
+                loop.run_until_complete(asyncio.sleep(0))
+            assert list(tmp_path.iterdir()) == []
+        finally:
+            release.set()
+            executor.shutdown(wait=True)
+            loop.close()
+
+    def test_cancellation_after_completed_write_reclaims_unhanded_path(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(embedding_transfer.tempfile, "tempdir", str(tmp_path))
+        loop = asyncio.new_event_loop()
+        # Register before asyncio wraps the executor future. Queue cancellation
+        # before its completed result can wake the sender.
+        executor = self._TrackedExecutor(
+            on_done=lambda _: loop.call_soon_threadsafe(task.cancel)
+        )
+        loop.set_default_executor(executor)
+        task = loop.create_task(
+            LocalEmbeddingSender().send_embeddings(torch.arange(1024))
+        )
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                loop.run_until_complete(task)
+            executor.submitted[0].result(timeout=2)
+            assert list(tmp_path.iterdir()) == []
+        finally:
+            executor.shutdown(wait=True)
+            loop.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_site", ["save", "metadata"])
+    async def test_failed_write_or_metadata_removes_only_its_file(
+        self, monkeypatch, tmp_path, failure_site
+    ):
+        monkeypatch.setattr(embedding_transfer.tempfile, "tempdir", str(tmp_path))
+        sentinel = tmp_path / "unrelated"
+        sentinel.write_text("preserve")
+        failure = RuntimeError("controlled local transfer failure")
+
+        if failure_site == "save":
+
+            def fail_save(tensors, path):
+                Path(path).write_bytes(b"partial safetensors write")
+                raise failure
+
+            monkeypatch.setattr(
+                embedding_transfer.safetensors_torch, "save_file", fail_save
+            )
+        else:
+
+            def fail_metadata(**kwargs):
+                raise failure
+
+            monkeypatch.setattr(embedding_transfer, "TransferRequest", fail_metadata)
+
+        with pytest.raises(RuntimeError) as caught:
+            await LocalEmbeddingSender().send_embeddings(torch.arange(1024))
+
+        assert caught.value is failure
+        assert list(tmp_path.iterdir()) == [sentinel]
+        assert sentinel.read_text() == "preserve"
+
+    @pytest.mark.asyncio
+    async def test_success_keeps_receiver_ownership_and_thread_context(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(embedding_transfer.tempfile, "tempdir", str(tmp_path))
+        context = contextvars.ContextVar("local-embedding-write-context")
+        context.set("request-context")
+        observed = []
+        save_file = embedding_transfer.safetensors_torch.save_file
+
+        def observe_context(tensors, path):
+            observed.append(context.get())
+            save_file(tensors, path)
+
+        monkeypatch.setattr(
+            embedding_transfer.safetensors_torch, "save_file", observe_context
+        )
+        tensor = torch.arange(1024)
+        request, complete = await LocalEmbeddingSender().send_embeddings(tensor)
+        await complete
+        path = Path(request.serialized_request)
+        assert path.exists()
+        receiver = LocalEmbeddingReceiver()
+        tensor_id, received = await receiver.receive_embeddings(request)
+        assert torch.equal(received, tensor)
+        assert path.exists()
+        receiver.release_tensor(tensor_id)
+        assert not path.exists()
+        assert torch.equal(received, tensor)
+        assert observed == ["request-context"]
 
 
 @pytest.mark.asyncio

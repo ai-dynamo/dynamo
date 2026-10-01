@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import tempfile
+import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -142,6 +143,20 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         self.sender_id = uuid.uuid4().hex
         self.embedding_counter = 0
 
+    @staticmethod
+    def _remove_unclaimed_file(tensor_path: str) -> None:
+        try:
+            os.remove(tensor_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Preserve the original save failure or caller cancellation.
+            logger.warning(
+                "Failed to remove unclaimed embedding file %s",
+                tensor_path,
+                exc_info=True,
+            )
+
     def save_embeddings_to_file(
         self, embedding_key: str, embeddings: torch.Tensor
     ) -> str:
@@ -157,13 +172,17 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         fd, tensor_path = tempfile.mkstemp(
             prefix=f"encoder_cache.{embedding_key}.", suffix=".safetensors"
         )
-        os.close(fd)
-        tensors = {"ec_cache": embeddings.cpu()}
-        safetensors_torch.save_file(
-            tensors,
-            tensor_path,
-        )
-        return tensor_path
+        try:
+            os.close(fd)
+            tensors = {"ec_cache": embeddings.cpu()}
+            safetensors_torch.save_file(
+                tensors,
+                tensor_path,
+            )
+            return tensor_path
+        except BaseException:
+            self._remove_unclaimed_file(tensor_path)
+            raise
 
     @_nvtx.annotate("mm:local:send_embeddings", color="magenta")
     async def send_embeddings(
@@ -183,21 +202,44 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         # This could involve publishing to a message queue or making an API call
         embedding_key = f"{self.sender_id}_{self.embedding_counter}"
         self.embedding_counter += 1
-        tensor_path = await asyncio.to_thread(
-            self.save_embeddings_to_file,
-            embedding_key,
-            embeddings,
-        )
-        fut = asyncio.get_event_loop().create_future()
-        fut.set_result(None)
-        return (
-            TransferRequest(
-                embeddings_shape=list(embeddings.shape),
-                embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
-                serialized_request=tensor_path,
-            ),
-            fut,
-        )
+        write_lock = threading.Lock()
+        abandoned = False
+        unclaimed_path: str | None = None
+
+        def save() -> str:
+            nonlocal unclaimed_path
+            tensor_path = self.save_embeddings_to_file(embedding_key, embeddings)
+            with write_lock:
+                if not abandoned:
+                    unclaimed_path = tensor_path
+                    return tensor_path
+            # The caller may already be gone, including its event loop. Only
+            # the completed writer can safely remove this still-unclaimed file.
+            self._remove_unclaimed_file(tensor_path)
+            return tensor_path
+
+        try:
+            tensor_path = await asyncio.to_thread(save)
+            fut = asyncio.get_event_loop().create_future()
+            fut.set_result(None)
+            return (
+                TransferRequest(
+                    embeddings_shape=list(embeddings.shape),
+                    embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
+                    serialized_request=tensor_path,
+                ),
+                fut,
+            )
+        except BaseException:
+            # Cancellation does not stop an executor thread. Whichever side
+            # observes the completed path owns cleanup, without a loop callback.
+            with write_lock:
+                abandoned = True
+                path_to_remove = unclaimed_path
+                unclaimed_path = None
+            if path_to_remove is not None:
+                self._remove_unclaimed_file(path_to_remove)
+            raise
 
 
 class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
