@@ -128,6 +128,7 @@ impl SglangMockerService {
             );
         }
 
+        let engine_args = engine_args.normalized()?;
         anyhow::ensure!(
             engine_args.engine_type == EngineType::Sglang,
             "Mocker engine_type must be sglang"
@@ -138,9 +139,9 @@ impl SglangMockerService {
             "Mocker worker_type must be aggregated; use the server mode for the emulated wire role"
         );
 
-        let engine_args = engine_args.normalized()?;
-        let page_size = u32::try_from(engine_args.block_size)
-            .map_err(|_| anyhow::anyhow!("block_size exceeds the KV event discovery range"))?;
+        let page_size = u32::try_from(engine_args.block_size).map_err(|_| {
+            anyhow::anyhow!("block_size exceeds the SGLang page_size discovery range")
+        })?;
         let max_total_num_tokens = engine_args
             .num_gpu_blocks
             .checked_mul(engine_args.block_size)

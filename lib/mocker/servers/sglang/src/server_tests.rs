@@ -9,7 +9,6 @@ fn engine_args() -> MockEngineArgs {
     MockEngineArgs::builder()
         .engine_type(EngineType::Sglang)
         .block_size(4)
-        .enable_prefix_caching(false)
         .num_gpu_blocks(128)
         .max_num_seqs(Some(8))
         .max_num_batched_tokens(Some(64))
@@ -33,6 +32,24 @@ fn request(request_id: &str) -> pb::GenerateRequest {
         rid: Some(request_id.to_string()),
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn service_rejects_normalized_multi_rank_ais_args() {
+    let mut args = engine_args();
+    args.ais_perf_config = Some(json!({
+        "model": "model",
+        "system": "h200_sxm",
+        "backend": "sglang",
+        "worker_type": "aggregated",
+        "attention_dp": 2,
+    }));
+    assert_eq!(args.dp_size, 1);
+
+    let error = SglangMockerService::new(MockerServerConfig::default(), args)
+        .err()
+        .expect("normalized attention DP must be rejected before engine initialization");
+    assert_eq!(error.to_string(), "Mocker dp_size must be 1");
 }
 
 #[tokio::test]

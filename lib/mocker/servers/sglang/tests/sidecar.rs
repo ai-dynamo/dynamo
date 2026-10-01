@@ -66,7 +66,6 @@ fn fast_engine_args() -> MockEngineArgs {
     MockEngineArgs::builder()
         .engine_type(EngineType::Sglang)
         .block_size(4)
-        .enable_prefix_caching(false)
         .num_gpu_blocks(4_096)
         .max_num_seqs(Some(64))
         .max_num_batched_tokens(Some(1_024))

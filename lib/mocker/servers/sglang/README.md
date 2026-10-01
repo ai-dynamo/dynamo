@@ -52,6 +52,16 @@ unset `zmq_kv_events_port` selects an automatic ZMQ port. The sidecar discovers
 the endpoint and replaces its wildcard address with the host from
 `--grpc-endpoint`. Use a frontend with `--router-mode kv`.
 
+The event and optional replay sockets bind to all IPv4 interfaces (`0.0.0.0`),
+independently of the gRPC `--listen` address. These sockets have no authentication,
+and stored events include token IDs from cached prompt and generated-token blocks.
+Use an IPv4 address, or a hostname reachable over IPv4, for `--grpc-endpoint`.
+An IPv6-only gRPC endpoint cannot receive events from this publisher.
+
+Publishing collects and queues token IDs even when no subscriber is connected.
+The background publisher task encodes and sends the events. This work also
+occurs when the frontend uses a routing mode that does not consume KV events.
+
 Automatic ports work for local processes and containers that share a network
 namespace, including containers in one Kubernetes pod. Use a fixed port when
 port mappings, a Service, or firewall rules need a known event port. For example:
@@ -80,8 +90,10 @@ sidecar does not rebuild the index for blocks already in the mock server's
 cache. This server uses that existing path without additional recovery.
 
 Set `"enable_prefix_caching":false` to disable both prefix caching and KV
-events. Decode servers do not publish events. As with regular mock workers,
-publisher setup failures are logged and serving continues without KV events.
+events. Decode servers do not publish events. In either case, explicit
+`zmq_kv_events_port` and `zmq_replay_port` values are ignored; they do not enable
+publishing. As with regular mock workers, publisher setup failures are logged
+and serving continues without KV events.
 
 ## Disaggregated wire flow
 
