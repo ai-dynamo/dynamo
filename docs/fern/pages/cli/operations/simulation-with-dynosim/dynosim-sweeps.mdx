@@ -83,7 +83,6 @@ optimizer:
 dgd:
   name: qwen
   output_file: deployment.yaml
-  namespace: default
   renderer: aic
   format: manifest
   runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
@@ -94,7 +93,8 @@ Each parallelism preset is a complete mapping and becomes one categorical choice
 scheduler domains add independent search dimensions. `engine.model` identifies the model that
 AISimulate evaluates and that the generated DGD serves. `dgd.name` is only the Kubernetes resource
 name, while `dgd.output_file` is the output filename relative to `--output-dir`. Neither field
-selects the model. `dgd.namespace` is optional.
+selects the model. `dgd.namespace` is optional; when omitted or empty, the output manifest does not
+set `metadata.namespace`.
 
 </Step>
 <Step title="Run the recommendation" id="run-the-recommendation">
