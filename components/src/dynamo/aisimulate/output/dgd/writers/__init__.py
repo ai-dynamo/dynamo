@@ -35,30 +35,25 @@ def write_outputs(
     rendered_dgds: Sequence[str],
     output_dir: Path,
     *,
-    filenames: Sequence[str],
+    destinations: Sequence[str],
     renderer: str,
     output: OutputFormat,
 ) -> list[dict[str, str]]:
     """Write rendered DGDs with one selected output plugin and a run index."""
-    if len(rendered_dgds) != len(filenames):
-        raise ValueError("rendered DGDs and output filenames must have equal lengths")
+    if len(rendered_dgds) != len(destinations):
+        raise ValueError(
+            "rendered DGDs and output destinations must have equal lengths"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     writer = _load_writer(output)
     artifacts: list[dict[str, str]] = []
-    artifact_paths: list[Path] = []
-    for rendered_dgd, filename in zip(rendered_dgds, filenames, strict=True):
+    for rendered_dgd, destination in zip(rendered_dgds, destinations, strict=True):
         artifact_path = writer.write(
             rendered_dgd,
             output_dir,
-            filename=filename,
+            destination=destination,
         )
-        artifact_paths.append(artifact_path)
         artifacts.append({"path": str(artifact_path.relative_to(output_dir))})
-
-    finalize = getattr(writer, "finalize", None)
-    if finalize is not None:
-        final_path = finalize(output_dir, artifact_paths)
-        artifacts.append({"path": str(final_path.relative_to(output_dir))})
 
     replace_text(
         output_dir / "index.json",

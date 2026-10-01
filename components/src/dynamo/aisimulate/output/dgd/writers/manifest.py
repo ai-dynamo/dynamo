@@ -8,8 +8,8 @@ from pathlib import Path
 from dynamo.aisimulate.output.dgd.writers.atomic import replace_text
 
 
-def write(rendered_dgd: str, output_dir: Path, *, filename: str) -> Path:
+def write(rendered_dgd: str, output_dir: Path, *, destination: str) -> Path:
     """Write one DGD manifest and return its path."""
-    artifact_path = output_dir / filename
+    artifact_path = output_dir / destination
     replace_text(artifact_path, rendered_dgd)
     return artifact_path

@@ -67,6 +67,8 @@ def test_adapter_matches_aisimulate_contract_and_defaults() -> None:
     assert validate_output_adapter(adapter, requested_name="dgd") is adapter
     assert config.renderer == "aic"
     assert config.format == "manifest"
+    assert config.output_file == "deployment.yaml"
+    assert config.output_dir is None
     assert config.output_format == "dgd"
 
 
@@ -82,6 +84,35 @@ def test_adapter_requires_output_file() -> None:
         DGDOutputConfig.model_validate(config)
 
 
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            _config(output_dir="deployment"),
+            "output_dir is only valid for format kustomize",
+        ),
+        (_config(format="kustomize"), "output_dir is required for format kustomize"),
+        (
+            _config(format="kustomize", output_dir="deployment"),
+            "output_file is only valid for format manifest",
+        ),
+    ],
+)
+def test_output_target_must_match_format(config, message) -> None:
+    with pytest.raises(ValidationError, match=message):
+        DGDOutputConfig.model_validate(config)
+
+
+def test_kustomize_requires_only_output_dir() -> None:
+    config = DGDOutputConfig.model_validate(
+        _config(format="kustomize", output_file=None, output_dir="deployment")
+    )
+
+    assert config.output_file is None
+    assert config.output_dir == "deployment"
+    assert config.output_format == "kustomize"
+
+
 def test_adapter_requires_name() -> None:
     config = _config()
     del config["name"]
@@ -95,6 +126,14 @@ def test_adapter_requires_name() -> None:
 def test_adapter_rejects_invalid_output_file(output_file) -> None:
     with pytest.raises(ValidationError, match="YAML filename"):
         DGDOutputConfig.model_validate(_config(output_file=output_file))
+
+
+@pytest.mark.parametrize("output_dir", [".", "..", "../deployment", "{name}"])
+def test_adapter_rejects_invalid_output_dir(output_dir) -> None:
+    with pytest.raises(ValidationError, match="path separators|templated"):
+        DGDOutputConfig.model_validate(
+            _config(format="kustomize", output_file=None, output_dir=output_dir)
+        )
 
 
 @pytest.mark.parametrize(
@@ -148,19 +187,43 @@ def test_scalar_writes_only_the_selected_winner(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("pareto", "output_file", "message"),
+    ("pareto", "config", "message"),
     [
-        (False, "candidate-{index}.yaml", "only valid for Pareto"),
-        (True, "candidate.yaml", r"require \{index\} in dgd.output_file"),
+        (
+            False,
+            _config(output_file="candidate-{index}.yaml"),
+            "only valid for Pareto",
+        ),
+        (
+            True,
+            _config(name="qwen-{index}", output_file="candidate.yaml"),
+            r"require \{index\} in dgd.output_file",
+        ),
+        (
+            False,
+            _config(
+                format="kustomize",
+                output_file=None,
+                output_dir="candidate-{index}",
+            ),
+            "only valid for Pareto",
+        ),
+        (
+            True,
+            _config(
+                name="qwen-{index}",
+                format="kustomize",
+                output_file=None,
+                output_dir="candidate",
+            ),
+            r"require \{index\} in dgd.output_dir",
+        ),
     ],
 )
-def test_output_file_form_must_match_result_view(
-    monkeypatch, tmp_path, pareto, output_file, message
+def test_output_target_form_must_match_result_view(
+    monkeypatch, tmp_path, pareto, config, message
 ) -> None:
     monkeypatch.setattr(adapter_module, "_workload", lambda _result: object())
-    config = _config(output_file=output_file)
-    if pareto:
-        config["name"] = "qwen-{index}"
     with pytest.raises(ValueError, match=message):
         create_adapter().write(
             config,
@@ -183,28 +246,27 @@ def test_pareto_writes_every_selected_candidate(monkeypatch, tmp_path) -> None:
     artifacts = create_adapter().write(
         _config(
             name="qwen-pareto-{index}",
-            output_file="candidate-{index}.yaml",
             format="kustomize",
+            output_file=None,
+            output_dir="candidate-{index}",
         ),
         result=_result(candidates, pareto=True),
         output_dir=tmp_path,
     )
 
     assert artifacts == [
-        Path("candidate-000.yaml"),
-        Path("candidate-001.yaml"),
-        Path("kustomization.yaml"),
+        Path("candidate-000"),
+        Path("candidate-001"),
         Path("index.json"),
     ]
     for index in range(2):
-        source = tmp_path / f"candidate-{index:03d}.yaml"
-        assert yaml.safe_load(source.read_text())["kind"] == ("DynamoGraphDeployment")
-    assert yaml.safe_load((tmp_path / "kustomization.yaml").read_text())[
-        "resources"
-    ] == [
-        "candidate-000.yaml",
-        "candidate-001.yaml",
-    ]
+        source = tmp_path / f"candidate-{index:03d}"
+        assert yaml.safe_load((source / "deploy.yaml").read_text())["kind"] == (
+            "DynamoGraphDeployment"
+        )
+        assert yaml.safe_load((source / "kustomization.yaml").read_text())[
+            "resources"
+        ] == ["deploy.yaml"]
 
 
 def test_adapter_rejects_empty_selection(tmp_path) -> None:

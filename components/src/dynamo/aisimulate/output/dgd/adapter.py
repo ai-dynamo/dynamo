@@ -12,7 +12,7 @@ from typing import Any, Literal
 from aisimulate.output_adapter import OUTPUT_ADAPTER_API_VERSION
 from aisimulate.sweeper.config import SmartSearchConfig
 from aisimulate.sweeper.result import SweepResult
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,
@@ -29,7 +29,8 @@ class DGDOutputConfig(BaseModel):
 
     name: str = Field(min_length=1)
     namespace: str | None = None
-    output_file: str = Field(min_length=1)
+    output_file: str | None = Field(default=None, min_length=1)
+    output_dir: str | None = Field(default=None, min_length=1)
     renderer: Literal["aic", "direct"] = "aic"
     format: Literal["manifest", "kustomize"] = "manifest"
     runtime_image: str = Field(min_length=1)
@@ -53,7 +54,9 @@ class DGDOutputConfig(BaseModel):
 
     @field_validator("output_file")
     @classmethod
-    def _validate_output_file(cls, value: str) -> str:
+    def _validate_output_file(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         literal = value.replace("{index}", "")
         if (
             Path(value).name != value
@@ -66,6 +69,44 @@ class DGDOutputConfig(BaseModel):
             )
         return value
 
+    @field_validator("output_dir")
+    @classmethod
+    def _validate_output_dir(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        literal = value.replace("{index}", "")
+        if (
+            value in {".", ".."}
+            or Path(value).name != value
+            or "{" in literal
+            or "}" in literal
+        ):
+            raise ValueError(
+                "must not contain path separators; only {index} may be templated"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_output_target(self) -> DGDOutputConfig:
+        if self.format == "manifest":
+            if self.output_file is None:
+                raise ValueError("dgd.output_file is required for format manifest")
+            if self.output_dir is not None:
+                raise ValueError("dgd.output_dir is only valid for format kustomize")
+        else:
+            if self.output_dir is None:
+                raise ValueError("dgd.output_dir is required for format kustomize")
+            if self.output_file is not None:
+                raise ValueError("dgd.output_file is only valid for format manifest")
+        return self
+
+    @property
+    def output_template(self) -> str:
+        """Return the validated file or directory template for the selected format."""
+        target = self.output_file if self.format == "manifest" else self.output_dir
+        assert target is not None
+        return target
+
     def validate_result(self, *, is_pareto: bool) -> None:
         """Require the naming form that matches the selected result view."""
         if is_pareto and "{index}" not in self.name:
@@ -74,13 +115,14 @@ class DGDOutputConfig(BaseModel):
             raise ValueError(
                 "{index} in dgd.name is only valid for Pareto recommendations"
             )
-        if is_pareto and "{index}" not in self.output_file:
+        output_field = "output_file" if self.format == "manifest" else "output_dir"
+        if is_pareto and "{index}" not in self.output_template:
             raise ValueError(
-                "Pareto recommendations require {index} in dgd.output_file"
+                f"Pareto recommendations require {{index}} in dgd.{output_field}"
             )
-        if not is_pareto and "{index}" in self.output_file:
+        if not is_pareto and "{index}" in self.output_template:
             raise ValueError(
-                "{index} in dgd.output_file is only valid for Pareto recommendations"
+                f"{{index}} in dgd.{output_field} is only valid for Pareto recommendations"
             )
 
     def generation_options(self) -> DGDGenerationOptions:
@@ -133,13 +175,13 @@ class DGDOutputAdapter:
             if is_pareto
             else [resolved.name]
         )
-        output_files = (
+        output_targets = (
             [
-                resolved.output_file.format(index=f"{index:03d}")
+                resolved.output_template.format(index=f"{index:03d}")
                 for index in range(len(selected))
             ]
             if is_pareto
-            else [resolved.output_file]
+            else [resolved.output_template]
         )
         workload = _workload(result)
         rendered = [
@@ -155,7 +197,7 @@ class DGDOutputAdapter:
         artifacts = write_outputs(
             rendered,
             output_dir,
-            filenames=output_files,
+            destinations=output_targets,
             renderer=resolved.renderer,
             output=resolved.output_format,
         )
