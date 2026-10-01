@@ -244,7 +244,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 ## Dynamo Sidecar Mode
 
-**Experimental.** An entry named `runtime` in `podTemplate.spec.initContainers` activates Dynamo sidecar mode. It must specify a non-empty `image` and `restartPolicy: Always`. The name alone selects the mode; a missing restart policy is rejected. A regular container named `runtime` or an init container with another name does not activate it.
+**Experimental.** An entry named `runtime` in `podTemplate.spec.initContainers` activates Dynamo sidecar mode. You must declare this init container yourself; the operator merges defaults into it and does not create it. It must specify a non-empty `image` and `restartPolicy: Always`. The name alone selects the mode; a missing restart policy is rejected. A regular container named `runtime` or an init container with another name does not activate it.
 
 The operator injects Dynamo environment variables, identity, transport TLS, system port, and startup, liveness, and readiness probes into `runtime`. The `main` container runs the engine with user-provided launch configuration and probes. Graph-level environment variables apply to both containers; compilation cache and shared-memory configuration remain on `main`. A separate `frontendSidecar` is supported.
 

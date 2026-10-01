@@ -316,7 +316,7 @@ There is no published sidecar image yet, so build and push the image from
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
-The vLLM engine runs as `main`, alongside the restartable Dynamo sidecar
+The vLLM engine runs as the `main` container, alongside the restartable Dynamo sidecar
 `runtime`. Its name in `initContainers` activates Dynamo sidecar mode; keep
 `restartPolicy: Always`. The operator injects sidecar probes: `/live` for startup and liveness,
 and `/health` for runtime readiness, independent of engine loading.
