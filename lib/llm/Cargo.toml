@@ -168,7 +168,7 @@ indicatif = { version = "0.18.0", optional = true }
 axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { workspace = true }
-utoipa = { version = "5.3", features = ["axum_extras"] }
+utoipa = { version = "5.3", features = ["axum_extras", "preserve_order"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 

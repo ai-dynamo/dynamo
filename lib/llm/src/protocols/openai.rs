@@ -33,6 +33,9 @@ pub mod tools;
 pub mod validate;
 pub mod videos;
 
+#[cfg(test)]
+pub(crate) mod schema_tests;
+
 use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MAX_STOP_SEQUENCES, MIN_P_RANGE, N_RANGE,
     PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, validate_range, validate_top_p,

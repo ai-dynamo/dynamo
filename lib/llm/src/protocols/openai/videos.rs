@@ -3,6 +3,7 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 mod aggregator;
 mod nvext;
@@ -10,7 +11,7 @@ mod nvext;
 pub use nvext::NvExt;
 
 /// Request for video generation (/v1/videos endpoint)
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvCreateVideoRequest {
     /// The text prompt for video generation
     pub prompt: String,
@@ -67,13 +68,14 @@ pub struct NvCreateVideoRequest {
     /// extra_body option, which merges into the top level of the body.
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
+    #[schema(ignore)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Delivery mode of the generated video.
 ///
 /// The set has two values. A request with an unknown value fails to parse.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoResponseFormat {
     /// The response carries a URL to the video file.
@@ -91,7 +93,7 @@ impl NvCreateVideoRequest {
 }
 
 /// Video data in response
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct VideoData {
     /// Actual container format of this video: "mp4", "webm", "gif"
     pub output_format: String,
@@ -114,13 +116,14 @@ pub struct VideoData {
 }
 
 /// Response structure for video generation
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvVideosResponse {
     /// Unique identifier for the response
     pub id: String,
 
     /// Object type (always "video")
     #[serde(default = "default_object_type")]
+    #[schema(default = "video")]
     pub object: String,
 
     /// Model used for generation
@@ -128,10 +131,12 @@ pub struct NvVideosResponse {
 
     /// Status of the generation ("completed", "failed", etc.)
     #[serde(default = "default_status")]
+    #[schema(default = "completed")]
     pub status: String,
 
     /// Progress percentage (0-100)
     #[serde(default = "default_progress")]
+    #[schema(default = 100)]
     pub progress: i32,
 
     /// Unix timestamp of creation
@@ -139,6 +144,7 @@ pub struct NvVideosResponse {
 
     /// Generated video data
     #[serde(default)]
+    #[schema(default = json!([]))]
     pub data: Vec<VideoData>,
 
     /// Error message if generation failed
@@ -207,8 +213,54 @@ impl AnnotationsProvider for NvCreateVideoRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::openai::schema_tests::{object_schema, property_default};
 
     // --- NvCreateVideoRequest ---
+
+    #[test]
+    fn video_request_schema_lists_wire_fields_in_declaration_order() {
+        let object = object_schema::<NvCreateVideoRequest>();
+        let names: Vec<&str> = object.properties.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "prompt",
+                "model",
+                "input_reference",
+                "seconds",
+                "size",
+                "user",
+                "response_format",
+                "output_format",
+                "stream",
+                "nvext",
+            ]
+        );
+        let nvext = serde_json::to_string(&object.properties["nvext"]).unwrap();
+        assert!(
+            nvext.contains("#/components/schemas/VideoNvExt"),
+            "nvext must reference the renamed component; got: {nvext}"
+        );
+        assert_eq!(NvExt::name(), "VideoNvExt");
+    }
+
+    #[test]
+    fn video_response_schema_carries_the_serde_defaults() {
+        let object = object_schema::<NvVideosResponse>();
+        assert_eq!(
+            property_default(&object, "object"),
+            serde_json::json!("video")
+        );
+        assert_eq!(
+            property_default(&object, "status"),
+            serde_json::json!("completed")
+        );
+        assert_eq!(
+            property_default(&object, "progress"),
+            serde_json::json!(100)
+        );
+        assert_eq!(property_default(&object, "data"), serde_json::json!([]));
+    }
 
     #[test]
     fn video_request_stream_field_round_trips() {

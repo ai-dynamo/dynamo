@@ -3,6 +3,7 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
@@ -16,7 +17,7 @@ pub use nvext::NvExt;
 ///
 /// Follows vLLM-Omni's OpenAICreateSpeechRequest format with TTS-specific
 /// parameters as top-level fields.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateAudioSpeechRequest {
     /// The text to synthesize into speech (required)
     pub input: String,
@@ -44,6 +45,7 @@ pub struct NvCreateAudioSpeechRequest {
     /// Absent means 1.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(range(min = 0.25, max = 4.0, message = "speed must be between 0.25 and 4.0"))]
+    #[schema(minimum = 0.25, maximum = 4.0)]
     pub speed: Option<f64>,
 
     // Qwen3-TTS specific parameters (top-level, matching vLLM-Omni)
@@ -92,6 +94,7 @@ pub struct NvCreateAudioSpeechRequest {
     /// extra_body option, which merges into the top level of the body.
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
+    #[schema(ignore)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -99,7 +102,7 @@ pub struct NvCreateAudioSpeechRequest {
 ///
 /// The frontend reads this field to select the delivery mode. The set has two
 /// values. A request with an unknown value fails to parse.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioDataSource {
     /// The response carries a URL to the audio file.
@@ -117,7 +120,7 @@ impl NvCreateAudioSpeechRequest {
 }
 
 /// Audio data in response
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct AudioData {
     /// Actual codec used for this audio: "wav", "mp3", "pcm", "flac", "aac", "opus"
     pub output_format: String,
@@ -132,13 +135,14 @@ pub struct AudioData {
 }
 
 /// Response structure for audio speech generation
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvAudioSpeechResponse {
     /// Unique identifier for the response
     pub id: String,
 
     /// Object type (always "audio.speech")
     #[serde(default = "default_object_type")]
+    #[schema(default = "audio.speech")]
     pub object: String,
 
     /// Model used for generation
@@ -146,10 +150,12 @@ pub struct NvAudioSpeechResponse {
 
     /// Status of the generation ("completed", "failed", etc.)
     #[serde(default = "default_status")]
+    #[schema(default = "completed")]
     pub status: String,
 
     /// Progress percentage (0-100)
     #[serde(default = "default_progress")]
+    #[schema(default = 100)]
     pub progress: i32,
 
     /// Unix timestamp of creation
@@ -157,6 +163,7 @@ pub struct NvAudioSpeechResponse {
 
     /// Generated audio data
     #[serde(default)]
+    #[schema(default = json!([]))]
     pub data: Vec<AudioData>,
 
     /// Error message if generation failed
@@ -224,6 +231,7 @@ impl AnnotationsProvider for NvCreateAudioSpeechRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::openai::schema_tests::{object_schema, property_default};
 
     // --- NvCreateAudioSpeechRequest ---
 
@@ -301,6 +309,69 @@ mod tests {
                 "expected the error for {json} to name the field; got: {message}"
             );
         }
+    }
+
+    #[test]
+    fn audio_request_schema_lists_wire_fields_in_declaration_order() {
+        // The schema is the source of the generated Python model. It must
+        // list the wire fields in order. It must hide the frontend-only
+        // fields.
+        let object = object_schema::<NvCreateAudioSpeechRequest>();
+        let names: Vec<&str> = object.properties.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "input",
+                "model",
+                "voice",
+                "data_source",
+                "response_format",
+                "speed",
+                "task_type",
+                "language",
+                "instructions",
+                "ref_audio",
+                "ref_text",
+                "max_new_tokens",
+                "user",
+                "nvext",
+            ]
+        );
+        let nvext = serde_json::to_string(&object.properties["nvext"]).unwrap();
+        assert!(
+            nvext.contains("#/components/schemas/AudioNvExt"),
+            "nvext must reference the renamed component; got: {nvext}"
+        );
+        assert_eq!(NvExt::name(), "AudioNvExt");
+        let speed = serde_json::to_value(&object.properties["speed"]).unwrap();
+        assert_eq!(
+            speed["minimum"].as_f64(),
+            Some(0.25),
+            "speed bounds: {speed}"
+        );
+        assert_eq!(
+            speed["maximum"].as_f64(),
+            Some(4.0),
+            "speed bounds: {speed}"
+        );
+    }
+
+    #[test]
+    fn audio_response_schema_carries_the_serde_defaults() {
+        let object = object_schema::<NvAudioSpeechResponse>();
+        assert_eq!(
+            property_default(&object, "object"),
+            serde_json::json!("audio.speech")
+        );
+        assert_eq!(
+            property_default(&object, "status"),
+            serde_json::json!("completed")
+        );
+        assert_eq!(
+            property_default(&object, "progress"),
+            serde_json::json!(100)
+        );
+        assert_eq!(property_default(&object, "data"), serde_json::json!([]));
     }
 
     #[test]
