@@ -4806,6 +4806,8 @@ class InstrumentedScheduler(AsyncScheduler):
     _kvwarm_native_resume_ids: set[str] | None = None
     _kvwarm_stage_t0: float | None
     _kvwarm_stage_batch: int | None
+    # Stage depth by ``_kvwarm_plan_key``: a batch rung, or one native execution.
+    _kvwarm_plan: dict
     # Local outcome ``(batch, ok, detail)`` of the active stage once this
     # rank's build has closed, held until the group's round says every rank
     # is done (``_kvwarm_stage_round``).
@@ -5280,7 +5282,7 @@ class InstrumentedScheduler(AsyncScheduler):
         # ``_kvwarm_register_shadow``, otherwise a covered point's shadow can
         # need one block more than its chain holds.
         if self._kvwarm_native:
-            plan = {}
+            plan: dict = {}
             for point in decode_pts:
                 contexts = self._bench_decode_context_lengths(
                     point.total_kv_read_tokens, point.batch_size
@@ -5309,7 +5311,7 @@ class InstrumentedScheduler(AsyncScheduler):
         else:
             repeats = self._kvwarm_giant_repeats()
             margin = 1 + repeats
-            plan: dict = {}
+            plan = {}
             rung_ctxs: dict = {}
             for p in decode_pts:
                 ctxs = self._bench_decode_context_lengths(
