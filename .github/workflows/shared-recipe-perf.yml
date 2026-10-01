@@ -230,9 +230,9 @@ jobs:
             "${k[@]}" logs -l "nvidia.com/dynamo-graph-deployment-name=$DGD" \
               --all-containers --prefix --tail=1000 > "$ARTIFACTS/deployment.log" 2>&1 || true
             for worker_pod in $("${k[@]}" get pods \
-              -l "nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component-type=worker" \
+              -l "nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component-type in (worker,prefill,decode)" \
               -o name); do
-              "${k[@]}" logs "$worker_pod" --all-containers --prefix --previous --tail=1000 \
+              "${k[@]}" logs "$worker_pod" -c main --prefix --previous --tail=1000 \
                 >> "$ARTIFACTS/deployment-previous.log" 2>&1 || true
             done
           fi
