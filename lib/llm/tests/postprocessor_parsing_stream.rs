@@ -524,6 +524,79 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
     }
 }
 
+#[tokio::test]
+async fn postprocessor_parsing_stream_normalizes_repeated_tool_metadata_across_mixed_deltas_and_detour()
+ {
+    use dynamo_protocols::types::{
+        ChatCompletionMessageToolCallChunk, FunctionCallStream, FunctionType,
+    };
+
+    let preprocessor = build_preprocessor(Some("deepseek_v41"), Some("deepseek_v41"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    let mixed_delta = |content: Option<&str>| {
+        let mut chunk = mock_content_chunk(content.unwrap_or_default());
+        let choice = &mut chunk.inner.choices[0];
+        choice.delta.content = content.map(|text| ChatCompletionMessageContent::Text(text.into()));
+        choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call-same".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some("{}".to_string()),
+            }),
+        }]);
+        chunk
+    };
+
+    let mut terminal_mixed_delta = mixed_delta(Some("raw text after detour"));
+    terminal_mixed_delta.inner.choices[0].finish_reason = Some(FinishReason::Stop);
+    let input_chunks = vec![
+        mixed_delta(Some("first raw text")),
+        mixed_delta(Some("second raw text")),
+        mixed_delta(None),
+        terminal_mixed_delta,
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let choices: Vec<_> = output_chunks
+        .iter()
+        .filter_map(|chunk| chunk.data.as_ref())
+        .flat_map(|data| data.inner.choices.iter())
+        .collect();
+    let calls: Vec<_> = choices
+        .iter()
+        .filter_map(|choice| choice.delta.tool_calls.as_ref())
+        .flatten()
+        .collect();
+    assert_eq!(calls.len(), 4, "each upstream tool-call delta must survive");
+    assert!(calls.iter().all(|call| call.index == 0));
+    assert_eq!(calls[0].id.as_deref(), Some("call-same"));
+    assert_eq!(calls[0].r#type, Some(FunctionType::Function));
+    assert!(calls[1..].iter().all(|call| call.id.is_none()));
+    assert!(calls[1..].iter().all(|call| call.r#type.is_none()));
+
+    let content: String = choices
+        .iter()
+        .filter_map(|choice| choice.delta.content.as_ref())
+        .map(get_text)
+        .collect();
+    assert_eq!(
+        content,
+        "first raw textsecond raw textraw text after detour"
+    );
+    let finish_reasons: Vec<_> = choices
+        .iter()
+        .filter_map(|choice| choice.finish_reason)
+        .collect();
+    assert_eq!(finish_reasons, vec![FinishReason::ToolCalls]);
+}
+
 /// Regression for DeepSeek V4 tool-continuation turns.
 ///
 /// The V4 formatter seeds `<think>` into the prompt after a merged tool result,
@@ -4628,6 +4701,157 @@ async fn postprocessor_parsing_stream_muse_routes_to_unified() {
 }
 
 #[tokio::test]
+async fn postprocessor_parsing_stream_preserves_repeated_qwen_reason_text_tool_order() {
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("qwen3_coder"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    let use_unified_v2 =
+        dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2");
+    eprintln!(
+        "repeated Qwen3 test route: {}",
+        if use_unified_v2 {
+            "UnifiedParser v2"
+        } else {
+            "legacy v1"
+        }
+    );
+    let locations = ["Paris", "Tokyo", "Oslo"];
+    let cycles = 100;
+    let (input_tx, input_rx) = futures::channel::mpsc::unbounded();
+    let input_stream = stream::unfold(input_rx, |mut rx| async move {
+        rx.next().await.map(|item| (item, rx))
+    });
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    tokio::pin!(output_stream);
+    let mut output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+    for cycle in 0..cycles {
+        input_tx
+            .unbounded_send(Annotated::from_data(mock_content_chunk(if cycle == 0 {
+                "start "
+            } else {
+                " middle "
+            })))
+            .unwrap();
+        input_tx
+            .unbounded_send(Annotated::from_data(mock_content_chunk(
+                "<think>reason one</think>",
+            )))
+            .unwrap();
+        let call = format!(
+            "<tool_call>\n<function=get_weather>\n<parameter=location>\n{}\n</parameter>\n</function>\n</tool_call>",
+            locations[cycle % locations.len()]
+        );
+        input_tx
+            .unbounded_send(Annotated::from_data(mock_content_chunk(&call)))
+            .unwrap();
+
+        let mut saw_tool_call = false;
+        while !saw_tool_call {
+            let output =
+                tokio::time::timeout(std::time::Duration::from_secs(1), output_stream.next())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("cycle {cycle}: no tool output before more input or EOF")
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("cycle {cycle}: postprocessor ended before EOF was sent")
+                    });
+            saw_tool_call = output.data.as_ref().is_some_and(|data| {
+                data.inner.choices.iter().any(|choice| {
+                    choice
+                        .delta
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+                })
+            });
+            output_chunks.push(output);
+        }
+        let current = demux_by_choice(&output_chunks)
+            .remove(&0)
+            .unwrap_or_else(|| panic!("cycle {cycle}: choice zero output missing"));
+        assert_eq!(current.tool_calls.len(), cycle + 1);
+        for (index, call) in current.tool_calls.values().enumerate() {
+            assert_eq!(call.name.as_deref(), Some("get_weather"));
+            let arguments: serde_json::Value = serde_json::from_str(&call.arguments)
+                .unwrap_or_else(|e| panic!("cycle {cycle}: incomplete tool arguments: {e}"));
+            assert_eq!(arguments["location"], locations[index % locations.len()]);
+        }
+    }
+    input_tx
+        .unbounded_send(Annotated::from_data(mock_content_chunk(" end")))
+        .unwrap();
+    input_tx
+        .unbounded_send(Annotated::from_data(mock_final_chunk()))
+        .unwrap();
+    drop(input_tx);
+    output_chunks.extend(output_stream.collect::<Vec<_>>().await);
+
+    let mut event_order = Vec::new();
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            let mut kinds = Vec::new();
+            if let Some(value) = &choice.delta.content {
+                let text = get_text(value);
+                content.push_str(text);
+                if !text.is_empty() {
+                    kinds.push("text");
+                }
+            }
+            if let Some(value) = &choice.delta.reasoning_content {
+                reasoning.push_str(value);
+                if !value.is_empty() {
+                    kinds.push("reasoning");
+                }
+            }
+            if choice
+                .delta
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+            {
+                kinds.push("tool");
+            }
+            if kinds.len() > 1 {
+                event_order.push("multiple-fields");
+            } else if let Some(kind) = kinds.first() {
+                if event_order.last() != Some(kind) {
+                    event_order.push(kind);
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        content,
+        format!("start {} end", " middle ".repeat(cycles - 1))
+    );
+    assert_eq!(reasoning, "reason one".repeat(cycles));
+    let mut expected_order = Vec::with_capacity(cycles * 3 + 1);
+    for _ in 0..cycles {
+        expected_order.extend(["text", "reasoning", "tool"]);
+    }
+    expected_order.push("text");
+    assert_eq!(event_order, expected_order, "streamed event order changed");
+    let choice = demux_by_choice(&output_chunks)
+        .remove(&0)
+        .expect("choice zero output");
+    assert_eq!(choice.tool_calls.len(), cycles);
+    for (index, call) in choice.tool_calls.values().enumerate() {
+        assert_eq!(call.name.as_deref(), Some("get_weather"));
+        let arguments: serde_json::Value = serde_json::from_str(&call.arguments).unwrap();
+        assert_eq!(arguments["location"], locations[index % locations.len()]);
+    }
+    assert!(choice.content.find("start").unwrap() < choice.content.find("middle").unwrap());
+}
+
+#[tokio::test]
 async fn postprocessor_parsing_stream_muse_force_nonempty_matches_batch_policy() {
     let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
     let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::None);
@@ -5225,4 +5449,126 @@ async fn route_matrix_minimax_m2_named_native_xml_with_inner_brace_stays_native(
         serde_json::json!({"location": "San Francisco {CA}"}),
         "{case}: the inner brace must stay argument DATA, not become structure"
     );
+}
+
+#[tokio::test]
+async fn research_per_chunk_interleaving() {
+    use futures::FutureExt;
+    let v2_enabled = dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2");
+    for family in ["qwen3_coder", "deepseek_v4", "kimi_k2"] {
+        // Hold reasoning grammar fixed to isolate the selected tool parser and its routing.
+        let preprocessor = build_preprocessor(Some("qwen3"), Some(family));
+        let (header, value_end, inner_end, outer_end) = match family {
+            "qwen3_coder" => (
+                "<tool_call>\n<function=get_weather>\n<parameter=location>\n",
+                "\n</parameter>",
+                "\n</function>",
+                "\n</tool_call>",
+            ),
+            "deepseek_v4" => (
+                "<｜DSML｜tool_calls><｜DSML｜invoke name=\"get_weather\"><｜DSML｜parameter name=\"location\" string=\"true\">",
+                "</｜DSML｜parameter>",
+                "</｜DSML｜invoke>",
+                "</｜DSML｜tool_calls>",
+            ),
+            "kimi_k2" => (
+                "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\":\"",
+                "\"",
+                "}",
+                "<|tool_call_end|><|tool_calls_section_end|>",
+            ),
+            _ => unreachable!(),
+        };
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let consumed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = consumed.clone();
+        let input = rx.inspect(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let output = preprocessor
+            .postprocessor_parsing_stream(input, &request, false, false)
+            .unwrap();
+        tokio::pin!(output);
+        let mut all = Vec::new();
+        let second_header = header.replace("functions.get_weather:0", "functions.get_weather:1");
+        let chunks = [
+            "text1 ",
+            "<think>",
+            "reason1",
+            "</think>",
+            header,
+            "Par",
+            "is",
+            value_end,
+            inner_end,
+            outer_end,
+            " text2 ",
+            "<think>",
+            "reason2",
+            "</think>",
+            second_header.as_str(),
+            "Tok",
+            "yo",
+            value_end,
+            inner_end,
+            outer_end,
+            " end",
+        ];
+        for (i, chunk) in chunks.iter().enumerate() {
+            tx.unbounded_send(Annotated::from_data(mock_content_chunk(chunk)))
+                .unwrap();
+            let mut rows = Vec::new();
+            while let Some(item) = output.next().now_or_never() {
+                let item = item.expect("source remains open");
+                if let Some(data) = &item.data {
+                    for choice in &data.inner.choices {
+                        rows.push(serde_json::to_value(&choice.delta).unwrap());
+                    }
+                }
+                all.push(item);
+            }
+            assert_eq!(consumed.load(std::sync::atomic::Ordering::SeqCst), i + 1);
+            let tool_call_emitted = rows.iter().any(|delta| {
+                delta["tool_calls"]
+                    .as_array()
+                    .is_some_and(|calls| !calls.is_empty())
+            });
+            let expected_tool_call = [4, 14].into_iter().any(|header_index| {
+                let outer_end_index = header_index + 5;
+                if v2_enabled && family == "qwen3_coder" {
+                    (header_index + 1..outer_end_index).contains(&i)
+                } else if v2_enabled && family == "deepseek_v4" {
+                    i == header_index + 4
+                } else {
+                    i == outer_end_index
+                }
+            });
+            assert_eq!(
+                tool_call_emitted,
+                expected_tool_call,
+                "family {family}, input chunk {}: unexpected tool-call release timing",
+                i + 1
+            );
+            if i == 9 || i == 19 {
+                let choice = demux_by_choice(&all).remove(&0).unwrap();
+                assert_eq!(choice.tool_calls.len(), if i == 9 { 1 } else { 2 });
+                for (j, call) in choice.tool_calls.values().enumerate() {
+                    assert_eq!(call.name.as_deref(), Some("get_weather"));
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&call.arguments).unwrap(),
+                        serde_json::json!({"location": (["Paris", "Tokyo"][j])})
+                    );
+                }
+            }
+        }
+        tx.unbounded_send(Annotated::from_data(mock_final_chunk()))
+            .unwrap();
+        drop(tx);
+        all.extend(output.collect::<Vec<_>>().await);
+        let choice = demux_by_choice(&all).remove(&0).unwrap();
+        assert_eq!(choice.content, "text1  text2  end");
+        assert_eq!(choice.reasoning, "reason1reason2");
+        assert_eq!(choice.tool_calls.len(), 2);
+    }
 }

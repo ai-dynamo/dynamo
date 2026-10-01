@@ -2898,9 +2898,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.5.3"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3dba2a81c6382dc217fb4caa2b5b03a7e80d5bda6694a3c002ee9eeefa84336"
+checksum = "46b635ada977b630aadc8763345a229920957b86d04a3677fd93e6c65629ba6e"
 dependencies = [
  "anyhow",
  "num-traits",
