@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 from aisimulate.output_adapter import validate_output_adapter
+from aisimulate.sweeper.result import SweepResult
 from pydantic import ValidationError
 
 from dynamo.aisimulate.output.dgd import adapter as adapter_module
@@ -45,6 +47,78 @@ def _result(candidates, *, pareto: bool = False):
         selected_candidates=candidates,
         views=SimpleNamespace(pareto_front=["candidate-000001"] if pareto else []),
         provenance=SimpleNamespace(config={}),
+    )
+
+
+def _real_scalar_result() -> SweepResult:
+    smart_config = {
+        "search_space": {
+            "model_name": "Qwen/Qwen3-32B",
+            "deployment_mode": ["agg"],
+            "backend": ["vllm"],
+            "hardware_sku": "h200_sxm",
+            "gpu_budget": 8,
+            "context_length": 131072,
+        },
+        "workload": {
+            "isl": 1024,
+            "osl": 1024,
+            "request_rate": 10,
+            "num_request_ratio": 10,
+        },
+        "goal": {
+            "target": "goodput_per_gpu",
+            "sla": {"ttft_ms": 2000, "itl_ms": 25},
+        },
+        "sweep": {
+            "max_rounds": 1,
+            "candidates_per_round": 2,
+            "parallel_evals": 1,
+            "max_eval_seconds": 120,
+        },
+    }
+
+    def candidate_record(candidate_id: str, score: float, used_gpus: int):
+        return {
+            "candidate_id": candidate_id,
+            "status": "feasible",
+            "config": {"backend": "vllm", "backend_version": "0.20.1"},
+            "used_gpus": used_gpus,
+            "score": score,
+            "metrics": {},
+            "provenance": {
+                "model": "Qwen/Qwen3-32B",
+                "hardware": "h200_sxm",
+                "backend": "vllm",
+            },
+        }
+
+    candidate_records = [
+        candidate_record("candidate-000001", score=2.0, used_gpus=2),
+        candidate_record("candidate-000002", score=1.0, used_gpus=4),
+    ]
+    return SweepResult.model_validate(
+        {
+            "counts": {
+                "evaluated": 2,
+                "feasible": 2,
+                "infeasible": 0,
+                "unsupported": 0,
+                "timed_out": 0,
+                "failed": 0,
+            },
+            "candidates": candidate_records,
+            "views": {
+                "top_n": ["candidate-000002", "candidate-000001"],
+            },
+            "provenance": {
+                "search_strategy": "optimizer_guided",
+                "run_id": "adapter-test",
+                "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+                "input_fingerprint": "sha256:adapter-test",
+                "config": smart_config,
+            },
+        }
     )
 
 
@@ -171,13 +245,14 @@ def test_name_form_must_match_result_view(
         )
 
 
-def test_scalar_writes_only_the_selected_winner(monkeypatch, tmp_path) -> None:
-    candidates = [_Candidate(2.0), _Candidate(1.0)]
+def test_scalar_respects_aisimulate_selection_order(monkeypatch, tmp_path) -> None:
+    # The selected view is authoritative even if local score ranking would differ.
+    result = _real_scalar_result()
     rendered_scores = []
-    monkeypatch.setattr(adapter_module, "_workload", lambda _result: "workload")
 
     def fake_render(candidate, workload, options, *, dgd_name, renderer):
-        assert workload == "workload"
+        assert workload.isl == 1024
+        assert workload.osl == 1024
         assert options.dynamo_runtime_version == "1.5.0"
         assert dgd_name == "qwen"
         assert renderer == "aic"
@@ -187,12 +262,12 @@ def test_scalar_writes_only_the_selected_winner(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(adapter_module, "render_dgd", fake_render)
     artifacts = create_adapter().write(
         _config(),
-        result=_result(candidates),
+        result=result,
         output_dir=tmp_path,
     )
 
     assert artifacts == [Path("deployment.yaml"), Path("index.json")]
-    assert rendered_scores == [2.0]
+    assert rendered_scores == [1.0]
     assert yaml.safe_load((tmp_path / "deployment.yaml").read_text())["kind"] == (
         "DynamoGraphDeployment"
     )
@@ -279,6 +354,31 @@ def test_pareto_writes_every_selected_candidate(monkeypatch, tmp_path) -> None:
         assert yaml.safe_load((source / "kustomization.yaml").read_text())[
             "resources"
         ] == ["deploy.yaml"]
+
+
+def test_pareto_materialization_is_atomic(monkeypatch, tmp_path) -> None:
+    candidates = [_Candidate(2.0), _Candidate(1.0)]
+    monkeypatch.setattr(adapter_module, "_workload", lambda _result: "workload")
+
+    def fake_render(candidate, _workload, _options, *, dgd_name, renderer):
+        if candidate.score == 1.0:
+            raise CandidateMaterializationError("candidate cannot become a DGD")
+        return _rendered_dgd(dgd_name, candidate.score)
+
+    monkeypatch.setattr(adapter_module, "render_dgd", fake_render)
+    with pytest.raises(
+        CandidateMaterializationError, match="candidate cannot become a DGD"
+    ):
+        create_adapter().write(
+            _config(
+                name="qwen-pareto-{index}",
+                output_file="candidate-{index}.yaml",
+            ),
+            result=_result(candidates, pareto=True),
+            output_dir=tmp_path,
+        )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_adapter_rejects_empty_selection(tmp_path) -> None:
