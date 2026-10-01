@@ -90,14 +90,34 @@ class ClassifyWorkerHandler:
                     f"TYPE_STRING input named '{override}'; TYPE_STRING "
                     f"inputs: {string_inputs}."
                 )
-            return override
-        if len(string_inputs) != 1:
+            name = override
+        else:
+            if len(string_inputs) != 1:
+                raise ValueError(
+                    f"Triton classify model '{self._model.name}' has "
+                    f"{len(string_inputs)} TYPE_STRING input tensor(s); "
+                    "expected exactly 1. Pass --classify-input-name to "
+                    "disambiguate."
+                )
+            name = string_inputs[0]
+        # The handler builds [N, 1] (batched) or [1] (unbatched) request
+        # tensors, so the selected STRING input must declare dims=[1] (one
+        # string per request item) or dims=[-1] (variable, which still
+        # accepts shape 1). Reject other layouts at startup rather than
+        # letting the model pass readiness and fail every request with a
+        # Triton shape-mismatch error.
+        selected = next(i for i in self._config.input if i.name == name)
+        dims = list(selected.dims)
+        if not (len(dims) == 1 and dims[0] in (1, -1)):
             raise ValueError(
-                f"Triton classify model '{self._model.name}' has "
-                f"{len(string_inputs)} TYPE_STRING input tensor(s); expected "
-                "exactly 1. Pass --classify-input-name to disambiguate."
+                f"Triton classify model '{self._model.name}' STRING input "
+                f"'{name}' has dims={dims}; the /v1/classify path supports "
+                "only dims=[1] or dims=[-1] (one string per request item). "
+                "Change the model's config.pbtxt to one of the supported "
+                "layouts, or serve the model with --task tensor and "
+                "address it over KServe gRPC."
             )
-        return string_inputs[0]
+        return name
 
     def _resolve_output_name(self, override: Optional[str] = None) -> str:
         fp32_outputs = [

@@ -255,6 +255,47 @@ class TestInitAndResolve:
         )
         assert handler._batched is True
 
+    def _config_with_input_dims(self, dims: list[int]) -> "mc.ModelConfig":
+        """Build a classify-shaped ModelConfig with explicit STRING input
+        dims so dims-validation tests can probe shapes the shared fixture
+        does not expose."""
+        config = mc.ModelConfig(name="mock-classifier", max_batch_size=8)
+        config.input.add(name="TEXT", data_type=mc.DataType.TYPE_STRING, dims=dims)
+        config.output.add(name="probs", data_type=mc.DataType.TYPE_FP32, dims=[-1])
+        return config
+
+    def test_rank_2_string_input_dims_rejected(self) -> None:
+        # Model declares dims=[1, 1], so Triton expects request shape
+        # [N, 1, 1]. The handler always sends [N, 1], so every request
+        # would fail. Reject at startup.
+        with pytest.raises(ValueError, match=r"dims=\[1, 1\]"):
+            ClassifyWorkerHandler(
+                server=MagicMock(),
+                model=_MockModel([]),
+                triton_model_config=self._config_with_input_dims([1, 1]),
+            )
+
+    def test_multi_string_per_item_dims_rejected(self) -> None:
+        # dims=[2] means two strings per request item; the OpenAI classify
+        # request only carries one string per item, so this layout cannot
+        # be served.
+        with pytest.raises(ValueError, match=r"dims=\[2\]"):
+            ClassifyWorkerHandler(
+                server=MagicMock(),
+                model=_MockModel([]),
+                triton_model_config=self._config_with_input_dims([2]),
+            )
+
+    def test_variable_rank_1_dims_accepted(self) -> None:
+        # dims=[-1] is semantically "variable length on that axis"; it
+        # accepts shape 1 from the handler, so the layout is supported.
+        handler = ClassifyWorkerHandler(
+            server=MagicMock(),
+            model=_MockModel([]),
+            triton_model_config=self._config_with_input_dims([-1]),
+        )
+        assert handler._input_name == "TEXT"
+
 
 # ---------------------------------------------------------------------------
 # Classify happy paths

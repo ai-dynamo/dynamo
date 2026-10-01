@@ -179,6 +179,7 @@ The frontend translates the classify JSON into a Dynamo tensor request, this wor
 **Expected model shape.**
 The worker auto-detects the input/output tensor names from `config.pbtxt`.
 Any Triton model — leaf plan or ensemble — that declares exactly one `TYPE_STRING` input and exactly one `TYPE_FP32` output serves classify unchanged.
+The STRING input must declare `dims: [ 1 ]` or `dims: [ -1 ]` (one string per request item); other layouts are rejected at startup.
 An ensemble that runs tokenization inside Triton (Python-backend tokenizer plus a TensorRT plan wired through `ensemble_scheduling`) is the intended shape:
 
 ```protobuf
