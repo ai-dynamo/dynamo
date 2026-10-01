@@ -13,6 +13,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
+    pytest.mark.core,
 ]
 
 
@@ -140,6 +141,100 @@ async def test_generate_tokens_passes_delta_chunks_without_cumulative_slicing():
 
 
 @pytest.mark.asyncio
+async def test_generate_tokens_reports_cached_usage_before_finish():
+    responses = [
+        _request_output(
+            [output],
+            prompt_token_ids=[10, 11, 12],
+            num_cached_tokens=2,
+        )
+        for output in (
+            _output([1]),
+            _output([2, 3]),
+            _output([], finish_reason="length"),
+        )
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses)
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[1], [2, 3], []]
+    assert "finish_reason" not in chunks[0]
+    assert "finish_reason" not in chunks[1]
+    assert chunks[-1]["finish_reason"] == "length"
+    assert "completion_usage" not in chunks[1]
+    for chunk, completion_tokens in [(chunks[0], 1), (chunks[-1], 3)]:
+        assert chunk["completion_usage"] == {
+            "prompt_tokens": 3,
+            "completion_tokens": completion_tokens,
+            "total_tokens": 3 + completion_tokens,
+            "prompt_tokens_details": {"cached_tokens": 2},
+        }
+
+
+@pytest.mark.parametrize("completion_tokens", [0, 7])
+def test_build_completion_usage_uses_running_total(completion_tokens):
+    response = _request_output([_output([101])], prompt_token_ids=[10, 11])
+
+    usage = BaseWorkerHandler._build_completion_usage(
+        response, completion_tokens=completion_tokens
+    )
+
+    assert usage["completion_tokens"] == completion_tokens
+    assert usage["total_tokens"] == 2 + completion_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached_tokens", [0, 2])
+async def test_generate_tokens_reports_cache_count_when_it_becomes_available(
+    cached_tokens,
+):
+    responses = [
+        _request_output(
+            [_output([token_id])],
+            prompt_token_ids=[10, 11, 12],
+            num_cached_tokens=cache_count,
+        )
+        for token_id, cache_count in [(1, None), (2, cached_tokens)]
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses)
+
+    assert all("finish_reason" not in chunk for chunk in chunks)
+    assert chunks[0]["completion_usage"]["prompt_tokens_details"] is None
+    assert chunks[1]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": cached_tokens
+    }
+
+
+@pytest.mark.asyncio
+async def test_generate_tokens_reports_prompt_and_cache_metadata_changes():
+    responses = [
+        _request_output(
+            [_output([index])],
+            prompt_token_ids=list(range(prompt_tokens)),
+            num_cached_tokens=cached_tokens,
+        )
+        for index, (prompt_tokens, cached_tokens) in enumerate(
+            [(3, 0), (3, 0), (4, 0), (4, 2), (4, 2)]
+        )
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses)
+
+    assert ["completion_usage" in chunk for chunk in chunks] == [
+        True,
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert chunks[2]["completion_usage"]["prompt_tokens"] == 4
+    assert chunks[3]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 2
+    }
+
+
+@pytest.mark.asyncio
 async def test_generate_tokens_keeps_final_empty_delta_chunk_for_usage():
     responses = [
         _request_output([_output([1, 2])], prompt_token_ids=[10]),
@@ -199,8 +294,19 @@ async def test_generate_tokens_tracks_interleaved_output_indexes_independently()
         (1, [12]),
         (1, []),
     ]
-    assert chunks[2]["completion_usage"]["completion_tokens"] == 5
+    assert chunks[2]["completion_usage"]["completion_tokens"] == 4
     assert chunks[-1]["completion_usage"]["completion_tokens"] == 5
+    assert "completion_usage" not in chunks[3]
+    assert [
+        chunk["completion_usage"]["completion_tokens"]
+        for chunk in chunks
+        if "completion_usage" in chunk
+    ] == [
+        1,
+        3,
+        4,
+        5,
+    ]
 
 
 @pytest.mark.asyncio

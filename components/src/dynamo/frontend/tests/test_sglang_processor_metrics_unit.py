@@ -309,3 +309,81 @@ def test_stream_emits_multimodal_counts(module_stubs):
     assert metrics["video_count"] == 1
     # audio has zero parts, so the key is omitted from the emitted metrics.
     assert metrics.get("audio_count") is None
+
+
+@pytest.mark.parametrize("stream_interval", [1, 2])
+@pytest.mark.parametrize(
+    "stream_options,intermediate_usage",
+    [
+        (None, False),
+        ({"include_usage": True, "continuous_usage_stats": False}, False),
+        ({"include_usage": False, "continuous_usage_stats": True}, False),
+        ({"include_usage": True, "continuous_usage_stats": True}, True),
+    ],
+)
+def test_sparse_usage_survives_flushes(
+    module_stubs, stream_interval, stream_options, intermediate_usage
+):
+    module = _load_processor_module(module_stubs)
+    processor = module.SglangProcessor(
+        tokenizer=None,
+        routed_engine=FakeRoutedEngine(
+            items=[
+                {
+                    "token_ids": [101],
+                    "completion_usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 1,
+                        "total_tokens": 4,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    },
+                },
+                {
+                    "token_ids": [102],
+                    "completion_usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 2,
+                        "total_tokens": 5,
+                        "prompt_tokens_details": {"cached_tokens": 2},
+                    },
+                },
+                {"token_ids": [103]},
+                {"token_ids": [], "finish_reason": "stop"},
+            ]
+        ),
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        eos_token_ids=None,
+    )
+    processor.stream_interval = stream_interval
+
+    async def collect():
+        return [
+            item
+            async for item in processor._generate_and_stream(
+                "req-sparse",
+                {
+                    "model": "test-model",
+                    "stream": True,
+                    "stream_options": stream_options,
+                },
+                {},
+                [1, 2, 3],
+                _PostProcessor(),
+            )
+        ]
+
+    items = asyncio.run(collect())
+    expected_counts = [1, 2, 3, 3] if stream_interval == 1 else [1, 3, 3]
+    assert len(items) == len(expected_counts)
+    for index, (item, count) in enumerate(zip(items, expected_counts)):
+        expected_cache = 0 if index == 0 else 2
+        assert item["data"]["llm_metrics"]["cached_tokens"] == expected_cache
+        assert ("usage" in item["data"]) == (
+            intermediate_usage or index == len(items) - 1
+        )
+        if "usage" in item["data"]:
+            usage = item["data"]["usage"]
+            assert usage["completion_tokens"] == count
+            assert usage["total_tokens"] == 3 + count
+            assert usage["prompt_tokens_details"] == {"cached_tokens": expected_cache}

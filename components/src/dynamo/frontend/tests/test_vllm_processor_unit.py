@@ -1227,6 +1227,8 @@ class _FakeOutputProcessor:
 
 
 class _FakePostProcessor:
+    reasoning_token_total = 0
+
     def process_output(self, output):
         return {
             "index": output.index,
@@ -1534,19 +1536,28 @@ def _base_preproc():
     }
 
 
-async def _run_generate(processor, preproc, *, mm_routing_info=None, context=None):
+async def _run_generate(
+    processor,
+    preproc,
+    *,
+    mm_routing_info=None,
+    context=None,
+    request=None,
+    post_processors=None,
+):
     vllm_preproc = SimpleNamespace(
         sampling_params=SimpleNamespace(n=1),
         request_id="vllm-request",
         external_req_id=None,
     )
-    post_processors = {0: _FakePostProcessor()}
+    if post_processors is None:
+        post_processors = {0: _FakePostProcessor()}
 
     return [
         item
         async for item in processor._generate_and_stream(
             "request-id",
-            {"model": MODEL},
+            request if request is not None else {"model": MODEL},
             preproc,
             preproc["token_ids"],
             vllm_preproc,
@@ -1558,6 +1569,123 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stream,stream_options,intermediate_usage",
+        [
+            (True, None, False),
+            (True, {"include_usage": True}, False),
+            (True, {"include_usage": True, "continuous_usage_stats": False}, False),
+            (True, {"include_usage": False, "continuous_usage_stats": True}, False),
+            (True, {"include_usage": True, "continuous_usage_stats": True}, True),
+            (False, None, True),
+        ],
+    )
+    async def test_stream_usage_options_with_sparse_backend_metadata(
+        self, vllm_processor_module, stream, stream_options, intermediate_usage
+    ):
+        responses = [
+            {
+                "token_ids": [101],
+                "completion_usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 1,
+                    "total_tokens": 4,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                },
+            },
+            {"token_ids": [102, 103]},
+            {
+                "token_ids": [104],
+                "completion_usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 4,
+                    "total_tokens": 8,
+                    "prompt_tokens_details": {"cached_tokens": 2},
+                },
+            },
+            {"token_ids": [105]},
+            {"token_ids": [], "finish_reason": "stop"},
+        ]
+        processor = _make_processor(vllm_processor_module, _FakeRoutedEngine(responses))
+        chunks = await _run_generate(
+            processor,
+            _base_preproc(),
+            request={
+                "model": MODEL,
+                "stream": stream,
+                "stream_options": stream_options,
+            },
+        )
+
+        assert len(chunks) == 5
+        assert ["usage" in chunk["data"] for chunk in chunks] == [
+            intermediate_usage,
+            intermediate_usage,
+            intermediate_usage,
+            intermediate_usage,
+            True,
+        ]
+        expected_counts = [(3, 1, 0), (3, 3, 0), (4, 4, 2), (4, 5, 2), (4, 5, 2)]
+        for chunk, (prompt, completion, cached) in zip(chunks, expected_counts):
+            if "usage" in chunk["data"]:
+                usage = chunk["data"]["usage"]
+                assert usage["prompt_tokens"] == prompt
+                assert usage["completion_tokens"] == completion
+                assert usage["total_tokens"] == prompt + completion
+                assert usage["prompt_tokens_details"] == {"cached_tokens": cached}
+        assert responses[0]["completion_usage"]["completion_tokens"] == 1
+
+    @pytest.mark.asyncio
+    async def test_stream_usage_retains_metadata_from_suppressed_chunk(
+        self, vllm_processor_module
+    ):
+        class SuppressFirstDelta(_FakePostProcessor):
+            def __init__(self):
+                self.first = True
+
+            def process_output(self, output):
+                if self.first:
+                    self.first = False
+                    return None
+                return super().process_output(output)
+
+        processor = _make_processor(
+            vllm_processor_module,
+            _FakeRoutedEngine(
+                [
+                    {
+                        "token_ids": [101, 102],
+                        "completion_usage": {
+                            "prompt_tokens": 3,
+                            "completion_tokens": 2,
+                            "total_tokens": 5,
+                            "prompt_tokens_details": {"cached_tokens": 2},
+                        },
+                    },
+                    {"token_ids": [103]},
+                ]
+            ),
+        )
+        chunks = await _run_generate(
+            processor,
+            _base_preproc(),
+            request={
+                "model": MODEL,
+                "stream": True,
+                "stream_options": {
+                    "include_usage": True,
+                    "continuous_usage_stats": True,
+                },
+            },
+            post_processors={0: SuppressFirstDelta()},
+        )
+        assert "data" not in chunks[0]
+        usage = chunks[1]["data"]["usage"]
+        assert usage["completion_tokens"] == 3
+        assert usage["total_tokens"] == 6
+        assert usage["prompt_tokens_details"] == {"cached_tokens": 2}
+
     @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module
