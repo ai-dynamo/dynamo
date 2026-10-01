@@ -80,14 +80,25 @@ async fn later_pool_slots_share_the_original_deadline() {
 #[tokio::test(start_paused = true)]
 async fn retry_wait_is_capped_and_last_failure_is_preserved() {
     let mut transport = config();
-    transport.retry_interval = Duration::from_secs(1);
+    transport.retry_interval = Duration::from_millis(60);
+    let attempts = Cell::new(0);
     let started = Instant::now();
-    let error = connect_pool_with("test", "in-memory", transport, false, |_, _| async {
-        Err::<(), _>(io::Error::other("peer rejected connection"))
+    let error = connect_pool_with("test", "in-memory", transport, false, |_, _| {
+        let attempt = attempts.get();
+        attempts.set(attempt + 1);
+        async move {
+            Err::<(), _>(io::Error::other(if attempt == 0 {
+                "initial connection failure"
+            } else {
+                "latest connection failure"
+            }))
+        }
     })
     .await
     .unwrap_err();
     assert_eq!(started.elapsed(), Duration::from_millis(100));
-    assert!(error.to_string().contains("peer rejected connection"));
-    assert!(error.to_string().contains("after 1 attempts"));
+    assert_eq!(attempts.get(), 2);
+    assert!(error.to_string().contains("latest connection failure"));
+    assert!(!error.to_string().contains("initial connection failure"));
+    assert!(error.to_string().contains("after 2 attempts"));
 }

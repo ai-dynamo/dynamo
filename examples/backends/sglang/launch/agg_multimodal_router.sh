@@ -127,6 +127,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     python -m dynamo.sglang \
         --model-path "${MODEL}" \
         --served-model-name "${MODEL}" \
+        --frontend-decoding \
         --page-size "${BLOCK_SIZE}" \
         --context-length "${MAX_MODEL_LEN}" \
         --tp 1 \
@@ -180,7 +181,7 @@ done
 echo
 echo "Architecture: Rust frontend (MM-aware KV router) -> ${NUM_WORKERS}x SGLang workers"
 echo "  - mm_hashes forwarded to SGLang GenerateReqInput.mm_hashes -> matching pad_value"
-echo "  - Image dims via header-only HTTP fetch (Range: bytes=0-65535)"
+echo "  - Images and videos decoded once in the frontend and transferred over NIXL"
 echo "  - No PyO3, no GIL, no Python deps in the routing path"
 echo
 echo "Press Ctrl+C to stop all services"

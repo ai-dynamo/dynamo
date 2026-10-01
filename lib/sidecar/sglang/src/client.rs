@@ -33,10 +33,8 @@ pub struct Discovery {
     pub server_info: Value,
 }
 
-/// `bootstrap`: true when called before `dynamo_backend_common::run` installs
-/// the global tracing subscriber (the `bootstrap_discover` path during
-/// `from_args()`), false once running inside `LLMEngine::start` (via
-/// `Pool::connect`) where the subscriber is live.
+/// `bootstrap`: true for synchronous constructors before logging setup;
+/// false for deferred launcher discovery and `LLMEngine::start`.
 pub async fn connect(
     uri: &GrpcEndpoint,
     cfg: &GrpcTransportConfig,
@@ -64,13 +62,8 @@ pub async fn connect(
                 let now = Instant::now();
                 if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
                 {
-                    // eprintln! on the bootstrap path: tracing events emitted before
-                    // dynamo_backend_common::run() installs the global subscriber are
-                    // silently dropped, which would make this warning exactly as
-                    // invisible as the debug! it replaced. On the post-init path
-                    // (Pool::connect, called from LLMEngine::start), route through
-                    // tracing like everything else so the line gets levels,
-                    // timestamps, and filtering.
+                    // Synchronous constructors may precede logging setup;
+                    // deferred launcher discovery already has a subscriber.
                     if bootstrap {
                         eprintln!(
                             "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",

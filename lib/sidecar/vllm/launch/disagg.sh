@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Disaggregated serving through vLLM's native gRPC servers (2 GPUs).
+# Disaggregated serving through vLLM's native gRPC servers (2 workers).
 
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -82,7 +81,7 @@ if [[ -z "$GPU_MEM_ARGS" ]]; then
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching vLLM Native-gRPC Sidecar Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching vLLM Native-gRPC Sidecar Disaggregated Serving (2 workers)" "$MODEL" "$HTTP_PORT" \
     "Decode:      GPU ${VLLM_DECODE_GPU}, gRPC 127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     "Prefill:     GPU ${VLLM_PREFILL_GPU}, gRPC 127.0.0.1:${VLLM_PREFILL_GRPC_PORT}"
 
