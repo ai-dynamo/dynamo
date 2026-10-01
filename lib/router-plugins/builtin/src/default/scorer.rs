@@ -218,8 +218,13 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             } else {
                 context.prompt_tokens()
             };
-            let prefill = (self.prepared.block_size.divide(raw_tokens as f64) - credit).max(0.0);
-            self.prefill_load_scale * prefill + load.decode_cost_blocks() + request_cost
+            crate::credit::aggregated_cost(
+                self.prepared.block_size.divide(raw_tokens as f64),
+                credit,
+                self.prefill_load_scale,
+                load.decode_cost_blocks(),
+                request_cost,
+            )
         };
         let cost = logit * candidate.preferred_taint_multiplier().unwrap_or(1.0);
         Ok(cost)
