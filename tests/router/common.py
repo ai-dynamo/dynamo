@@ -16,7 +16,7 @@ import aiohttp
 import requests
 
 from dynamo.llm import (
-    AicPerfConfig,
+    AisPerfConfig,
     KvRouter,
     KvRouterConfig,
     compute_block_hash_for_seq,
@@ -25,11 +25,13 @@ from dynamo.prometheus_names import frontend_service, name_prefix
 from tests.router.helper import (
     assert_event_dumps_equal,
     get_runtime,
+    get_stored_kv_event_counts,
     managed_runtime,
     parse_sse_json_chunks,
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
+    send_router_chat_request,
     verify_response_timing,
     wait_for_frontend_ready,
     wait_for_indexer_workers_active,
@@ -41,6 +43,7 @@ from tests.utils.router_logs import (
     select_kv_event_diagnostics,
     wait_for_kv_event_diagnostics,
 )
+from tests.utils.router_nvext import require_router_worker_id
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
@@ -282,8 +285,7 @@ def _test_kv_event_publisher_disabled_diagnostic(
 
     expected_worker_ids = asyncio.run(discover_diagnostic_worker_ids())
     expected_serving_endpoint = (
-        f"{diagnostic_workers.namespace}/"
-        f"{diagnostic_workers.component_name}/generate"
+        f"{diagnostic_workers.namespace}/{diagnostic_workers.component_name}/generate"
     )
     expected_dp_ranks = ",".join(str(rank) for rank in range(expected_rank_count))
 
@@ -552,6 +554,155 @@ def _test_router_two_routers(
     finally:
         for kv_router in kv_routers:
             kv_router.__exit__(None, None, None)
+
+
+def _test_frontend_kv_routing(
+    *,
+    frontend_port: int,
+    system_ports: list[int],
+    namespace: str,
+    model_name: str,
+    block_size: int,
+    dp_ranks: tuple[int, ...] = (0,),
+) -> None:
+    """Verify engine events drive HTTP routing to two independently warmed ranks."""
+    assert len(system_ports) * len(dp_ranks) == 2
+    url = f"http://localhost:{frontend_port}/v1/chat/completions"
+    prompts = [
+        "Amber rabbits explore quiet meadows. " * 96,
+        "Violet submarines navigate distant oceans. " * 96,
+    ]
+
+    async def run_test() -> None:
+        with managed_runtime() as runtime:
+            worker_ids = sorted(
+                await poll_for_worker_instances(
+                    runtime.endpoint(f"{namespace}.backend.generate"), len(system_ports)
+                )
+            )
+            assert len(worker_ids) == len(system_ports), worker_ids
+            targets = [
+                (worker_id, rank) for worker_id in worker_ids for rank in dp_ranks
+            ]
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as session:
+
+                async def send(
+                    prompt: str,
+                    *,
+                    is_query_only: bool = False,
+                    target: tuple[int, int] | None = None,
+                ) -> tuple[tuple[int, int], float | None]:
+                    """Send one request and return its selected target and KV hit rate."""
+                    payload = {
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 8,
+                        "temperature": 0,
+                        "stream": True,
+                        "nvext": {
+                            "extra_fields": ["worker_id", "timing"],
+                            "annotations": ["query_instance_id:"]
+                            if is_query_only
+                            else [],
+                        },
+                    }
+                    headers = (
+                        {
+                            "x-dynamo-worker-instance-id": str(target[0]),
+                            "x-dynamo-dp-rank": str(target[1]),
+                        }
+                        if target is not None
+                        else None
+                    )
+                    nvext, has_generated_text = await send_router_chat_request(
+                        session, url, payload, headers
+                    )
+                    selected = require_router_worker_id({"nvext": nvext})
+                    selected_target = (
+                        selected["decode_worker_id"],
+                        selected["decode_dp_rank"],
+                    )
+                    assert selected_target in targets, selected
+                    assert (
+                        selected["prefill_worker_id"],
+                        selected["prefill_dp_rank"],
+                    ) == selected_target, selected
+                    hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
+                    if is_query_only:
+                        assert not has_generated_text, nvext
+                        assert len(nvext.get("token_ids", [])) >= block_size * 4, nvext
+                    else:
+                        assert (
+                            has_generated_text
+                        ), "Request completed without generating text"
+                        assert isinstance(hit_rate, (int, float)), nvext
+                        assert 0 <= hit_rate <= 1, nvext
+                    return selected_target, hit_rate
+
+                baselines = {
+                    port: await get_stored_kv_event_counts(session, port)
+                    for port in system_ports
+                }
+                for prompt in prompts:
+                    await send(prompt, is_query_only=True)
+                for prompt, target in zip(prompts, targets):
+                    selected, _ = await send(prompt, target=target)
+                    assert selected == target, (selected, target)
+
+                deadline = time.monotonic() + 60
+                observed = []
+                counts = {}
+                while time.monotonic() < deadline:
+                    # Pinned completions expose timing without warming the other target.
+                    observed = [
+                        await send(prompt, target=target)
+                        for prompt, target in zip(prompts, targets)
+                    ]
+                    counts = {
+                        port: await get_stored_kv_event_counts(session, port)
+                        for port in system_ports
+                    }
+                    if all(
+                        selected == expected
+                        and hit_rate is not None
+                        and hit_rate >= 0.5
+                        for (selected, hit_rate), expected in zip(observed, targets)
+                    ) and all(
+                        all(
+                            current > baseline
+                            for current, baseline in zip(counts[port], baselines[port])
+                        )
+                        for port in system_ports
+                    ):
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    raise AssertionError(
+                        f"KV events did not converge: expected targets={targets}, "
+                        f"routing={observed}, Stored counters={counts}, baselines={baselines}"
+                    )
+
+                for prompt, target in zip(prompts, targets):
+                    selected, _ = await send(prompt, is_query_only=True)
+                    assert selected == target, (selected, target)
+
+                for prompt_index in (0, 0, 1, 0, 1, 1):
+                    selected, hit_rate = await send(prompts[prompt_index])
+                    assert selected == targets[prompt_index], (
+                        prompt_index,
+                        selected,
+                        targets,
+                    )
+                    assert hit_rate is not None and hit_rate >= 0.5, (
+                        prompt_index,
+                        selected,
+                        hit_rate,
+                    )
+
+    asyncio.run(run_test())
 
 
 def _test_session_affinity(
@@ -2314,8 +2465,7 @@ def _test_router_indexers_sync(
                     "Standalone B",
                 )
                 logger.info(
-                    "All 4 dumps match: Router 1, Router 2, "
-                    "Standalone A, Standalone B"
+                    "All 4 dumps match: Router 1, Router 2, Standalone A, Standalone B"
                 )
 
     async def test_sync():
@@ -2336,7 +2486,7 @@ def _test_router_decisions_disagg(
     test_payload: dict,
     store_backend: str = "etcd",
     request_plane: str = "nats",
-    router_aic_config: Optional[dict[str, Any]] = None,
+    router_ais_config: Optional[dict[str, Any]] = None,
     enable_bootstrap: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
@@ -2359,7 +2509,7 @@ def _test_router_decisions_disagg(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        router_aic_config: Optional AIC router perf-model config for frontend KV routing.
+        router_ais_config: Optional AIS router perf-model config for frontend KV routing.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -2373,7 +2523,7 @@ def _test_router_decisions_disagg(
         store_backend,
         request_plane=request_plane,
         min_initial_workers=decode_workers.num_workers,
-        router_aic_config=router_aic_config,
+        router_ais_config=router_ais_config,
     ):
         # Start KV router frontend - uses decode_workers namespace for discovery
         # The frontend will auto-discover both prefill and decode workers
@@ -2807,7 +2957,7 @@ def _test_router_decisions(
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
     standalone_selector_url: Optional[str] = None,
-    router_aic_config: Optional[dict[str, Any]] = None,
+    router_ais_config: Optional[dict[str, Any]] = None,
     router_predicted_ttl_secs: Optional[float] = None,
     router_approximate_cache_policy: str = "ttl",
     initial_wait: float = 0.25,
@@ -2834,7 +2984,7 @@ def _test_router_decisions(
         block_size: KV cache block size. Defaults to 8.
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with the configured retention policy (--no-kv-events mode).
-        router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
+        router_ais_config: Optional AIS router perf-model config for direct KvRouter tests.
         router_approximate_cache_policy: Retention policy for the local approximate indexer.
 
     Raises:
@@ -2856,14 +3006,14 @@ def _test_router_decisions(
             router_event_threads=router_event_threads,
             router_track_prefill_tokens=True,
             router_prefill_load_model=(
-                "aic" if router_aic_config is not None else "none"
+                "ais" if router_ais_config is not None else "none"
             ),
             router_predicted_ttl_secs=router_predicted_ttl_secs,
             router_approximate_cache_policy=router_approximate_cache_policy,
         )
-        aic_perf_config = (
-            AicPerfConfig(**router_aic_config)
-            if router_aic_config is not None
+        ais_perf_config = (
+            AisPerfConfig(config=router_ais_config)
+            if router_ais_config is not None
             else None
         )
 
@@ -2872,7 +3022,7 @@ def _test_router_decisions(
                 endpoint=endpoint,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
-                aic_perf_config=aic_perf_config,
+                ais_perf_config=ais_perf_config,
             ),
             num_workers=expected_num_instances,
             engine_workers=engine_workers,
