@@ -3056,84 +3056,121 @@ async fn tool_choice_matrix_non_force_required_no_injection_bare_json() {
     assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
 }
 
-/// Non-force parser + required + reasoning</think>JSON (the Qwen3.x production
-/// shape; verified end-to-end against Qwen3.6-35B-A3B-FP8). Parser strips
-/// reasoning, jail gets JSON.
+/// Non-force parser + required + reasoning</think>JSON (the Qwen3.x shape
+/// when the backend gates the grammar until `</think>`; verified end-to-end
+/// against Qwen3.6-35B-A3B-FP8). Parser strips reasoning, jail gets JSON.
 #[tokio::test]
 async fn tool_choice_matrix_non_force_required_prompt_injected_with_close_marker() {
     let stream_text = r#"Let me check.</think>[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
-    let preprocessor = build_preprocessor(Some("qwen3"), Some("hermes"));
-    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(stream_text), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning,
-        content,
-        tool_calls,
-        ..
-    } = drain_stream(output_stream).await;
+    for tool_call_parser in ["hermes", "qwen3_coder"] {
+        let preprocessor = build_preprocessor(Some("qwen3"), Some(tool_call_parser));
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(stream_text), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            ..
+        } = drain_stream(output_stream).await;
 
-    let case = "4: non-force + required + prompt_injected=true + reasoning</think>JSON";
-    assert_eq!(
-        reasoning.trim(),
-        "Let me check.",
-        "{case}: reasoning_content should hold only the pre-</think> text, got: {reasoning:?}"
-    );
-    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+        let case = format!(
+            "4: non-force + required + prompt_injected=true + reasoning</think>JSON ({tool_call_parser})"
+        );
+        assert_eq!(
+            reasoning.trim(),
+            "Let me check.",
+            "{case}: reasoning_content should hold only the pre-</think> text, got: {reasoning:?}"
+        );
+        assert_clean_tool_call(&case, &content, &tool_calls, "San Francisco");
+    }
 }
 
 /// CASE 5 — non-force parser + required + `prompt_injected_reasoning=true`
-/// + bare JSON (no `</think>`). Documents the **backend contract** rather
-/// than asserting recovery: when `--dyn-reasoning-parser X` is set, vLLM's
-/// auto-forward in `components/src/dynamo/vllm/main.py:506-507` instantiates
-/// a reasoner whose `should_fill_bitmask` gate (vLLM
-/// `v1/structured_output/__init__.py:301`) keeps the xgrammar bitmask off
-/// until `</think>` appears in the output. Consequently any "bare guided
-/// JSON" emitted before `</think>` was never grammar-constrained — it's a
-/// backend-bug shape, not a normal production output.
-///
-/// This test pins the current behavior so future regressions are loud: if
-/// we later add an EOF fallback to `BasicReasoningParser` to flush
-/// accumulated reasoning as content, this assertion needs to flip.
+/// + bare JSON (no `</think>`). vLLM's reasoner keeps the grammar off until
+/// `</think>`, but SGLang without `--reasoning-parser` constrains decoding
+/// from the first token, so Qwen3 emits bare JSON for a forced tool call.
+/// The stream-shape detector must send it to the tool-call jail instead of
+/// `reasoning_content`, with the parser Qwen3.x models deploy with
+/// (`qwen3_coder`) as well as `hermes`.
 #[tokio::test]
-async fn tool_choice_matrix_non_force_required_prompt_injected_bare_json_contract() {
+async fn tool_choice_matrix_non_force_required_prompt_injected_bare_json_recovers() {
     let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
-    let preprocessor = build_preprocessor(Some("qwen3"), Some("hermes"));
-    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(bare_json), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning,
-        content,
-        tool_calls,
-        ..
-    } = drain_stream(output_stream).await;
+    for tool_call_parser in ["hermes", "qwen3_coder"] {
+        let preprocessor = build_preprocessor(Some("qwen3"), Some(tool_call_parser));
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(bare_json), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output_stream).await;
 
-    let case = "5 (contract): non-force + required + prompt_injected=true + bare JSON";
-    assert!(
-        tool_calls.is_empty(),
-        "{case}: contract case currently extracts no tool_calls (backend bug shape), got: {tool_calls:?}"
-    );
-    assert!(
-        content.is_empty(),
-        "{case}: content must remain empty (no leak), got: {content:?}"
-    );
-    assert!(
-        reasoning.contains("get_weather"),
-        "{case}: parser pins the JSON in reasoning_content under the broken contract, got: {reasoning:?}"
-    );
+        let case = format!(
+            "5: non-force + required + prompt_injected=true + bare JSON ({tool_call_parser})"
+        );
+        assert!(
+            reasoning.is_empty(),
+            "{case}: guided JSON must not be classified as reasoning_content, got: {reasoning:?}"
+        );
+        assert_clean_tool_call(&case, &content, &tool_calls, "San Francisco");
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+        );
+    }
+}
+
+/// Qwen3 + named tool_choice + `prompt_injected_reasoning=true` + bare
+/// parameters object. Exercises the named SingleObject immediate-jail path.
+#[tokio::test]
+async fn tool_choice_qwen3_named_prompt_injected_bare_params_recovers() {
+    let bare_params = r#"{"location":"San Francisco"}"#;
+    for tool_call_parser in ["hermes", "qwen3_coder"] {
+        let preprocessor = build_preprocessor(Some("qwen3"), Some(tool_call_parser));
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Named(
+            "get_weather".to_string().into(),
+        ));
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(bare_params), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output_stream).await;
+
+        let case = format!("Qwen3 named + prompt_injected=true + bare params ({tool_call_parser})");
+        assert!(
+            reasoning.is_empty(),
+            "{case}: guided JSON must not be classified as reasoning_content, got: {reasoning:?}"
+        );
+        assert_clean_tool_call(&case, &content, &tool_calls, "San Francisco");
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+        );
+    }
 }
 
 /// `enable_thinking=true` still preserves genuine reasoning followed by a

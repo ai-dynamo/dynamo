@@ -6266,6 +6266,9 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Prompt-seeded parsers whose forced `tool_choice` output may be bare
+    /// guided JSON. A backend without native reasoning gating, such as SGLang
+    /// without `--reasoning-parser`, constrains decoding from the first token.
     fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
         matches!(
             reasoning_parser,
@@ -6277,12 +6280,13 @@ impl OpenAIPreprocessor {
                     | "glm45"
                     | "minimax_m3"
                     | "minimax-m3"
+                    | "qwen3"
             )
         )
     }
 
     fn skips_structured_response_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
-        matches!(reasoning_parser, Some("qwen3" | "kimi_k3" | "kimi-k3"))
+        matches!(reasoning_parser, Some("kimi_k3" | "kimi-k3"))
             || Self::skips_guided_json_when_prompt_injected(reasoning_parser)
     }
 
