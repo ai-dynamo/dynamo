@@ -52,22 +52,30 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ##### Reserved runtime init container name
 
-**Change:** An init container named `runtime` activates Dynamo sidecar mode in DGD components
-and standalone DCDs, in both API versions. It must have an image and `restartPolicy: Always`.
-Dynamo defaults and runtime-version resolution target this container; `main` runs the engine.
+**Change:** Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates Dynamo
+sidecar mode. It must have an image and `restartPolicy: Always`. Dynamo defaults and
+runtime-version resolution target `spec.podTemplate.spec.initContainers[name=runtime]`;
+`spec.podTemplate.spec.containers[name=main]` runs the engine. These paths use the standalone
+v1beta1 DCD layout; for DGD components, replace the leading `spec.podTemplate` with
+`spec.components[*].podTemplate`. In v1alpha1, the corresponding paths are
+`spec.extraPodSpec.initContainers[name=runtime]` and `spec.extraPodSpec.mainContainer`;
+for DGD services, replace the leading `spec.extraPodSpec` with
+`spec.services.<service-name>.extraPodSpec`.
 Only worker, prefill, and decode components support this mode. Multinode, enabled checkpoint,
 GPU memory service, and failover are rejected because they are not currently supported in this
 mode. Support for these features is planned for a future release.
 
-**Affected:** Any deployment with an init container named `runtime`, including an unrelated
-setup container using that name.
+**Affected:** Any deployment with `spec.podTemplate.spec.initContainers[name=runtime]`,
+including an unrelated setup container using that name.
 
-**Action:** Before upgrading, rename unrelated init containers named `runtime`. For native
-Dynamo sidecars, use `runtime` as the init-container name and specify `restartPolicy: Always`.
+**Action:** Before upgrading, rename unrelated containers at
+`spec.podTemplate.spec.initContainers[name=runtime]`. For native Dynamo sidecars, declare
+`spec.podTemplate.spec.initContainers[name=runtime]` and specify `restartPolicy: Always`.
 
-**Existing deployments:** Components without a `runtime` init container retain their current
-mode. Existing components with that name adopt sidecar behavior when reconciled, which can
-change the rendered pod and trigger a rollout. Invalid combinations are rejected on updates.
+**Existing deployments:** Components without `spec.podTemplate.spec.initContainers[name=runtime]`
+retain their current mode. Existing components with that entry adopt sidecar behavior when
+reconciled, which can change the rendered pod and trigger a rollout. Invalid combinations are
+rejected on updates.
 
 #### Operator behavior breaking changes
 
