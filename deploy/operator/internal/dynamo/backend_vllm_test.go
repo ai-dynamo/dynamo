@@ -565,6 +565,39 @@ func TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand(t *testing
 	}
 }
 
+// TestVLLMBackend_UpdateContainer_LeavesShellScriptInCommandUntouched covers a launch
+// script held in a non-python Command. The injectors cannot extend such a script, and one
+// that manages its own multinode launch breaks if the operator puts a second Ray head in
+// front of it or replaces the worker command, so it must come through as written.
+func TestVLLMBackend_UpdateContainer_LeavesShellScriptInCommandUntouched(t *testing.T) {
+	scripts := map[string]string{
+		"self-managed ray": `if [ "$LWS_WORKER_INDEX" = 0 ]; then ray start --head --port=6379 && ` +
+			`exec python3 -m dynamo.vllm --tensor-parallel-size 16 --distributed-executor-backend ray; ` +
+			`else exec ray start --address=$LWS_LEADER_ADDRESS:6379 --block; fi`,
+		"self-managed elastic EP": `if [ "$LWS_WORKER_INDEX" = 0 ]; then ray start --head --port=6379 && ` +
+			`exec python3 -m dynamo.vllm --enable-elastic-ep --data-parallel-size 2 --data-parallel-backend ray; ` +
+			`else exec ray start --address=$LWS_LEADER_ADDRESS:6379 --block; fi`,
+	}
+	modes := map[string]map[string]string{
+		"no origin version": {},
+		"ray annotation":    {commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"},
+		"origin 1.0.0 (mp)": {commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0"},
+	}
+	for scriptName, script := range scripts {
+		for modeName, annotations := range modes {
+			for _, role := range []Role{RoleLeader, RoleWorker} {
+				t.Run(scriptName+"/"+modeName+"/"+string(role), func(t *testing.T) {
+					container := &corev1.Container{Command: []string{"sh", "-c", script}}
+					component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{Annotations: annotations})
+					require.NoError(t, (&VLLMBackend{}).UpdateContainer(container, 2, role, component, "test-service", &LWSMultinodeDeployer{}, staticContainerGPUCount(8)))
+					require.Equal(t, []string{"sh", "-c", script}, container.Command)
+					require.Empty(t, container.Args)
+				})
+			}
+		}
+	}
+}
+
 func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 	backend := &VLLMBackend{}
 

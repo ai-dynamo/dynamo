@@ -318,9 +318,15 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
 func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) {
-	// Size from Command and Args together: Kubernetes joins them into one argv, so a
-	// flag in either one changes the topology vLLM launches.
-	args := parseVLLMLaunchArgs(getExpandedCommandLine(container))
+	// Size from Command too only when Command is the python interpreter: that is the one
+	// Command form the injectors below extend, by appending to Args. They cannot rewrite a
+	// shell script or wrapper held in Command, so that launch is sized from Args alone and a
+	// multinode launch it manages itself is left intact.
+	commandLine := getExpandedArgs(container)
+	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
+		commandLine = getExpandedCommandLine(container)
+	}
+	args := parseVLLMLaunchArgs(commandLine)
 	needsDistributed := needsTensorParallelMultinodeLaunch(args, containerGPUs)
 
 	if needsDistributed && shouldUseMpBackend(annotations) {
@@ -345,6 +351,16 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
 	}
+}
+
+// getExpandedArgs will expand the containers args in the case where
+// the args are joined together with spaces as an individual string (i.e. "python3 -m dynamo.vllm")
+func getExpandedArgs(container *corev1.Container) []string {
+	expandedArgs := []string{}
+	for _, arg := range container.Args {
+		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
+	}
+	return normalizeVLLMFlags(expandedArgs)
 }
 
 // shouldUseMpBackend determines whether to use multiprocessing (mp) or Ray for vLLM
@@ -575,9 +591,9 @@ func IsElasticEPRayLaunch(container *corev1.Container) bool {
 // tokens, so flag detection works whether the manifest puts flags in Command or
 // Args and whether they are separate list items or a single combined string.
 //
-// TODO: an "sh -c" script is split on whitespace here rather than read the way
-// the shell reads it, so a flag inside a shell comment, such as
-// "# --tensor-parallel-size 4", counts as a real occurrence and can be the one
+// TODO: an "sh -c" script is split on whitespace here (and in getExpandedArgs)
+// rather than read the way the shell reads it, so a flag inside a shell comment
+// ("# --tensor-parallel-size 4") counts as a real occurrence and can be the one
 // parseVLLMLaunchArgs resolves, although vLLM never receives it. Either drop
 // everything from a word starting with "#" to the end of its line before
 // splitting, or parse the script with a shell parser such as mvdan.cc/sh to get
@@ -745,10 +761,11 @@ func (a vllmLaunchArgs) WorldSize() int64 {
 	return a.TensorParallelSize * a.PipelineParallelSize
 }
 
-// parseVLLMLaunchArgs reads an already-normalized list (see getExpandedCommandLine)
-// in one pass. Each occurrence of a flag overwrites the field it sets, so a repeated
-// flag resolves to its final occurrence, as it does in vLLM's argparse. A size value
-// that does not parse as an integer leaves the earlier value in place.
+// parseVLLMLaunchArgs reads an already-normalized list (see getExpandedArgs /
+// getExpandedCommandLine) in one pass. Each occurrence of a flag overwrites the field it
+// sets, so a repeated flag resolves to its final occurrence, as it does in vLLM's
+// argparse. A size value that does not parse as an integer leaves the earlier value in
+// place.
 func parseVLLMLaunchArgs(expandedArgs []string) vllmLaunchArgs {
 	args := vllmLaunchArgs{TensorParallelSize: 1, PipelineParallelSize: 1, DataParallelSize: 1}
 	for i, arg := range expandedArgs {
