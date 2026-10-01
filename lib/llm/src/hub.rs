@@ -239,7 +239,6 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     }
 }
 
-/// Download directly through the selected ModelExpress provider into the configured cache.
 async fn mx_download_direct(
     model_name: &str,
     provider: MxModelProvider,
@@ -481,7 +480,6 @@ mod tests {
         .await;
     }
 
-    /// Route NGC URIs explicitly while preserving the default Hugging Face provider.
     #[test]
     fn provider_for_routes_ngc_uris_to_ngc() {
         assert_eq!(
@@ -500,7 +498,6 @@ mod tests {
 
     const NGC_TEST_MODEL: &str = "ngc://test-org/test-team/test-model:v1";
 
-    /// Build ModelExpress's NGC cache layout for `NGC_TEST_MODEL` in `cache_root`.
     fn build_ngc_cache(cache_root: &Path, files: &[&str]) -> PathBuf {
         let model_dir = cache_root.join("ngc/test-org/test-team/models/test-model/v1");
         fs::create_dir_all(&model_dir).unwrap();
@@ -510,7 +507,6 @@ mod tests {
         model_dir
     }
 
-    /// Distinguish metadata-only NGC caches from caches that can satisfy a full download.
     #[test]
     fn test_ngc_cached_path_requires_weights_for_full_download() {
         let temp = TempDir::new().unwrap();
@@ -534,7 +530,6 @@ mod tests {
         assert_eq!(lookup(false).as_deref(), Some(model_dir.as_path()));
     }
 
-    /// Reuse a complete NGC cache without contacting ModelExpress or NGC.
     #[serial_test::serial]
     #[tokio::test]
     async fn test_from_hf_ngc_cache_first() {

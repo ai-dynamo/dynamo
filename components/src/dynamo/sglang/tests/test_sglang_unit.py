@@ -1644,7 +1644,6 @@ def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
 async def test_parse_args_resolves_ngc_before_server_args(
     monkeypatch, tmp_path, load_format
 ):
-    """Fetch NGC before ServerArgs construction, including with ModelExpress."""
     model_uri = "ngc://test-org/test-team/test-model:v1"
     local_path = str(tmp_path)
     fetch = AsyncMock(return_value=local_path)
@@ -1652,7 +1651,6 @@ async def test_parse_args_resolves_ngc_before_server_args(
     monkeypatch.delenv(SNAPSHOT_CONTROL_DIR_ENV, raising=False)
 
     def resolve(parsed_args):
-        """Check that ServerArgs receives the fetched directory for model config."""
         assert parsed_args.model_path == local_path
         return _dcp_server_args_stub(
             model_path=parsed_args.model_path,
@@ -1692,7 +1690,6 @@ async def test_parse_args_resolves_ngc_before_server_args(
 async def test_ngc_requires_valid_served_name_before_fetch(
     monkeypatch, served_model_name
 ):
-    """Reject missing or colon-containing SGLang served names before downloading."""
     fetch = AsyncMock()
     monkeypatch.setattr(sglang_args, "fetch_model", fetch)
     argv = ["--model", "ngc://test-org/test-team/test-model:v1"]

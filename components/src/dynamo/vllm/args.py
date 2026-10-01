@@ -69,7 +69,6 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
 
     @property
     def model_source_path(self) -> str:
-        """Return the fetched NGC directory or the original HF/local model source."""
         return (
             self.engine_args.model if needs_local_model_path(self.model) else self.model
         )

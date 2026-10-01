@@ -19,5 +19,4 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
     ],
 )
 def test_needs_local_model_path(model: str, expected: bool) -> None:
-    """Require a fetched directory for NGC URIs while preserving HF and local paths."""
     assert needs_local_model_path(model) is expected
