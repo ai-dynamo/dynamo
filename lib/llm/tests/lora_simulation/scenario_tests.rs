@@ -76,6 +76,151 @@ fn test_random_baseline_matches_controller_replica_budget() {
 }
 
 #[test]
+fn test_windowed_load_keeps_sparse_lora_routable() {
+    // With a 90-second rate window and three-second control ticks, one arrival every 10 ticks
+    // must keep the LoRA active between arrivals. A per-tick-only signal would remove and re-add
+    // the route on every zero-load tick.
+    let config = SimConfig {
+        num_backends: 2,
+        slots_per_backend: 2,
+        total_loras: 1,
+        concurrent_loras: 1,
+        total_ticks: 31,
+        ..Default::default()
+    };
+    let mut loads = vec![0; config.total_ticks];
+    for tick in (0..config.total_ticks).step_by(10) {
+        loads[tick] = 1;
+    }
+    let schedules = vec![LoraLoadSchedule {
+        lora_name: "sparse-lora".to_string(),
+        active_window: (0, config.total_ticks),
+        peak_load: 1,
+        ramp_up: 0,
+        steady: 0,
+        ramp_down: 0,
+        per_tick_loads: Some(loads),
+    }];
+
+    let metrics = run_hrw_simulation(&config, &schedules);
+
+    assert!(
+        metrics.per_tick_churn[1..].iter().all(|&churn| churn == 0),
+        "a sparse LoRA must stay routed while arrivals remain in the rate window: {:?}",
+        metrics.per_tick_churn
+    );
+}
+
+#[test]
+fn test_random_baseline_keeps_sparse_lora_in_rate_window() {
+    let config = SimConfig {
+        num_backends: 1,
+        slots_per_backend: 1,
+        total_loras: 1,
+        concurrent_loras: 1,
+        total_ticks: 2,
+        ..Default::default()
+    };
+    let schedules = vec![LoraLoadSchedule {
+        lora_name: "sparse-random-lora".to_string(),
+        active_window: (0, config.total_ticks),
+        peak_load: 1,
+        ramp_up: 0,
+        steady: 0,
+        ramp_down: 0,
+        per_tick_loads: Some(vec![1, 0]),
+    }];
+
+    let metrics = run_random_simulation(&config, &schedules);
+
+    assert_eq!(metrics.per_tick_lora_removals, vec![0, 0]);
+}
+
+#[test]
+fn test_random_baseline_keeps_warm_lora_after_rate_window_expires() {
+    // The first request makes the adapter resident. Once its sole arrival ages out of the
+    // 90-second window (30 three-second ticks), Random must retain a cold-start route for that
+    // resident adapter instead of dropping the routing entry.
+    let config = SimConfig {
+        num_backends: 1,
+        slots_per_backend: 1,
+        total_loras: 1,
+        concurrent_loras: 1,
+        total_ticks: 32,
+        ..Default::default()
+    };
+    let mut loads = vec![0; config.total_ticks];
+    loads[0] = 1;
+    let schedules = vec![LoraLoadSchedule {
+        lora_name: "warm-random-lora".to_string(),
+        active_window: (0, config.total_ticks),
+        peak_load: 1,
+        ramp_up: 0,
+        steady: 0,
+        ramp_down: 0,
+        per_tick_loads: Some(loads),
+    }];
+
+    let metrics = run_random_simulation(&config, &schedules);
+
+    assert_eq!(metrics.per_tick_lora_removals, vec![0; config.total_ticks]);
+}
+
+#[test]
+fn test_request_path_handles_empty_worker_set() {
+    let config = SimConfig {
+        num_backends: 0,
+        slots_per_backend: 1,
+        total_loras: 1,
+        concurrent_loras: 1,
+        total_ticks: 1,
+        ..Default::default()
+    };
+    let schedules = vec![LoraLoadSchedule {
+        lora_name: "unroutable-lora".to_string(),
+        active_window: (0, config.total_ticks),
+        peak_load: 1,
+        ramp_up: 0,
+        steady: 0,
+        ramp_down: 0,
+        per_tick_loads: Some(vec![1]),
+    }];
+
+    let metrics = run_random_simulation(&config, &schedules);
+
+    assert_eq!(metrics.per_tick_requests, vec![1]);
+    assert_eq!(metrics.per_tick_hits, vec![0]);
+}
+
+#[test]
+fn test_request_path_measures_residency_hit_after_cold_load() {
+    let config = SimConfig {
+        num_backends: 1,
+        slots_per_backend: 1,
+        total_loras: 1,
+        concurrent_loras: 1,
+        total_ticks: 2,
+        ..Default::default()
+    };
+    let schedules = vec![LoraLoadSchedule {
+        lora_name: "warm-after-first-request".to_string(),
+        active_window: (0, config.total_ticks),
+        peak_load: 1,
+        ramp_up: 0,
+        steady: 0,
+        ramp_down: 0,
+        per_tick_loads: Some(vec![1, 1]),
+    }];
+
+    let metrics = run_hrw_simulation(&config, &schedules);
+
+    assert_eq!(metrics.per_tick_adapter_loads, vec![1, 0]);
+    assert_eq!(metrics.per_tick_adapter_unloads, vec![0, 0]);
+    assert_eq!(metrics.per_tick_requests, vec![1, 1]);
+    assert_eq!(metrics.per_tick_hits, vec![0, 1]);
+}
+
+#[test]
 fn test_random_baseline_matches_overflow_routability() {
     // Three active LoRAs share only two resident slots. All controllers still retain one route
     // target per LoRA: two budgeted targets plus one soft-overflow fallback target.
@@ -123,6 +268,7 @@ fn test_mcf_simulation_is_repeatable() {
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
+        ..Default::default()
     };
     let schedules =
         generate_zipf_poisson_schedules(config.total_loras, config.total_ticks, 1.0, 40.0, 42);
@@ -159,6 +305,7 @@ fn test_simulation_lora_pool_fits_resident_slots() {
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
+        ..Default::default()
     };
     let schedules =
         generate_zipf_poisson_schedules(config.total_loras, config.total_ticks, 1.0, 40.0, 42);

@@ -182,15 +182,26 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_PUBLISH_KV_EVENTS",
             default=False,
             help=(
-                "If set, publish KV cache events to the KV router. The "
-                "`dynamo_component_*` gauges and `trtllm_*` vendor metrics "
-                "emit unconditionally regardless of this flag."
+                "Publish KV cache events to the KV router. This does not enable "
+                "TensorRT-LLM iteration statistics: use --publish-metrics for "
+                "Prometheus metrics, and --fpm-trace or DYN_FORWARDPASS_METRIC_PORT "
+                "for the Planner's forward-pass metrics."
             ),
-            dest="publish_events_and_metrics",
-            # `obsolete_flag` accepts the old `--publish-events-and-metrics`
-            # / `--no-publish-events-and-metrics` aliases automatically.
-            # DeprecationWarning fires in args.py:parse_args.
-            obsolete_flag="--publish-events-and-metrics",
+            dest="publish_kv_events",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--publish-metrics",
+            env_var="DYN_TRTLLM_PUBLISH_METRICS",
+            default=False,
+            help=(
+                "Expose TensorRT-LLM iteration and request metrics on this "
+                "worker's Prometheus endpoint, and publish the Planner's "
+                "forward-pass metrics, which read the same iteration "
+                "statistics. This does not publish KV cache events; use "
+                "--publish-kv-events for that."
+            ),
+            dest="publish_metrics",
         )
         add_argument(
             g,
@@ -499,7 +510,8 @@ class DynamoTrtllmConfig(ConfigBase):
     free_gpu_memory_fraction: float
     extra_engine_args: str
     override_engine_args: str
-    publish_events_and_metrics: bool
+    publish_kv_events: bool
+    publish_metrics: bool
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None

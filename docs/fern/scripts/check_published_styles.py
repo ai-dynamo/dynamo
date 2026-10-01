@@ -44,6 +44,7 @@ Usage:
 
 Exits 1 with the failing page/selector pairs listed.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -68,8 +69,10 @@ CHECKS: list[tuple[str, str, str]] = [
     ("community", ".dynamo-community-page", "LandingStyles"),
     ("digest", ".dynamo-blog-art__grid", "BlogStyles"),
     ("reference/compatibility", ".dynref-panel", "ReferenceStyles"),
+    # URL from the nav's explicit slugs (section `benchmarks`, page
+    # `llama-3-70b-topology`), not the page's file path.
     (
-        "recipes/feature-benchmarks/llama-3-3-70b-topology",
+        "recipes/benchmarks/llama-3-70b-topology",
         ".dynamo-benchmark-grid",
         "RecipeStyles",
     ),
@@ -103,7 +106,7 @@ def url_from_base(base: str, path: str) -> str:
     origin = f"{parsed.scheme}://{parsed.netloc}"
     if origin not in ALLOWED_ORIGINS:
         raise SystemExit(
-            f"{origin} is not an allowed docs origin: " f"{sorted(ALLOWED_ORIGINS)}"
+            f"{origin} is not an allowed docs origin: {sorted(ALLOWED_ORIGINS)}"
         )
     return url
 

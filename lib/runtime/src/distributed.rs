@@ -3,10 +3,10 @@
 
 use crate::component::{
     self, Component, ComponentBuilder, Endpoint, EndpointDiscoverySource, Instance, Namespace,
-    RoutingOccupancyState,
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
+use crate::pipeline::network::ResponsePlaneMode;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
@@ -20,6 +20,7 @@ use crate::{
 
 use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
+use crate::routing_policy::RoutingOccupancyState;
 use crate::runtime::Runtime;
 
 // Used instead of std::cell::OnceCell because get_or_try_init there is nightly
@@ -40,6 +41,81 @@ use tokio_util::sync::CancellationToken;
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
+fn parse_tcp_response_stream_port(value: Option<&str>) -> Result<u16, PipelineError> {
+    let Some(port) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(0);
+    };
+
+    port.parse::<u16>().map_err(|_| {
+        PipelineError::Generic(format!(
+            "invalid {}: '{}' is not a valid port number",
+            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            port
+        ))
+    })
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::parse_tcp_response_stream_port;
+    use crate::pipeline::PipelineError;
+
+    #[tokio::test]
+    async fn completed_runtime_initialization_rejects_shutdown_before_http_bind() {
+        use super::{DistributedConfig, DistributedRuntime, Runtime};
+        use crate::system_status_server::SystemProbePolicy;
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_HOST", Some("127.0.0.1")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+            ],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                runtime.mark_shutting_down();
+                // Exercise the final bind guard directly: the public constructor
+                // would reject shutdown before polling build at all.
+                let result = DistributedRuntime::build(
+                    runtime.clone(),
+                    DistributedConfig::process_local(),
+                    SystemProbePolicy::RuntimeOnly,
+                )
+                .await;
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("runtime shut down during initialization")
+                );
+                runtime.shutdown();
+            },
+        )
+        .await;
+    }
+
+    #[test]
+    fn response_stream_port_trims_and_treats_empty_as_unset() {
+        for value in [None, Some(""), Some(" \t ")] {
+            assert_eq!(parse_tcp_response_stream_port(value).unwrap(), 0);
+        }
+        assert_eq!(
+            parse_tcp_response_stream_port(Some(" 8080 ")).unwrap(),
+            8080
+        );
+    }
+
+    #[test]
+    fn response_stream_port_rejects_invalid_values() {
+        let error = parse_tcp_response_stream_port(Some(" 65536 ")).unwrap_err();
+        assert!(matches!(
+            error,
+            PipelineError::Generic(message)
+                if message
+                    == "invalid DYN_TCP_RESPONSE_STREAM_PORT: '65536' is not a valid port number"
+        ));
+    }
+}
+
 /// Distributed [Runtime] providing cluster-wide communication, transport, and discovery resources.
 ///
 /// `DistributedRuntime` is not a process singleton. Calling [`DistributedRuntime::new`] more than
@@ -57,8 +133,11 @@ pub struct DistributedRuntime {
     nats_client: Option<transports::nats::Client>,
     network_manager: Arc<NetworkManager>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    quic_response_server:
+        Arc<OnceCell<Arc<crate::pipeline::network::quic_response::QuicResponseServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
+    response_plane: ResponsePlaneMode,
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
@@ -124,34 +203,53 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (discovery_backend, nats_config, request_plane, event_transport_kind) =
-            config.dissolve();
+        Self::new_with_probe_policy(
+            runtime,
+            config,
+            system_status_server::SystemProbePolicy::Worker,
+        )
+        .await
+    }
 
+    /// Initialize runtime dependencies, then bind HTTP with the selected probe policy.
+    /// Shutdown cancels pending initialization; no listener exists until it completes.
+    pub async fn new_with_probe_policy(
+        runtime: Runtime,
+        config: DistributedConfig,
+        policy: system_status_server::SystemProbePolicy,
+    ) -> Result<Self> {
+        let shutdown = runtime.shutdown_started_token();
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => anyhow::bail!("runtime shut down during initialization"),
+            result = Self::build(runtime, config, policy) => result,
+        }
+    }
+
+    async fn build(
+        runtime: Runtime,
+        config: DistributedConfig,
+        policy: system_status_server::SystemProbePolicy,
+    ) -> Result<Self> {
+        let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
+            config.dissolve();
+        let response_plane = match response_plane {
+            Some(mode) => mode,
+            None => ResponsePlaneMode::configured()?,
+        };
+
+        let config = match policy {
+            system_status_server::SystemProbePolicy::Worker => {
+                crate::config::RuntimeConfig::from_settings().unwrap_or_default()
+            }
+            system_status_server::SystemProbePolicy::RuntimeOnly => {
+                crate::config::RuntimeConfig::from_settings()?
+            }
+        };
         let nats_client = match nats_config {
             Some(nc) => Some(nc.connect().await?),
             None => None,
         };
-
-        // Start system status server for health and metrics if enabled in configuration
-        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
-        // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
-        // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
-        let cancel_token = if config.system_server_enabled() {
-            Some(runtime.clone().child_token())
-        } else {
-            None
-        };
-        let starting_health_status = config.starting_health_status.clone();
-        let use_endpoint_health_status = config.use_endpoint_health_status.clone();
-        let health_endpoint_path = config.system_health_path.clone();
-        let live_endpoint_path = config.system_live_path.clone();
-        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
-            starting_health_status,
-            use_endpoint_health_status,
-            config.health_check_enabled,
-            health_endpoint_path,
-            live_endpoint_path,
-        )));
 
         // Initialize discovery client based on backend configuration
         let (discovery_client, discovery_metadata) = match discovery_backend {
@@ -191,6 +289,18 @@ impl DistributedRuntime {
             }
         };
 
+        let starting_health_status = config.starting_health_status.clone();
+        let use_endpoint_health_status = config.use_endpoint_health_status.clone();
+        let health_endpoint_path = config.system_health_path.clone();
+        let live_endpoint_path = config.system_live_path.clone();
+        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
+            starting_health_status,
+            use_endpoint_health_status,
+            config.health_check_enabled,
+            health_endpoint_path,
+            live_endpoint_path,
+        )));
+
         let component_registry = component::Registry::new();
 
         // NetworkManager for request plane
@@ -211,6 +321,7 @@ impl DistributedRuntime {
             network_manager: Arc::new(network_manager),
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            quic_response_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             endpoint_registrations,
@@ -221,11 +332,18 @@ impl DistributedRuntime {
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
+            response_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
             metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
         };
+
+        if response_plane == ResponsePlaneMode::Quic {
+            crate::metrics::quic_response::ensure_registered(
+                distributed_runtime.get_metrics_registry(),
+            );
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -245,47 +363,42 @@ impl DistributedRuntime {
                 }));
         }
 
-        // Handle system status server initialization
-        if let Some(cancel_token) = cancel_token {
-            // System server is enabled - start both the state and HTTP server
-            let host = config.system_host.clone();
-            let port = config.system_port as u16;
-
-            // Start system status server (it creates SystemStatusState internally)
-            match crate::system_status_server::spawn_system_status_server(
-                &host,
-                port,
-                cancel_token,
-                Arc::new(distributed_runtime.clone()),
-                distributed_runtime.discovery_metadata.clone(),
-            )
-            .await
-            {
-                Ok((addr, handle)) => {
-                    tracing::info!("System status server started successfully on {addr}");
-
-                    // Store system status server information
-                    let system_status_server_info =
-                        crate::system_status_server::SystemStatusServerInfo::new(
-                            addr,
-                            Some(handle),
-                        );
-
-                    // Initialize the system_status_server field
-                    distributed_runtime
-                        .system_status_server
-                        .set(Arc::new(system_status_server_info))
-                        .expect("System status server info should only be set once");
-                }
-                Err(e) => {
-                    tracing::error!("System status server startup failed: {e}");
-                }
+        // Opt-in OTLP metrics export. Deliberately not tied to the system
+        // status server: that server is disabled by default
+        // (DYN_SYSTEM_PORT=-1), and gating export on it would make
+        // OTEL_METRICS_EXPORTER=otlp a silent no-op in the default
+        // configuration. Traces and logs are set up in logging::init() for the
+        // same reason -- an OTEL_* variable should mean the same thing for
+        // every signal. Metrics cannot join them there because the exporter
+        // needs the registry, which only exists once the runtime does.
+        match crate::metrics::otlp_export::ExportConfig::from_env() {
+            Ok(Some(export_config)) => {
+                tracing::info!(
+                    endpoint = %export_config.endpoint,
+                    interval_ms = export_config.interval.as_millis(),
+                    "exporting metrics over OTLP"
+                );
+                // Hold a graceful-shutdown guard for the task's life so the
+                // final export is not abandoned mid-RPC. `child_token()`
+                // derives from the endpoint shutdown token, which Phase 1
+                // cancels *before* the Phase 2 wait, so the exporter is told to
+                // stop and then waited for -- it cannot deadlock the wait on a
+                // token that only fires in Phase 3.
+                let shutdown_guard = distributed_runtime
+                    .runtime
+                    .graceful_shutdown_tracker()
+                    .register_task();
+                let registry = distributed_runtime.metrics_registry.clone();
+                let cancel = distributed_runtime.runtime.child_token();
+                tokio::spawn(async move {
+                    crate::metrics::otlp_export::run(registry, export_config, cancel).await;
+                    drop(shutdown_guard);
+                });
             }
-        } else {
-            // System server HTTP is disabled, but uptime metrics are still being tracked via SystemHealth
-            tracing::debug!(
-                "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
-            );
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, "OTLP metrics export is misconfigured; not exporting");
+            }
         }
 
         // Start health check manager if enabled
@@ -313,12 +426,69 @@ impl DistributedRuntime {
             }
         }
 
+        anyhow::ensure!(
+            !distributed_runtime.runtime.is_shutting_down(),
+            "runtime shut down during initialization"
+        );
+        if config.system_server_enabled() {
+            // Keep sidecar probes alive through unregister/drain. Ordinary workers
+            // retain their existing endpoint-shutdown lifetime.
+            let stop = match policy {
+                system_status_server::SystemProbePolicy::Worker => {
+                    distributed_runtime.runtime.child_token()
+                }
+                system_status_server::SystemProbePolicy::RuntimeOnly => {
+                    distributed_runtime.runtime.primary_token().child_token()
+                }
+            };
+            match system_status_server::spawn_system_status_server(
+                &config.system_host,
+                config.system_port as u16,
+                stop,
+                Arc::new(distributed_runtime.clone()),
+                distributed_runtime.discovery_metadata.clone(),
+                policy,
+            )
+            .await
+            {
+                Ok((address, handle)) => {
+                    distributed_runtime
+                        .system_status_server
+                        .set(Arc::new(system_status_server::SystemStatusServerInfo::new(
+                            address,
+                            Some(handle),
+                        )))
+                        .expect("System status server info should only be set once");
+                    tracing::info!(%address, ?policy, "System HTTP listener started");
+                }
+                // Preserve ordinary workers' optional-HTTP failure behavior.
+                Err(error) if policy == system_status_server::SystemProbePolicy::Worker => {
+                    tracing::error!(%error, "System status server startup failed");
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(distributed_runtime)
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings();
+        let config = DistributedConfig::try_from_settings()?;
         Self::new(runtime, config).await
+    }
+
+    /// Check configured runtime dependencies, independently of model registration.
+    /// The HTTP caller bounds this operation; it never performs inference.
+    pub(crate) async fn check_dependencies(&self) -> Result<()> {
+        anyhow::ensure!(!self.runtime.is_shutting_down(), "runtime is shutting down");
+        if let Some(client) = &self.nats_client {
+            anyhow::ensure!(
+                client.client().connection_state() == async_nats::connection::State::Connected,
+                "NATS is disconnected"
+            );
+        }
+        self.discovery_client.check_connection().await?;
+        anyhow::ensure!(!self.runtime.is_shutting_down(), "runtime is shutting down");
+        Ok(())
     }
 
     pub fn runtime(&self) -> &Runtime {
@@ -391,39 +561,81 @@ impl DistributedRuntime {
         Ok(self
             .tcp_server
             .get_or_try_init(async move {
-                let port = match std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT) {
-                    Ok(p) => p.parse::<u16>().map_err(|_| {
-                        PipelineError::Generic(format!(
-                            "invalid {}: '{}' is not a valid port number",
-                            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
-                            p
-                        ))
-                    })?,
-                    Err(_) => 0,
-                };
-                let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
-                    .ok()
-                    .filter(|h| !h.is_empty());
+                let port_value =
+                    std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT).ok();
+                let port = parse_tcp_response_stream_port(port_value.as_deref())?;
+                let host = crate::utils::ip_resolver::host_override_from_env(
+                    tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+                )
+                .map_err(|error| PipelineError::Generic(error.to_string()))?;
 
-                let host_suffix = interface
+                let host_suffix = host
                     .as_ref()
                     .map_or(String::new(), |h| format!(" on host {h}"));
                 if port == 0 {
                     tracing::info!(
-                        "TCP response stream server using OS-assigned port{host_suffix}"
+                        "TCP request callback server using OS-assigned port{host_suffix}"
                     );
                 } else {
                     tracing::info!(
-                        "TCP response stream server using fixed port {port}{host_suffix}"
+                        "TCP request callback server using fixed port {port}{host_suffix}"
                     );
                 }
 
-                let options = tcp::server::ServerOptions { port, interface };
+                let options = tcp::server::ServerOptions {
+                    port,
+                    interface: host,
+                };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })
             .await?
             .clone())
+    }
+
+    pub async fn quic_response_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::quic_response::QuicResponseServer>> {
+        anyhow::ensure!(
+            self.response_plane == ResponsePlaneMode::Quic,
+            "QUIC response server requested while response plane is {}",
+            self.response_plane.name()
+        );
+        Ok(self
+            .quic_response_server
+            .get_or_try_init(async {
+                let tcp_server = self.tcp_server().await?;
+                let tcp_address = tcp_server.local_address()?;
+                // Keep the selected interface, but let the UDP stack choose a
+                // free port. A TCP ephemeral port can already be in use by an
+                // unrelated UDP socket because the two protocols allocate
+                // ports independently.
+                let address = std::net::SocketAddr::new(tcp_address.ip(), 0);
+                crate::pipeline::network::quic_response::QuicResponseServer::new(
+                    address,
+                    address,
+                    self.runtime.child_token(),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await?
+            .clone())
+    }
+
+    pub fn quic_response_client_pool(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::quic_response::QuicResponseClientPool>> {
+        anyhow::ensure!(
+            self.response_plane == ResponsePlaneMode::Quic,
+            "QUIC response client pool requested while response plane is {}",
+            self.response_plane.name()
+        );
+        crate::pipeline::network::quic_response::process_client_pool_from_env()
+            .map_err(anyhow::Error::from)
+    }
+
+    pub fn response_plane(&self) -> ResponsePlaneMode {
+        self.response_plane
     }
 
     /// Get the network manager
@@ -685,6 +897,9 @@ pub struct DistributedConfig {
     pub discovery_backend: DiscoveryBackend,
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
+    /// Explicit response transport. `None` reads `DYN_RESPONSE_PLANE` for
+    /// standalone Rust entry points.
+    pub response_plane: Option<ResponsePlaneMode>,
     /// Resolved event transport kind — computed once at config time from
     /// `DYN_EVENT_PLANE` and the discovery backend, then stored on the runtime
     /// so callers always get the same answer regardless of which other services
@@ -693,13 +908,36 @@ pub struct DistributedConfig {
 }
 
 impl DistributedConfig {
+    /// Build distributed runtime configuration from environment defaults.
+    ///
+    /// # Panics
+    /// Panics if a discovery or transport setting is invalid.
     pub fn from_settings() -> DistributedConfig {
-        let request_plane = RequestPlaneMode::from_env();
+        Self::try_from_settings().unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_from_settings() -> Result<DistributedConfig> {
+        Self::from_settings_with_overrides(None, None, None)
+    }
+
+    /// Resolve per-worker options before environment defaults, without mutating
+    /// the process environment. Safe to use after the Tokio runtime has started.
+    pub fn from_settings_with_overrides(
+        discovery_backend: Option<&str>,
+        request_plane: Option<&str>,
+        event_plane: Option<&str>,
+    ) -> Result<DistributedConfig> {
+        let request_plane = match request_plane {
+            Some(value) => value.parse()?,
+            None => RequestPlaneMode::from_env()?,
+        };
 
         // Determine the discovery backend first — we need it to compute the NATS default below.
         // Valid values for DYN_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
-        let backend_str =
-            std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "etcd".to_string());
+        let backend_str = discovery_backend
+            .map(str::to_owned)
+            .or_else(|| std::env::var("DYN_DISCOVERY_BACKEND").ok())
+            .unwrap_or_else(|| "etcd".to_string());
 
         let discovery_backend = match backend_str.as_str() {
             "kubernetes" => {
@@ -707,12 +945,12 @@ impl DistributedConfig {
                 DiscoveryBackend::Kubernetes
             }
             other => {
-                let selector: kv::Selector = other.parse().unwrap_or_else(|_| {
-                    panic!(
+                let selector: kv::Selector = other.parse().map_err(|_| {
+                    anyhow::anyhow!(
                         "Unknown DYN_DISCOVERY_BACKEND value: '{other}'. \
                          Valid options: kubernetes, etcd, file, mem"
                     )
-                });
+                })?;
                 DiscoveryBackend::KvStore(selector)
             }
         };
@@ -720,7 +958,14 @@ impl DistributedConfig {
         // Resolve event transport kind once — the single source of truth used both to
         // decide whether to open a NATS connection and to answer
         // `DistributedRuntime::default_event_transport_kind()` later.
-        let event_transport_kind = discovery_backend.resolve_event_transport_kind();
+        let event_transport_kind = match event_plane {
+            Some("nats") => crate::discovery::EventTransportKind::Nats,
+            Some("zmq" | "") => crate::discovery::EventTransportKind::Zmq,
+            Some(other) => {
+                anyhow::bail!("Invalid event plane '{other}'. Valid options are: 'nats', 'zmq'")
+            }
+            None => discovery_backend.resolve_event_transport_kind(),
+        };
 
         // NATS is used for more than just NATS request-plane RPC:
         // - KV router events (NATS core event plane)
@@ -737,7 +982,7 @@ impl DistributedConfig {
                 crate::discovery::EventTransportKind::Nats
             );
 
-        DistributedConfig {
+        Ok(DistributedConfig {
             discovery_backend,
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
@@ -745,16 +990,21 @@ impl DistributedConfig {
                 None
             },
             request_plane,
+            response_plane: None,
             event_transport_kind,
-        }
+        })
     }
 
     pub fn for_cli() -> DistributedConfig {
+        Self::try_for_cli().unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_for_cli() -> Result<DistributedConfig> {
         let etcd_config = etcd::ClientOptions {
             attach_lease: false,
             ..Default::default()
         };
-        let request_plane = RequestPlaneMode::from_env();
+        let request_plane = RequestPlaneMode::from_env()?;
         let discovery_backend =
             DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config)));
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
@@ -764,7 +1014,7 @@ impl DistributedConfig {
                 event_transport_kind,
                 crate::discovery::EventTransportKind::Nats
             );
-        DistributedConfig {
+        Ok(DistributedConfig {
             discovery_backend,
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
@@ -772,8 +1022,9 @@ impl DistributedConfig {
                 None
             },
             request_plane,
+            response_plane: None,
             event_transport_kind,
-        }
+        })
     }
 
     /// A DistributedConfig that isn't distributed, for when the frontend and backend are in the
@@ -785,6 +1036,7 @@ impl DistributedConfig {
             // This won't be used in process local, so we likely need a "none" option to
             // communicate that and avoid opening the ports.
             request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Zmq,
         }
     }
@@ -829,17 +1081,86 @@ impl std::str::FromStr for RequestPlaneMode {
 }
 
 impl RequestPlaneMode {
-    /// Get the request plane mode from environment variable (uncached)
-    /// Reads from `DYN_REQUEST_PLANE` environment variable.
-    fn from_env() -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default()
+    fn from_env() -> Result<Self> {
+        Self::from_env_result(std::env::var(
+            crate::config::environment_names::request_plane::DYN_REQUEST_PLANE,
+        ))
+    }
+
+    fn from_env_result(value: std::result::Result<String, std::env::VarError>) -> Result<Self> {
+        match value {
+            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
+            Ok(s) => s.parse(),
+            Err(std::env::VarError::NotUnicode(raw)) => Err(anyhow::anyhow!(
+                "Invalid request plane mode: '{}' is not valid Unicode. \
+                 Valid options are: 'nats', 'tcp'",
+                raw.to_string_lossy()
+            )),
+        }
     }
 
     pub fn is_nats(&self) -> bool {
         matches!(self, RequestPlaneMode::Nats)
+    }
+}
+
+#[cfg(test)]
+mod request_plane_env_tests {
+    use super::RequestPlaneMode;
+
+    #[test]
+    fn absent_request_plane_defaults_to_tcp() {
+        let mode = RequestPlaneMode::from_env_result(Err(std::env::VarError::NotPresent))
+            .expect("an absent DYN_REQUEST_PLANE must not be an error");
+        assert_eq!(mode, RequestPlaneMode::Tcp);
+    }
+
+    #[test]
+    fn empty_request_plane_is_an_error() {
+        RequestPlaneMode::from_env_result(Ok(String::new()))
+            .expect_err("an empty DYN_REQUEST_PLANE must not silently fall back to TCP");
+    }
+
+    #[test]
+    fn valid_request_plane_value_resolves() {
+        let mode = RequestPlaneMode::from_env_result(Ok("nats".to_string()))
+            .expect("DYN_REQUEST_PLANE=nats should resolve");
+        assert_eq!(mode, RequestPlaneMode::Nats);
+    }
+
+    #[test]
+    fn invalid_request_plane_is_an_error_naming_value_and_options() {
+        let err = RequestPlaneMode::from_env_result(Ok("nat".to_string()))
+            .expect_err("a misspelled DYN_REQUEST_PLANE must not silently fall back to TCP");
+        let message = err.to_string();
+        assert!(
+            message.contains("nat"),
+            "error should name the offending value, got: {message}"
+        );
+        assert!(
+            message.contains("'nats'") && message.contains("'tcp'"),
+            "error should list the valid options, got: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_request_plane_is_an_error_not_a_default() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let raw = OsString::from_vec(b"nat\xff".to_vec());
+        let err = RequestPlaneMode::from_env_result(Err(std::env::VarError::NotUnicode(raw)))
+            .expect_err("a non-Unicode DYN_REQUEST_PLANE must not silently fall back to TCP");
+        let message = err.to_string();
+        assert!(
+            message.contains("not valid Unicode"),
+            "error should say the value was not valid Unicode, got: {message}"
+        );
+        assert!(
+            message.contains("'nats'") && message.contains("'tcp'"),
+            "error should list the valid options, got: {message}"
+        );
     }
 }
 
@@ -860,6 +1181,7 @@ pub mod distributed_test_utils {
             ),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
+            response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Nats,
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()
@@ -883,6 +1205,7 @@ pub mod distributed_test_utils {
             ),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
+            response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Nats,
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()

@@ -8,6 +8,7 @@ package podcache
 import (
 	"testing"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -40,7 +41,12 @@ func TestProjectConsumerContract(t *testing.T) {
 			ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "large-manager"}},
 		},
 		Spec: corev1.PodSpec{
-			NodeName: "node-a",
+			NodeName:      "node-a",
+			SchedulerName: "lpx-scheduler",
+			ResourceClaims: []corev1.PodResourceClaim{{
+				Name:              "lpu-partition",
+				ResourceClaimName: ptr.To("lpu-partition-0"),
+			}},
 			Containers: []corev1.Container{{
 				Name:    "main",
 				Image:   "large-image",
@@ -87,6 +93,7 @@ func TestProjectConsumerContract(t *testing.T) {
 					}},
 				},
 				{Name: "discarded-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "large"}}},
+				{Name: "discarded-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "config"}}}},
 			},
 		},
 		Status: corev1.PodStatus{
@@ -95,6 +102,13 @@ func TestProjectConsumerContract(t *testing.T) {
 			Conditions: []corev1.PodCondition{
 				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, Message: "discard-me"},
 				{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "discard-me"},
+				{
+					Type:    corev1.PodConditionType(podcontract.RestoredCondition),
+					Status:  corev1.ConditionFalse,
+					Reason:  podcontract.RestoreReasonFailed,
+					Message: "discard-me",
+				},
+				{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "EvictionByEvictionAPI", Message: "discard-me"},
 			},
 			ContainerStatuses: []corev1.ContainerStatus{
 				{
@@ -148,7 +162,17 @@ func TestProjectConsumerContract(t *testing.T) {
 	t.Run("model retains Ready identity command and arguments", func(t *testing.T) {
 		require.Len(t, got.Spec.Containers, 1)
 		assert.Equal(t, corev1.Container{Name: "main", Command: []string{"python"}, Args: []string{"-m", "dynamo"}}, got.Spec.Containers[0])
-		assert.Equal(t, []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}, got.Status.Conditions)
+	})
+	t.Run("snapshot retains restore state", func(t *testing.T) {
+		assert.Empty(t, got.Spec.SchedulerName)
+		assert.Equal(t, []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{
+				Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+				Status: corev1.ConditionFalse,
+				Reason: podcontract.RestoreReasonFailed,
+			},
+		}, got.Status.Conditions)
 	})
 	t.Run("failover DGDR GMS replacement and Recreate retain status state", func(t *testing.T) {
 		assert.Equal(t, corev1.PodRunning, got.Status.Phase)

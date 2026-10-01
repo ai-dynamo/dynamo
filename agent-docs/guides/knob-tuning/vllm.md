@@ -87,13 +87,16 @@ guidance is in [`memory.md`](../model-sizing/memory.md) and [`parallelism.md`](.
 Exact API surfaces may differ by version.
 
 - **Chunked prefill** (`enable_chunked_prefill`) — splits long prefill into chunks so prefill and decode interleave.
-  Strongly recommended `true` for throughput workloads. recent vLLM versions enable it by default for standard generation; verify against the running version
-  models.
+  Strongly recommended `true` for throughput workloads. Recent vLLM versions enable it by default for standard
+  generation models; verify against the running version.
 - **`max_num_seqs`** — maximum sequences per iteration; primary throughput/latency knob, analogous to
   `max_batch_size` in TensorRT-LLM.
 - **`max_num_batched_tokens`** — maximum total tokens admitted per scheduling step, analogous to `max_num_tokens` in
-  TensorRT-LLM. Without chunked prefill, the largest prompt must fit within this budget. An approximate sizing relation
-  is `max_num_batched_tokens ≈ max_num_seqs × avg_seq_len`.
+  TensorRT-LLM. Without chunked prefill, the largest prompt must fit within this budget. This is a *per-step* budget,
+  not total KV capacity: in steady-state decode each running sequence contributes about one token per step, so the
+  budget only has to cover the decode batch plus one prefill chunk. Start in the low thousands — raise it to finish
+  prefill in fewer steps for throughput and TTFT, lower it to keep prefill from crowding decode for smoother
+  inter-token latency — and size total in-flight tokens with `max_num_seqs` and `max_model_len` instead.
 - **`max_model_len`** — per-request sequence cap. Fix it to the workload maximum rather than tuning it unless GPU memory
   is tight after weights; see [`memory.md`](../model-sizing/memory.md).
 - **`gpu_memory_utilization`** — fraction of total GPU memory for weights, KV cache, and buffers, with a default of 0.9;

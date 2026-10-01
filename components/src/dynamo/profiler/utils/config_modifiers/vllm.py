@@ -43,7 +43,10 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-DEFAULT_VLLM_KV_TRANSFER_CONFIG = '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+DEFAULT_VLLM_KV_TRANSFER_CONFIG = {
+    SubComponentType.PREFILL: '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
+    SubComponentType.DECODE: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}',
+}
 
 
 def _get_valued_arg(args: list[str], key: str) -> str | None:
@@ -99,22 +102,37 @@ def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[s
     finalized = set_unique_argument_value(
         cleaned_args, "--disaggregation-mode", role.value
     )
-    if (
-        role == SubComponentType.PREFILL
-        and _get_valued_arg(finalized, "--kv-transfer-config") is None
-    ):
+    if _get_valued_arg(finalized, "--kv-transfer-config") is None:
         finalized = set_unique_argument_value(
             finalized,
             "--kv-transfer-config",
-            DEFAULT_VLLM_KV_TRANSFER_CONFIG,
+            DEFAULT_VLLM_KV_TRANSFER_CONFIG[role],
         )
     return finalized
+
+
+def _remove_disaggregation_mode_args(args: list[str]) -> list[str]:
+    filtered_args: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--disaggregation-mode":
+            index += 2
+            continue
+        if arg.startswith("--disaggregation-mode="):
+            index += 1
+            continue
+        filtered_args.append(arg)
+        index += 1
+    return filtered_args
 
 
 class VllmV1ConfigModifier(BaseConfigModifier):
     BACKEND = "vllm"
     # vllm uses a different arg for model path
     WORKER_MODEL_PATH_ARG = "--model"
+    # vllm reads the context window cap from --max-model-len
+    GENERATED_CONTEXT_LENGTH_ARGS = ("--max-model-len",)
 
     @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:
@@ -243,6 +261,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             )
             args = validate_and_get_worker_args(worker_service, backend="vllm")
             args = break_arguments(args)
+
+            # The decode candidate is standalone after its prefill peer is removed.
+            args = _remove_disaggregation_mode_args(args)
 
             # enable prefix caching
             if "--enable-prefix-caching" not in args:

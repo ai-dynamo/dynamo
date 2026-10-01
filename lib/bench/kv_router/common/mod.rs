@@ -12,6 +12,7 @@ pub mod dc_ckf_metadata;
 #[cfg(feature = "dc-ckf-relay")]
 pub mod dc_ckf_shared;
 #[cfg(any(
+    feature = "approximate-lru",
     feature = "dc-ckf-relay",
     feature = "mooncake",
     feature = "router-test-support"

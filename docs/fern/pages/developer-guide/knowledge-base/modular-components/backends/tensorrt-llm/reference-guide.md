@@ -80,12 +80,6 @@ Logits processors let you modify the next-token logits at every decoding step. D
 
 TensorRT-LLM supports attention data parallelism for models like DeepSeek, enabling KV-cache-aware routing to specific DP ranks. For configuration and usage details, see the [DP Rank Routing Guide](../../../../additional-resources/tensorrt-llm-details/dp-rank-routing.md).
 
-## KVBM Integration
-
-Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
-
-See the instructions here: [Running KVBM in TensorRT-LLM](../../kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm).
-
 ## Observability
 
 TensorRT-LLM exposes Prometheus metrics for monitoring inference performance. For detailed metrics reference, collection setup, and Grafana integration, see the [Observability Guide](observability.md).

@@ -88,6 +88,8 @@ func ReconcileModelServicesForComponents(
 			func(ctx context.Context) (*corev1.Service, bool, error) {
 				return headlessService, false, nil
 			},
+			// Components that serve the same base model share this Service.
+			commonController.WithSharedOwnership(),
 		)
 		if err != nil {
 			logger.Error(err, "Failed to sync headless service for model",

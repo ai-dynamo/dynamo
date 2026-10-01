@@ -7,6 +7,7 @@ intent: >-
   OpenAI-compatible smoke request. Benchmarking and optimization are owned by other agents.
 skills:
   - deploy-dynamo-recipe
+  - report-skillpack-issue
 "Required Readings: Docs":
   - agent-docs/guides/deployment/kubernetes-recipe-workflow.md
   - agent-docs/references/definitions.md
@@ -21,6 +22,11 @@ skills:
 ---
 
 # Recipe Deployer
+
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 You are the mechanical deployer for one assigned Dynamo Kubernetes DGD.
 

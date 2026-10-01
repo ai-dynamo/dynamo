@@ -30,13 +30,12 @@ If you installed Dynamo into a Python environment, activate that environment bef
   </Step>
   <Step title="Choose a Backend">
 
-Select one offloading backend for each worker. KVBM, LMCache, FlexKV, and HiCache are alternatives,
+Select one offloading backend for each worker. LMCache, FlexKV, and HiCache are alternatives,
 not cache layers to stack together. KV-aware routing and NIXL-based prefill/decode transfer are
 separate features that can operate alongside the selected backend.
 
 | Backend | Engine | Cache tiers | Prebuilt Dynamo runtime container | Python environment |
 | --- | --- | --- | --- | --- |
-| **KVBM** | vLLM, TensorRT-LLM | Host, disk, object storage | Included in current vLLM and TensorRT-LLM runtime images | Install `kvbm` |
 | **LMCache** | vLLM | Host and persistent L2 adapters | Inherited from the upstream vLLM image; verify compatibility for the image tag and platform | Install `lmcache` |
 | **HiCache** | SGLang | Host and optional external storage | Included with SGLang | Included with `ai-dynamo[sglang]` |
 | **FlexKV** | vLLM in this tutorial | Host, SSD, cloud storage | Requires a custom image or a source build inside the container | Build FlexKV from source |
@@ -55,29 +54,6 @@ optional disaggregated FlexKV example uses two GPUs. The vLLM launch scripts sta
 frontend and workers, and stop all processes when you press `Ctrl+C`.
 
 <Tabs>
-  <Tab title="KVBM">
-
-KVBM is Dynamo's native KV block manager and the recommended starting point for vLLM. The current
-Dynamo vLLM runtime container includes it. For a Python environment, install its wheel first:
-
-```bash
-uv pip install kvbm
-```
-
-Start an aggregated vLLM worker with a 20 GB host-memory cache:
-
-```bash
-cd examples/backends/vllm
-DYN_KVBM_CPU_CACHE_GB=20 ./launch/agg_kvbm.sh
-```
-
-The script selects `DynamoConnector`. To add a disk tier later, set `DYN_KVBM_DISK_CACHE_GB` and
-`DYN_KVBM_DISK_CACHE_DIR`. Keep every lower cache tier at least as large as the tier above it to
-avoid repeatedly evicting and reloading the same blocks.
-
-For all KVBM settings, see the [KVBM Configuration Reference](../../reference/components/kvbm-configuration.mdx).
-
-  </Tab>
   <Tab title="LMCache">
 
 The current Dynamo vLLM runtime is based on an upstream vLLM image that provides LMCache on supported
@@ -223,7 +199,5 @@ with long, repeated prefixes to measure Time To First Token (TTFT) and cache hit
 - Combine one offloading backend with [disaggregated serving](../disaggregated-serving/overview.mdx). In that
   topology, the offloading connector manages storage while NIXL transfers blocks from prefill to
   decode workers.
-- Review [KVBM architecture](../../developer-guide/knowledge-base/modular-components/kvbm/kvbm-design.md) for Dynamo's cache-tier and transfer
-  design.
 - To make a custom inference engine visible to the KV router, implement
   [KV event publishing](../../developer-guide/advanced-customizations/writing-custom-backends/publish-kv-events.md).

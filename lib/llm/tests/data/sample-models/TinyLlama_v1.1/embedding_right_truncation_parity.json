@@ -1,0 +1,48 @@
+{
+  "text": "Hello world from Dynamo",
+  "bos_token_id": 1,
+  "cases": [
+    {
+      "name": "special_tokens_untruncated",
+      "add_special_tokens": true,
+      "truncate_prompt_tokens": null,
+      "max_model_len": 8,
+      "expected_token_ids": [1, 15043, 3186, 515, 22554, 29877]
+    },
+    {
+      "name": "no_special_tokens_untruncated",
+      "add_special_tokens": false,
+      "truncate_prompt_tokens": null,
+      "max_model_len": 8,
+      "expected_token_ids": [15043, 3186, 515, 22554, 29877]
+    },
+    {
+      "name": "special_tokens_right_truncated",
+      "add_special_tokens": true,
+      "truncate_prompt_tokens": 4,
+      "max_model_len": 8,
+      "expected_token_ids": [1, 15043, 3186, 515]
+    },
+    {
+      "name": "no_special_tokens_right_truncated",
+      "add_special_tokens": false,
+      "truncate_prompt_tokens": 3,
+      "max_model_len": 8,
+      "expected_token_ids": [15043, 3186, 515]
+    },
+    {
+      "name": "zero_tokens",
+      "add_special_tokens": true,
+      "truncate_prompt_tokens": 0,
+      "max_model_len": 8,
+      "expected_token_ids": []
+    },
+    {
+      "name": "minus_one_uses_model_limit",
+      "add_special_tokens": true,
+      "truncate_prompt_tokens": -1,
+      "max_model_len": 4,
+      "expected_token_ids": [1, 15043, 3186, 515]
+    }
+  ]
+}

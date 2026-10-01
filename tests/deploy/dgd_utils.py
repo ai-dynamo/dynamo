@@ -4,22 +4,131 @@
 """Helpers for live-cluster DynamoGraphDeployment tests."""
 
 import asyncio
+import json
 import logging
 import os
 import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from functools import partial
+from pathlib import Path
 from typing import Any, List, Literal, Optional
 
+import aiohttp
+import httpx
 import kr8s
+import pytest
 import requests
 import yaml
 from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.deploy.vcluster_utils import (
+    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+    retry_vcluster_api,
+    retry_vcluster_api_async,
+)
+from tests.utils.client import send_request
 from tests.utils.test_output import resolve_test_output_path
+
+logger = logging.getLogger(__name__)
+
+# Shared chat-completion request defaults and response validation.
+#
+# These live here rather than in a test module so every deploy test asserts the
+# same thing: a second copy is free to lose an assertion, and one did -- the EFA
+# test's private validator had dropped the role and key checks below.
+# tests/deploy/test_dgd.py and tests/deploy/test_deploy_efa.py both import them.
+
+# Test prompt designed to validate model capabilities:
+# - Long enough to test context handling (multiple sentences, ~150 words)
+# - Descriptive content requiring multi-sentence responses
+# - Consistent across test runs for reproducibility
+# This prompt is maintained from the original shell-based deployment tests.
+TEST_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
+lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
+beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
+known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at \
+the city's location. Your journey will take you through treacherous deserts, enchanted forests, \
+and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."""
+
+DEFAULT_MAX_TOKENS = 30
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_REQUEST_TIMEOUT = 120
+# Minimum response content length to validate that the model is generating meaningful output.
+# This matches the validation threshold from the original shell-based deployment tests.
+MIN_RESPONSE_CONTENT_LENGTH = 100
+PORT_FORWARD_REQUEST_RETRY_LIMIT = 1
+DISCOVERY_SNAPSHOT_TIMEOUT = 15
+DISCOVERY_RESOURCE_TIMEOUT = 3
+_KR8S_VCLUSTER_CONNECTION_ERRORS = (httpx.TransportError, kr8s.APITimeoutError)
+_VCLUSTER_CLEANUP_ERRORS = (
+    aiohttp.ClientConnectionError,
+    *_KR8S_VCLUSTER_CONNECTION_ERRORS,
+)
+
+
+def validate_chat_response(
+    response: requests.Response,
+    expected_model: str,
+    min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
+) -> dict[str, Any]:
+    """Validate the structure and content of a chat completion response.
+
+    Args:
+        response: HTTP response from the chat completion endpoint
+        expected_model: Expected model name in the response
+        min_content_length: Minimum required length for response content
+
+    Returns:
+        Parsed response JSON on success
+
+    Raises:
+        AssertionError: If validation fails
+    """
+    # Check HTTP status
+    assert response.status_code == 200, (
+        f"Expected status 200, got {response.status_code}. "
+        f"Response: {response.text[:500]}"
+    )
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
+
+    assert "choices" in data, f"Response missing 'choices' field: {data}"
+    assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
+
+    choice = data["choices"][0]
+    assert "message" in choice, f"Choice missing 'message' field: {choice}"
+
+    message = choice["message"]
+    assert (
+        message.get("role") == "assistant"
+    ), f"Expected role 'assistant', got '{message.get('role')}'"
+    assert "content" in message, f"Message missing 'content' field: {message}"
+
+    content = message["content"]
+    assert len(content) >= min_content_length, (
+        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
+        f"Content: {content[:200]}"
+    )
+
+    assert "model" in data, f"Response missing 'model' field: {data}"
+    assert (
+        data["model"] == expected_model
+    ), f"Expected model '{expected_model}', got '{data['model']}'"
+
+    logger.info(
+        f"Response validation passed: model={data['model']}, "
+        f"content_length={len(content)}"
+    )
+
+    return data
 
 
 def _get_workspace_dir() -> str:
@@ -569,7 +678,8 @@ class DeploymentSpec:
         Returns:
             dict with 'jsonl_enabled' and 'log_level' keys
         """
-        envs = self._deployment_spec.get("spec", {}).get("envs", [])
+        env_key = "env" if self._schema == SCHEMA_V1BETA1 else "envs"
+        envs = self._deployment_spec.get("spec", {}).get(env_key, [])
 
         jsonl_enabled = False
         log_level = None
@@ -646,7 +756,7 @@ class DeploymentSpec:
         Add or override a command-line argument for a specific service
 
         Args:
-            service_name: Name of the service (e.g., "VllmDecodeWorker", "TRTLLMWorker")
+            service_name: Name of the service (e.g., "decode", "TRTLLMWorker")
             arg_name: Argument name (e.g., "--max-model-len", "--max-seq-len")
             arg_value: Argument value (e.g., "1024")
         """
@@ -789,6 +899,10 @@ class ManagedDeployment:
     # the service containing component_type: Frontend determines what is actually the frontend service
     frontend_service_name: str = "Frontend"
     skip_service_restart: bool = False
+    # Readiness budget for __aenter__. Tests carrying a pytest timeout should set
+    # this below it, so _wait_for_condition raises with pod-status diagnostics
+    # instead of pytest-timeout killing the test mid-wait with a bare traceback.
+    readiness_timeout: int = 1800
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -1157,14 +1271,31 @@ class ManagedDeployment:
                         warning += f" lastExitCode={last_exit}"
 
                     prev_log = await self._fetch_previous_container_log(
-                        pod_name, cs.name, tail_lines=prev_log_tail_lines
+                        pod_name, cs.name
                     )
                     if prev_log:
+                        restart_log_dir = os.path.join(self.log_dir, "restarts")
+                        try:
+                            os.makedirs(restart_log_dir, exist_ok=True)
+                            restart_log_path = os.path.join(
+                                restart_log_dir,
+                                f"{pod_name}.{cs.name}.restart-{after}.previous.log",
+                            )
+                            with open(restart_log_path, "w") as f:
+                                f.write(prev_log)
+                        except OSError as e:
+                            self._logger.debug(
+                                "Failed to preserve previous log for %s: %s", key, e
+                            )
+
+                        prev_log_tail = "\n".join(
+                            prev_log.splitlines()[-prev_log_tail_lines:]
+                        )
                         warning += (
                             f"\n      --- last {prev_log_tail_lines} lines of "
                             f"previous {cs.name} log ({pod_name}) ---\n"
                         )
-                        for line in prev_log.splitlines():
+                        for line in prev_log_tail.splitlines():
                             warning += f"      {line}\n"
                         warning += f"      --- end of previous {cs.name} log ---"
                     else:
@@ -1193,15 +1324,12 @@ class ManagedDeployment:
         self,
         pod_name: str,
         container: str,
-        tail_lines: int = 100,
     ) -> Optional[str]:
-        """Fetch the previous (pre-restart) instance log for a container.
+        """Fetch a bounded previous-instance log for a container.
 
-        Returns the tail of the log as a single string, or None if no previous
-        instance exists or the API call fails. This is the artifact that
-        normally lives in ``<pod>.<container>.previous.log`` on disk; we
-        surface it inline so failed CI runs are self-diagnosing without
-        needing an artifact download.
+        Returns the log as a single string, or None if no previous instance
+        exists or the API call fails. The caller preserves it before a later
+        restart rotates it out of Kubernetes' single previous-log slot.
         """
         try:
             assert self._core_api is not None, "Kubernetes API not initialized"
@@ -1210,7 +1338,7 @@ class ManagedDeployment:
                 namespace=self.namespace,
                 container=container,
                 previous=True,
-                tail_lines=tail_lines,
+                tail_lines=50000,
             )
             return log if isinstance(log, str) else str(log)
         except exceptions.ApiException as e:
@@ -1378,28 +1506,33 @@ class ManagedDeployment:
         return Service.get(full_service_name, namespace=self.namespace)
 
     def get_pods(self, service_names: list[str] | None = None) -> dict[str, list[Pod]]:
-        result: dict[str, list[Pod]] = {}
-
         if not service_names:
             service_names = [service.name for service in self.deployment_spec.services]
 
-        for original_name in service_names:
-            # List pods using stable labels that are not affected by worker hash suffixes.
-            label_selector = (
-                f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
-                f"nvidia.com/dynamo-component={original_name}"
-            )
+        def list_pods() -> dict[str, list[Pod]]:
+            result: dict[str, list[Pod]] = {}
+            for original_name in service_names:
+                # List pods using stable labels that are not affected by worker hash suffixes.
+                label_selector = (
+                    f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
+                    f"nvidia.com/dynamo-component={original_name}"
+                )
 
-            pods: list[Pod] = []
+                result[original_name] = list(  # type: ignore[arg-type]
+                    kr8s.get(
+                        "pods",
+                        namespace=self.namespace,
+                        label_selector=label_selector,
+                    )
+                )
+            return result
 
-            for pod in kr8s.get(
-                "pods", namespace=self.namespace, label_selector=label_selector
-            ):
-                pods.append(pod)  # type: ignore[arg-type]
-
-            result[original_name] = pods
-
-        return result
+        return retry_vcluster_api(
+            "listing pods",
+            list_pods,
+            _KR8S_VCLUSTER_CONNECTION_ERRORS,
+            self._logger,
+        )
 
     def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
         directory = os.path.join(self.log_dir, service_name)
@@ -1520,18 +1653,27 @@ class ManagedDeployment:
         """
         Delete the DynamoGraphDeployment CR.
         """
+        if not self._deployment_name or self._custom_api is None:
+            return
+
         try:
-            if self._deployment_name and self._custom_api is not None:
-                await self._custom_api.delete_namespaced_custom_object(
+            await retry_vcluster_api_async(
+                f"deleting deployment {self.namespace}/{self._deployment_name}",
+                partial(
+                    self._custom_api.delete_namespaced_custom_object,
                     group="nvidia.com",
                     version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
-                )
-        except exceptions.ApiException as e:
-            if e.status != 404:  # Ignore if already deleted
-                raise
+                ),
+                (aiohttp.ClientConnectionError,),
+                self._logger,
+            )
+        except exceptions.ApiException as error:
+            if error.status == 404:  # Ignore if already deleted
+                return
+            raise
 
     def port_forward(
         self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
@@ -1563,7 +1705,7 @@ class ManagedDeployment:
                 # Check if port is assigned
                 if port_forward.local_port == 0:
                     self._logger.debug(
-                        f"Port not yet assigned for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts})"
+                        f"Port not yet assigned for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts})"
                     )
                     continue
 
@@ -1577,40 +1719,8 @@ class ManagedDeployment:
                         return port_forward
                 except (requests.ConnectionError, requests.Timeout) as e:
                     self._logger.warning(
-                        f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}"
+                        f"Connection test failed for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts}): {e}"
                     )
-
-                # Restart port-forward for next attempt (except on last attempt)
-                if attempt == max_connection_attempts - 1:
-                    continue
-                try:
-                    port_forward.stop()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error stopping port forward for pod {pod.name}: {e}"
-                    )
-                # kr8s' sync stop() can return before the background thread has
-                # fully torn down (or even finished starting), so we can't assume
-                # the old forward is dead once stop() returns. Track it so
-                # _cleanup() stops it later regardless of whether stop() raised,
-                # rather than losing the reference when we replace the object.
-                if port_forward not in self._active_port_forwards:
-                    self._active_port_forwards.append(port_forward)
-                # Create a fresh portforward object so local_port=0 picks a new
-                # ephemeral port rather than re-binding the previously assigned
-                # port that may still be in TIME_WAIT.
-                try:
-                    port_forward = pod.portforward(
-                        remote_port=remote_port,
-                        local_port=0,
-                        address="127.0.0.1",
-                    )
-                    port_forward.start()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error restarting port forward for pod {pod.name}: {e}"
-                    )
-                    break
 
             # All attempts failed
             self._logger.warning(
@@ -1618,8 +1728,8 @@ class ManagedDeployment:
             )
             try:
                 port_forward.stop()
-            except Exception:
-                pass  # Ignore errors during cleanup
+            except Exception as e:
+                self._logger.debug("Error stopping port forward: %s", e)
             return None
 
         except Exception as e:
@@ -1628,8 +1738,143 @@ class ManagedDeployment:
             )
             return None
 
-    async def _cleanup(self):
+    def send_request_with_port_forward_retry(
+        self,
+        pod: Pod,
+        remote_port: int,
+        endpoint: str,
+        payload: dict[str, Any],
+        timeout: float,
+        port_forward: Any,
+        request_sender: Any = send_request,
+    ) -> requests.Response:
+        """Retry one request after rebuilding a dropped pod port-forward."""
+        active_port_forward = port_forward
+
+        # Inference POSTs may have reached the backend before their connection
+        # failed, so rebuild the port-forward and replay each request only once.
+        for attempt in range(PORT_FORWARD_REQUEST_RETRY_LIMIT + 1):
+            url = f"http://localhost:{active_port_forward.local_port}{endpoint}"
+            try:
+                return request_sender(url, payload, timeout=timeout, method="POST")
+            except (
+                requests.ConnectionError,
+                requests.Timeout,
+                httpx.TransportError,
+            ) as error:
+                if attempt == PORT_FORWARD_REQUEST_RETRY_LIMIT:
+                    raise
+
+                self._logger.warning(
+                    "Frontend request transport failed; rebuilding the pod "
+                    "port-forward and retrying once: %s",
+                    error,
+                )
+                try:
+                    active_port_forward.stop()
+                except RuntimeError as stop_error:
+                    if "anext()" not in str(
+                        stop_error
+                    ) and "already running" not in str(stop_error):
+                        raise
+                    self._logger.debug(
+                        "Ignoring expected error while stopping failed frontend "
+                        "port-forward: %s",
+                        stop_error,
+                    )
+
+                time.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
+                replacement = self.port_forward(pod, remote_port)
+                if replacement is None:
+                    raise
+                active_port_forward = replacement
+
+        raise AssertionError("unreachable")
+
+    async def _capture_discovery_state(self):
+        """Save namespace discovery resources while their owner objects still exist."""
+        if self._custom_api is None or self._core_api is None:
+            self._logger.warning(
+                "Discovery snapshot unavailable: Kubernetes clients not initialized"
+            )
+            return
+        directory = Path(self.log_dir) / "discovery"
+        directory.mkdir(parents=True, exist_ok=True)
+        api_client = self._core_api.api_client
+        discovery_api = client.DiscoveryV1Api(api_client)
+        resources = (
+            (
+                "dgd",
+                partial(
+                    self._custom_api.list_namespaced_custom_object,
+                    "nvidia.com",
+                    self.deployment_spec.api_version,
+                    self.namespace,
+                    "dynamographdeployments",
+                ),
+            ),
+            (
+                "dwm",
+                partial(
+                    self._custom_api.list_namespaced_custom_object,
+                    "nvidia.com",
+                    "v1alpha1",
+                    self.namespace,
+                    "dynamoworkermetadatas",
+                ),
+            ),
+            ("pods", partial(self._core_api.list_namespaced_pod, self.namespace)),
+            (
+                "services",
+                partial(self._core_api.list_namespaced_service, self.namespace),
+            ),
+            (
+                "endpointslices",
+                partial(discovery_api.list_namespaced_endpoint_slice, self.namespace),
+            ),
+        )
+        # DWM ownership is through Pod UIDs; a DGD label selector can miss it.
+        for name, read in resources:
+            record = {
+                "namespace": self.namespace,
+                "deployment": self._deployment_name,
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+            try:
+                async with asyncio.timeout(DISCOVERY_RESOURCE_TIMEOUT):
+                    response = await read(_request_timeout=DISCOVERY_RESOURCE_TIMEOUT)
+                record["response"] = api_client.sanitize_for_serialization(response)
+            except Exception as error:
+                record["error"] = f"{type(error).__name__}: {error}"
+                self._logger.warning(
+                    "Could not capture discovery resource %s: %s", name, error
+                )
+            try:
+                (directory / f"{name}.json").write_text(json.dumps(record, indent=2))
+            except (OSError, TypeError, ValueError) as error:
+                self._logger.warning(
+                    "Could not save discovery resource %s: %s", name, error
+                )
+
+    async def _cleanup(self, failed: bool = False):
+        pending_cancellation: asyncio.CancelledError | None = None
         try:
+            if failed:
+                try:
+                    async with asyncio.timeout(DISCOVERY_SNAPSHOT_TIMEOUT):
+                        await self._capture_discovery_state()
+                except asyncio.CancelledError as error:
+                    pending_cancellation = error
+                    self._logger.warning(
+                        "Discovery snapshot cancelled; finishing cleanup before "
+                        "propagating cancellation"
+                    )
+                except BaseException as error:
+                    # Snapshot capture is best-effort and must not replace the
+                    # existing setup or test failure.
+                    self._logger.warning(
+                        "Discovery snapshot failed; continuing cleanup: %s", error
+                    )
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs()
             self._logger.info(
@@ -1638,20 +1883,16 @@ class ManagedDeployment:
             for port_forward in self._active_port_forwards:
                 try:
                     port_forward.stop()
-                except RuntimeError as e:
-                    # Expected error when pod is terminated:
-                    # "anext(): asynchronous generator is already running"
-                    if "anext()" in str(e) or "already running" in str(e):
-                        self._logger.debug(f"Port forward cleanup: {e}")
-                    else:
-                        self._logger.warning(
-                            f"Unexpected error stopping port forward: {e}"
-                        )
                 except Exception as e:
-                    self._logger.debug(f"Error stopping port forward: {e}")
+                    # Port-forward teardown is best-effort. A third-party cleanup
+                    # failure must not mask the deployment test result or prevent
+                    # the remaining forwards from being stopped.
+                    self._logger.debug("Error stopping port forward: %s", e)
             self._active_port_forwards.clear()
         finally:
             await self._delete_deployment()
+        if pending_cancellation is not None:
+            raise pending_cancellation
 
     async def __aenter__(self):
         try:
@@ -1668,15 +1909,32 @@ class ManagedDeployment:
             await asyncio.gather(*tasks)
 
             await self._create_deployment()
-            await self._wait_for_ready()
+            await self._wait_for_ready(timeout=self.readiness_timeout)
 
-        except:
-            await self._cleanup()
+        except BaseException as error:
+            try:
+                await self._cleanup(failed=not isinstance(error, pytest.skip.Exception))
+            except _VCLUSTER_CLEANUP_ERRORS:
+                self._logger.exception(
+                    "vCluster connection failed during cleanup after deployment "
+                    "setup failure; preserving the original error"
+                )
             raise
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self._cleanup()
+        if exc_type is None:
+            await self._cleanup()
+            return None
+
+        try:
+            await self._cleanup(failed=not issubclass(exc_type, pytest.skip.Exception))
+        except _VCLUSTER_CLEANUP_ERRORS:
+            self._logger.exception(
+                "vCluster connection failed during cleanup after test failure; "
+                "preserving the original error"
+            )
+        return False
 
 
 async def main():

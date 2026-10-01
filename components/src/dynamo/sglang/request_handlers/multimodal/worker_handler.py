@@ -15,6 +15,8 @@ from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -67,6 +69,9 @@ class EmbeddingsProcessorLike(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def release_embeddings(self, tensor_id: int) -> None:
+        ...
+
 
 class SglangUtils:
     """General SGLang utilities (not multimodal-specific)"""
@@ -90,6 +95,8 @@ class SglangUtils:
             sampling_params["n"] = sampling_options.n
         if stop_conditions.max_tokens:
             sampling_params["max_new_tokens"] = stop_conditions.max_tokens
+        if stop_conditions.min_tokens:
+            sampling_params["min_new_tokens"] = stop_conditions.min_tokens
         if stop_conditions.ignore_eos:
             sampling_params["ignore_eos"] = stop_conditions.ignore_eos
 
@@ -347,63 +354,79 @@ async def _build_mm_items(
     if encoded_groups:
         embeddings, tensor_id = await embeddings_processor.process_embeddings(request)
 
-        grouped_grids: dict[str, list[Any]] = {"IMAGE": [], "VIDEO": []}
-        grouped_embeds: dict[str, list[torch.Tensor]] = {"IMAGE": [], "VIDEO": []}
-        video_second_per_grid_ts: list[float] = []
-        # SGLang expects one timestamp list per video in the grouped item.
-        video_timestamps: list[list[float]] = []
+        try:
+            grouped_grids: dict[str, list[Any]] = {"IMAGE": [], "VIDEO": []}
+            grouped_embeds: dict[str, list[torch.Tensor]] = {
+                "IMAGE": [],
+                "VIDEO": [],
+            }
+            video_second_per_grid_ts: list[float] = []
+            # SGLang expects one timestamp list per video in the grouped item.
+            video_timestamps: list[list[float]] = []
 
-        offset = 0
-        for (
-            modality,
-            grid_item,
-            token_count,
-            second_per_grid_ts,
-            timestamps,
-        ) in encoded_groups:
-            next_offset = offset + int(token_count)
-            if next_offset > embeddings.shape[0]:
-                raise ValueError("Encoded token counts exceed received embedding rows")
-            grouped_grids[modality].append(grid_item)
-            grouped_embeds[modality].append(embeddings[offset:next_offset])
-            if modality == "VIDEO":
-                if second_per_grid_ts is not None:
-                    video_second_per_grid_ts.append(second_per_grid_ts)
-                if timestamps is not None:
-                    video_timestamps.append(timestamps)
-            offset = next_offset
+            offset = 0
+            for (
+                modality,
+                grid_item,
+                token_count,
+                second_per_grid_ts,
+                timestamps,
+            ) in encoded_groups:
+                next_offset = offset + int(token_count)
+                if next_offset > embeddings.shape[0]:
+                    raise ValueError(
+                        "Encoded token counts exceed received embedding rows"
+                    )
+                grouped_grids[modality].append(grid_item)
+                grouped_embeds[modality].append(embeddings[offset:next_offset])
+                if modality == "VIDEO":
+                    if second_per_grid_ts is not None:
+                        video_second_per_grid_ts.append(second_per_grid_ts)
+                    if timestamps is not None:
+                        video_timestamps.append(timestamps)
+                offset = next_offset
 
-        if offset != embeddings.shape[0]:
-            raise ValueError("Encoded token counts do not match received embeddings")
-
-        if grouped_embeds["IMAGE"]:
-            image_mm_items.append(
-                embeddings_processor.create_multimodal_image_item(
-                    torch.cat(grouped_embeds["IMAGE"], dim=0),
-                    grouped_grids["IMAGE"],
-                )
-            )
-        if grouped_embeds["VIDEO"]:
-            video_group_count = len(grouped_grids["VIDEO"])
-            if (
-                video_second_per_grid_ts
-                and len(video_second_per_grid_ts) != video_group_count
-            ):
+            if offset != embeddings.shape[0]:
                 raise ValueError(
-                    "second_per_grid_ts must be present for every video group"
+                    "Encoded token counts do not match received embeddings"
                 )
-            if video_timestamps and len(video_timestamps) != video_group_count:
-                raise ValueError(
-                    "video_timestamps must be present for every video group"
+
+            if grouped_embeds["IMAGE"]:
+                image_mm_items.append(
+                    embeddings_processor.create_multimodal_image_item(
+                        torch.cat(grouped_embeds["IMAGE"], dim=0),
+                        grouped_grids["IMAGE"],
+                    )
                 )
-            video_data_items.append(
-                embeddings_processor.create_multimodal_video_item(
-                    torch.cat(grouped_embeds["VIDEO"], dim=0),
-                    grouped_grids["VIDEO"],
-                    second_per_grid_ts=video_second_per_grid_ts or None,
-                    video_timestamps=video_timestamps or None,
+            if grouped_embeds["VIDEO"]:
+                video_group_count = len(grouped_grids["VIDEO"])
+                if (
+                    video_second_per_grid_ts
+                    and len(video_second_per_grid_ts) != video_group_count
+                ):
+                    raise ValueError(
+                        "second_per_grid_ts must be present for every video group"
+                    )
+                if video_timestamps and len(video_timestamps) != video_group_count:
+                    raise ValueError(
+                        "video_timestamps must be present for every video group"
+                    )
+                video_data_items.append(
+                    embeddings_processor.create_multimodal_video_item(
+                        torch.cat(grouped_embeds["VIDEO"], dim=0),
+                        grouped_grids["VIDEO"],
+                        second_per_grid_ts=video_second_per_grid_ts or None,
+                        video_timestamps=video_timestamps or None,
+                    )
                 )
-            )
+        except BaseException:
+            try:
+                embeddings_processor.release_embeddings(tensor_id)
+            except BaseException:
+                logger.exception(
+                    "Failed to release multimodal embeddings allocation %s", tensor_id
+                )
+            raise
 
     return image_mm_items, video_data_items, embeddings, tensor_id
 
@@ -495,6 +518,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                 finally:
                     _nvtx.end_range(rng_agg)
 
+        except InvalidArgument:
+            raise
         except Exception as e:
             logger.error(f"Error in multimodal generation: {e}", exc_info=True)
             yield ErrorResponseBuilder.build_error_response(e)
@@ -514,6 +539,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             raise ValueError("input_ids is required")
 
         sampling_params = SglangUtils.build_sampling_params(request)
+        validate_disagg_parallel_sampling({"sampling_params": sampling_params})
 
         # Request bootstrap info from prefill worker
         bootstrap_info = await self._get_bootstrap_from_prefill(
@@ -724,6 +750,9 @@ class MultimodalPrefillWorkerHandler(
         try:
             # Validate and parse request
             disagg_request = self._validate_and_parse_disagg_request(disagg_request)
+            validate_disagg_parallel_sampling(
+                {"sampling_params": disagg_request.sampling_params}
+            )
 
             rid = context.trace_id or context.id()
             bootstrap_room = self._generate_bootstrap_room()

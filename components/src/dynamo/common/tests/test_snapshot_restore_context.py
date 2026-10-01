@@ -48,12 +48,24 @@ def write_restore_context(monkeypatch, tmp_path, env):
 
 def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_path):
     monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
+    monkeypatch.setenv("DYN_EVENT_PLANE_HOST", "192.0.2.10")
+    monkeypatch.setenv("DYN_TCP_RPC_HOST", "192.0.2.15")
+    monkeypatch.setenv("DYN_TCP_RPC_PORT", "25000")
+    monkeypatch.setenv("DYN_TCP_RESPONSE_STREAM_HOST", "192.0.2.20")
+    monkeypatch.setenv("DYN_TCP_RESPONSE_STREAM_PORT", "8080")
+    monkeypatch.setenv("DYN_TCP_LISTEN_BACKLOG", "128")
     write_restore_context(
         monkeypatch,
         tmp_path,
         {
             "DYN_DISCOVERY_BACKEND": "etcd",
             "DYN_REQUEST_PLANE": None,
+            "DYN_EVENT_PLANE_HOST": None,
+            "DYN_TCP_RPC_HOST": "198.51.100.15",
+            "DYN_TCP_RPC_PORT": "25001",
+            "DYN_TCP_RESPONSE_STREAM_HOST": "198.51.100.20",
+            "DYN_TCP_RESPONSE_STREAM_PORT": None,
+            "DYN_TCP_LISTEN_BACKLOG": "8192",
             "UNSUPPORTED_ENV": "ignored",
         },
     )
@@ -63,9 +75,21 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     assert restored == {
         "DYN_DISCOVERY_BACKEND": "etcd",
         "DYN_REQUEST_PLANE": None,
+        "DYN_EVENT_PLANE_HOST": None,
+        "DYN_TCP_RPC_HOST": "198.51.100.15",
+        "DYN_TCP_RPC_PORT": "25001",
+        "DYN_TCP_RESPONSE_STREAM_HOST": "198.51.100.20",
+        "DYN_TCP_RESPONSE_STREAM_PORT": None,
+        "DYN_TCP_LISTEN_BACKLOG": "8192",
     }
     assert os.environ["DYN_DISCOVERY_BACKEND"] == "etcd"
     assert "DYN_REQUEST_PLANE" not in os.environ
+    assert "DYN_EVENT_PLANE_HOST" not in os.environ
+    assert os.environ["DYN_TCP_RPC_HOST"] == "198.51.100.15"
+    assert os.environ["DYN_TCP_RPC_PORT"] == "25001"
+    assert os.environ["DYN_TCP_RESPONSE_STREAM_HOST"] == "198.51.100.20"
+    assert "DYN_TCP_RESPONSE_STREAM_PORT" not in os.environ
+    assert os.environ["DYN_TCP_LISTEN_BACKLOG"] == "8192"
     assert "UNSUPPORTED_ENV" not in os.environ
 
 

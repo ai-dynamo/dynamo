@@ -24,6 +24,7 @@ active-sequences = [
   "dep:rustc-hash",
   "dep:tracing-subscriber",
 ]
+approximate-lru = ["active-sequences"]
 claude-trace-export = [
   "dep:chrono",
   "dep:crossbeam-channel",
@@ -48,6 +49,7 @@ mooncake = [
   "dep:dynamo-mocker",
   "dep:indicatif",
   "dep:libc",
+  "dep:sha2",
   "dep:tokio-util",
 ]
 multiturn = [
@@ -57,7 +59,7 @@ multiturn = [
   "dep:indicatif",
   "dep:rand",
 ]
-offline-replay = ["dep:blake3", "dep:dynamo-mocker"]
+offline-replay = ["dep:blake3", "dep:dynamo-mocker", "dep:libc"]
 router-bench = ["dynamo-kv-router/bench"]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
@@ -72,7 +74,7 @@ router-test-support = [
   "dep:tracing-subscriber",
 ]
 satf = ["dep:dynamo-data-gen"]
-request-trace-to-mooncake = ["dep:dynamo-data-gen", "dep:tempfile"]
+request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
 test-support = [
   "router-test-support",
   "dynamo-mocker/test-support",
@@ -132,6 +134,17 @@ name = "active_sequences_bench"
 path = "kv_router/active_sequences_bench.rs"
 harness = false
 required-features = ["active-sequences"]
+
+[[bench]]
+name = "approximate_lru_bench"
+path = "kv_router/approximate_lru_bench.rs"
+harness = false
+required-features = ["approximate-lru"]
+
+[[test]]
+name = "approximate_lru"
+path = "tests/approximate_lru.rs"
+required-features = ["approximate-lru"]
 
 [[bench]]
 name = "dc_ckf_relay_bench"

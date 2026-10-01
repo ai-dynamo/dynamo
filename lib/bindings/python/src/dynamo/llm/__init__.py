@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
-from dynamo._core import AicPerfConfig as AicPerfConfig
+from dynamo._core import AisPerfConfig as AisPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
@@ -25,6 +25,7 @@ from dynamo._core import KvRouter as KvRouter
 from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import KvStateAgentHost as KvStateAgentHost
 from dynamo._core import KvStateAttachmentOwner as KvStateAttachmentOwner
+from dynamo._core import LoadThresholdConfig as LoadThresholdConfig
 from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import MediaFetcher as MediaFetcher
@@ -60,6 +61,8 @@ try:
 except ImportError:
     pass
 
+from ._unary import LLMUnaryClient as LLMUnaryClient
+from ._unary import with_engine_data as with_engine_data
 from .exceptions import HttpError
 from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 

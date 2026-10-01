@@ -199,7 +199,7 @@ def test_endpoint_overrides_with_prefill_worker(mock_vllm_cli):
         "--disaggregation-mode",
         "prefill",
         "--kv-transfer-config",
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
     )
     config = parse_args()
     assert config.namespace == "custom"
@@ -237,10 +237,28 @@ def test_removed_multimodal_role_flags_are_rejected(flag, mock_vllm_cli):
 # --connector removal tests
 
 
-def test_connector_nixl_raises_error_with_migration_hint(mock_vllm_cli):
-    """Test that --connector nixl raises ValueError with --kv-transfer-config hint."""
+def test_connector_nixl_raises_error_without_mode(mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "nixl")
     with pytest.raises(ValueError, match="--connector is no longer supported"):
+        parse_args()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_role"),
+    [("prefill", "kv_producer"), ("decode", "kv_consumer")],
+)
+def test_connector_nixl_migration_hint_uses_disaggregation_role(
+    mock_vllm_cli, mode, expected_role
+):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--connector",
+        "nixl",
+        "--disaggregation-mode",
+        mode,
+    )
+    with pytest.raises(ValueError, match=f'"kv_role": "{expected_role}"'):
         parse_args()
 
 
@@ -294,18 +312,20 @@ def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
 
 def test_connector_to_kv_transfer_json_single():
     """Test _connector_to_kv_transfer_json returns valid JSON for a single connector."""
-    result = json.loads(_connector_to_kv_transfer_json(["nixl"]))
-    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+    result = json.loads(_connector_to_kv_transfer_json(["nixl"], "kv_producer"))
+    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_producer"}
 
 
 def test_connector_to_kv_transfer_json_multi():
     """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
-    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"]))
+    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer"))
     assert result["kv_connector"] == "PdConnector"
+    assert result["kv_role"] == "kv_both"
     nested = result["kv_connector_extra_config"]["connectors"]
-    nested_names = [c["kv_connector"] for c in nested]
-    assert "DynamoConnector" in nested_names
-    assert "NixlConnector" in nested_names
+    assert {c["kv_connector"]: c["kv_role"] for c in nested} == {
+        "DynamoConnector": "kv_both",
+        "NixlConnector": "kv_consumer",
+    }
 
 
 # _uses_nixl_connector / _uses_dynamo_connector tests
@@ -326,7 +346,7 @@ def _make_engine_cfg(kv_connector=None, extra_config=None):
 _PD_KVBM_NIXL = {
     "connectors": [
         {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
-        {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
+        {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
     ]
 }
 
@@ -486,6 +506,54 @@ def test_vllm_publishes_structural_tag_reasoning_policy(
     )
 
 
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
+        (SimpleNamespace(video_token_index=202), 202),
+        (SimpleNamespace(), None),
+    ],
+)
+def test_resolve_video_token_id(hf_config, expected):
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert _load_vllm_main()._resolve_video_token_id(vllm_config) == expected
+
+
+def test_kv_event_publisher_receives_video_token_id(monkeypatch):
+    vllm_main = _load_vllm_main()
+    publisher = Mock()
+    monkeypatch.setattr(vllm_main, "KvEventPublisher", publisher)
+    monkeypatch.setattr(vllm_main, "get_dp_range_for_worker", lambda _: (0, 1))
+    monkeypatch.setattr(vllm_main, "get_configured_kv_event_block_size", lambda _: 16)
+    monkeypatch.setattr(vllm_main, "_resolve_image_token_id", lambda *_: 100)
+    monkeypatch.setattr(vllm_main, "_resolve_video_token_id", lambda _: 200)
+    monkeypatch.setattr(
+        vllm_main.ZmqEventPublisher,
+        "offset_endpoint_port",
+        lambda endpoint, data_parallel_rank: endpoint,
+    )
+    config = SimpleNamespace(
+        engine_args=SimpleNamespace(
+            enable_prefix_caching=True,
+            kv_events_config=SimpleNamespace(
+                enable_kv_cache_events=True,
+                endpoint="tcp://*:5557",
+            ),
+        ),
+        enable_local_indexer=True,
+        kv_state_endpoint=None,
+    )
+
+    publishers = vllm_main.setup_kv_event_publisher(
+        config, SimpleNamespace(), SimpleNamespace()
+    )
+
+    assert publishers is not None and len(publishers) == 1
+    assert publisher.call_args.kwargs["image_token_id"] == 100
+    assert publisher.call_args.kwargs["video_token_id"] == 200
+
+
 @pytest.mark.parametrize("load_format", ["modelexpress", "mx"])
 def test_should_not_prefetch_model_for_modelexpress_load_formats(load_format):
     from dynamo.vllm.main import (
@@ -579,6 +647,8 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         component="backend",
         namespace="dynamo",
         engine_args=FakeEngineArgs(),
+        embedding_worker=False,
+        embedding_worker_processes=1,
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
         route_to_encoder=False,
@@ -616,7 +686,7 @@ def test_disaggregation_mode_prefill(mock_vllm_cli):
         "--disaggregation-mode",
         "prefill",
         "--kv-transfer-config",
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
     )
     config = parse_args()
     assert config.disaggregation_mode == DisaggregationMode.PREFILL
@@ -806,6 +876,53 @@ class TestVllmOmniOptionalDependency:
 class TestBenchmarkConfig:
     """Tests for BenchmarkConfig dataclass and grid generation."""
 
+    @pytest.mark.parametrize(
+        ("trace", "worker_cls"),
+        [(False, "auto"), (True, "auto"), (False, "example.ServingWorker")],
+    )
+    def test_disabled_benchmark_preserves_serving_worker(
+        self, monkeypatch, mock_vllm_cli, trace, worker_cls
+    ):
+        for name in (
+            "DYN_BENCHMARK_MODE",
+            "DYN_BENCHMARK_RANDOMIZE_KDA_STATE",
+            "DYN_FORWARDPASS_METRIC_PORT",
+            "DYN_FPM_TRACE",
+            "DYN_GMS_USE_V1",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+        flags = [
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--worker-cls",
+            worker_cls,
+            "--worker-extension-cls",
+            "example.ServingExtension",
+            "--additional-config",
+            '{"application_setting": "preserved"}',
+        ]
+        if trace:
+            flags.append("--fpm-trace")
+        mock_vllm_cli(*flags)
+
+        config = parse_args()
+
+        assert config.benchmark_mode is None
+        assert config.benchmark_randomize_kda_state is False
+        assert getattr(config, "_benchmark_additional_config", None) is None
+        assert config.engine_args.additional_config == {
+            "application_setting": "preserved"
+        }
+        assert config.engine_args.worker_cls == worker_cls
+        assert config.engine_args.worker_extension_cls == "example.ServingExtension"
+        expected_scheduler = (
+            "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            if trace
+            else None
+        )
+        assert config.engine_args.scheduler_cls == expected_scheduler
+
     def test_benchmark_config_defaults(self):
         from dynamo.vllm.instrumented_scheduler import BenchmarkConfig
 
@@ -853,9 +970,12 @@ class TestBenchmarkConfig:
 
         assert config._benchmark_additional_config == {
             "mode": "prefill",
+            "randomize_kda_state": False,
+            "hybrid_live_state": False,
             "warmup_iterations": 2,
             "output_path": str(output),
             "timeout": 900,
+            "max_batch_size": None,
             "prefill_max_new_token_samples": 64,
             "prefill_max_kv_read_token_samples": 16,
             "decode_max_kv_read_token_samples": 128,
@@ -863,6 +983,45 @@ class TestBenchmarkConfig:
             "prefix_max_batch_size_samples": 3,
             "collect_imbalanced": False,
         }
+
+    def test_random_kda_config_selects_worker_and_reaches_scheduler(
+        self, mock_vllm_cli
+    ):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "decode",
+            "--benchmark-randomize-kda-state",
+        )
+        config = parse_args()
+        assert (
+            config.engine_args.worker_cls
+            == "dynamo.vllm.benchmark_worker.BenchmarkWorker"
+        )
+        assert config._benchmark_additional_config["randomize_kda_state"] is True
+
+    @pytest.mark.parametrize("mode", [None, "prefill"])
+    def test_random_kda_requires_decode_benchmark(self, mock_vllm_cli, mode):
+        flags = ["--model", "Qwen/Qwen3-0.6B", "--benchmark-randomize-kda-state"]
+        if mode:
+            flags.extend(["--benchmark-mode", mode])
+        mock_vllm_cli(*flags)
+        with pytest.raises(ValueError, match="requires --benchmark-mode"):
+            parse_args()
+
+    def test_random_kda_rejects_custom_worker(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "decode",
+            "--benchmark-randomize-kda-state",
+            "--worker-cls",
+            "custom.Worker",
+        )
+        with pytest.raises(ValueError, match="standard --worker-cls"):
+            parse_args()
 
     def test_benchmark_points_file_is_embedded_in_benchmark_config(
         self, mock_vllm_cli, tmp_path
@@ -1176,24 +1335,31 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
-def test_build_sampling_params_allowlists_router_hint_extra_args():
+def test_build_sampling_params_attaches_kv_hint_message():
     from dynamo.vllm.handlers import build_sampling_params
 
-    router_hint = {
+    source_locations_payload = {
         "source_control_endpoint": "tcp://127.0.0.1:23280",
         "block_hashes": [11, 22],
+    }
+    kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-123",
+        "actions": [
+            {
+                "action_id": "a1",
+                "action_type": "kv.fetch",
+                "action_version": "1.0",
+                "payload": source_locations_payload,
+            },
+        ],
     }
     request = {
         "token_ids": [1, 2, 3],
         "sampling_options": {},
         "stop_conditions": {},
         "output_options": {},
-        "extra_args": {
-            "kv_transfer_params": {
-                "router_hint": router_hint,
-                "untrusted_connector_param": "dropped",
-            },
-        },
+        "kv_hint": kv_hint,
     }
 
     default_sampling_params = {
@@ -1214,7 +1380,7 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
     assert sp.extra_args == {
         "kv_transfer_params": {
             "internal": "kept",
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
         },
         "other_internal": "kept",
     }
@@ -1227,50 +1393,49 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
         {"do_remote_decode": True, "remote_engine_id": "prefill-a"},
     ],
 )
-def test_update_kv_transfer_params_preserves_router_hint_only(kv_transfer_params):
+def test_update_kv_transfer_params_preserves_kv_hint_only(kv_transfer_params):
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    request_router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
+    request_kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-request",
+        "actions": [],
     }
-    stale_router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23281",
-        "block_hashes": [33, 44],
+    stale_kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-stale",
+        "actions": [],
     }
     sampling_params = SimpleNamespace(
         extra_args={
             "kv_transfer_params": {
-                "router_hint": request_router_hint,
+                "kv_hint": request_kv_hint,
                 "untrusted_connector_param": "dropped",
             }
         }
     )
-    kv_transfer_params = {**kv_transfer_params, "router_hint": stale_router_hint}
+    kv_transfer_params = {**kv_transfer_params, "kv_hint": stale_kv_hint}
 
     _update_kv_transfer_params(
-        sampling_params, kv_transfer_params, preserve_router_hint=True
+        sampling_params, kv_transfer_params, preserve_kv_hint=True
     )
 
     assert sampling_params.extra_args["kv_transfer_params"] == {
-        **{
-            key: value
-            for key, value in kv_transfer_params.items()
-            if key != "router_hint"
-        },
-        "router_hint": request_router_hint,
+        **{key: value for key, value in kv_transfer_params.items() if key != "kv_hint"},
+        "kv_hint": request_kv_hint,
     }
 
 
-def test_update_kv_transfer_params_drops_existing_router_hint_by_default():
+def test_update_kv_transfer_params_drops_existing_kv_hint_by_default():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
+    kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-request",
+        "actions": [],
     }
     sampling_params = SimpleNamespace(
-        extra_args={"kv_transfer_params": {"router_hint": router_hint}}
+        extra_args={"kv_transfer_params": {"kv_hint": kv_hint}}
     )
 
     _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
@@ -1280,12 +1445,13 @@ def test_update_kv_transfer_params_drops_existing_router_hint_by_default():
     }
 
 
-def test_update_kv_transfer_params_drops_replacement_router_hint():
+def test_update_kv_transfer_params_drops_replacement_kv_hint():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    stale_router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23281",
-        "block_hashes": [33, 44],
+    stale_kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-stale",
+        "actions": [],
     }
     sampling_params = SimpleNamespace(extra_args={})
 
@@ -1293,7 +1459,7 @@ def test_update_kv_transfer_params_drops_replacement_router_hint():
         sampling_params,
         {
             "transfer_id": "prefill-1",
-            "router_hint": stale_router_hint,
+            "kv_hint": stale_kv_hint,
         },
     )
 
@@ -1305,13 +1471,14 @@ def test_update_kv_transfer_params_drops_replacement_router_hint():
 def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
+    kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-request",
+        "actions": [],
     }
     shared_extra_args = {
         "kv_transfer_params": {
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
             "internal": "kept-in-default",
         },
         "other_internal": "kept",
@@ -1319,12 +1486,12 @@ def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     sampling_params = SimpleNamespace(extra_args=shared_extra_args)
 
     _update_kv_transfer_params(
-        sampling_params, {"transfer_id": "prefill-1"}, preserve_router_hint=True
+        sampling_params, {"transfer_id": "prefill-1"}, preserve_kv_hint=True
     )
 
     assert shared_extra_args == {
         "kv_transfer_params": {
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
             "internal": "kept-in-default",
         },
         "other_internal": "kept",
@@ -1333,7 +1500,7 @@ def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     assert sampling_params.extra_args == {
         "kv_transfer_params": {
             "transfer_id": "prefill-1",
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
         },
         "other_internal": "kept",
     }
@@ -1530,6 +1697,9 @@ def _make_dynamo_config(**overrides):
         "enable_multimodal": False,
         "fpm_trace": False,
         "benchmark_mode": None,
+        "benchmark_randomize_kda_state": False,
+        "benchmark_hybrid_live_state": False,
+        "benchmark_max_batch_size": None,
         "benchmark_warmup_iterations": 5,
         "benchmark_output_path": "/tmp/benchmark_results.json",
         "benchmark_timeout": 900,
@@ -1656,7 +1826,7 @@ class TestForwardPassMetricsActivation:
 
     def test_cli_flag_enables_trace_and_exports_env(self, monkeypatch, mock_vllm_cli):
         monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
-        monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
+        monkeypatch.setenv("DYN_FPM_TRACE", "0")
         mock_vllm_cli("--fpm-trace", "--model", "Qwen/Qwen3-0.6B")
 
         config = parse_args()
@@ -1835,6 +2005,7 @@ class TestEmbeddingWorkerFlag:
         mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
         config = parse_args()
         assert config.embedding_worker is False
+        assert config.embedding_worker_processes == 1
 
     def test_flag_sets_true(self, mock_vllm_cli):
         """--embedding-worker on its own with default agg mode parses cleanly."""
@@ -1848,6 +2019,53 @@ class TestEmbeddingWorkerFlag:
         config = parse_args()
         assert config.embedding_worker is True
 
+    def test_embedding_worker_processes_parse(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "8",
+            "--runner",
+            "pooling",
+        )
+        config = parse_args()
+        assert config.embedding_worker_processes == 8
+
+    def test_embedding_worker_processes_require_embedding_worker(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--embedding-worker-processes", "4")
+        with pytest.raises(ValueError, match="requires --embedding-worker"):
+            parse_args()
+
+    def test_embedding_worker_processes_reject_data_parallel(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "4",
+            "--runner",
+            "pooling",
+            "--data-parallel-size",
+            "2",
+        )
+        with pytest.raises(ValueError, match="data-parallel-size=1"):
+            parse_args()
+
+    def test_embedding_worker_processes_reject_lora(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "4",
+            "--runner",
+            "pooling",
+            "--enable-lora",
+        )
+        with pytest.raises(ValueError, match="--enable-lora"):
+            parse_args()
+
     def test_rejects_prefill_disagg(self, mock_vllm_cli):
         """--embedding-worker combined with --disaggregation-mode prefill is rejected."""
         mock_vllm_cli(
@@ -1859,7 +2077,7 @@ class TestEmbeddingWorkerFlag:
             "--disaggregation-mode",
             "prefill",
             "--kv-transfer-config",
-            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+            '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
         )
         with pytest.raises(ValueError, match="--embedding-worker is only valid"):
             parse_args()
@@ -1925,6 +2143,33 @@ def test_build_sampling_params_openai_maps_max_thinking_tokens():
     assert sp.thinking_token_budget == 1024
 
 
+def test_build_sampling_params_openai_maps_root_thinking_token_budget():
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {
+        "model": "test-model",
+        "prompt": "Solve: 1+1.",
+        "max_tokens": 32,
+        "thinking_token_budget": 2048,
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params={})
+    assert sp.thinking_token_budget == 2048
+
+
+def test_build_sampling_params_openai_root_thinking_token_budget_overrides_nvext():
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {
+        "model": "test-model",
+        "prompt": "Solve: 1+1.",
+        "max_tokens": 32,
+        "thinking_token_budget": 2048,
+        "nvext": {"max_thinking_tokens": 1024},
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params={})
+    assert sp.thinking_token_budget == 2048
+
+
 @pytest.mark.asyncio
 async def test_generate_text_mode_applies_nvext_cache_salt():
     from dynamo.vllm.handlers import DecodeWorkerHandler
@@ -1976,3 +2221,78 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
 
     assert chunks
     assert captured["prompt"]["cache_salt"] == "dynamo-cache-salt:tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_generate_text_mode_notifies_for_empty_decoded_token():
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    class InputParams:
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is True
+            return [1, 2, 3]
+
+    class Context:
+        def __init__(self):
+            self.notifications = 0
+
+        def trace_headers(self):
+            return {}
+
+        def notify_first_token(self):
+            self.notifications += 1
+
+    context = Context()
+
+    class EngineClient:
+        def generate(self, prompt, *args, **kwargs):
+            async def gen():
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=0,
+                            text="",
+                            token_ids=[101],
+                            finish_reason=None,
+                        )
+                    ]
+                )
+                assert context.notifications == 1
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=0,
+                            text="a",
+                            token_ids=[101, 102],
+                            finish_reason=None,
+                        )
+                    ]
+                )
+
+            return gen()
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    handler = SimpleNamespace(
+        input_param_manager=InputParams(),
+        default_sampling_params={},
+        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
+        engine_client=EngineClient(),
+        _deferred_aborts={},
+        _shutdown_on_engine_dead=lambda exc: None,
+        _abort_monitor=abort_monitor,
+        _to_local_dp_rank=lambda rank: None,
+    )
+    request = {"model": "test-model", "prompt": "ignored after tokenization"}
+
+    chunks = [
+        chunk
+        async for chunk in DecodeWorkerHandler._generate_text_mode(
+            handler, request, context, "req-1"
+        )
+    ]
+
+    assert chunks[0]["choices"][0]["delta"]["content"] == ""
+    assert context.notifications == 1

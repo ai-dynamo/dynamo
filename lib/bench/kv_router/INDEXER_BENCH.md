@@ -10,7 +10,6 @@ drained. There is no separate replay mode.
 Supported backends are:
 
 - `nested-map` (`PositionalIndexer`)
-- `concurrent-radix-tree`
 - `concurrent-radix-tree-compressed`
 
 The benchmark rejects single-threaded radix, branch-sharded CRTC, approximate
@@ -49,7 +48,9 @@ Inside timing:
   worker lookup and Flume queues.
 - Lookup service, event application, contention, required clock reads, and
   fixed-slot completion records.
-- Query drain and FIFO event-worker seal barriers.
+- Queue drain, ending at the last query or event completion. Closing lanes,
+  sealing and harvesting completion buffers, and aggregating issue records
+  happen after that timestamp.
 
 The logical denominator is Request + Stored + Removed + Cleared. The block
 denominator includes request hashes and hashes in both Stored and Removed
@@ -79,6 +80,11 @@ cargo bench --package dynamo-bench --bench mooncake_bench \
 BIN=$(find target/release/deps -maxdepth 1 -type f -perm -111 \
   -name 'mooncake_bench-*' | head -n1)
 ```
+
+`--trace-block-size` (default 512) is the number of tokens each trace `hash_id`
+represents and must match the trace; the public Mooncake traces use 512.
+`--block-size` (default 128) is the separate mock-engine and indexer block size;
+the engine re-chunks synthesized prompt tokens at that size.
 
 Linux uses absolute `CLOCK_MONOTONIC` sleeps followed by the configured spin.
 macOS uses a portable sleep-plus-spin timer for correctness tests only.
@@ -179,10 +185,46 @@ The versioned Mooncake JSON reports:
 - Queue depth at producer stop, outstanding work, maximum reconstructed depth,
   drain time, timer kind, CPU masks, exact-ID validity, and compact failure
   reasons.
+- `provenance`: the command line, binary path and SHA-256, trace path and
+  SHA-256, and the trace, corpus, and issuer settings that shaped the replay.
 
 Do not interpret overloaded lookup latency as an iso-throughput latency result.
 At a comfortable common load, report scheduler lag, queue wait, and lookup
 service separately and require negligible queue depth and drain.
+
+### Choosing a load for A/B comparisons
+
+An overloaded replay and a keep-up replay measure different things, so choose
+the load by the path a change touches:
+
+- **Write capacity: overloaded replay** (for example the 750 ms command above).
+  Queries finish during the issue window while events drain for several times
+  longer, so `achieved_block_ops_per_sec` mostly measures event application.
+  During that window queries also walk a tree that lags far behind the trace.
+- **Read cost and write latency: keep-up replay.** Use the shortest duration
+  whose runs report `kept_up=true` with negligible drain; the sweep finds it.
+  Compare `query_service` and `update_accepted_to_finished` percentiles.
+  Achieved throughput is pinned to the offered rate there and is not a metric.
+
+A sensitivity check with two deliberately regressed builds shows the difference.
+Both were throwaway patches to the CRTC at `2de120f6a3`. The read variant ran
+`walk_match_path` twice in `find_matches_impl` and kept the second result, and
+the write variant busy-waited 6 µs at the start of `apply_event`. Each variant
+ran the documented CRTC command at 750 ms and at 12 s, with 128 workers,
+duplication 20, length 4, and 4 event workers, as five interleaved
+fresh-process pairs against an unpatched build on 8 cores. Values are
+candidate/control median ratios:
+
+| Metric | Load | Read path ×2 | Write +6 µs/event |
+|---|---|---:|---:|
+| `achieved_block_ops_per_sec` | 750 ms (overloaded) | 0.997 (not detected) | 0.728 |
+| `query_service` p50 | 750 ms (overloaded) | 1.086 | 0.952 |
+| `query_service` p50 | 12 s (keep-up) | 1.325 | 1.007 |
+| `update_accepted_to_finished` p50 | 12 s (keep-up) | 1.004 | 5.09 |
+
+Median lookup service was 1.66 µs in the overloaded replay and 3.10 µs at keep-up:
+the overloaded replay understates read cost because its queries run against an
+early, small tree.
 
 ## Active Sequences replay
 
@@ -255,6 +297,57 @@ cargo bench --package dynamo-bench --bench active_sequences_bench \
 
 The macOS timer is a correctness and profiling fallback. Do not publish local
 workstation throughput as an authoritative cross-system result.
+
+## Approximate retention replay
+
+`approximate_lru_bench` drives the production
+`ThreadPoolIndexer<ConcurrentRadixTreeCompressed>` directly. It supports a TTL
+arm and a capacity-bounded LRU arm in separate processes. Each request performs
+a prompt lookup and predicted insertion/acquire at its raw admission timestamp,
+then releases its LRU lease at the terminal output signal. Lanes are sticky by
+request attempt so same-rank lookups can still execute concurrently; the
+indexer's production worker/rank assignment preserves mutation FIFO.
+
+This is deliberately a prompt-lifecycle benchmark. It accounts for partial
+prompt tails as private LRU occupancy, but does not hash or materialize streamed
+output blocks. The result schema identifies that scope explicitly. Capacity is
+registered and acknowledged before timing, every LRU acquire must resolve to
+LRU rather than TTL fallback or ignored, and the final stats fence verifies that
+leases, active references, private occupancy, overcapacity, and queue backlog
+have drained.
+
+The default timed path is lean. It records only start/end wall and process CPU,
+issuer CPU, issue span, drain, queue depth at producer stop, acquire-mode counts,
+and final indexer state. It does not read clocks or maintain latency samples per
+operation. Use `perf` or Samply for CPU attribution; production mutation-queue
+statistics remain available in the final LRU snapshot.
+
+Build and run TTL and LRU in fresh processes:
+
+```bash
+cargo bench --package dynamo-bench --bench approximate_lru_bench \
+  --no-default-features --features approximate-lru --no-run
+
+cargo bench --package dynamo-bench --bench approximate_lru_bench \
+  --no-default-features --features approximate-lru -- \
+  testdata/mooncake_trace_approximate_pressure.jsonl \
+  --policy ttl --trace-block-size 8 --block-size 4 --benchmark-duration-ms 1000 \
+  --num-unique-inference-workers 1 --pre-run-quiescence-ms 0 \
+  --result-json-output /tmp/approx-ttl-smoke.json
+
+cargo bench --package dynamo-bench --bench approximate_lru_bench \
+  --no-default-features --features approximate-lru -- \
+  testdata/mooncake_trace_approximate_pressure.jsonl \
+  --policy lru --trace-block-size 8 --block-size 4 --capacity-blocks 2 --require-eviction \
+  --benchmark-duration-ms 1000 --num-unique-inference-workers 1 \
+  --pre-run-quiescence-ms 0 \
+  --result-json-output /tmp/approx-lru-smoke.json
+```
+
+The pressure arm exits nonzero if its prepared unique working set does not
+exceed capacity, any acquire falls back, eviction does not occur, or final
+invariants fail. macOS runs are functional smoke evidence only; authoritative
+CPU and throughput comparisons require pinned, exclusive Linux CPUs.
 
 ## Validation evidence
 

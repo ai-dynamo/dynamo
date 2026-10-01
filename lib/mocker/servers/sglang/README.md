@@ -30,7 +30,7 @@ Point the existing sidecar at it:
 
 ```bash
 cargo run -p dynamo-sglang-sidecar --bin dynamo-sglang-sidecar -- \
-  --sglang-endpoint http://127.0.0.1:30001
+  --grpc-endpoint http://127.0.0.1:30001
 ```
 
 `--extra-engine-args` accepts inline JSON or a JSON file path. The server adds
@@ -62,13 +62,13 @@ bootstrap host. Run each sidecar in a separate terminal:
 
 ```bash
 cargo run -p dynamo-sglang-sidecar --bin dynamo-sglang-sidecar -- \
-  --sglang-endpoint http://127.0.0.1:30001 \
+  --grpc-endpoint http://127.0.0.1:30001 \
   --bootstrap-host 127.0.0.1
 ```
 
 ```bash
 cargo run -p dynamo-sglang-sidecar --bin dynamo-sglang-sidecar -- \
-  --sglang-endpoint http://127.0.0.1:30002
+  --grpc-endpoint http://127.0.0.1:30002
 ```
 
 The prefill response carries SGLang's bootstrap host, port, and room through

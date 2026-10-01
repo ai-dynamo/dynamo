@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -13,7 +14,7 @@ use dynamo_backend_common::{
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
     PreprocessedRequest, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
 use serde_json::Value;
 use tokio::sync::OnceCell;
@@ -22,11 +23,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, Client, Discovery, Pool};
+use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, new_output_ids, output_ids_to_u32, terminal_from_meta,
+    meta_u32, output_ids_to_u32, terminal_from_meta,
 };
+
+const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
@@ -40,6 +44,7 @@ pub struct SglangSidecarEngine {
 
 struct StartedState {
     pool: Pool,
+    native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
 }
 
@@ -51,40 +56,82 @@ struct DiscoveredKvEventSource {
 }
 
 impl SglangSidecarEngine {
-    pub(crate) fn new(
-        endpoint: GrpcEndpoint,
-        transport: GrpcTransportConfig,
-        disaggregation_mode: DisaggregationMode,
-        bootstrap_host: Option<String>,
-        bootstrap_port: Option<u16>,
-    ) -> Self {
-        Self {
-            endpoint,
-            transport,
-            disaggregation_mode,
-            bootstrap_host,
-            bootstrap_port,
-            state: OnceCell::new(),
-            cancel: CancellationToken::new(),
+    pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
+        match argv {
+            Some(argv) => Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo),
+            None => Self::from_parsed(<Args as clap::Parser>::parse()),
         }
     }
 
-    pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
-        let args = match argv {
-            Some(args) => <Args as clap::Parser>::try_parse_from(args)
-                .map_err(|err| client::invalid_arg(err.to_string()))?,
-            None => <Args as clap::Parser>::parse(),
-        };
+    /// Parse injected arguments while retaining Clap's structured exit error.
+    ///
+    /// Embedded callers use this to distinguish help and version output from
+    /// Dynamo startup failures without changing `from_args`'s error contract.
+    pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        Self::from_parsed(args).map_err(Into::into)
+    }
 
+    /// Parse CLI arguments without connecting; discovery runs after probe startup.
+    pub fn from_cli() -> Result<
+        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        DynamoError,
+    > {
+        let args = <Args as clap::Parser>::parse();
+        Self::validate_args(&args)?;
+        Ok(Self::from_parsed_async(args, false))
+    }
+
+    /// Parse embedded launcher arguments now, then discover metadata after the
+    /// shared sidecar runner has started probes and connected the runtime.
+    pub fn try_from_args_async(
+        argv: Vec<String>,
+    ) -> Result<
+        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        SidecarStartupError,
+    > {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        Self::validate_args(&args)?;
+        Ok(Self::from_parsed_async(args, false))
+    }
+
+    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        Self::validate_args(&args)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
+        runtime.block_on(Self::from_parsed_async(args, true))
+    }
+
+    fn validate_args(args: &Args) -> Result<(), DynamoError> {
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",
             ));
         }
+        Ok(())
+    }
 
-        let endpoint = GrpcEndpoint::parse(&args.sglang_endpoint, "--sglang-endpoint")?;
+    async fn from_parsed_async(
+        args: Args,
+        bootstrap: bool,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let discovery = bootstrap_discover(
+            &args.sidecar.grpc_endpoint,
+            &args.sidecar.grpc.config(),
+            bootstrap,
+        )
+        .await?;
+        Self::from_discovered(args, discovery)
+    }
+
+    fn from_discovered(
+        args: Args,
+        discovery: Discovery,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
-        let discovery = bootstrap_discover(&endpoint, &transport)?;
         let disaggregation_mode = discovery_mode(&discovery)?;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
             resolve_bootstrap_host(
@@ -100,7 +147,6 @@ impl SglangSidecarEngine {
         } else {
             None
         };
-
         tracing::info!(
             %endpoint,
             mode = ?disaggregation_mode,
@@ -136,19 +182,25 @@ impl SglangSidecarEngine {
         };
 
         Ok((
-            Self::new(
+            Self {
                 endpoint,
                 transport,
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
-            ),
+                state: OnceCell::new(),
+                cancel: CancellationToken::new(),
+            },
             config,
         ))
     }
 
     async fn await_ready(&self, client: &mut Client, deadline: Instant) -> Result<(), DynamoError> {
+        let started = Instant::now();
+        let mut attempt = 0_u64;
+        let mut last_logged_at: Option<Instant> = None;
         loop {
+            attempt += 1;
             let retry_message = match client::health_check(client, deadline).await {
                 Ok(healthy) => {
                     if healthy {
@@ -164,10 +216,26 @@ impl SglangSidecarEngine {
                     self.transport.startup_deadline
                 )));
             }
-            tokio::time::sleep_until(
-                (Instant::now() + self.transport.retry_interval).min(deadline),
-            )
-            .await;
+            let now = Instant::now();
+            if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
+                // WARN, not silent: this loop previously logged nothing at all on a
+                // failed attempt, so a SGLang engine that's slow (or never becomes)
+                // healthy produced zero visible output anywhere for up to
+                // startup_deadline (default 300s) -- indistinguishable from a hang.
+                // Rate-limited like GrpcChannelPool::connect_until_ready: a normal
+                // slow startup retries every retry_interval (default 1s) and would
+                // otherwise spam hundreds of lines.
+                tracing::warn!(
+                    attempt,
+                    elapsed = ?started.elapsed(),
+                    remaining = ?deadline.saturating_duration_since(now),
+                    retry_interval = ?self.transport.retry_interval,
+                    reason = %retry_message,
+                    "SGLang not healthy yet; retrying"
+                );
+                last_logged_at = Some(now);
+            }
+            tokio::time::sleep_until((now + self.transport.retry_interval).min(deadline)).await;
         }
     }
 }
@@ -192,18 +260,46 @@ impl LLMEngine for SglangSidecarEngine {
             )));
         }
 
-        let config = build_engine_config(
+        let mut config = build_engine_config(
             &discovery,
             self.disaggregation_mode,
             self.bootstrap_host.clone(),
             self.bootstrap_port,
         )?;
+        let native_http = match NativeHttp::discover(
+            &self.endpoint,
+            &discovery,
+            self.transport.connect_attempt_timeout,
+        )? {
+            Some(native_http) => {
+                match native_http
+                    .await_ready(deadline, self.transport.retry_interval)
+                    .await
+                {
+                    Ok(()) => Some(native_http),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "SGLang native HTTP generation is unavailable; continuing with gRPC"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        if native_http.is_some() {
+            config
+                .runtime_data
+                .insert("sglang_generate".into(), true.into());
+        }
         let kv_event_sources = discover_kv_event_sources(&discovery, &config, &self.endpoint)?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
         self.state
             .set(StartedState {
                 pool,
+                native_http,
                 kv_event_sources,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
@@ -222,11 +318,25 @@ impl LLMEngine for SglangSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let mut grpc_client = self
+        let state = self
             .state
             .get()
-            .map(|state| state.pool.stream_client())
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
+        if let Some(native_request) = native_http::request(
+            &request,
+            ctx.id(),
+            self.disaggregation_mode,
+            self.bootstrap_host.as_deref(),
+            self.bootstrap_port,
+        )? {
+            let native_http = state.native_http.clone().ok_or_else(|| {
+                client::invalid_arg(
+                    "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
+                )
+            })?;
+            return Ok(native_http.generate(native_request, ctx, self.cancel.clone()));
+        }
+        let mut grpc_client = state.pool.stream_client();
 
         let prompt_tokens = request.token_ids.len() as u32;
         let return_tokens_as_ids = request
@@ -240,7 +350,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
-        let prefill_handoff = if self.disaggregation_mode.is_prefill() {
+        let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
                 .as_ref()
@@ -248,8 +358,9 @@ impl LLMEngine for SglangSidecarEngine {
         } else {
             None
         };
-        let cancel = self.cancel.clone();
+        let cancel = self.cancel.child_token();
         let is_prefill = self.disaggregation_mode.is_prefill();
+        let stop_conditions = request.stop_conditions;
 
         Ok(Box::pin(async_stream::stream! {
             if ctx.is_stopped() || cancel.is_cancelled() {
@@ -275,11 +386,23 @@ impl LLMEngine for SglangSidecarEngine {
                     return;
                 }
             };
+            if is_prefill {
+                let Some(handoff) = prefill_handoff.take() else {
+                    yield Err(client::protocol_error(
+                        "SGLang gRPC prefill request is missing disaggregated params",
+                    ));
+                    return;
+                };
+                // Publish the handoff only after the gRPC transport opens the
+                // response stream so decode can rendezvous while prefill runs.
+                yield Ok(LLMEngineOutput {
+                    disaggregated_params: Some(handoff),
+                    ..Default::default()
+                });
+            }
 
             let mut generated = 0_u32;
             let mut observed_prompt_tokens = prompt_tokens;
-            let mut logprob_offset = 0_usize;
-            let mut token_offset = 0_usize;
             loop {
                 tokio::select! {
                     biased;
@@ -311,42 +434,29 @@ impl LLMEngine for SglangSidecarEngine {
                         if let Some(value) = meta_u32(&response.meta_info, "prompt_tokens") {
                             observed_prompt_tokens = value;
                         }
-                        // SGLang streams output_ids cumulatively (the whole sequence
-                        // so far, like its logprob metadata), so emit only the tokens
-                        // appended since the previous chunk.
-                        let token_ids = match output_ids_to_u32(new_output_ids(
-                            &response.output_ids,
-                            token_offset,
-                        )) {
+                        let token_ids = match output_ids_to_u32(&response.output_ids) {
                             Ok(ids) => ids,
                             Err(err) => {
                                 yield Err(err);
                                 break;
                             }
                         };
-                        // Never rewind: a regressive chunk (shorter than what we
-                        // already emitted) must not let later growth re-emit tokens.
-                        token_offset = token_offset.max(response.output_ids.len());
-                        let (log_probs, top_logprobs, next_offset) =
-                            match extract_logprobs(
-                                &response.meta_info,
-                                logprob_offset,
-                                return_tokens_as_ids,
-                            ) {
+                        let (log_probs, top_logprobs) =
+                            match extract_logprobs(&response.meta_info, return_tokens_as_ids) {
                                 Ok(values) => values,
                                 Err(err) => {
                                     yield Err(err);
                                     break;
                                 }
                             };
-                        logprob_offset = next_offset;
 
                         if is_prefill {
                             if response.finished {
-                                let mut terminal = match terminal_from_meta(
+                                let terminal = match terminal_from_meta(
                                     &response.meta_info,
                                     observed_prompt_tokens,
                                     0,
+                                    &stop_conditions,
                                 ) {
                                     Ok(terminal) => terminal,
                                     Err(error) => {
@@ -354,7 +464,6 @@ impl LLMEngine for SglangSidecarEngine {
                                         break;
                                     }
                                 };
-                                terminal.disaggregated_params = prefill_handoff.clone();
                                 yield Ok(terminal);
                                 break;
                             }
@@ -367,6 +476,7 @@ impl LLMEngine for SglangSidecarEngine {
                                 &response.meta_info,
                                 observed_prompt_tokens,
                                 generated,
+                                &stop_conditions,
                             ) {
                                 Ok(terminal) => terminal,
                                 Err(error) => {
@@ -453,24 +563,20 @@ impl LLMEngine for SglangSidecarEngine {
                 endpoint: source.endpoint.clone(),
                 topic: source.topic.clone(),
                 dp_rank: source.dp_rank,
+                image_token_id: None,
             })
             .collect())
     }
 }
 
-fn bootstrap_discover(
+async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
+    bootstrap: bool,
 ) -> Result<Discovery, DynamoError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| client::engine_shutdown(format!("bootstrap runtime: {err}")))?;
-    runtime.block_on(async {
-        let deadline = Instant::now() + transport.startup_deadline;
-        let mut grpc_client = client::connect(endpoint, transport, deadline).await?;
-        client::discover(&mut grpc_client, deadline).await
-    })
+    let deadline = Instant::now() + transport.startup_deadline;
+    let mut grpc_client = client::connect(endpoint, transport, deadline, bootstrap).await?;
+    client::discover(&mut grpc_client, deadline).await
 }
 
 fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoError> {
@@ -748,6 +854,107 @@ fn kv_event_connect_host(
     Ok(bare_host.to_string())
 }
 
+/// Same predicate as SGLang's `SpeculativeAlgorithm.is_eagle()`, which is
+/// what switches its radix cache (and so its KV events) to bigram keys.
+/// `NEXTN` covers older builds that don't normalize it to `EAGLE`.
+fn sglang_eagle_enabled(server_info: &Value) -> bool {
+    server_info
+        .get("speculative_algorithm")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|algorithm| {
+            matches!(
+                algorithm.to_ascii_uppercase().as_str(),
+                "EAGLE" | "EAGLE3" | "FROZEN_KV_MTP" | "NEXTN"
+            )
+        })
+}
+
+fn is_deepseek_v4_arch(model_info: &Value) -> bool {
+    model_info
+        .get("architectures")
+        .and_then(Value::as_array)
+        .is_some_and(|architectures| {
+            architectures.iter().any(|architecture| {
+                matches!(
+                    architecture.as_str(),
+                    Some(
+                        "DeepseekV4ForCausalLM"
+                            | "DeepseekV4ForCausalLMNextN"
+                            | "DeepseekV4ForCausalLMDSpark"
+                    )
+                )
+            })
+        })
+}
+
+fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -> Option<u64> {
+    let device_tokens = server_info
+        .get("max_total_num_tokens")?
+        .as_u64()
+        .filter(|tokens| *tokens > 0)?;
+    let policy = server_info.get("hicache_write_policy")?.as_str()?;
+    if !matches!(policy, "write_back" | "write_through") {
+        return None;
+    }
+
+    let host_tokens = match server_info.get("hicache_host_total_tokens") {
+        Some(value) => value.as_u64().filter(|tokens| *tokens > 0)?,
+        None => {
+            if server_info
+                .get("enable_hierarchical_cache")
+                .and_then(Value::as_bool)
+                != Some(true)
+                || server_info.get("hicache_size").and_then(Value::as_u64) != Some(0)
+                || client::json_u64(server_info, "dcp_size")
+                    .unwrap_or(1)
+                    .max(1)
+                    > 1
+            {
+                return None;
+            }
+
+            let page_size = client::json_u64(server_info, "page_size").filter(|size| *size > 0)?;
+            let ratio = server_info
+                .get("hicache_ratio")?
+                .as_f64()
+                .filter(|ratio| ratio.is_finite() && *ratio > 0.0)?;
+            if is_deepseek_v4_arch(model_info) {
+                // Compatibility with SGLang's current DSV4 host allocator. Prefer the
+                // authoritative field above once SGLang exposes realized capacity.
+                let device_pages = device_tokens
+                    .checked_add(page_size.checked_sub(1)?)?
+                    .checked_div(page_size)?;
+                let host_pages = device_pages as f64 * ratio;
+                if !host_pages.is_finite() || host_pages >= u64::MAX as f64 {
+                    return None;
+                }
+                (host_pages as u64).checked_mul(page_size)?
+            } else {
+                let unaligned_tokens = device_tokens as f64 * ratio;
+                if !unaligned_tokens.is_finite() || unaligned_tokens >= u64::MAX as f64 {
+                    return None;
+                }
+                (unaligned_tokens as u64)
+                    .checked_div(page_size)?
+                    .checked_add(1)?
+                    .checked_mul(page_size)?
+            }
+        }
+    };
+    if host_tokens == 0 {
+        return None;
+    }
+
+    match policy {
+        "write_back" => Some(host_tokens),
+        "write_through" => host_tokens
+            .checked_sub(device_tokens)
+            .filter(|tokens| *tokens > 0),
+        _ => None,
+    }
+}
+
 fn build_engine_config(
     discovery: &Discovery,
     mode: DisaggregationMode,
@@ -769,9 +976,14 @@ fn build_engine_config(
     let dp_size = client::json_u32(&discovery.server_info, "dp_size")
         .unwrap_or(1)
         .max(1);
+    let enable_dp_attention = discovery
+        .server_info
+        .get("enable_dp_attention")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let max_num_seqs =
         client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
-            if dp_size > 1 {
+            if enable_dp_attention && dp_size > 1 {
                 value / u64::from(dp_size)
             } else {
                 value
@@ -780,18 +992,10 @@ fn build_engine_config(
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
 
-    let enable_dp_attention = discovery
-        .server_info
-        .get("enable_dp_attention")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let (data_parallel_start_rank, data_parallel_size) = if enable_dp_attention && dp_size > 1 {
-        // Native gRPC is exposed by the rank-zero frontend for the complete
-        // multi-node SGLang endpoint, so one sidecar registers every DP rank.
-        (Some(0), Some(dp_size))
-    } else {
-        (Some(0), Some(1))
-    };
+    // Native gRPC is exposed by the rank-zero frontend for the complete
+    // SGLang endpoint, so one sidecar registers every pure- or attention-DP rank.
+    let data_parallel_start_rank = Some(0);
+    let data_parallel_size = Some(dp_size);
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(
@@ -799,11 +1003,21 @@ fn build_engine_config(
         ));
     }
 
+    let enable_eagle = sglang_eagle_enabled(&discovery.server_info);
+
     let mut runtime_data = HashMap::new();
     runtime_data.insert(
         "grpc_service".to_string(),
         Value::String("sglang.runtime.v1.SglangService".to_string()),
     );
+    if let Some(total_tokens) =
+        hicache_native_offloading_capacity(&discovery.server_info, &discovery.model_info)
+    {
+        runtime_data.insert(
+            "native_offloading_capacity".to_string(),
+            serde_json::json!({"total_tokens": total_tokens}),
+        );
+    }
 
     Ok(EngineConfig {
         model: discovery.model_path.clone(),
@@ -816,8 +1030,10 @@ fn build_engine_config(
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
+            max_gpu_lora_count: None,
             data_parallel_size,
             data_parallel_start_rank,
+            enable_eagle,
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
             bootstrap_port: mode.is_prefill().then_some(bootstrap_port).flatten(),
         }),
@@ -826,12 +1042,16 @@ fn build_engine_config(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+    use dynamo_backend_common::{BackendError, ErrorType, ModelInput};
     use dynamo_sidecar_common::GrpcEndpoint;
     use serde_json::json;
 
     use super::{
-        DisaggregationMode, DiscoveredKvEventSource, Discovery, build_engine_config,
-        discover_kv_event_sources, resolve_bootstrap_host_with_local,
+        Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
+        SglangSidecarEngine, build_engine_config, discover_kv_event_sources,
+        discovery_bootstrap_port, discovery_mode, hicache_native_offloading_capacity,
+        kv_event_connect_host, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -843,6 +1063,512 @@ mod tests {
             model_info: json!({}),
             server_info,
         }
+    }
+
+    fn args() -> Args {
+        Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "worker.example:30001",
+            "--namespace",
+            "test-namespace",
+            "--component",
+            "custom-component",
+            "--endpoint",
+            "tokens",
+            "--endpoint-types",
+            "completions",
+            "--custom-jinja-template",
+            "template.jinja",
+            "--exclude-tools-when-tool-choice-none",
+            "false",
+            "--enable-rl",
+            "--grpc-connections",
+            "3",
+            "--grpc-connect-attempt-timeout-secs",
+            "7",
+            "--grpc-retry-interval-secs",
+            "2",
+            "--grpc-startup-deadline-secs",
+            "11",
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn worker_preserves_options_and_uses_discovered_identity_and_role() {
+        for (mode, component) in [("aggregated", "custom-component"), ("decode", "backend")] {
+            let mut args = args();
+            args.sidecar.common.disaggregation_mode = DisaggregationMode::Prefill;
+            let mut discovery = discovery(json!({"disaggregation_mode": mode}));
+            discovery.served_model_name = Some("public-model".into());
+            let (engine, config) = SglangSidecarEngine::from_discovered(args, discovery).unwrap();
+
+            assert_eq!(config.namespace, "test-namespace");
+            assert_eq!(config.component, component);
+            assert_eq!(config.endpoint, "tokens");
+            assert_eq!(config.endpoint_types, "completions");
+            assert_eq!(
+                config.custom_jinja_template.as_deref(),
+                Some(std::path::Path::new("template.jinja"))
+            );
+            assert_eq!(config.model_name, "tokenizer");
+            assert_eq!(config.served_model_name.as_deref(), Some("public-model"));
+            assert!(matches!(config.model_input, ModelInput::Tokens));
+            assert!(!config.exclude_tools_when_tool_choice_none);
+            assert!(!config.route_to_encoder);
+            assert!(config.enable_rl);
+            assert_eq!(
+                config.disaggregation_mode.as_str(),
+                if mode == "aggregated" {
+                    "agg"
+                } else {
+                    "decode"
+                }
+            );
+            assert_eq!(engine.disaggregation_mode, config.disaggregation_mode);
+            assert_eq!(engine.endpoint.as_str(), "http://worker.example:30001");
+            assert_eq!(engine.transport.connections.get(), 3);
+            assert_eq!(engine.transport.connect_attempt_timeout.as_secs(), 7);
+            assert_eq!(engine.transport.retry_interval.as_secs(), 2);
+            assert_eq!(engine.transport.startup_deadline.as_secs(), 11);
+            assert!(engine.bootstrap_host.is_none());
+            assert!(engine.bootstrap_port.is_none());
+            assert!(!engine.state.initialized());
+        }
+    }
+
+    #[test]
+    fn worker_parsers_prefer_cli_then_discovery() {
+        for (cli_reasoning, cli_tools, expected_reasoning, expected_tools) in [
+            (
+                Some("cli-reasoning"),
+                Some("cli-tools"),
+                "cli-reasoning",
+                "cli-tools",
+            ),
+            (Some("cli-reasoning"), None, "cli-reasoning", "native-tools"),
+            (None, None, "native-reasoning", "native-tools"),
+        ] {
+            let mut args = args();
+            args.sidecar.common.dyn_reasoning_parser = cli_reasoning.map(str::to_string);
+            args.sidecar.common.dyn_tool_call_parser = cli_tools.map(str::to_string);
+            let (_, config) = SglangSidecarEngine::from_discovered(
+                args,
+                discovery(json!({
+                    "reasoning_parser": "native-reasoning",
+                    "tool_call_parser": "native-tools",
+                })),
+            )
+            .unwrap();
+            assert_eq!(config.reasoning_parser.as_deref(), Some(expected_reasoning));
+            assert_eq!(config.tool_call_parser.as_deref(), Some(expected_tools));
+        }
+        for native in [json!(""), json!(null)] {
+            let (_, config) = SglangSidecarEngine::from_discovered(
+                args(),
+                discovery(json!({"reasoning_parser": native, "tool_call_parser": native})),
+            )
+            .unwrap();
+            assert!(config.reasoning_parser.is_none());
+            assert!(config.tool_call_parser.is_none());
+        }
+    }
+
+    #[test]
+    fn encoder_routing_is_rejected_before_discovery() {
+        let mut args = args();
+        args.sidecar.common.route_to_encoder = true;
+        let error = SglangSidecarEngine::from_parsed(args)
+            .err()
+            .expect("unsupported encoder routing");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("route-to-encoder is not supported")
+        );
+    }
+
+    #[test]
+    fn discovery_roles_accept_native_aliases_and_reject_unknown_strings() {
+        for (value, expected) in [
+            (json!(null), DisaggregationMode::Aggregated),
+            (json!("null"), DisaggregationMode::Aggregated),
+            (json!("agg"), DisaggregationMode::Aggregated),
+            (json!("aggregated"), DisaggregationMode::Aggregated),
+            (json!("prefill"), DisaggregationMode::Prefill),
+            (json!("decode"), DisaggregationMode::Decode),
+        ] {
+            assert_eq!(
+                discovery_mode(&discovery(json!({"disaggregation_mode": value}))).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            discovery_mode(&discovery(json!({}))).unwrap(),
+            DisaggregationMode::Aggregated
+        );
+        for mode in ["encode", "unknown", ""] {
+            let error =
+                discovery_mode(&discovery(json!({"disaggregation_mode": mode}))).unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported SGLang disaggregation_mode")
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_port_requires_a_nonzero_u16() {
+        for (value, expected) in [(json!(1), 1), (json!("65535"), u16::MAX)] {
+            assert_eq!(
+                discovery_bootstrap_port(&discovery(
+                    json!({"disaggregation_bootstrap_port": value})
+                ))
+                .unwrap(),
+                Some(expected)
+            );
+        }
+        for value in [
+            json!(null),
+            json!(0),
+            json!(-1),
+            json!(65536),
+            json!("invalid"),
+        ] {
+            let error = discovery_bootstrap_port(&discovery(
+                json!({"disaggregation_bootstrap_port": value}),
+            ))
+            .unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(error.to_string().contains("disaggregation_bootstrap_port"));
+        }
+    }
+
+    #[test]
+    fn bootstrap_host_falls_back_to_remote_endpoint_and_preserves_ipv6() {
+        for (server_info, endpoint, expected) in [
+            (
+                json!({"host": "localhost", "dist_init_addr": "worker.localhost:20000"}),
+                "http://remote.example:30001",
+                "remote.example",
+            ),
+            (
+                json!({"dist_init_addr": "tcp://[2001:db8::1]:20000"}),
+                "http://127.0.0.1:30001",
+                "[2001:db8::1]",
+            ),
+        ] {
+            let host = resolve_bootstrap_host_with_local(
+                Some(" "),
+                endpoint,
+                &discovery(server_info),
+                "::1",
+            )
+            .unwrap();
+            assert_eq!(host.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn registration_preserves_identity_and_optional_limits() {
+        let mut discovery = discovery(
+            json!({"max_total_num_tokens": "512", "max_prefill_tokens": "128", "max_running_requests": "32"}),
+        );
+        discovery.served_model_name = Some("public-model".into());
+        discovery.max_model_len = Some(4096);
+        let config =
+            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
+        assert_eq!(config.model, "model");
+        assert_eq!(config.served_model_name.as_deref(), Some("public-model"));
+        assert_eq!(
+            config.runtime_data.get("grpc_service"),
+            Some(&json!("sglang.runtime.v1.SglangService"))
+        );
+        let llm = config.llm.unwrap();
+        assert_eq!(llm.context_length, Some(4096));
+        assert_eq!(llm.max_num_batched_tokens, Some(128));
+        assert_eq!(llm.max_num_seqs, Some(32));
+        assert_eq!(llm.kv_cache_block_size, None);
+        assert_eq!(llm.total_kv_blocks, None);
+
+        discovery
+            .server_info
+            .as_object_mut()
+            .unwrap()
+            .remove("max_prefill_tokens");
+        assert_eq!(
+            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None)
+                .unwrap()
+                .llm
+                .unwrap()
+                .max_num_batched_tokens,
+            Some(512)
+        );
+        discovery.server_info = json!({});
+        discovery.max_model_len = None;
+        let llm = build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None)
+            .unwrap()
+            .llm
+            .unwrap();
+        assert_eq!(
+            (
+                llm.context_length,
+                llm.max_num_seqs,
+                llm.max_num_batched_tokens
+            ),
+            (None, None, None)
+        );
+        assert_eq!(
+            (llm.data_parallel_start_rank, llm.data_parallel_size),
+            (Some(0), Some(1))
+        );
+    }
+
+    #[test]
+    fn registration_requires_bootstrap_address_only_for_prefill() {
+        for (host, port) in [
+            (None, None),
+            (Some("prefill.example"), None),
+            (None, Some(8998)),
+        ] {
+            let error = build_engine_config(
+                &discovery(json!({})),
+                DisaggregationMode::Prefill,
+                host.map(str::to_string),
+                port,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(error.to_string().contains("usable bootstrap address"));
+        }
+        for mode in [
+            DisaggregationMode::Aggregated,
+            DisaggregationMode::Decode,
+            DisaggregationMode::Prefill,
+        ] {
+            let llm = build_engine_config(
+                &discovery(json!({})),
+                mode,
+                Some("prefill.example".into()),
+                Some(8998),
+            )
+            .unwrap()
+            .llm
+            .unwrap();
+            assert_eq!(
+                llm.bootstrap_host.as_deref(),
+                mode.is_prefill().then_some("prefill.example")
+            );
+            assert_eq!(llm.bootstrap_port, mode.is_prefill().then_some(8998));
+        }
+    }
+
+    fn kv_discovery() -> (Discovery, EngineConfig, GrpcEndpoint) {
+        let discovery = discovery(json!({
+            "page_size": 128, "dp_size": 2,
+            "kv_events": {"publisher": "zmq", "endpoint_host": "*", "endpoint_port_base": 5557,
+                          "topic": "kv", "block_size": 128, "dp_size": 2}
+        }));
+        let config =
+            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
+        let endpoint = GrpcEndpoint::parse("worker.example:30001", "test").unwrap();
+        (discovery, config, endpoint)
+    }
+
+    #[test]
+    fn kv_event_descriptor_is_optional_but_validated_when_present() {
+        let (mut discovery, config, endpoint) = kv_discovery();
+        for value in [json!(null), json!([]), json!("zmq")] {
+            discovery.server_info["kv_events"] = value.clone();
+            let result = discover_kv_event_sources(&discovery, &config, &endpoint);
+            if value.is_null() {
+                assert!(result.unwrap().is_empty());
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("must be an object or null")
+                );
+            }
+        }
+        discovery.server_info = json!({});
+        assert!(
+            discover_kv_event_sources(&discovery, &config, &endpoint)
+                .unwrap()
+                .is_empty()
+        );
+
+        for (field, value) in [
+            ("publisher", json!(null)),
+            ("publisher", json!("redis")),
+            ("endpoint_host", json!(" ")),
+            ("endpoint_port_base", json!(0)),
+            ("endpoint_port_base", json!(65536)),
+            ("endpoint_port_base", json!("5557")),
+            ("topic", json!(null)),
+            ("block_size", json!(0)),
+            ("block_size", json!(u64::from(u32::MAX) + 1)),
+            ("dp_size", json!(0)),
+        ] {
+            let (mut discovery, config, endpoint) = kv_discovery();
+            discovery.server_info["kv_events"][field] = value;
+            let error = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(error.to_string().contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn kv_events_require_matching_registration_and_rank_coverage() {
+        for (block_size, dp_size, dp_start, message) in [
+            (64, 2, 0, "block size"),
+            (128, 1, 0, "reports 2 DP ranks"),
+            (128, 2, u32::MAX, "rank range overflows"),
+            (128, 2, 1, "does not cover registered DP rank range"),
+        ] {
+            let (discovery, mut config, endpoint) = kv_discovery();
+            let llm = config.llm.as_mut().unwrap();
+            llm.kv_cache_block_size = Some(block_size);
+            llm.data_parallel_size = Some(dp_size);
+            llm.data_parallel_start_rank = Some(dp_start);
+            let error = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(error.to_string().contains(message), "{error}");
+        }
+        let (discovery, mut config, endpoint) = kv_discovery();
+        config.llm = None;
+        assert!(
+            discover_kv_event_sources(&discovery, &config, &endpoint)
+                .unwrap_err()
+                .to_string()
+                .contains("require an LLM engine registration")
+        );
+    }
+
+    #[test]
+    fn kv_events_reject_unmapped_multi_node_dp_and_port_overflow() {
+        for (nnodes, base_port, message) in [
+            (2, 5557, "multi-node DP are unsupported"),
+            (1, 65535, "port overflows 65535"),
+        ] {
+            let (mut discovery, config, endpoint) = kv_discovery();
+            discovery.server_info["nnodes"] = json!(nnodes);
+            discovery.server_info["kv_events"]["endpoint_port_base"] = json!(base_port);
+            let error = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn kv_event_hosts_normalize_ipv6_and_reject_embedded_addresses() {
+        let endpoint = GrpcEndpoint::parse("http://[2001:db8::1]:30001", "test").unwrap();
+        for (host, expected) in [
+            ("*", "[2001:db8::1]"),
+            ("0.0.0.0", "[2001:db8::1]"),
+            ("[::]", "[2001:db8::1]"),
+            ("2001:db8::2", "[2001:db8::2]"),
+            ("[2001:db8::2]", "[2001:db8::2]"),
+            (" 10.0.0.2 ", "10.0.0.2"),
+            ("worker.example", "worker.example"),
+        ] {
+            assert_eq!(kv_event_connect_host(host, &endpoint).unwrap(), expected);
+        }
+        for host in [
+            "tcp://worker",
+            "worker:5557",
+            "worker/path",
+            "worker\\path",
+            "two hosts",
+        ] {
+            let error = kv_event_connect_host(host, &endpoint).unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid SGLang KV-event endpoint host")
+            );
+        }
+    }
+
+    #[test]
+    fn eagle_enabled_tracks_sglang_is_eagle_predicate() {
+        for algorithm in [
+            "EAGLE",
+            "eagle",
+            "EAGLE3",
+            "FROZEN_KV_MTP",
+            "NEXTN",
+            " Eagle ",
+        ] {
+            assert!(
+                sglang_eagle_enabled(&json!({"speculative_algorithm": algorithm})),
+                "{algorithm:?} keys the radix cache by bigrams and must advertise enable_eagle"
+            );
+        }
+        for server_info in [
+            json!({}),
+            json!({"speculative_algorithm": null}),
+            json!({"speculative_algorithm": "NONE"}),
+            json!({"speculative_algorithm": "NGRAM"}),
+            json!({"speculative_algorithm": "STANDALONE"}),
+            json!({"speculative_algorithm": 3}),
+        ] {
+            assert!(
+                !sglang_eagle_enabled(&server_info),
+                "{server_info} must not advertise enable_eagle"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_advertises_enable_eagle_for_eagle_servers() {
+        let eagle = build_engine_config(
+            &discovery(json!({"speculative_algorithm": "EAGLE", "page_size": 256})),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(eagle.llm.unwrap().enable_eagle);
+
+        let plain = build_engine_config(
+            &discovery(json!({"page_size": 256})),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!plain.llm.unwrap().enable_eagle);
     }
 
     #[test]
@@ -932,6 +1658,43 @@ mod tests {
     }
 
     #[test]
+    fn pure_dp_preserves_per_rank_max_num_seqs() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 4,
+                "enable_dp_attention": false,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.max_num_seqs, Some(256));
+        assert_eq!(registration.data_parallel_start_rank, Some(0));
+        assert_eq!(registration.data_parallel_size, Some(4));
+    }
+
+    #[test]
+    fn attention_dp_normalizes_aggregate_max_num_seqs_per_rank() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 4,
+                "enable_dp_attention": true,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(config.llm.unwrap().max_num_seqs, Some(64));
+    }
+
+    #[test]
     fn dcp_registers_logical_kv_block_size() {
         let config = build_engine_config(
             &discovery(json!({
@@ -948,6 +1711,63 @@ mod tests {
 
         assert_eq!(registration.kv_cache_block_size, Some(512));
         assert_eq!(registration.total_kv_blocks, Some(16));
+    }
+
+    #[test]
+    fn publishes_hicache_capacity() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "enable_hierarchical_cache": true,
+                "hicache_size": 0,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_through",
+                "page_size": 16,
+                "max_total_num_tokens": 100,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.runtime_data.get("native_offloading_capacity"),
+            Some(&json!({"total_tokens": 204}))
+        );
+    }
+
+    #[test]
+    fn supports_deepseek_v4_hicache_capacity() {
+        let mut server_info = json!({
+            "enable_hierarchical_cache": true,
+            "hicache_size": 0,
+            "hicache_ratio": 2.0,
+            "hicache_write_policy": "write_back",
+            "page_size": 256,
+            "max_total_num_tokens": 8192,
+        });
+        for architecture in [
+            "DeepseekV4ForCausalLM",
+            "DeepseekV4ForCausalLMNextN",
+            "DeepseekV4ForCausalLMDSpark",
+        ] {
+            assert_eq!(
+                hicache_native_offloading_capacity(
+                    &server_info,
+                    &json!({"architectures": [architecture]}),
+                ),
+                Some(16384)
+            );
+        }
+
+        server_info["hicache_host_total_tokens"] = json!(16640);
+        assert_eq!(
+            hicache_native_offloading_capacity(
+                &server_info,
+                &json!({"architectures": ["DeepseekV4ForCausalLM"]}),
+            ),
+            Some(16640)
+        );
     }
 
     #[test]

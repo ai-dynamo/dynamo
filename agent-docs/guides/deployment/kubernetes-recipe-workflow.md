@@ -21,9 +21,18 @@ retained beyond the deployment ledger.
 
 ```bash
 kubectl --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}"
-kubectl --context "${KUBE_CONTEXT}" get crd | grep -i dynamo || { echo "Dynamo CRDs missing"; exit 1; }
-kubectl --context "${KUBE_CONTEXT}" get storageclass
-kubectl --context "${KUBE_CONTEXT}" get nodes -o wide
+# CRD presence gate: a Forbidden here is tolerated because deploy-dynamo-recipe's server
+# dry-run re-checks it authoritatively; a confirmed absence stops before any mutation.
+crds="$(kubectl --context "${KUBE_CONTEXT}" get crd 2>&1 || true)"
+case "${crds}" in
+  *Forbidden*) echo "WARN: cluster-scope CRD list forbidden for this identity; deferring to server dry-run" ;;
+  *dynamographdeployment*) : ;;
+  *) echo "Dynamo CRDs missing"; exit 1 ;;
+esac
+# Advisory reads: storage classes and node inventory inform sizing but a namespace-scoped
+# identity may lack cluster-scope list rights. Record a Forbidden as a run limitation; do not fail.
+kubectl --context "${KUBE_CONTEXT}" get storageclass || echo "WARN: storageclass list forbidden; record as limitation"
+kubectl --context "${KUBE_CONTEXT}" get nodes -o wide || echo "WARN: node list forbidden; record as limitation"
 ```
 
 Check secrets only by name. Never print, decode, or persist secret values.
@@ -42,7 +51,10 @@ kubectl --context "${KUBE_CONTEXT}" get pvc -n "${NAMESPACE}"
 ```
 
 Run model download and validation jobs when present. Read each Job name from its manifest's `metadata.name`; never infer
-the resource name from the filename.
+the resource name from the filename. A recipe may ship variant-specific download manifests (for example
+`model-download-fp8.yaml` and `model-download-nvfp4.yaml`); select the one matching the assigned DGD and copy it into
+`applied_manifests/` as `model-download.yaml`, per `deploy-dynamo-recipe`. Skip a block when the recipe ships no such
+job.
 
 ```bash
 kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-download.yaml" -n "${NAMESPACE}"
@@ -59,7 +71,7 @@ Apply the selected DGD from its run-scoped copy:
 kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/deploy.yaml" -n "${NAMESPACE}"
 kubectl --context "${KUBE_CONTEXT}" get dynamographdeployment -n "${NAMESPACE}"
 kubectl --context "${KUBE_CONTEXT}" get pods -n "${NAMESPACE}" -o wide
-kubectl get svc -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" get svc -n "${NAMESPACE}"
 ```
 
 ## Readiness Signals

@@ -402,18 +402,13 @@ func findContainerIndex(containers []corev1.Container, name string) int {
 }
 
 // profilerContainerOverride selects the override entry for the profiler container.
-// Prefers an entry named "profiler"; otherwise the first entry that is not the
-// output-copier sidecar (preserving backward compatibility for unnamed overrides).
+// Prefers name:profiler, then a leftover unnamed entry. Unknown names are not
+// aliases for the profiler.
 func profilerContainerOverride(overrides []corev1.Container) *corev1.Container {
 	if override := findContainerOverride(overrides, ContainerNameProfiler); override != nil {
 		return override
 	}
-	for i := range overrides {
-		if overrides[i].Name == "" || overrides[i].Name != ContainerNameOutputCopier {
-			return &overrides[i]
-		}
-	}
-	return nil
+	return findContainerOverride(overrides, "")
 }
 
 // applyContainerOverrides merges fields from the user's container override

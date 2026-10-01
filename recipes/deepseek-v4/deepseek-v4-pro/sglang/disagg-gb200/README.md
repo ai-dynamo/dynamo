@@ -84,7 +84,7 @@ tolerations:
 
 ### AWS EFA
 
-See [Disagg Communication Guide](../../../../../docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md#aws-efa-configuration) for EFA-specific NIXL configuration with libfabric.
+See [EFA on AWS](../../../../../docs/fern/pages/kubernetes/installation/rdma-setup/efa-on-aws.mdx) for EFA-specific NIXL configuration with libfabric.
 
 ### InfiniBand
 

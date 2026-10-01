@@ -233,7 +233,7 @@ python -m api_service.main
 curl -X POST http://localhost:8080/api/v1/faults/gpu/inject \
   -H "Content-Type: application/json" \
   -d '{
-    "target_pod": "vllm-worker-0",
+    "target_pod": "worker-0",
     "fault_type": "XID_ERROR",
     "severity": "HIGH"
   }'
@@ -245,7 +245,7 @@ curl -X POST http://localhost:8080/api/v1/faults/gpu/inject \
 # Inject XID 79 (GPU memory page fault)
 curl -X POST http://localhost:8080/api/v1/faults/gpu/inject/xid-79 \
   -H "Content-Type: application/json" \
-  -d '{"target_pod": "vllm-worker-0"}'
+  -d '{"target_pod": "worker-0"}'
 ```
 
 Supported XID codes: 43, 48, 74, 79, 94, 95, 119, 120
@@ -331,7 +331,7 @@ scenario = Scenario(
     ),
     failure=Failure(
         type="pod_kill",
-        target="vllm-worker-0",
+        target="worker-0",
         trigger_after_requests=50
     )
 )

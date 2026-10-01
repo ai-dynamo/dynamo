@@ -14,7 +14,10 @@ Perform a concurrency sweep during benchmarking only if you deem it is necessary
 
 Do not invent an unbounded sweep when the target and benchmark plan provide no safe maximum. Include `c=1` when the
 goal is to characterize the full latency/throughput frontier, but do not add it to a user-constrained set merely to
-complete a curve. Additionally, after selecting a particular concurrency value, keep the selected number of requests to be AT MOST 4x the concurrency. For example, if `c=4`, the number of requests should be at most 4.
+complete a curve. Additionally, after selecting a particular concurrency value, size the request count to AT MOST 4x the
+concurrency (for example, at most 16 requests for `c=4`), and never below the concurrency itself - fewer requests
+than slots cannot even fill the batch, and tiny counts cannot support the noise-floor and comparison rules in
+`comparison-uncertainty.md`. Within that cap, the count must also keep the measurement inside the standard 30-minute window per `comparison-uncertainty.md`.
 
 Use a non-power-of-two point only when it is required by the user workload, needed to reproduce a baseline, selected
 by an AIPerf search method, or chosen as a bounded refinement around an SLO boundary or observed knee. Record the

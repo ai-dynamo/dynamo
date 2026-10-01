@@ -17,6 +17,11 @@ metadata:
 
 # Create Optimization Hypothesis
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 Materialize an already-reasoned proposal. Treat `knowledge-consult.md` as a flexible reasoning record, not a rigid
 schema. Do not select a different lever, broaden the proposal, deploy, benchmark, or approve it.
 

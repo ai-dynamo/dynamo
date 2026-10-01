@@ -27,6 +27,7 @@ class BasePlannerDefaults:
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = "vllm"
     log_dir = None
     throughput_adjustment_interval_seconds = 180
+    max_throughput_scaling_replicas = 8
     max_gpu_budget = 8
     # GPU floor for the local planner (per-DGD scope). -1 disables.
     # When set alongside max_gpu_budget (with min == max), pins the total
@@ -40,7 +41,7 @@ class BasePlannerDefaults:
     min_endpoint = 1
     prefill_min_endpoint = None
     decode_min_endpoint = None
-    # Localhost-only runtime configuration API (0 disables). It is
+    # Localhost-only endpoint and GPU budget configuration API (0 disables). It is
     # unauthenticated by design and trusts processes in the pod namespace.
     control_api_port = 9086
     decode_engine_num_gpu = 1
@@ -64,6 +65,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
         "PROMETHEUS_EXTRA_QUERY_PARAMS"
     )
     metric_pulling_prometheus_ca_bundle = os.environ.get("PROMETHEUS_CA_BUNDLE")
+    metric_pulling_prometheus_request_timeout_seconds = 10.0
     profile_results_dir = "profiling_results"
 
     isl = 3000  # in number of tokens

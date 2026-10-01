@@ -5,15 +5,17 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
+pub use dynamo_kv_router::kv_hints::{
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
+};
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
+    scheduling::{AbortCause, RequestLifecycle},
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
 
-const KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: &str = "kv_transfer_params";
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
@@ -132,6 +134,7 @@ pub(crate) struct MigrationState {
 struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
+    request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 impl MigrationState {
@@ -189,6 +192,54 @@ impl MigrationState {
                 .build(),
         )
     }
+
+    pub(crate) fn take_request_lifecycle(&self) -> Option<Box<RequestLifecycle>> {
+        self.inner
+            .get()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_lifecycle
+            .take()
+    }
+
+    pub(crate) fn store_request_lifecycle(&self, lifecycle: Box<RequestLifecycle>) {
+        let replaced = self
+            .inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_lifecycle
+            .replace(lifecycle);
+        if let Some(replaced) = replaced {
+            tracing::warn!(
+                replaced = ?replaced,
+                "Replacing an unclaimed request-classifier migration lifecycle"
+            );
+        }
+    }
+
+    pub(crate) fn abort_request_lifecycle(&self, error: Option<&AbortCause>) {
+        let Some(mut lifecycle) = self.take_request_lifecycle() else {
+            return;
+        };
+        lifecycle.abort(error.map(owned_abort_error));
+    }
+}
+
+/// Owned abort payload for classifier lifecycle events: the typed
+/// [`DynamoError`] from the chain when one exists, else the whole chain
+/// converted so the root cause survives.
+pub(crate) fn owned_abort_error(error: &AbortCause) -> Arc<AbortCause> {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = cause {
+        if let Some(dynamo_error) = current.downcast_ref::<DynamoError>() {
+            return Arc::new(dynamo_error.clone());
+        }
+        cause = current.source();
+    }
+    Arc::new(DynamoError::from(
+        error as &(dyn std::error::Error + 'static),
+    ))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -256,8 +307,29 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) migration_state: Option<MigrationState>,
 
-    /// Type of prompt
-    pub token_ids: Vec<TokenIdType>,
+    /// Set when remote prefill has staged KV blocks that only this request's
+    /// decode worker can release, so the decode leg must reach that worker even
+    /// after the client disconnects.
+    ///
+    /// Narrower than `RequestPhase::Decode`: the conditional-disaggregation
+    /// bypass reaches decode without running remote prefill and leaves this
+    /// unset. Frontend-only, like `migration_state` — the routing decision it
+    /// feeds is made in-process before the request is serialized to a worker.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) staged_kv_cleanup: bool,
+
+    /// Prompt tokens shared by prefill and decode request clones.
+    ///
+    /// Disaggregated serving runs those requests concurrently. Keeping the
+    /// immutable prompt behind `Arc` makes cloning the token storage constant-time;
+    /// paths that append generated tokens use `Arc::make_mut`.
+    #[builder(setter(into))]
+    #[serde(
+        serialize_with = "serialize_token_ids",
+        deserialize_with = "deserialize_token_ids"
+    )]
+    pub token_ids: Arc<Vec<TokenIdType>>,
 
     /// Base64-encoded PyTorch tensor containing pre-computed embeddings
     /// If provided, this takes precedence over token_ids for inference
@@ -348,6 +420,20 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_link: Option<TraceLink>,
 
+    /// Text withheld by the previous attempt's decoder as a possible (but
+    /// unresolved) prefix of a hidden stop sequence, carried into a migration
+    /// retry so the new attempt's decoder does not silently drop it and can
+    /// still complete the match if the continuation supplies the rest of the
+    /// sequence. Set by the migration `RetryManager` (in-process, on its own
+    /// in-memory `PreprocessedRequest`) from the last successfully processed
+    /// response before a retry, and consumed once by `Backend` -- also
+    /// in-process, one hop later in the same pipeline -- when seeding the
+    /// retry's decoder. `#[serde(skip)]` keeps it that way: it never needs to,
+    /// and must not, reach a remote worker over the wire.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) jail_seed: Option<String>,
+
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -357,6 +443,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Versioned KV hint message from Dynamo's routing layer for the selected backend request.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hint: Option<KvHint>,
 
     /// Whether the backend should allow a reasoning phase before enforcing
     /// guided output. SGLang consumes this as its per-request
@@ -377,11 +468,30 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_context: Option<AgentContext>,
 
+    /// Opaque frontend-derived scope for partitioning backend `ImageLoader`
+    /// URL caches and Dynamo-owned image embedding caches. This does not
+    /// namespace engine KV caches.
+    ///
+    /// This is carried separately from `agent_context` because backends need
+    /// only the opaque cache scope, not agent lifecycle metadata.
+    /// The optional field is safe across rolling upgrades: older readers
+    /// ignore it and newer readers default it when an older frontend omits it.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_cache_scope: Option<String>,
+
     /// Multimodal processor kwargs forwarded to the backend engine
     /// (e.g. `{"use_audio_in_video": true}` for omni models).
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mm_processor_kwargs: Option<serde_json::Value>,
+
+    /// Per-request media I/O options, forwarded untouched from the incoming request
+    /// when the worker owns media decoding. Absent when the frontend decoded the
+    /// media itself and already consumed them.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_io_kwargs: Option<serde_json::Value>,
 
     /// Optional request timestamp in milliseconds forwarded from nvext.
     #[builder(default)]
@@ -409,6 +519,105 @@ pub struct PreprocessedRequest {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub is_probe: bool,
+}
+
+/// `DYN_TOKEN_IDS_AS_BYTES=1`: put `token_ids` on the request plane as one packed
+/// little-endian int32 blob instead of a sequence. On a binary codec (msgpack) the
+/// Python worker then receives `bytes` and never allocates one Python int per
+/// token; the TRT-LLM handler turns it into an int32 array. Human-readable codecs
+/// (JSON) keep the sequence form. Deserialization accepts both forms.
+/// Enable only when every msgpack worker runs a release with this reader: an older
+/// worker decodes the blob through rmp-serde's `deserialize_seq`, one token per
+/// byte, with no error.
+static TOKEN_IDS_AS_BYTES: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    dynamo_runtime::config::env_is_truthy(
+        dynamo_runtime::config::environment_names::request_plane::DYN_TOKEN_IDS_AS_BYTES,
+    )
+});
+
+/// Readers decode the packed form as signed int32 (the engines' token type), so
+/// ids above `i32::MAX` keep the sequence form.
+fn token_ids_fit_i32(ids: &[TokenIdType]) -> bool {
+    ids.iter().all(|&id| id <= i32::MAX as TokenIdType)
+}
+
+/// Upper bound on the capacity reserved from a sequence size hint; a MessagePack
+/// array header can claim any length before supplying the elements.
+const TOKEN_IDS_PREALLOC_CAP: usize = 1 << 20;
+
+fn serialize_token_ids<S>(ids: &Arc<Vec<TokenIdType>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serialize_token_ids_with(ids, serializer, *TOKEN_IDS_AS_BYTES)
+}
+
+fn serialize_token_ids_with<S>(
+    ids: &[TokenIdType],
+    serializer: S,
+    packed: bool,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if packed && !serializer.is_human_readable() && token_ids_fit_i32(ids) {
+        let mut buf = Vec::with_capacity(ids.len() * 4);
+        for id in ids {
+            buf.extend_from_slice(&id.to_le_bytes());
+        }
+        return serializer.serialize_bytes(&buf);
+    }
+    ids.serialize(serializer)
+}
+
+fn deserialize_token_ids<'de, D>(deserializer: D) -> Result<Arc<Vec<TokenIdType>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TokenIdsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for TokenIdsVisitor {
+        type Value = Vec<TokenIdType>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a sequence of token ids or packed little-endian int32 bytes")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut out =
+                Vec::with_capacity(seq.size_hint().unwrap_or(0).min(TOKEN_IDS_PREALLOC_CAP));
+            while let Some(id) = seq.next_element::<TokenIdType>()? {
+                out.push(id);
+            }
+            Ok(out)
+        }
+
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if !v.len().is_multiple_of(4) {
+                return Err(E::custom(
+                    "packed token_ids byte length is not a multiple of 4",
+                ));
+            }
+            Ok(v.chunks_exact(4)
+                .map(|c| TokenIdType::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect())
+        }
+
+        fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visit_bytes(&v)
+        }
+    }
+
+    deserializer.deserialize_any(TokenIdsVisitor).map(Arc::new)
 }
 
 /// Enforce the object-only `encoder_result` contract at the serde boundary.
@@ -456,22 +665,6 @@ impl PreprocessedRequest {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
 
-    pub fn attach_router_hint(&mut self, hint: &RouterHint) -> serde_json::Result<()> {
-        let hint_value = serde_json::to_value(hint)?;
-        let mut map = extra_args_object(self.extra_args.take());
-        let mut kv_transfer_params = match map.remove(KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY) {
-            Some(serde_json::Value::Object(params)) => params,
-            Some(_) | None => serde_json::Map::new(),
-        };
-        kv_transfer_params.insert(ROUTER_HINT_EXTRA_ARGS_KEY.to_string(), hint_value);
-        map.insert(
-            KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY.to_string(),
-            serde_json::Value::Object(kv_transfer_params),
-        );
-        self.extra_args = Some(serde_json::Value::Object(map));
-        Ok(())
-    }
-
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
     /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
     pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
@@ -484,14 +677,12 @@ impl PreprocessedRequest {
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
     }
-}
 
-fn extra_args_object(
-    extra_args: Option<serde_json::Value>,
-) -> serde_json::Map<String, serde_json::Value> {
-    match extra_args {
-        Some(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
+    pub(crate) fn expanded_prompt_token_count(&self) -> usize {
+        self.mm_routing_info
+            .as_ref()
+            .filter(|mm| !mm.routing_token_ids.is_empty() && mm.expanded_prompt_len > 0)
+            .map_or(self.token_ids.len(), |mm| mm.expanded_prompt_len)
     }
 }
 
@@ -506,7 +697,13 @@ pub struct PreprocessedEmbeddingRequest {
     pub model: String,
 
     /// Encoding format preference
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding_format: Option<String>,
+
+    /// Maximum prompt tokens requested by the client; -1 means the model limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub truncate_prompt_tokens: Option<i64>,
 
     /// Number of dimensions for output embeddings (if supported)
     pub dimensions: Option<u32>,
@@ -536,86 +733,191 @@ impl PreprocessedEmbeddingRequest {
 mod tests {
     use super::*;
 
-    #[test]
-    fn attach_router_hint_preserves_extra_args_object() {
-        use dynamo_kv_router::{
-            protocols::ExternalSequenceBlockHash,
-            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
-        };
+    #[derive(serde::Deserialize)]
+    struct TokenIdsOnly {
+        #[serde(deserialize_with = "deserialize_token_ids")]
+        token_ids: Arc<Vec<TokenIdType>>,
+    }
 
-        let mut req = PreprocessedRequest::builder()
-            .model("t".to_string())
-            .token_ids(vec![1])
-            .stop_conditions(StopConditions::default())
-            .sampling_options(SamplingOptions::default())
-            .output_options(OutputOptions::default())
-            .extra_args(Some(serde_json::json!({
-                "caller": "kept",
-                "kv_transfer_params": {"existing": "kept"}
-            })))
-            .build()
-            .unwrap();
-        let hint = RouterHint {
-            source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-            block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
-        };
+    struct Bytes<'a>(&'a [u8]);
 
-        req.attach_router_hint(&hint).unwrap();
+    impl serde::Serialize for Bytes<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
+    }
 
-        let extra_args = req.extra_args.unwrap();
-        assert_eq!(extra_args["caller"], "kept");
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY]["existing"],
-            "kept"
-        );
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["source_control_endpoint"],
-            "tcp://127.0.0.1:23280"
-        );
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
-            serde_json::json!([11, 22])
-        );
+    struct PackedTokenIds<'a>(&'a [u8]);
+
+    impl serde::Serialize for PackedTokenIds<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = serializer.serialize_struct("TokenIdsOnly", 1)?;
+            st.serialize_field("token_ids", &Bytes(self.0))?;
+            st.end()
+        }
+    }
+
+    fn le_bytes(ids: &[TokenIdType]) -> Vec<u8> {
+        ids.iter().flat_map(|id| id.to_le_bytes()).collect()
     }
 
     #[test]
-    fn attach_router_hint_replaces_non_object_kv_transfer_params() {
-        use dynamo_kv_router::{
-            protocols::ExternalSequenceBlockHash,
-            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
+    fn packed_token_ids_deserialize_from_msgpack_bytes() {
+        let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
+        let payload = rmp_serde::to_vec_named(&PackedTokenIds(&le_bytes(&ids))).unwrap();
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn packed_token_ids_reject_odd_byte_length() {
+        let payload = rmp_serde::to_vec_named(&PackedTokenIds(&[1, 0, 0])).unwrap();
+        assert!(rmp_serde::from_slice::<TokenIdsOnly>(&payload).is_err());
+    }
+
+    #[test]
+    fn sequence_token_ids_still_deserialize() {
+        #[derive(serde::Serialize)]
+        struct Seq {
+            token_ids: Vec<TokenIdType>,
+        }
+        let ids = vec![7u32, 8, 9];
+        let payload = rmp_serde::to_vec_named(&Seq {
+            token_ids: ids.clone(),
+        })
+        .unwrap();
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    struct TokenIdsField<'a> {
+        ids: &'a [TokenIdType],
+        packed: bool,
+    }
+
+    impl serde::Serialize for TokenIdsField<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serialize_token_ids_with(self.ids, serializer, self.packed)
+        }
+    }
+
+    struct Request<'a> {
+        ids: &'a [TokenIdType],
+        packed: bool,
+    }
+
+    impl serde::Serialize for Request<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = serializer.serialize_struct("TokenIdsOnly", 1)?;
+            st.serialize_field(
+                "token_ids",
+                &TokenIdsField {
+                    ids: self.ids,
+                    packed: self.packed,
+                },
+            )?;
+            st.end()
+        }
+    }
+
+    fn encode(ids: &[TokenIdType], packed: bool) -> Vec<u8> {
+        rmp_serde::to_vec_named(&Request { ids, packed }).unwrap()
+    }
+
+    // fixmap(1) + fixstr header + the 9 key bytes precede the `token_ids` value.
+    const VALUE_OFFSET: usize = 1 + 1 + "token_ids".len();
+
+    #[test]
+    fn packed_serialization_emits_int32_bytes_that_round_trip() {
+        let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
+        let payload = encode(&ids, true);
+        assert_eq!(payload[VALUE_OFFSET], 0xc4, "msgpack bin8 marker");
+        assert_eq!(&payload[VALUE_OFFSET + 2..], le_bytes(&ids).as_slice());
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn ids_above_i32_max_keep_the_sequence_form() {
+        let ids = vec![7u32, i32::MAX as u32 + 1];
+        let payload = encode(&ids, true);
+        assert_eq!(payload[VALUE_OFFSET], 0x92, "msgpack fixarray(2), not bin");
+        assert_eq!(payload, encode(&ids, false));
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn packed_flag_leaves_json_as_a_sequence() {
+        let ids = vec![1u32, 2];
+        let json = serde_json::to_string(&Request {
+            ids: &ids,
+            packed: true,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"token_ids":[1,2]}"#);
+    }
+
+    fn request_with_tokens(token_ids: Vec<TokenIdType>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(token_ids)
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid request")
+    }
+
+    #[test]
+    fn clone_shares_token_storage_until_mutated() {
+        let request = request_with_tokens(vec![1, 2, 3]);
+        let mut cloned = request.clone();
+
+        assert!(Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
+        Arc::make_mut(&mut cloned.token_ids).push(4);
+
+        assert!(!Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
+        assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
+        assert_eq!(cloned.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn shared_tokens_preserve_json_wire_format() {
+        let request = request_with_tokens(vec![11, 22, 33]);
+        let json = serde_json::to_string(&request).expect("serializes");
+        assert!(json.contains(r#""token_ids":[11,22,33]"#), "{json}");
+
+        let decoded: PreprocessedRequest = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(decoded.token_ids.as_slice(), &[11, 22, 33]);
+    }
+
+    #[test]
+    fn embedding_encoding_format_serde_omits_none() {
+        let mut request = PreprocessedEmbeddingRequest {
+            token_ids: vec![vec![1, 2, 3]],
+            model: "test-model".to_string(),
+            encoding_format: None,
+            truncate_prompt_tokens: None,
+            dimensions: None,
+            mdc_sum: None,
+            annotations: Vec::new(),
         };
 
-        for invalid_params in [
-            serde_json::Value::Null,
-            serde_json::json!("invalid"),
-            serde_json::json!(["invalid"]),
-        ] {
-            let mut req = PreprocessedRequest::builder()
-                .model("t".to_string())
-                .token_ids(vec![1])
-                .stop_conditions(StopConditions::default())
-                .sampling_options(SamplingOptions::default())
-                .output_options(OutputOptions::default())
-                .extra_args(Some(serde_json::json!({
-                    "caller": "kept",
-                    "kv_transfer_params": invalid_params
-                })))
-                .build()
-                .unwrap();
-            let hint = RouterHint {
-                source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-                block_hashes: vec![ExternalSequenceBlockHash(33)],
-            };
+        let omitted = serde_json::to_value(&request).unwrap();
+        assert!(omitted.get("encoding_format").is_none());
+        assert!(omitted.get("truncate_prompt_tokens").is_none());
+        let round_trip: PreprocessedEmbeddingRequest = serde_json::from_value(omitted).unwrap();
+        assert!(round_trip.encoding_format.is_none());
+        assert!(round_trip.truncate_prompt_tokens.is_none());
 
-            req.attach_router_hint(&hint).unwrap();
-
-            let extra_args = req.extra_args.unwrap();
-            assert_eq!(extra_args["caller"], "kept");
-            assert_eq!(
-                extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
-                serde_json::json!([33])
-            );
-        }
+        request.encoding_format = Some("float".to_string());
+        request.truncate_prompt_tokens = Some(-1);
+        let explicit = serde_json::to_value(&request).unwrap();
+        assert_eq!(explicit["encoding_format"], "float");
+        assert_eq!(explicit["truncate_prompt_tokens"], -1);
     }
 
     #[test]
@@ -713,7 +1015,7 @@ mod tests {
             "_HEALTH_CHECK": true,
         }))
         .unwrap();
-        assert_eq!(req.token_ids, vec![1]);
+        assert_eq!(req.token_ids.as_slice(), &[1]);
         assert!(req.is_probe);
         assert_eq!(req.model, "");
     }

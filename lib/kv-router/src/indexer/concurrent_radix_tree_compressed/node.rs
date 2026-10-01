@@ -118,17 +118,14 @@ impl Node {
         }
     }
 
-    fn with_shape_plan<R>(
-        &self,
-        plan: impl FnOnce(&NodeState, &NodeChildren, u64) -> R,
-    ) -> Option<R> {
+    fn with_shape_plan<R>(&self, plan: impl FnOnce(&NodeState, &NodeChildren, u64) -> R) -> R {
         // NOTE(perf): Replacing these shape-gated reads with state-only snapshots
         // was neutral or regressive, and profiling did not identify the RwLock
         // as a hotspot. Re-profile before removing this shape read.
         let _gate = self.shape_gate.read();
         let shape_version = self.shape_version.load(Ordering::Acquire);
         let state = self.state.read();
-        Some(plan(&state, &self.children, shape_version))
+        plan(&state, &self.children, shape_version)
     }
 
     fn validate_shape_read<R>(&self, expected_version: u64, f: impl FnOnce() -> R) -> Option<R> {
@@ -194,6 +191,15 @@ impl Node {
 
     pub(super) fn child_snapshot(&self, local_hash: LocalBlockHash) -> Option<SharedNode> {
         self.children.get(&local_hash)
+    }
+
+    /// Number of leading `hashes` present in this node's edge, read under one lock.
+    pub(super) fn leading_edge_hash_count(&self, hashes: &[ExternalSequenceBlockHash]) -> usize {
+        let state = self.state.read();
+        hashes
+            .iter()
+            .take_while(|hash| state.edge_index.contains_key(hash))
+            .count()
     }
 
     pub(super) fn contains_edge_hash(&self, hash: ExternalSequenceBlockHash) -> bool {
@@ -396,7 +402,6 @@ impl Node {
                 action,
             })
         })
-        .flatten()
     }
 
     pub(super) fn apply_store_parent_edge_plan(
@@ -452,31 +457,21 @@ impl Node {
     }
 
     pub(super) fn scan_store_prefix(&self, blocks: &[KvCacheStoredBlockData]) -> ChildEdgeScan {
-        loop {
-            if let Some(scan) = self.with_shape_plan(|state, _children, shape_version| {
-                let mut match_len = 0;
-                let mut block_hash_mismatch = None;
-
-                for (edge_elem, block) in state.edge.iter().zip(blocks.iter()) {
-                    if edge_elem.0 != block.tokens_hash {
-                        break;
-                    }
-                    if edge_elem.1 != block.block_hash && block_hash_mismatch.is_none() {
-                        block_hash_mismatch = Some((block.block_hash, edge_elem.1));
-                    }
-                    match_len += 1;
+        self.with_shape_plan(|state, _children, shape_version| {
+            let mut match_len = 0;
+            for (edge_elem, block) in state.edge.iter().zip(blocks) {
+                if edge_elem.0 != block.tokens_hash {
+                    break;
                 }
-
-                ChildEdgeScan {
-                    shape_version,
-                    edge_len: state.edge.len(),
-                    match_len,
-                    block_hash_mismatch,
-                }
-            }) {
-                return scan;
+                match_len += 1;
             }
-        }
+
+            ChildEdgeScan {
+                shape_version,
+                edge_len: state.edge.len(),
+                match_len,
+            }
+        })
     }
 
     pub(super) fn cover_prefix_for_worker_with_version(
@@ -562,7 +557,6 @@ impl Node {
 
             ParentChildPlan::MissingChild { shape_version }
         })
-        .unwrap_or(ParentChildPlan::Stale)
     }
 
     pub(super) fn insert_child_if_still_missing(
@@ -711,7 +705,7 @@ impl Node {
             state.edge[depth - 1].1
         };
 
-        if let Some(block_hashes) = input.router_hint_root_chain.as_deref_mut() {
+        if let Some(block_hashes) = input.kv_transfer_chain.as_deref_mut() {
             block_hashes.extend(
                 state
                     .edge
@@ -722,6 +716,13 @@ impl Node {
         }
 
         if input.first_node {
+            // Every scored worker is covered by the first node, so its coverage bounds
+            // the result size; reserving avoids repeated rehash growth per query.
+            let scored_bound = state.full_edge_workers.len() + state.worker_cutoffs.len();
+            input.scores.scores.reserve(scored_bound);
+            if let Some(last_matched_hashes) = input.last_matched_hashes.as_deref_mut() {
+                last_matched_hashes.reserve(scored_bound);
+            }
             *input.active = state.full_edge_workers.clone();
             for (&worker, &cutoff) in &state.worker_cutoffs {
                 let contribution = cutoff.min(edge_match_len);
@@ -765,6 +766,8 @@ impl Node {
                     }
                 });
             } else if state.full_edge_workers.len() != input.active_count {
+                // Equal sizes are treated as equal sets, skipping the intersection. This
+                // accepts an overcount after head-first eviction; see README "Equal-size skip".
                 input.active.retain(|worker| {
                     if state.full_edge_workers.contains(worker) {
                         true
