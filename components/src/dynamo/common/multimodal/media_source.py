@@ -23,6 +23,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import re
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
@@ -73,16 +74,23 @@ def decode_data_uri(url: str, max_bytes: int | None = None) -> bytes:
     if "base64" not in meta.split(";"):
         raise UrlValidationError("Unsupported data URI: expected base64 payload")
     if max_bytes is not None:
+        # Base64 needs four characters per three bytes, and percent escapes
+        # can triple that length. Reject impossible sizes before scanning.
+        if len(payload) > 12 * ((max_bytes + 2) // 3):
+            raise UrlValidationError(
+                f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
+            )
+        if re.search(r"%(?![0-9a-fA-F]{2})", payload):
+            raise UrlValidationError("Malformed percent escape in data URI")
         # unquote() below copies its whole input, so a client can defeat the
         # size guard just by percent-escaping a huge payload: the guard would
-        # only fire after that copy already ran. Percent-unescaping a string
-        # never grows it (each `%XY` triplet collapses to one byte), so the
-        # RAW payload length upper-bounds len(body) and therefore the decoded
-        # byte count -- reject on that bound first, len() is O(1). The "- 2"
-        # gives padding the same benefit of the doubt the exact check below
-        # gives it, so this can only reject what the exact check would also
-        # reject.
-        if len(payload) // 4 * 3 - 2 > max_bytes:
+        # only fire after that copy already ran. Each `%XY` triplet collapses
+        # to one byte, so subtract two per "%" to lower-bound the unescaped
+        # base64 length before rejecting. The "- 2" gives padding the same
+        # benefit of the doubt the exact check below gives it, so this can
+        # only reject what the exact check would also reject.
+        min_body_length = len(payload) - 2 * payload.count("%")
+        if min_body_length // 4 * 3 - 2 > max_bytes:
             raise UrlValidationError(
                 f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
             )
