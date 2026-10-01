@@ -4470,6 +4470,9 @@ class InstrumentedScheduler(AsyncScheduler):
         requests: list[Request] = []
         prompts: list[list[int]] = []
         shape = json.dumps(list(prompt_lens), separators=(",", ":"))
+        # Digest the O(B) shape once per batch: interpolating it into every
+        # slot's salt made seeding a batch of B requests O(B^2).
+        shape_digest = hashlib.sha256(shape.encode()).hexdigest()
         for index, prompt_len in enumerate(prompt_lens):
             req_id = f"__bench_{self._bench_seq + index}"
             salt = cache_salts[index] if cache_salts is not None else req_id
@@ -4478,7 +4481,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 if content_salts is not None
                 else cache_salts[index]
                 if cache_salts is not None
-                else f"prefill:{shape}:slot{index}"
+                else f"prefill:{shape_digest}:slot{index}"
             )
             prompt = (
                 list(prompt_token_ids_list[index])
@@ -4553,11 +4556,14 @@ class InstrumentedScheduler(AsyncScheduler):
         num_scheduled_tokens: dict[str, int] = {}
 
         shape = json.dumps(list(context_lengths), separators=(",", ":"))
+        # One digest per batch, as in _bench_inject_prefill: a per-slot copy
+        # of the O(B) shape made seeding the batch O(B^2).
+        shape_digest = hashlib.sha256(shape.encode()).hexdigest()
         for index, ctx_len in enumerate(context_lengths):
             req_id = f"{RANDOM_KDA_REQUEST_PREFIX if self._bench_random_kda else '__bench_'}{self._bench_seq}"
             padded_len = ctx_len + 1
             prompt = self._bench_synthetic_token_ids(
-                f"decode:{shape}:slot{index}", padded_len
+                f"decode:{shape_digest}:slot{index}", padded_len
             )
             req = Request(
                 request_id=req_id,

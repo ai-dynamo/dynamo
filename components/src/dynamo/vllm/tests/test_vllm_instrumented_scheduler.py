@@ -7947,3 +7947,103 @@ def test_fake_prefix_content_is_stable_and_matches_measured_request():
         cache_salts.append([request.cache_salt for request in measured])
     assert prompts[0] == prompts[1]
     assert cache_salts[0] != cache_salts[1], "allocation identities stay independent"
+
+
+def _record_benchmark_content_salts(stub) -> list[str]:
+    """Wrap the stub's real synthetic-prompt generator so every content salt
+    it receives is recorded, in call order."""
+    salts: list[str] = []
+    generate = stub._bench_synthetic_token_ids
+
+    def recording(salt, length):
+        salts.append(salt)
+        return generate(salt, length)
+
+    stub._bench_synthetic_token_ids = recording
+    return salts
+
+
+def _inject_benchmark_batch(stub, phase, lengths) -> None:
+    if phase == "prefill":
+        stub._bench_inject_prefill(prompt_lens=lengths, max_tokens=1)
+    else:
+        stub._bench_inject_fake_decode(context_lengths=lengths)
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_benchmark_seed_digest_keeps_slot_salts_fixed_length(phase):
+    """Each slot's content salt carries one fixed-length digest of the batch
+    shape. Embedding the shape itself made every salt O(B) long, so seeding a
+    batch of B requests did O(B^2) work."""
+    salts_by_batch = {}
+    for batch in (4, 512):
+        lengths = [1] * batch
+        stub = _measurement_injection_stub(seq=0)
+        salts = _record_benchmark_content_salts(stub)
+
+        _inject_benchmark_batch(stub, phase, lengths)
+
+        shape = json.dumps(lengths, separators=(",", ":"))
+        digest = hashlib.sha256(shape.encode()).hexdigest()
+        assert salts == [f"{phase}:{digest}:slot{index}" for index in range(batch)]
+        salts_by_batch[batch] = salts
+    # The same slot in a batch 128 times larger has a salt of the same length.
+    assert len(salts_by_batch[512][3]) == len(salts_by_batch[4][3])
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_benchmark_seed_digest_is_deterministic_per_shape_and_slot(phase):
+    def salts_for(lengths, seq):
+        stub = _measurement_injection_stub(seq=seq)
+        salts = _record_benchmark_content_salts(stub)
+        _inject_benchmark_batch(stub, phase, lengths)
+        return salts
+
+    first = salts_for([32, 31, 30], seq=0)
+
+    # The same shape after an unrelated request history: identical salts.
+    assert salts_for([32, 31, 30], seq=500) == first
+    # Every slot of a batch has its own salt.
+    assert len(set(first)) == 3
+    # A different shape changes every slot's salt, even where a length matches.
+    other = salts_for([30, 31, 32], seq=0)
+    assert all(mine != theirs for mine, theirs in zip(first, other, strict=True))
+
+
+def test_benchmark_seed_digest_leaves_explicit_prefill_salts_alone():
+    """Only the fallback salt carries the digest: explicit content salts (the
+    fake-prefix pairing) and cache salts reach the generator unchanged."""
+    stub = _measurement_injection_stub(seq=0)
+    salts = _record_benchmark_content_salts(stub)
+
+    stub._bench_inject_prefill(
+        prompt_lens=[8, 8],
+        max_tokens=1,
+        cache_salts=["cache-0", "cache-1"],
+        content_salts=["content-0", "content-1"],
+    )
+    stub._bench_inject_prefill(
+        prompt_lens=[8, 8], max_tokens=1, cache_salts=["cache-2", "cache-3"]
+    )
+
+    assert salts == ["content-0", "content-1", "cache-2", "cache-3"]
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_benchmark_seed_digest_hashes_the_shape_once_per_batch(phase, monkeypatch):
+    """The batch shape is digested once per batch, not once per slot. The salts
+    come out the same either way, so count the SHA-256 calls over the shape."""
+    lengths = [1] * 64
+    shape_bytes = json.dumps(lengths, separators=(",", ":")).encode()
+    real_sha256 = hashlib.sha256
+    shape_hashes = []
+
+    def counting_sha256(data=b"", *args, **kwargs):
+        if data == shape_bytes:
+            shape_hashes.append(1)
+        return real_sha256(data, *args, **kwargs)
+
+    monkeypatch.setattr(hashlib, "sha256", counting_sha256)
+    _inject_benchmark_batch(_measurement_injection_stub(seq=0), phase, lengths)
+
+    assert len(shape_hashes) == 1, "the shape is digested once per batch"
