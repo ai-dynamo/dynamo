@@ -714,6 +714,8 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/multimodal-serving/overview.md
+          - page: Voice Pipelines
+            path: pages/use-cases/multimodal-serving/voice.md
           - page: Parallel Media Decoding
             path: pages/use-cases/multimodal-serving/parallel-media-decoding.md
           - page: Custom Vision Encoders

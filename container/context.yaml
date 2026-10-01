@@ -190,7 +190,7 @@ triton:
     # Build toolchain only, pinned to CUDA 13.1: the Rust cudarc crate rejects 13.4 at build time.
     # The wheels load CUDA dynamically, so they run on the 13.4 runtime image regardless.
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 26.08-py3
+    runtime_image_tag: 26.09-py3
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   # KVBM is disabled: it is an LLM KV-cache feature whose Python NIXL path
