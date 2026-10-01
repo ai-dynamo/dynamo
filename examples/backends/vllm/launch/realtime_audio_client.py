@@ -188,8 +188,8 @@ async def run(args: argparse.Namespace) -> int:
                     )
                     await asyncio.sleep(args.chunk_ms / 1000)
 
-                await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
                 committed = True
+                await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
                 print("[client] committed audio")
 
             sender = asyncio.create_task(send_audio())

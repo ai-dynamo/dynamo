@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 
 from dynamo.vllm.realtime import RealtimeHandler, RealtimeTranscriptionHandler
-from dynamo.vllm.realtime.transcription import VllmRealtimeTranscriber
 
 pytestmark = [
     pytest.mark.unit,
@@ -71,13 +70,11 @@ async def _stream_audio(audio_stream, input_stream):
 
 def _handler(engine: _FakeEngine) -> RealtimeTranscriptionHandler:
     return RealtimeTranscriptionHandler(
+        engine_client=engine,
         model_name=MODEL,
         model_sample_rate=16_000.0,
-        transcribe=VllmRealtimeTranscriber(
-            engine_client=engine,
-            streaming_input_factory=_stream_audio,
-            sampling_params_factory=lambda: object(),
-        ),
+        streaming_input_factory=_stream_audio,
+        sampling_params_factory=lambda: object(),
     )
 
 
@@ -344,14 +341,28 @@ def test_next_turn_is_pumped_while_previous_turn_uses_engine_slot():
     assert len(completed) == 2
 
 
-def test_native_realtime_adapter_feeds_tokens_back_before_next_audio_chunk():
+def test_from_engine_rejects_unsupported_model_at_startup(monkeypatch):
+    pytest.importorskip("vllm.model_executor.models.interfaces")
+    serving = SimpleNamespace(model_cls=SimpleNamespace(supports_realtime=False))
+    monkeypatch.setattr(
+        "dynamo.vllm.realtime.handler.build_realtime_serving", lambda **_: serving
+    )
+
+    with pytest.raises(ValueError, match="does not support realtime transcription"):
+        RealtimeTranscriptionHandler.from_engine(
+            engine_client=object(), model_name=MODEL, model_path=MODEL
+        )
+
+
+def test_native_transcription_emits_before_commit_and_feeds_tokens_back():
     async def scenario():
+        partial_received = asyncio.Event()
         feedback = []
 
         async def streaming_input(audio_stream, input_stream):
             async for audio in audio_stream:
                 yield audio
-                feedback.append(await asyncio.wait_for(input_stream.get(), 1))
+                feedback.append(await input_stream.get())
 
         class FeedbackEngine:
             async def generate(self, *, prompt, sampling_params, request_id):
@@ -361,19 +372,41 @@ def test_native_realtime_adapter_feeds_tokens_back_before_next_audio_chunk():
                         outputs=[SimpleNamespace(text="word ", token_ids=[4, 5])],
                     )
 
-        async def audio():
-            for _ in range(2):
-                yield np.zeros(16, dtype=np.float32)
-
-        transcribe = VllmRealtimeTranscriber(
+        handler = RealtimeTranscriptionHandler(
             engine_client=FeedbackEngine(),
+            model_name=MODEL,
+            model_sample_rate=16_000,
             streaming_input_factory=streaming_input,
             sampling_params_factory=lambda: object(),
         )
-        deltas = [item async for item in transcribe(audio(), "native-turn")]
-        assert feedback == [[4, 5], [4, 5]]
-        assert "".join(item.text for item in deltas) == "word word "
-        assert sum(item.input_tokens for item in deltas) == 3
-        assert sum(item.output_tokens for item in deltas) == 4
+        pcm = base64.b64encode(np.ones(2_400, dtype=np.int16).tobytes()).decode()
 
-    asyncio.run(scenario())
+        async def request_stream():
+            yield {"type": "session.update", "session": _session()}
+            yield {"type": "input_audio_buffer.append", "audio": pcm}
+            # A buffered-only implementation cannot finish this turn.
+            await partial_received.wait()
+            yield {"type": "input_audio_buffer.append", "audio": pcm}
+            yield {"type": "input_audio_buffer.commit"}
+
+        async def collect():
+            events = []
+            async for event in handler.generate(request_stream(), _Context()):
+                events.append(event)
+                if event["type"] == "conversation.item.input_audio_transcription.delta":
+                    partial_received.set()
+            return events
+
+        events = await asyncio.wait_for(collect(), timeout=5)
+        assert feedback == [[4, 5], [4, 5]]
+        return events
+
+    events = asyncio.run(scenario())
+    types = [event["type"] for event in events]
+    assert types.index(
+        "conversation.item.input_audio_transcription.delta"
+    ) < types.index("input_audio_buffer.committed")
+    assert events[-1]["type"] == "conversation.item.input_audio_transcription.completed"
+    assert events[-1]["transcript"] == "word word "
+    assert events[-1]["usage"]["input_tokens"] == 3
+    assert events[-1]["usage"]["output_tokens"] == 4

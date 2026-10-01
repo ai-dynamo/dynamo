@@ -25,12 +25,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# The Voxtral checkpoint needs this architecture override. Qwen3-ASR and other
-# models must keep the architecture declared by their own checkpoint.
+# These checkpoints need their native vLLM realtime architecture selected.
 MODEL_ARGS=()
-if [[ "$MODEL" == "mistralai/Voxtral-Mini-4B-Realtime-2602" ]]; then
-    MODEL_ARGS+=(--hf-overrides '{"architectures":["VoxtralRealtimeGeneration"]}')
-fi
+case "$MODEL" in
+    mistralai/Voxtral-Mini-4B-Realtime-2602)
+        MODEL_ARGS+=(--hf-overrides '{"architectures":["VoxtralRealtimeGeneration"]}')
+        ;;
+    Qwen/Qwen3-ASR-0.6B|Qwen/Qwen3-ASR-1.7B)
+        MODEL_ARGS+=(--hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}')
+        ;;
+esac
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
