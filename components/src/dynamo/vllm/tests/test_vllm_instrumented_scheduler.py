@@ -6790,6 +6790,58 @@ def test_kvwarm_dp_filter_marks_decode_missing_when_nothing_is_covered(monkeypat
     assert stub._bench_missing_phases == ["decode"]
 
 
+@pytest.mark.core
+def test_kvwarm_dp_filter_rebases_native_plan_without_dropped_points(monkeypatch):
+    """Attention-DP removes the native points the plan cannot cover before
+    ``_bench_build_grid`` assigns public IDs, so only the remaining executions
+    keep plan entries, and a dropped point's capacity fallback has no ID."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "3")
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    _install_test_capacity_preflight(
+        stub, _benchmark_capacity(usable_blocks_without_watermark=4)
+    )
+    stub._bench_config = BenchmarkConfig(mode="decode")
+    stub._bench_explicit_points = None
+    stub._bench_grid = deque()
+    stub._bench_grid_built = False
+    stub._bench_missing_phases = []
+    stub._bench_dp_size = 2
+    stub.num_lookahead_tokens = 0
+    stub._bench_blocks_per_req = lambda tokens, **_: -(-tokens // 16)
+    stub._kvwarm_warm_eligible = lambda: True
+    stub._kvwarm_native = True
+    points = [
+        BenchmarkPoint(
+            point_type="decode",
+            benchmark_id=0,
+            batch_size=2,
+            total_kv_read_tokens=2 * context,
+        )
+        for context in (31, 17, 2)
+    ]
+    stub._bench_generate_decode_grid = lambda: stub._bench_grid.extend(points)
+    stub._bench_eager_warmup_points = lambda: []
+
+    stub._bench_build_grid()
+
+    grid = list(stub._bench_grid)
+    # Context 31 needs six blocks with its repeated writes; the pool has four.
+    assert [(p.benchmark_id, p.total_kv_read_tokens) for p in grid] == [(1, 34), (2, 4)]
+    assert stub._bench_expected_points == 2
+    assert sorted(stub._kvwarm_plan) == [(1, 2, 34), (2, 2, 4)]
+    assert all(stub._kvwarm_plan_covers(point) for point in grid)
+    assert stub._kvwarm_meta["capacity_fallbacks"] == [
+        {
+            "benchmark_id": None,
+            "batch": 2,
+            "depth": 30,
+            "required_blocks": 6,
+            "usable_blocks": 4,
+        }
+    ]
+
+
 def test_giant_fake_off_by_batch_correction_requires_a_steady_sample():
     """The admission step also measures ``declared - batch``; only a recorded steady
     sample (``kvwarm_steady_sample``, set by both save paths) may be accepted at the

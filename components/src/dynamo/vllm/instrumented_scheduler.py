@@ -2777,12 +2777,16 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._kvwarm_native and getattr(self, "_kvwarm_plan", None):
             # Rebase from the old dictionary in one pass: updating it in place
             # could overwrite another execution's key during the permutation.
+            # Attention-DP removes uncovered points from the grid
+            # (``_kvwarm_prepare``): drop their plan entries and keep their
+            # capacity fallbacks without a public ID.
             self._kvwarm_plan = {
                 (public_ids[execution_id], batch, kv_tokens): depth
                 for (execution_id, batch, kv_tokens), depth in self._kvwarm_plan.items()
+                if execution_id in public_ids
             }
             for fallback in self._kvwarm_meta.get("capacity_fallbacks", []):
-                fallback["benchmark_id"] = public_ids[fallback["benchmark_id"]]
+                fallback["benchmark_id"] = public_ids.get(fallback["benchmark_id"])
         grid_payload = json.dumps(
             [asdict(point) for point in self._bench_grid],
             sort_keys=True,
