@@ -65,10 +65,13 @@ type DynamoComponentDeploymentSpec struct {
 // v1alpha1 (resources, envs, envFromSecret, livenessProbe, readinessProbe,
 // volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
 // replaced with a single `podTemplate` field holding a native
-// `corev1.PodTemplateSpec`. The operator injects its defaults into the
-// container named `"main"` and merges user overrides using strategic-merge-by-name
-// semantics. Users can add sidecars, init containers, and pod-level configuration
-// directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
+// `corev1.PodTemplateSpec`. By default, the operator injects its defaults into
+// `spec.podTemplate.spec.containers[name=main]` and merges user overrides using
+// strategic-merge-by-name semantics. In Dynamo sidecar mode, Dynamo defaults target
+// `spec.podTemplate.spec.initContainers[name=runtime]` instead. Users can add sidecars,
+// init containers, and pod-level configuration directly in `podTemplate` without
+// any `extraPodSpec`-style escape hatch. Paths use the standalone DCD layout; for
+// DGD components, replace the leading `spec.podTemplate` with `spec.components[*].podTemplate`.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (!has(self.replicas) && has(self.type) && self.type == 'lpx') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
@@ -117,9 +120,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ComponentType ComponentType `json:"type,omitempty"`
 
-	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in the runtime
-	// image: main by default, or the init container named "runtime" when present. DGD admission requires
-	// it when that image has no parseable semantic-version tag; controller-generated DCDs may omit it.
+	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in
+	// spec.podTemplate.spec.containers[name=main].image by default, or
+	// spec.podTemplate.spec.initContainers[name=runtime].image when that init container is present.
+	// DGD admission requires it when that image has no parseable semantic-version tag;
+	// controller-generated DCDs may omit it.
 	// Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical
 	// MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to
 	// version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
@@ -135,20 +140,22 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// podTemplate defines the complete Pod configuration shared by every role. It
 	// is mutually exclusive with roles[].podTemplate. Every component must
-	// include a container named "main" with a non-empty image. By default the
-	// operator merges Dynamo defaults into main. An init container named "runtime"
-	// activates Dynamo sidecar mode: main runs the user-configured engine, and
-	// runtime receives Dynamo env, identity, system port, and probe defaults.
-	// Users must declare the runtime init container in this podTemplate; the
-	// operator merges defaults into it but does not create it.
-	// The runtime init container must have a non-empty image and restartPolicy: Always.
+	// include spec.podTemplate.spec.containers[name=main] with a non-empty image.
+	// By default the operator merges Dynamo defaults into spec.podTemplate.spec.containers[name=main].
+	// Declaring spec.podTemplate.spec.initContainers[name=runtime] activates Dynamo sidecar mode:
+	// spec.podTemplate.spec.containers[name=main] runs the user-configured engine, and
+	// spec.podTemplate.spec.initContainers[name=runtime] receives Dynamo env, identity,
+	// system port, and probe defaults.
+	// Users must declare spec.podTemplate.spec.initContainers[name=runtime]; the operator merges defaults into it but does not create it. It must have a non-empty
+	// image and restartPolicy: Always.
 	// This mode supports worker, prefill, and decode components only. Multinode,
 	// enabled checkpoint, GPU memory service, and failover are rejected because
 	// they are not currently supported in this mode. Support for these features
 	// is planned for a future release.
-	// Graph-level env applies to main and runtime; compilationCache and shared memory
-	// remain engine-owned. All other containers are user-managed and must specify
-	// their required fields, including image.
+	// Graph-level env applies to spec.podTemplate.spec.containers[name=main] and
+	// spec.podTemplate.spec.initContainers[name=runtime]; compilationCache and shared memory
+	// remain on spec.podTemplate.spec.containers[name=main]. All other containers are
+	// user-managed and must specify their required fields, including image.
 	// For DGD components whose runtime image tag is not a Dynamo semantic version,
 	// set runtimeVersionOverride explicitly.
 	// +optional
@@ -244,7 +251,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// component-level podTemplate, or in every role podTemplate when those are used.
 	// The operator merges its
 	// frontend-sidecar defaults (auto-generated Dynamo env vars, ports,
-	// health probes) into that container the same way it merges into `"main"`.
+	// health probes) into that container the same way it merges into
+	// `spec.podTemplate.spec.containers[name=main]`.
 	// The full container definition (image, args, envFrom, env) lives in
 	// `podTemplate` -- this eliminates the redundant `image`, `args`,
 	// `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.
