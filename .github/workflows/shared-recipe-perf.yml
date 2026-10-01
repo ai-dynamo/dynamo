@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       recipe:
-        description: 'Kustomize overlay: kimi-k25-agg or deepseek-v4-pro-agg'
+        description: 'Kustomize overlay: kimi-k25-agg, deepseek-v4-pro-agg, or deepseek-v4-pro-disagg'
         type: string
         required: true
       source_ref:
@@ -56,15 +56,22 @@ jobs:
           case "$RECIPE" in
             kimi-k25-agg)
               dgd=kimi-k25-agg-kv-eagle
-              worker=agg
+              workers=agg
               benchmark=kimi-k25-agg-kv-eagle-bench
               container=perf
               resources=dgd,job,configmap,computedomain
               ;;
             deepseek-v4-pro-agg)
               dgd=dsv4-pro-agg
-              worker=worker
+              workers=worker
               benchmark=dsv4-bench
+              container=bench
+              resources=dgd,job,computedomain
+              ;;
+            deepseek-v4-pro-disagg)
+              dgd=dsv4-pro-disagg
+              workers=prefill,decode
+              benchmark=dsv4-pro-disagg-bench
               container=bench
               resources=dgd,job,computedomain
               ;;
@@ -73,7 +80,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/$RUN_KEY-artifacts"
           {
             echo "DGD=$dgd"
-            echo "WORKER=$worker"
+            echo "WORKERS=$workers"
             echo "BENCHMARK=$benchmark"
             echo "PERF_CONTAINER=$container"
             echo "RESOURCE_KINDS=$resources"
@@ -100,8 +107,11 @@ jobs:
             .manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest')
           export RUNTIME_IMAGE="$image@$digest"
           yq -i '.spec.services[].extraPodSpec.mainContainer.image = strenv(RUNTIME_IMAGE) |
-            .spec.services[].extraPodSpec.imagePullSecrets = [{"name": strenv(ACR_SECRET)}] |
-            .spec.services[strenv(WORKER)].envFromSecret = strenv(HF_SECRET)' "$OVERLAY/patch-deploy.yaml"
+            .spec.services[].extraPodSpec.imagePullSecrets = [{"name": strenv(ACR_SECRET)}]' "$OVERLAY/patch-deploy.yaml"
+          for worker in ${WORKERS//,/ }; do
+            export WORKER="$worker"
+            yq -i '.spec.services[strenv(WORKER)].envFromSecret = strenv(HF_SECRET)' "$OVERLAY/patch-deploy.yaml"
+          done
           yq -i '.commonLabels.ci-run = strenv(RUN_KEY) |
             .commonLabels.ci-workflow = strenv(RECIPE)' "$OVERLAY/kustomization.yaml"
           kubectl kustomize "$OVERLAY" --load-restrictor LoadRestrictionsNone > "$ARTIFACTS/rendered.yaml"
@@ -112,7 +122,7 @@ jobs:
           if [[ "$RECIPE" == kimi-k25-agg ]]; then
             yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
               (.spec.template.spec.containers[].env[] | select(.name == "ROOT_ARTIFACT_DIR").value) = "/model-cache/perf/" + strenv(RUN_KEY))' "$ARTIFACTS/rendered.yaml"
-          elif [[ "$RECIPE" == deepseek-v4-pro-agg ]]; then
+          elif [[ "$RECIPE" == deepseek-v4-pro-agg || "$RECIPE" == deepseek-v4-pro-disagg ]]; then
             yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
               .spec.template.spec.containers[0].command[2] = strenv(PERF_CLEANUP) + "\n" + .spec.template.spec.containers[0].command[2])' "$ARTIFACTS/rendered.yaml"
           fi
