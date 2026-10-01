@@ -12,7 +12,7 @@ use dynamo_kv_router::{
     },
     scheduling::{
         AdvisoryWorkerLoad, QueueRejection, RequestLifecycle, RoutingEligibility,
-        queue::BookingHandle,
+        SelectedWorkerTierSnapshot, queue::BookingHandle,
     },
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
@@ -35,6 +35,7 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) potential_decode_blocks: u64,
+    pub(super) selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) kv_hint: Option<KvHint>,
@@ -134,6 +135,7 @@ impl RoutingHost {
                 effective_overlap_blocks,
                 cached_tokens,
                 potential_decode_blocks,
+                selected_worker_tiers,
                 routing_hashes,
                 kv_hint,
             } => Ok(SelectionOutcome::Routed(WorkerSelection {
@@ -143,6 +145,7 @@ impl RoutingHost {
                 effective_overlap_blocks,
                 cached_tokens,
                 potential_decode_blocks,
+                selected_worker_tiers,
                 selected_worker_load: admitted.advisory_load,
                 routing_hashes,
                 kv_hint,
@@ -203,8 +206,8 @@ impl RoutingHost {
                 return Err(anyhow::anyhow!(error));
             }
         }
-        let return_routing_hashes =
-            !is_query_only && self.kv_router().indexer().records_routing_decisions();
+        let return_routing_hashes = !is_query_only
+            && (self.kv_router().indexer().records_routing_decisions() || self.reuse_age.is_some());
         let SelectionOptions {
             pinned_target,
             affinity_target,

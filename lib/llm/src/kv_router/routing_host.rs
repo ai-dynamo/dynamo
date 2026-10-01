@@ -29,7 +29,10 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, reuse_age::ReuseAgeTracker,
+        to_worker_selection_session_context,
+    },
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -300,6 +303,8 @@ pub struct RoutingHost {
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
+    /// Sampled KV reuse-age tracking; KV routing only, enabled by environment.
+    reuse_age: Option<Arc<ReuseAgeTracker>>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Compatibility construction paths that predate routing load ownership leave this unset.
@@ -447,6 +452,7 @@ impl RoutingHost {
             affinity,
             hosted_occupancy: None,
             lora: None,
+            reuse_age: ReuseAgeTracker::from_env(),
             routing_context: load_context,
         }
     }
@@ -530,6 +536,7 @@ impl RoutingHost {
                     load_estimator,
                     selector,
                 }),
+            reuse_age: None,
             routing_context: Some(load_context),
         })
     }

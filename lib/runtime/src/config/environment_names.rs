@@ -801,6 +801,10 @@ pub mod router {
 
     /// Stale active-request cleanup guard in seconds; this is not a request timeout.
     pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+
+    /// Fraction of prompt blocks (0.0-1.0] sampled for KV cache reuse-age metrics.
+    /// Unset or 0 disables them.
+    pub const DYN_ROUTER_REUSE_AGE_SAMPLE_RATE: &str = "DYN_ROUTER_REUSE_AGE_SAMPLE_RATE";
 }
 
 /// Request plane transport environment variables
@@ -1177,6 +1181,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            router::DYN_ROUTER_REUSE_AGE_SAMPLE_RATE,
             request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             response_plane::DYN_RESPONSE_PLANE,

@@ -29,7 +29,7 @@ use dynamo_kv_router::{
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
         RequestClassifier, RequestClassifierContext, RequestClassifierWorker,
-        WorkerAvailabilityProvider, effective_prefill_tokens,
+        SelectedWorkerTierSnapshot, WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
         queue::{BookingHandle, SchedulerBookingDescriptor},
     },
@@ -66,6 +66,7 @@ pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
+mod reuse_age;
 mod routing_host;
 pub(crate) mod routing_load;
 pub mod sequence;
@@ -462,6 +463,8 @@ pub enum FindBestMatchOutcome {
         effective_overlap_blocks: f64,
         cached_tokens: usize,
         potential_decode_blocks: u64,
+        /// Raw per-tier cached prefix of the selected worker.
+        selected_worker_tiers: SelectedWorkerTierSnapshot,
         routing_hashes: Option<RoutingDecisionHashes>,
         kv_hint: Option<KvHint>,
     },
@@ -1518,6 +1521,7 @@ impl KvRouter {
                 effective_overlap_blocks: response.effective_overlap_blocks,
                 cached_tokens: response.cached_tokens,
                 potential_decode_blocks: response.potential_decode_blocks as u64,
+                selected_worker_tiers: response.selected_worker_tiers,
                 routing_hashes,
                 kv_hint,
             },

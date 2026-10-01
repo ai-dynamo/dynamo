@@ -301,6 +301,14 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
   Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
+<ParamField path="dynamo_component_router_kv_reuse_hit_age_seconds" type="histogram">
+  For each sampled prompt block that the selected worker still holds, the time since that worker last finished using it. `0` means another request still holds the block. Labeled by `worker_type` and `tier` (`device`, `host_pinned`, or `disk`, which includes external tiers). Populated only when `DYN_ROUTER_REUSE_AGE_SAMPLE_RATE` is set.
+</ParamField>
+
+<ParamField path="dynamo_component_router_kv_reuse_miss_age_seconds" type="histogram">
+  For each sampled prompt block that the selected worker used before but no longer holds, the time since that worker last finished using it. A cache that kept blocks this long would have hit. Labeled by `worker_type`. Populated only when `DYN_ROUTER_REUSE_AGE_SAMPLE_RATE` is set.
+</ParamField>
+
 ### Per-request routing overhead
 
 `dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.

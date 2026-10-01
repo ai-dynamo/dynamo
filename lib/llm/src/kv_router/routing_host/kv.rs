@@ -428,6 +428,21 @@ impl RoutingHost {
             ),
         };
 
+        if !is_query_only
+            && let (Some(tracker), Some(hashes)) =
+                (self.reuse_age.as_ref(), selection.routing_hashes.as_ref())
+        {
+            let (lease, ages) = tracker.begin(
+                selected_worker,
+                &hashes.sequence_hashes,
+                &selection.selected_worker_tiers,
+                std::time::Instant::now(),
+            );
+            self.request_metrics
+                .observe_kv_reuse_ages(chooser.worker_type(), &ages);
+            guard.hold_reuse_age(lease);
+        }
+
         let record_result: Result<(), Error> = async {
             if !is_query_only && chooser.indexer().records_routing_decisions() {
                 let worker = selected_worker;

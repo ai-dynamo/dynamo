@@ -593,3 +593,16 @@ The router exposes Prometheus metrics on the frontend's HTTP port (default 8000)
 
 For the full list of router metrics, see the
 [Metrics Catalog](../../../../reference/observability/metrics-catalog.mdx#router-metrics).
+
+### KV Reuse Ages
+
+Set `DYN_ROUTER_REUSE_AGE_SAMPLE_RATE` to a fraction in `(0, 1]` to measure how long reused prompt blocks sit unused before a request reuses them. The router samples that fraction of prompt blocks by sequence hash and remembers when each worker last finished a request that used each sampled block, up to 262,144 worker and block pairs (about 30 MB). Unset or `0` disables tracking.
+
+When the router admits a request, it compares each sampled block with the selected worker's history:
+
+- `dynamo_component_router_kv_reuse_hit_age_seconds` records blocks that the worker still holds, labeled by the tier that holds them. An age of `0` means another request still holds the block.
+- `dynamo_component_router_kv_reuse_miss_age_seconds` records blocks that the worker used before but no longer holds. A cache that kept blocks this long would have reused them.
+
+Use the two histograms together to size cache retention, such as KV capacity or an offload tier. Hit ages alone stop at the worker's current eviction age; miss ages show the reuse that falls beyond it. With `--no-router-kv-events`, the router decides what a worker holds from its own TTL index, so miss ages show the reuse that arrives after `--router-ttl-secs` expires.
+
+The tracker sees only prompt blocks of requests that this router admits. With several router replicas, each replica sees only its own requests, so ages are upper bounds unless a session stays on one replica.
