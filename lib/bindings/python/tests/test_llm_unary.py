@@ -190,7 +190,9 @@ async def test_llm_unary_client_connect_waits_for_routable_instance() -> None:
     runtime = Mock()
     runtime.endpoint.return_value = endpoint
 
-    task = asyncio.create_task(LLMUnaryClient.connect(runtime, "vision.generator.generate"))
+    task = asyncio.create_task(
+        LLMUnaryClient.connect(runtime, "vision.generator.generate")
+    )
     await waiting.wait()
     assert not task.done()
     ready.set()
