@@ -28,9 +28,7 @@ def _clean_nixl_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-@pytest.mark.parametrize(
-    "value", ["n", "N", "no", " off ", "false", "disable", "0"]
-)
+@pytest.mark.parametrize("value", ["n", "N", "no", " off ", "false", "disable", "0"])
 def test_false_enable_switches_to_collect_only(monkeypatch, value):
     monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", value)
     monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
