@@ -3737,6 +3737,11 @@ These are injected into all components when the corresponding infrastructure ser
 | `DYNAMO_PORT` | HTTP port the frontend listens on | `8000` | `int` |
 | `DYN_HTTP_PORT` | HTTP port for the frontend service (alias) | `8000` | `int` |
 | `DYN_NAMESPACE_PREFIX` | Namespace prefix used for frontend request routing | Same as `DYN_NAMESPACE` | `string` |
+| `DYN_NAMESPACE_PREFIX_STRICT` | Limits prefix discovery to the base namespace, eight-character lowercase hexadecimal worker generations, and the `legacy` migration generation | `true` for runtime 1.6.0+; unset for older or unknown runtimes | `string` (boolean) |
+
+Strict namespace-prefix matching is available since runtime 1.6.0. The operator enables it for frontend and EPP components whose resolved runtime version is 1.6.0 or later. A runtime-only upgrade using an older operator must set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly. Manual frontend and EPP deployments retain literal prefix matching unless this variable is enabled. Exact frontend `DYN_NAMESPACE` selection and global frontend discovery are unchanged. EPP uses exact `DYN_NAMESPACE` selection when no prefix is provided. Custom images must contain the implementation and declare the correct `runtimeVersionOverride`; an override does not add support to an image.
+
+This filter follows the operator's namespace naming contract. A separate deployment whose name ends in an accepted worker-generation suffix can still produce an indistinguishable namespace, so do not use this filter as an authorization boundary.
 
 ### Worker Components
 
@@ -3763,6 +3768,8 @@ These are injected into all components when the corresponding infrastructure ser
 | --- | --- | --- | --- |
 | `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
 | `RUST_LOG` | Rust log level and filter configuration | `info` | `string` |
+| `DYN_NAMESPACE_PREFIX` | Namespace prefix used for EPP request routing | Same as `DYN_NAMESPACE` | `string` |
+| `DYN_NAMESPACE_PREFIX_STRICT` | Limits prefix discovery to operator worker-generation namespaces; does not modify exact `DYN_NAMESPACE` selection | `true` for runtime 1.6.0+; unset for older or unknown runtimes | `string` (boolean) |
 
 ### VLLM Backend
 

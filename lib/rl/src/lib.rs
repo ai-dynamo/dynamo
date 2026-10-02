@@ -26,7 +26,7 @@ use dynamo_runtime::{
     DistributedRuntime,
     component::{Client, Instance, TransportType},
     discovery::{DiscoveryInstance, DiscoveryQuery},
-    namespace::{GLOBAL_NAMESPACE, NamespaceFilter, is_global_namespace},
+    namespace::{GLOBAL_NAMESPACE, NamespaceFilter, NamespacePrefixMode, is_global_namespace},
     pipeline::{
         SingleIn,
         network::egress::push_router::{PushRouter, RouterMode},
@@ -172,7 +172,7 @@ fn namespace_scope(filter: &NamespaceFilter) -> &str {
     match filter {
         NamespaceFilter::Global => GLOBAL_NAMESPACE,
         NamespaceFilter::Exact(namespace) => namespace,
-        NamespaceFilter::Prefix(prefix) => prefix,
+        NamespaceFilter::Prefix(prefix) | NamespaceFilter::WorkerGenerationPrefix(prefix) => prefix,
     }
 }
 
@@ -292,7 +292,8 @@ impl RlDiscoveryState {
             Some(&config.namespace),
             std::env::var("DYN_NAMESPACE_PREFIX").ok().as_deref(),
             std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok().as_deref(),
-        );
+        )
+        .with_prefix_mode(NamespacePrefixMode::from_env());
         Self::new_with_namespace_filter(config, namespace_filter)
     }
 
@@ -395,9 +396,9 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
                 namespace: namespace.clone(),
             },
         ),
-        NamespaceFilter::Prefix(_) | NamespaceFilter::Global => {
-            (DiscoveryQuery::AllEndpoints, DiscoveryQuery::AllModels)
-        }
+        NamespaceFilter::Prefix(_)
+        | NamespaceFilter::WorkerGenerationPrefix(_)
+        | NamespaceFilter::Global => (DiscoveryQuery::AllEndpoints, DiscoveryQuery::AllModels),
     };
 
     let endpoint_instances = config.runtime.discovery().list(endpoint_query).await?;
@@ -1008,6 +1009,41 @@ mod tests {
 
         matching.shutdown().await.expect("endpoint shutdown");
         other.shutdown().await.expect("endpoint shutdown");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn strict_namespace_prefix_environment_excludes_sibling_rl_workers() {
+        let distributed = test_runtime().await;
+        let generation = start_rl_endpoint(&distributed, "default-foo-1a2b3c4d").await;
+        let sibling = start_rl_endpoint(&distributed, "default-foo-bar").await;
+        temp_env::async_with_vars(
+            [
+                ("DYN_NAMESPACE_PREFIX", Some("default-foo")),
+                ("DYN_NAMESPACE_PREFIX_STRICT", Some("true")),
+                ("DYN_NAMESPACE_WORKER_SUFFIX", None),
+            ],
+            async {
+                let state = RlDiscoveryState::new_from_env(RlDiscoveryConfig {
+                    runtime: distributed.clone(),
+                    namespace: "default-foo".into(),
+                    rl_endpoint: "rl".into(),
+                    component_filter: None,
+                    request_timeout: Duration::from_secs(1),
+                    max_concurrent_probes: 1,
+                });
+                assert_eq!(namespace_scope(&state.namespace_filter), "default-foo");
+                let workers = list_workers(&state).await.unwrap();
+                let namespaces: Vec<_> = workers
+                    .iter()
+                    .map(|worker| worker.namespace.as_str())
+                    .collect();
+                assert_eq!(namespaces, ["default-foo-1a2b3c4d"]);
+            },
+        )
+        .await;
+        generation.shutdown().await.unwrap();
+        sibling.shutdown().await.unwrap();
     }
 
     #[tokio::test]

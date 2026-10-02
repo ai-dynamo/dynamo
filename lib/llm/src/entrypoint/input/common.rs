@@ -20,7 +20,7 @@ use crate::{
     },
     migration::Migration,
     model_card::ModelDeploymentCard,
-    namespace::NamespaceFilter,
+    namespace::{NamespaceFilter, NamespacePrefixMode},
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -360,7 +360,8 @@ pub async fn prepare_engine(
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 local_model.namespace(),
                 local_model.namespace_prefix(),
-            );
+            )
+            .with_prefix_mode(NamespacePrefixMode::from_env());
             let _watcher_task = tokio::spawn(async move {
                 inner_watch_obj
                     .watch(discovery_stream, namespace_filter)

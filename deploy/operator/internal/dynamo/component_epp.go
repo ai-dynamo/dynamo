@@ -10,6 +10,7 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
@@ -112,6 +113,14 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	}...)
 
 	container.Command = []string{}
+
+	// Enable strict discovery only for runtimes that implement the flag.
+	if runtimefeatures.StrictNamespacePrefix.Enabled(context.RuntimeVersion) {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+			Value: "true",
+		})
+	}
 
 	// Presence of eppConfig keeps the legacy Go EPP launch contract so existing
 	// DGDs survive operator upgrades unchanged until migration clears it.

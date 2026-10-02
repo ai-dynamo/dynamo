@@ -16,7 +16,7 @@ use crate::{
     kv_router::plugins::RouterPluginBuilder,
     local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
-    namespace::NamespaceFilter,
+    namespace::{NamespaceFilter, NamespacePrefixMode},
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -247,7 +247,8 @@ async fn run_with_router_plugins(
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 model.namespace(),
                 model.namespace_prefix(),
-            );
+            )
+            .with_prefix_mode(NamespacePrefixMode::from_env());
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();

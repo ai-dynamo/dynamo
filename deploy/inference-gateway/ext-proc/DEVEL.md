@@ -131,7 +131,8 @@ The common local environment variables are:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DYN_NAMESPACE_PREFIX` | unset | Preferred Dynamo discovery namespace prefix. |
+| `DYN_NAMESPACE_PREFIX` | unset | Preferred Dynamo discovery namespace prefix. Literal prefix matching is retained unless strict mode is enabled. |
+| `DYN_NAMESPACE_PREFIX_STRICT` | `false` | With a namespace prefix, admit only its base namespace, eight-character lowercase hexadecimal worker generations, and the `legacy` migration generation. Available in runtime 1.6.0+. |
 | `DYN_NAMESPACE` | unset | Exact Dynamo discovery namespace fallback. If unset, the binary uses `vllm-agg`. |
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component that exposes the `generate` endpoint. |
 | `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |

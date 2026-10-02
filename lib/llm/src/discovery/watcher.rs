@@ -1603,6 +1603,56 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn operator_namespace_scope_filters_model_discovery() {
+        use crate::namespace::NamespacePrefixMode;
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+        let card = ModelDeploymentCard::with_name_only("isolated-model");
+        let literal = NamespaceFilter::from_namespace_and_prefix(None, Some("default-foo"));
+        let strict = literal
+            .clone()
+            .with_prefix_mode(NamespacePrefixMode::WorkerGeneration);
+
+        for (namespace, admitted) in [
+            ("default-foo", true),
+            ("default-foo-1a2b3c4d", true),
+            ("default-foo-legacy", true),
+            ("default-foo-bar", false),
+            ("default-foo-bar-1a2b3c4d", false),
+        ] {
+            let DiscoveryEvent::Added(instance) = discovered_card(namespace, 1, &card) else {
+                unreachable!();
+            };
+            assert_eq!(
+                watcher
+                    .normalize(instance.clone(), &strict)
+                    .unwrap()
+                    .is_some(),
+                admitted,
+                "{namespace}"
+            );
+            assert!(
+                watcher.normalize(instance, &literal).unwrap().is_some(),
+                "manual scope: {namespace}"
+            );
+        }
+        runtime.shutdown();
+    }
+
     type TestDiscoverySender =
         tokio::sync::mpsc::UnboundedSender<(DiscoveryEvent, tokio::sync::oneshot::Sender<()>)>;
 

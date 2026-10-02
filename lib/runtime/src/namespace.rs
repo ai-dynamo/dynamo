@@ -17,6 +17,24 @@ pub enum NamespaceFilter {
     /// Discover models from namespaces starting with the given prefix
     /// (e.g., prefix "ns" matches "ns", "ns-abc123", "ns-def456")
     Prefix(String),
+    /// Discover the base namespace and operator-managed worker generations.
+    WorkerGenerationPrefix(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespacePrefixMode {
+    Literal,
+    WorkerGeneration,
+}
+
+impl NamespacePrefixMode {
+    pub fn from_env() -> Self {
+        if crate::config::env_is_truthy("DYN_NAMESPACE_PREFIX_STRICT") {
+            Self::WorkerGeneration
+        } else {
+            Self::Literal
+        }
+    }
 }
 
 impl NamespaceFilter {
@@ -44,12 +62,40 @@ impl NamespaceFilter {
         NamespaceFilter::Global
     }
 
+    /// Apply prefix semantics without changing exact or global scopes.
+    pub fn with_prefix_mode(self, mode: NamespacePrefixMode) -> Self {
+        match self {
+            Self::Prefix(prefix) | Self::WorkerGenerationPrefix(prefix) => match mode {
+                NamespacePrefixMode::Literal => Self::Prefix(prefix),
+                NamespacePrefixMode::WorkerGeneration => Self::WorkerGenerationPrefix(prefix),
+            },
+            filter => filter,
+        }
+    }
+
     /// Check if a given namespace matches this filter.
     pub fn matches(&self, namespace: &str) -> bool {
         match self {
             NamespaceFilter::Global => true,
             NamespaceFilter::Exact(target) => namespace == target,
             NamespaceFilter::Prefix(prefix) => namespace.starts_with(prefix),
+            NamespaceFilter::WorkerGenerationPrefix(prefix) => {
+                if namespace == prefix {
+                    return true;
+                }
+                let Some(suffix) = namespace
+                    .strip_prefix(prefix.as_str())
+                    .and_then(|rest| rest.strip_prefix('-'))
+                else {
+                    return false;
+                };
+                // The operator uses `legacy` while migrating pre-generation workers.
+                suffix == "legacy"
+                    || (suffix.len() == 8
+                        && suffix
+                            .bytes()
+                            .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')))
+            }
         }
     }
 
@@ -132,5 +178,63 @@ mod tests {
         assert!(NamespaceFilter::Global.is_global());
         assert!(!NamespaceFilter::Exact("ns".to_string()).is_global());
         assert!(!NamespaceFilter::Prefix("ns".to_string()).is_global());
+        assert!(!NamespaceFilter::WorkerGenerationPrefix("ns".to_string()).is_global());
+    }
+
+    #[test]
+    fn operator_prefix_excludes_sibling_deployments() {
+        let literal = NamespaceFilter::from_namespace_and_prefix(None, Some("default-foo"));
+        let strict = literal
+            .clone()
+            .with_prefix_mode(NamespacePrefixMode::WorkerGeneration);
+        for namespace in ["default-foo", "default-foo-1a2b3c4d", "default-foo-legacy"] {
+            assert!(strict.matches(namespace), "{namespace}");
+        }
+        for namespace in [
+            "default-foo-bar",
+            "default-foo-bar-1a2b3c4d",
+            "default-foobar",
+            "default-foo-DEADBEEF",
+            "default-foo-1a2b3c4g",
+            "default-foo-1a2b3c4",
+        ] {
+            assert!(literal.matches(namespace), "manual prefix: {namespace}");
+            assert!(!strict.matches(namespace), "operator prefix: {namespace}");
+        }
+    }
+
+    #[test]
+    fn strict_prefix_preserves_exact_and_global_scopes() {
+        for (namespace, prefix) in [
+            (None, None),
+            (Some("default-foo"), None),
+            (None, Some("dynamo")),
+            (None, Some("")),
+        ] {
+            let filter = NamespaceFilter::from_namespace_and_prefix(namespace, prefix);
+            assert_eq!(
+                filter
+                    .clone()
+                    .with_prefix_mode(NamespacePrefixMode::WorkerGeneration),
+                filter
+            );
+        }
+        let exact = NamespaceFilter::Exact("default-foo".into())
+            .with_prefix_mode(NamespacePrefixMode::WorkerGeneration);
+        assert!(!exact.matches("default-foo-1a2b3c4d"));
+    }
+
+    #[test]
+    fn prefix_mode_uses_canonical_environment_flag() {
+        for (value, expected) in [
+            (None, NamespacePrefixMode::Literal),
+            (Some("false"), NamespacePrefixMode::Literal),
+            (Some(" TRUE "), NamespacePrefixMode::WorkerGeneration),
+            (Some("on"), NamespacePrefixMode::WorkerGeneration),
+        ] {
+            temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", value, || {
+                assert_eq!(NamespacePrefixMode::from_env(), expected);
+            });
+        }
     }
 }

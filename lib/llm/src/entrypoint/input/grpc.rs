@@ -11,7 +11,7 @@ use crate::{
     grpc::service::kserve,
     http::service::metrics::Metrics,
     local_model::runtime_config::TokenizerBackend,
-    namespace::NamespaceFilter,
+    namespace::{NamespaceFilter, NamespacePrefixMode},
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -52,7 +52,8 @@ pub async fn run(
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 model.namespace(),
                 model.namespace_prefix(),
-            );
+            )
+            .with_prefix_mode(NamespacePrefixMode::from_env());
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             run_watcher(

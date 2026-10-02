@@ -46,6 +46,20 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### v1.6.0
+
+#### Runtime Compatibility
+
+##### Operator Namespace Discovery Isolation
+
+**Change:** The operator sets `DYN_NAMESPACE_PREFIX_STRICT=true` for frontend and EPP components resolving to runtime 1.6.0 or later. Discovery accepts the component's base namespace, its eight-character lowercase hexadecimal worker generations, and the `legacy` migration generation. It excludes unrelated namespaces such as `default-foo-bar` from a frontend scoped to `default-foo`.
+
+**Affected:** Operator-managed frontend and EPP components upgrading to a runtime image containing the 1.6.0 strict-prefix implementation.
+
+**Action:** Upgrade the runtime image along with the operator and keep `runtimeVersionOverride` aligned with the image. If upgrading the runtime while retaining an older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly. Manually configured namespace prefixes retain literal prefix matching unless strict mode is enabled.
+
+**Existing deployments:** An operator-only upgrade preserves the rendered defaults of components resolving to older or unknown runtimes. Moving a component to runtime 1.6.0 or later adds the strict-mode environment variable and rolls that component. An operator-only upgrade does not fix isolation for older images.
+
 ### v1.5.0
 
 #### CRD and admission breaking changes
