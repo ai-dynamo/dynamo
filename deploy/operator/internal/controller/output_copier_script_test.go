@@ -168,3 +168,216 @@ func TestOutputCopierScript(t *testing.T) {
 		})
 	}
 }
+
+// TestOutputCopierScriptRelaysSweeperStatus covers the DGDR v2 (Sweeper-based) path:
+// sweeper_status.yaml, written by dynamo.aisimulate.output.dgd.DGDRAdapter, must be
+// relayed to the ConfigMap, and -- critically -- every apply after the first one that
+// relays it must keep carrying it forward. kubectl apply's 3-way merge deletes any
+// ConfigMap key present in the previous apply but missing from the current one, so a
+// later apply that "forgets" sweeper_status.yaml would silently erase it on a real
+// cluster even though this test's kubectl stub cannot reproduce that deletion itself
+// (it only records each apply's manifest, it does not simulate merge semantics). This
+// test instead asserts the structural invariant that makes that deletion impossible:
+// once sweeper_status.yaml appears in one captured apply, it appears in every
+// subsequent one too.
+func TestOutputCopierScriptRelaysSweeperStatus(t *testing.T) {
+	utilities := []string{"bash", "date", "grep", "awk", "sed", "tr", "cat", "sleep"}
+	const scriptTimeout = 15 * time.Second
+
+	t.Log("Build a private PATH holding only the utilities the sidecar image is required to provide")
+	binDir := t.TempDir()
+	for _, utility := range utilities {
+		resolved, err := exec.LookPath(utility)
+		if err != nil {
+			t.Skipf("the sidecar script needs %q, which is not on PATH: %v", utility, err)
+		}
+		if err := os.Symlink(resolved, filepath.Join(binDir, utility)); err != nil {
+			t.Fatalf("linking %q into the private PATH: %v", utility, err)
+		}
+	}
+	bashPath := filepath.Join(binDir, "bash")
+
+	t.Log("kubectl stub: report the profiler container as terminated, and capture every applied manifest in full (not just that it was called)")
+	capturePath := filepath.Join(t.TempDir(), "applied.log")
+	stub := "#!" + bashPath + "\n" +
+		"if [ \"$1\" = \"get\" ]; then echo '{\"terminated\":{\"exitCode\":0}}'; exit 0; fi\n" +
+		"if [ \"$1\" = \"apply\" ]; then\n" +
+		"  echo '---' >> " + capturePath + "\n" +
+		"  cat \"$3\" >> " + capturePath + "\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "kubectl"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("writing the kubectl stub: %v", err)
+	}
+
+	t.Log("Lay down both profiler_status.yaml and sweeper_status.yaml, as a Sweeper-driven (DGDR v2) run would")
+	outputDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outputDir, "profiler_status.yaml"),
+		[]byte("status: success\nphase: Done\nmessage: profiling complete\n"), 0o644); err != nil {
+		t.Fatalf("writing profiler_status.yaml: %v", err)
+	}
+	sweeperStatus := "status: running\nround_no: 3\ncumulative_evaluated: 42\ncandidates:\n- id: candidate-01\n  outcome: materialized\n  manifest: |\n    kind: DynamoGraphDeployment\n"
+	if err := os.WriteFile(filepath.Join(outputDir, "sweeper_status.yaml"), []byte(sweeperStatus), 0o644); err != nil {
+		t.Fatalf("writing sweeper_status.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, ProfilingOutputFile),
+		[]byte("apiVersion: nvidia.com/v1alpha1\nkind: DynamoGraphDeployment\n"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", ProfilingOutputFile, err)
+	}
+
+	tmpl, err := template.New("sidecar").Parse(sidecarScriptTemplate)
+	if err != nil {
+		t.Fatalf("parsing the sidecar script template: %v", err)
+	}
+	var script bytes.Buffer
+	if err := tmpl.Execute(&script, map[string]string{
+		"OutputPath":    outputDir,
+		"OutputFile":    ProfilingOutputFile,
+		"ConfigMapName": "dgdr-output-test",
+		"Namespace":     "test-namespace",
+		"DGDRName":      "test-dgdr",
+		"DGDRuid":       "8f0c4d5e-1b2a-4c3d-9e8f-0a1b2c3d4e5f",
+	}); err != nil {
+		t.Fatalf("executing the sidecar script template: %v", err)
+	}
+
+	scratchDir := t.TempDir()
+	rendered := script.String()
+	for _, scratchPath := range []string{"/tmp/progress.yaml", "/tmp/cm.yaml"} {
+		if !strings.Contains(rendered, scratchPath) {
+			t.Fatalf("the rendered sidecar script no longer writes %s; point this redirect at the path it uses now", scratchPath)
+		}
+		rendered = strings.ReplaceAll(rendered, scratchPath, filepath.Join(scratchDir, filepath.Base(scratchPath)))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), scriptTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bashPath, "-c", rendered)
+	cmd.Env = []string{"PATH=" + binDir, "HOSTNAME=profile-test-pod"}
+	cmd.WaitDelay = 5 * time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("expected the sidecar script to exit 0, got %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the sidecar script never exited within %s; it is stuck polling", scriptTimeout)
+	}
+
+	captured, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("reading captured applies: %v", err)
+	}
+	applies := strings.Split(strings.TrimPrefix(string(captured), "---\n"), "---\n")
+	if len(applies) < 2 {
+		t.Fatalf("expected at least 2 applies (one polling-time relay, one terminal write), got %d:\n%s", len(applies), captured)
+	}
+
+	sawSweeperStatus := false
+	for i, apply := range applies {
+		hasSweeperStatus := strings.Contains(apply, "sweeper_status.yaml:")
+		if hasSweeperStatus {
+			sawSweeperStatus = true
+		}
+		// Once any apply has relayed sweeper_status.yaml, every later apply must
+		// keep including it -- otherwise a real kubectl apply would delete it
+		// from the live ConfigMap (see the test's doc comment).
+		if sawSweeperStatus && !hasSweeperStatus {
+			t.Errorf("apply #%d dropped the sweeper_status.yaml key that a previous apply had set; "+
+				"a real kubectl apply would delete it from the live ConfigMap:\n%s", i+1, apply)
+		}
+	}
+	if !sawSweeperStatus {
+		t.Errorf("expected at least one apply to relay sweeper_status.yaml, but none did:\n%s", captured)
+	}
+	if !strings.Contains(string(captured), "kind: DynamoGraphDeployment") {
+		t.Errorf("expected the relayed sweeper_status.yaml content (including a candidate manifest) to appear verbatim in some apply:\n%s", captured)
+	}
+}
+
+// TestOutputCopierScriptOmitsSweeperStatusWhenAbsent covers the plain (non-Sweeper,
+// DGDR v1) profiling path: when sweeper_status.yaml was never written, the sidecar
+// must behave exactly as it did before this key existed -- no apply should ever
+// mention it.
+func TestOutputCopierScriptOmitsSweeperStatusWhenAbsent(t *testing.T) {
+	utilities := []string{"bash", "date", "grep", "awk", "sed", "tr", "cat", "sleep"}
+	const scriptTimeout = 15 * time.Second
+
+	binDir := t.TempDir()
+	for _, utility := range utilities {
+		resolved, err := exec.LookPath(utility)
+		if err != nil {
+			t.Skipf("the sidecar script needs %q, which is not on PATH: %v", utility, err)
+		}
+		if err := os.Symlink(resolved, filepath.Join(binDir, utility)); err != nil {
+			t.Fatalf("linking %q into the private PATH: %v", utility, err)
+		}
+	}
+	bashPath := filepath.Join(binDir, "bash")
+
+	capturePath := filepath.Join(t.TempDir(), "applied.log")
+	stub := "#!" + bashPath + "\n" +
+		"if [ \"$1\" = \"get\" ]; then echo '{\"terminated\":{\"exitCode\":0}}'; exit 0; fi\n" +
+		"if [ \"$1\" = \"apply\" ]; then\n" +
+		"  echo '---' >> " + capturePath + "\n" +
+		"  cat \"$3\" >> " + capturePath + "\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "kubectl"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("writing the kubectl stub: %v", err)
+	}
+
+	outputDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outputDir, "profiler_status.yaml"),
+		[]byte("status: success\nphase: Done\nmessage: profiling complete\n"), 0o644); err != nil {
+		t.Fatalf("writing profiler_status.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, ProfilingOutputFile),
+		[]byte("apiVersion: nvidia.com/v1alpha1\nkind: DynamoGraphDeployment\n"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", ProfilingOutputFile, err)
+	}
+	// Deliberately no sweeper_status.yaml.
+
+	tmpl, err := template.New("sidecar").Parse(sidecarScriptTemplate)
+	if err != nil {
+		t.Fatalf("parsing the sidecar script template: %v", err)
+	}
+	var script bytes.Buffer
+	if err := tmpl.Execute(&script, map[string]string{
+		"OutputPath":    outputDir,
+		"OutputFile":    ProfilingOutputFile,
+		"ConfigMapName": "dgdr-output-test",
+		"Namespace":     "test-namespace",
+		"DGDRName":      "test-dgdr",
+		"DGDRuid":       "8f0c4d5e-1b2a-4c3d-9e8f-0a1b2c3d4e5f",
+	}); err != nil {
+		t.Fatalf("executing the sidecar script template: %v", err)
+	}
+
+	scratchDir := t.TempDir()
+	rendered := script.String()
+	for _, scratchPath := range []string{"/tmp/progress.yaml", "/tmp/cm.yaml"} {
+		rendered = strings.ReplaceAll(rendered, scratchPath, filepath.Join(scratchDir, filepath.Base(scratchPath)))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), scriptTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bashPath, "-c", rendered)
+	cmd.Env = []string{"PATH=" + binDir, "HOSTNAME=profile-test-pod"}
+	cmd.WaitDelay = 5 * time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("expected the sidecar script to exit 0, got %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	captured, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("reading captured applies: %v", err)
+	}
+	if strings.Contains(string(captured), "sweeper_status") {
+		t.Errorf("expected no apply to mention sweeper_status when sweeper_status.yaml was never written, but found one:\n%s", captured)
+	}
+}
