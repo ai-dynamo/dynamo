@@ -11,10 +11,9 @@ source "$REPO_ROOT/examples/common/launch_utils.sh"
 trap dynamo_exit_trap EXIT
 
 MODEL="${DYN_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
-PUBLIC_MODEL_NAME="${DYN_SERVED_MODEL_NAME:-remote-custom-encoder}"
-GENERATOR_MODEL_NAME="${DYN_GENERATOR_MODEL_NAME:-remote-custom-encoder-generator}"
-NAMESPACE="${DYN_NAMESPACE:-remote-custom-encoder}"
-GENERATOR_ENDPOINT="$NAMESPACE.generator.generate"
+SERVICE_NAME="${DYN_SERVICE_NAME:-remote-custom-encoder}"
+GENERATOR_MODEL_NAME="$SERVICE_NAME-generator"
+GENERATOR_ENDPOINT="$SERVICE_NAME.generator.generate"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GENERATOR_GPU="${DYN_GENERATOR_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 ENCODER_GPU="${DYN_ENCODER_GPU:-$GENERATOR_GPU}"
@@ -23,16 +22,14 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 [[ -z "$GPU_MEM_ARGS" ]] && GPU_MEM_ARGS="--gpu-memory-utilization 0.8"
 
 export DYN_MODEL="$MODEL"
-export DYN_SERVED_MODEL_NAME="$PUBLIC_MODEL_NAME"
-export DYN_GENERATOR_MODEL_NAME="$GENERATOR_MODEL_NAME"
-export DYN_NAMESPACE="$NAMESPACE"
+export DYN_SERVICE_NAME="$SERVICE_NAME"
 export DYN_REQUEST_PLANE=tcp
 export DYN_REQUEST_PLANE_CODEC=msgpack
 export DYN_TCP_MAX_MESSAGE_SIZE=209715200
 export DYN_HTTP_BODY_LIMIT_MB=200
 
 print_launch_banner --no-curl "Remote Custom Encoder" "$MODEL" "$HTTP_PORT" \
-    "Inline encoder: ${DYN_ENCODER_CLASS:-HitchhikersVisionEncoder}" \
+    "Inline encoder: HitchhikersVisionEncoder" \
     "Remote generator: dyn://$GENERATOR_ENDPOINT"
 
 python -m dynamo.frontend --http-port "$HTTP_PORT" &

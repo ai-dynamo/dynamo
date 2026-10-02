@@ -30,12 +30,9 @@ From the repository root:
 ./examples/custom_encoder/remote/launch.sh
 ```
 
-The default `HitchhikersVisionEncoder` ignores the image contents and substitutes the embeddings for a known phrase, making the prompt-splicing path easy to inspect. Replace it with another `VisionEncoderBackend` using:
+The default `HitchhikersVisionEncoder` ignores the image contents and substitutes the embeddings for a known phrase, making the prompt-splicing path easy to inspect. To use another `VisionEncoderBackend`, import its class in `remote/config.py` and set `encoder_class` in `RemoteEncoderConfig.from_env()`. The orchestrator passes that class directly to `ExternalEncoderHandoff`; the example does not import a class by string at runtime.
 
-```bash
-DYN_ENCODER_CLASS=your_package.YourVisionEncoder \
-./examples/custom_encoder/remote/launch.sh
-```
+The service name defaults to `remote-custom-encoder`. The launcher derives the private generator endpoint and generator model name from `DYN_SERVICE_NAME`; `DYN_SERVED_MODEL_NAME` optionally overrides the public model name. The public endpoint is `<service-name>.app.generate`.
 
 Send an OpenAI-compatible request to the public orchestrator model:
 
