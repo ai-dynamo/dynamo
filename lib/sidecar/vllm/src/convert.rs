@@ -72,6 +72,14 @@ pub(crate) fn request_has_multimodal_input(request: &PreprocessedRequest) -> boo
     request_has_raw_media(request) || request_has_preprocessed_media(request)
 }
 
+fn requires_frontend_decode(request: &PreprocessedRequest) -> bool {
+    request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty())
+}
+
 pub(crate) fn build_generate_request(
     request: PreprocessedRequest,
     request_id: String,
@@ -79,6 +87,7 @@ pub(crate) fn build_generate_request(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     let request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
+    let output_text = !requires_frontend_decode(&request);
     validate_multimodal_cache_uuids(&request)?;
     // Legacy envelopes may only carry controls preserved by the typed request.
     if !mode.is_prefill()
@@ -220,6 +229,22 @@ pub(crate) fn build_generate_request(
         extra.remove("formatted_prompt");
         extra.remove(MM_HASHES_KEY);
     }
+    let reasoning_ended = bool_extra(
+        extra_args.as_ref().and_then(serde_json::Value::as_object),
+        "reasoning_ended",
+    )?;
+    let reasoning_parser_kwargs = if let Some(extra) = extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        extra.remove("reasoning_ended");
+        extra
+            .remove("reasoning_parser_kwargs")
+            .map(|value| json_to_struct_v14(value, "reasoning_parser_kwargs"))
+            .transpose()?
+    } else {
+        None
+    };
     let kv = build_kv_parameters(extra_args, prefill_result, encoder_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
@@ -250,16 +275,18 @@ pub(crate) fn build_generate_request(
             stop_token_ids: stop_token_ids(
                 stop_conditions.stop_token_ids,
                 stop_conditions.stop_token_ids_hidden,
+                stop_conditions.stop_token_ids_visible,
             ),
             stop_strings: stop_conditions.stop.unwrap_or_default(),
             include_stop_strings: sampling.include_stop_str_in_output.unwrap_or(false),
             ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
+            thinking_token_budget: stop_conditions.max_thinking_tokens.map(i64::from),
         }),
         response: Some(pb::ResponseOptions {
             prompt_token_ids: prompt_logprobs.is_some() || (has_media && mode.is_prefill()),
             prompt_logprobs: prompt_logprobs.is_some(),
             prompt_candidates: prompt_logprobs.map(top_n_candidates).transpose()?,
-            output_text: Some(true),
+            output_text: Some(output_text),
             output_token_ids: true,
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
@@ -272,6 +299,9 @@ pub(crate) fn build_generate_request(
         media,
         lora_name,
         watermarking: None,
+        reasoning_parser_kwargs,
+        reasoning_ended,
+        kv_hints: None,
     })
 }
 
@@ -981,10 +1011,17 @@ fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
     }
 }
 
-fn stop_token_ids(visible: Option<Vec<u32>>, hidden: Option<Vec<u32>>) -> Vec<u32> {
-    let mut ids = visible.unwrap_or_default();
+fn stop_token_ids(
+    user: Option<Vec<u32>>,
+    hidden: Option<Vec<u32>>,
+    visible: Option<Vec<u32>>,
+) -> Vec<u32> {
+    let mut ids = user.unwrap_or_default();
     if let Some(hidden) = hidden {
         ids.extend(hidden);
+    }
+    if let Some(visible) = visible {
+        ids.extend(visible);
     }
     ids.sort_unstable();
     ids.dedup();
@@ -1215,21 +1252,6 @@ fn validate_request(
             "Dynamo bootstrap handoff is not supported by the vLLM sidecar",
         ));
     }
-    if request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        return Err(client::invalid_argument(
-            "visible stop token IDs are not supported by vLLM gRPC",
-        ));
-    }
-    if request.stop_conditions.max_thinking_tokens.is_some() {
-        return Err(client::invalid_argument(
-            "max_thinking_tokens is not supported by vLLM gRPC",
-        ));
-    }
     let sampling = &request.sampling_options;
     if sampling.n.unwrap_or(1) != 1 {
         return Err(client::invalid_argument("n must be 1"));
@@ -1243,12 +1265,12 @@ fn validate_request(
     if !mode.is_prefill() && !mode.is_encode() {
         if matches!(sampling.top_k, Some(-1 | 0)) {
             return Err(client::invalid_argument(
-                "top_k=-1 or top_k=0 cannot be represented by vllm-proto 0.3",
+                "top_k=-1 or top_k=0 cannot be represented by vLLM gRPC",
             ));
         }
         if sampling.min_p == Some(0.0) {
             return Err(client::invalid_argument(
-                "min_p=0 cannot be represented by vllm-proto 0.3",
+                "min_p=0 cannot be represented by vLLM gRPC",
             ));
         }
     }
@@ -1273,6 +1295,7 @@ pub(crate) struct ResponseState {
     prompt_info: Option<pb::PromptInfo>,
     user_stop_token_ids: Vec<u32>,
     hidden_stop_token_ids: Vec<u32>,
+    use_native_text: bool,
 }
 
 impl ResponseState {
@@ -1289,6 +1312,9 @@ impl ResponseState {
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
+            // Native text excludes terminal stop tokens, but token IDs retain
+            // them. Use Dynamo's existing decoder when a parser needs one.
+            use_native_text: !requires_frontend_decode(request),
             user_stop_token_ids: request
                 .stop_conditions
                 .stop_token_ids
@@ -1367,7 +1393,7 @@ impl ResponseState {
             } else {
                 token_ids
             },
-            text: if self.mode.is_prefill() || self.mode.is_encode() {
+            text: if self.mode.is_prefill() || self.mode.is_encode() || !self.use_native_text {
                 None
             } else {
                 // vLLM may buffer text while matching stop strings. Preserve an

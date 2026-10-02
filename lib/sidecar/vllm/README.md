@@ -122,7 +122,7 @@ to that port to trusted consumers because KV events contain request token IDs.
 
 ### Native Generate compatibility
 
-`vllm-proto 0.3.0` does not include the native sampling JSON extension proposed in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421), so the sidecar projects typed controls into the gRPC request and advertises `vllm_inference_v1_generate`. During rolling upgrades, v1.4 frontends can supply the legacy `extra_args.vllm_tito.sampling_params` envelope; canonical typed fields take precedence when both are present. Requests that rely on distinctions proto 0.3 cannot represent, such as explicit `top_k=0`, `top_k=-1`, or `min_p=0`, fail explicitly instead of silently changing sampling behavior.
+The typed gRPC schema does not include the native sampling JSON extension proposed in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421), so the sidecar projects typed controls into the gRPC request and advertises `vllm_inference_v1_generate`. During rolling upgrades, v1.4 frontends can supply the legacy `extra_args.vllm_tito.sampling_params` envelope; canonical typed fields take precedence when both are present. Requests that rely on distinctions the schema cannot represent, such as explicit `top_k=0`, `top_k=-1`, or `min_p=0`, fail explicitly instead of silently changing sampling behavior.
 
 Prefill and encode use their canonical one-token request and do not apply decode sampling controls.
 
@@ -186,11 +186,17 @@ the response twice.
 When these flags and environment variables are absent, the sidecar advertises no
 parsers. It does not infer Dynamo parser settings from vLLM's native parser names.
 
-Requests that require visible stop-token preservation, `max_thinking_tokens`, or
-reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`) still fail
-explicitly in the gRPC request converter. These limitations affect some tool
-terminators and reasoning/structured-output combinations; enabling a parser does
-not add support for those request controls.
+For tool-closing tokens that are also EOS tokens, the sidecar requests native
+token IDs and uses Dynamo's existing frontend decoder to preserve the delimiter
+for parsing. vLLM still stops generation on that token. Other requests continue
+using native decoded text, including empty chunks while stop strings are buffered.
+
+Reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`) and
+`max_thinking_tokens` are forwarded to the native gRPC reasoning controls; the
+budget maps to `StoppingCriteria.thinking_token_budget`. Use a vLLM server that
+implements the corresponding `vllm-proto` schema. Native vLLM must also have the
+reasoning parser configured when its engine needs that
+parser for thinking budgets or reasoning-aware structured output.
 
 ### RL workflows
 

@@ -443,12 +443,6 @@ fn invalid_canonical_controls_are_rejected_before_submission() {
             r.sampling_options.length_penalty = Some(0.5)
         }),
         ("top_k", |r| r.sampling_options.top_k = Some(-2)),
-        ("visible stop", |r| {
-            r.stop_conditions.stop_token_ids_visible = Some(vec![42])
-        }),
-        ("max_thinking_tokens", |r| {
-            r.stop_conditions.max_thinking_tokens = Some(5)
-        }),
         ("mm_processor_kwargs", |r| {
             r.mm_processor_kwargs = Some(json!({}))
         }),
