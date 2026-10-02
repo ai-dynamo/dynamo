@@ -1476,7 +1476,8 @@ impl DistributedRuntime {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
                 .shutdown_and_wait(Some(dynamo_runtime::worker::graceful_shutdown_timeout()))
-                .await;
+                .await
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             Ok(())
         })
     }
