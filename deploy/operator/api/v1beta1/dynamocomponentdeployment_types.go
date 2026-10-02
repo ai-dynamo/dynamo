@@ -70,8 +70,7 @@ type DynamoComponentDeploymentSpec struct {
 // strategic-merge-by-name semantics. In Dynamo sidecar mode, Dynamo defaults target
 // `spec.podTemplate.spec.initContainers[name=runtime]` instead. Users can add sidecars,
 // init containers, and pod-level configuration directly in `podTemplate` without
-// any `extraPodSpec`-style escape hatch. Paths use the standalone DCD layout; for
-// DGD components, replace the leading `spec.podTemplate` with `spec.components[*].podTemplate`.
+// any `extraPodSpec`-style escape hatch.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (!has(self.replicas) && has(self.type) && self.type == 'lpx') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
@@ -122,7 +121,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in
 	// spec.podTemplate.spec.containers[name=main].image by default, or
-	// spec.podTemplate.spec.initContainers[name=runtime].image when that init container is present.
+	// spec.podTemplate.spec.initContainers[name=runtime].image when the dynamo runtime sidecar is present.
 	// DGD admission requires it when that image has no parseable semantic-version tag;
 	// controller-generated DCDs may omit it.
 	// Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical

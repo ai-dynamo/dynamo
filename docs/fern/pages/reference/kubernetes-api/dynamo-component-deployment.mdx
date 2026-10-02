@@ -103,7 +103,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </Indent>
 
 <ParamField path="runtimeVersionOverride" type="string">
-  Declares the Dynamo runtime version in `spec.podTemplate.spec.containers[name=main].image` by default, or `spec.podTemplate.spec.initContainers[name=runtime].image` when that init container is present, taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
+  Declares the Dynamo runtime version in `spec.podTemplate.spec.containers[name=main].image` by default, or `spec.podTemplate.spec.initContainers[name=runtime].image` when the dynamo sidecar is present, taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -244,7 +244,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 ## Dynamo Sidecar Mode
 
-**Experimental.** Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates Dynamo sidecar mode. You must declare this init container yourself; the operator merges defaults into it and does not create it. It must specify a non-empty `image` and `restartPolicy: Always`. The name alone selects the mode; a missing restart policy is rejected. `spec.podTemplate.spec.containers[name=runtime]` or an init container with another name does not activate it.
+Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates Dynamo sidecar mode. You must declare this init container yourself; the operator merges defaults into it and does not create it. It must specify a non-empty `image` and `restartPolicy: Always`. The name alone selects the mode; a missing restart policy is rejected. `spec.podTemplate.spec.containers[name=runtime]` or an init container with another name does not activate it.
 
 The operator injects Dynamo environment variables, identity, transport TLS, system port, and startup, liveness, and readiness probes into `spec.podTemplate.spec.initContainers[name=runtime]`. The `spec.podTemplate.spec.containers[name=main]` container runs the engine with user-provided launch configuration and probes. Graph-level environment variables apply to both containers; compilation cache and shared-memory configuration remain on `spec.podTemplate.spec.containers[name=main]`. A separate `frontendSidecar` is supported.
 
