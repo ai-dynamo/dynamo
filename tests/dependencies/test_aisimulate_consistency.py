@@ -58,16 +58,23 @@ def _python_requirement(pyproject: dict) -> Requirement:
     return matches[0]
 
 
-def _requirements_file_aisimulate_requirement(path: Path) -> Requirement:
+def _requirements_file_aisimulate_requirement(
+    path: Path, *, source: bool = False
+) -> Requirement:
     matches: list[Requirement] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        requirement = line.split("#", 1)[0].strip()
-        if not requirement or requirement.startswith("--"):
+        requirement = re.split(r"\s+#", line, maxsplit=1)[0].strip()
+        if not requirement or requirement.startswith(("#", "--")):
             continue
         parsed = Requirement(requirement)
-        if canonicalize_name(parsed.name) == "aisimulate":
+        if (
+            canonicalize_name(parsed.name) == "aisimulate"
+            and bool(parsed.url) == source
+        ):
             matches.append(parsed)
-    assert len(matches) == 1, f"{path} must declare one AISimulate dependency"
+    assert (
+        len(matches) == 1
+    ), f"{path} must declare one AISimulate {'source' if source else 'version'} requirement"
     return matches[0]
 
 
@@ -123,7 +130,7 @@ def test_dynamo_pins_matching_aisimulate_sources_and_versions() -> None:
     assert python_requirement.marker.evaluate(environment)
     environment["python_version"] = "3.14"
     assert not python_requirement.marker.evaluate(environment)
-    assert container_requirement.marker is None
+    assert container_requirement.marker == python_requirement.marker
     assert _exact_version(container_requirement) == python_version
     with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
         benchmarks = tomllib.load(handle)
@@ -137,6 +144,15 @@ def test_dynamo_pins_matching_aisimulate_sources_and_versions() -> None:
     if "git" in cargo_dependency:
         assert cargo_dependency["git"] == "https://github.com/ai-dynamo/aisimulate.git"
         assert re.fullmatch(r"[0-9a-f]{40}", cargo_dependency.get("rev", ""))
+        source_requirement = _requirements_file_aisimulate_requirement(
+            AISIMULATE_REQUIREMENTS, source=True
+        )
+        assert source_requirement.url == (
+            f"git+{cargo_dependency['git']}@{cargo_dependency['rev']}"
+            "#subdirectory=python/aisimulate"
+        ), "local installs and container builds must use the exact Rust source"
+        assert source_requirement.marker == python_requirement.marker
+        assert not source_requirement.specifier
     else:
         assert "rev" not in cargo_dependency
     cargo_requirement = str(cargo_dependency["version"])

@@ -949,6 +949,9 @@ impl OfflineReplayRouter {
     pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
+        if let Some(affinity) = &mut self.affinity {
+            affinity.workers_changed();
+        }
         Ok(())
     }
 
@@ -1216,15 +1219,9 @@ impl OfflineReplayRouter {
     }
 
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
-        if let Some(affinity) = &self.affinity {
-            for entry in self.pending.entries() {
-                let request = entry.payload();
-                affinity.acquire(request, &self.workers_with_configs)?;
-                // Only the selected queue head may initialize a new binding.
-                request.release_initialization();
-            }
-            self.pending
-                .refresh_placements(PendingRequest::queue_placement);
+        if let Some(affinity) = &mut self.affinity {
+            affinity.refresh_pending(&mut self.pending, &self.workers_with_configs)?;
+            self.pending.recheck_all_workers();
         }
         let mut admissions = Vec::new();
         loop {
@@ -1242,7 +1239,7 @@ impl OfflineReplayRouter {
                 let ready = affinity
                     .as_ref()
                     .map_or(Ok(true), |affinity| affinity.acquire(request, workers));
-                match ready {
+                let dispatchable = match ready {
                     Ok(true) => {
                         let active_tokens =
                             active_tokens.get_or_insert_with(|| slots.active_tokens(decay_now));
@@ -1253,18 +1250,25 @@ impl OfflineReplayRouter {
                         error = Some(cause);
                         false
                     }
-                }
+                };
+                // A class/lane head may be inspected without winning DRR.
+                // Only the selected request may retain initialization.
+                request.release_initialization();
+                dispatchable
             });
             if let Some(error) = error {
                 return Err(error);
             }
             let Some(popped) = popped else {
-                for entry in self.pending.entries() {
-                    entry.payload().release_initialization();
-                }
                 break;
             };
             let request = popped.into_payload();
+            if let Some(affinity) = &self.affinity {
+                anyhow::ensure!(
+                    affinity.acquire(&request, &self.workers_with_configs)?,
+                    "selected replay queue head lost affinity readiness"
+                );
+            }
             let uuid = request.uuid;
             let outcome = self.admit_request(request, decay_now)?;
             admissions.push(WorkerAdmission {

@@ -58,6 +58,38 @@ fn place(policy: &mut Policy, id: u128, session: &str, now: f64) -> PlacementDec
         .decision
 }
 
+#[test]
+#[ignore = "manual before/after affinity backlog benchmark; run with --ignored --nocapture"]
+fn benchmark_affinity_blocked_backlog() {
+    for pending in [128, 1024, 4096] {
+        let mut policy = placement(Some(RouterQueuePolicy::Fcfs));
+        for (id, session) in [(1, "busy-a"), (2, "busy-b")] {
+            immediate(place(&mut policy, id, session, 0.0));
+            commit(&mut policy, id, 0.0);
+        }
+        for id in 3..pending + 3 {
+            assert!(matches!(
+                place(&mut policy, id, "busy-a", 0.0),
+                PlacementDecision::Queued
+            ));
+        }
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                assert!(complete(&mut policy, 99_999, 0.0).is_empty());
+            }
+            samples.push(started.elapsed().as_nanos() / 100);
+        }
+        samples.sort_unstable();
+        assert_eq!(policy.router.pending_count(), pending as usize);
+        println!(
+            "affinity_blocked_backlog pending={pending} median_ns_per_drain={}",
+            samples[2]
+        );
+    }
+}
+
 fn immediate(decision: PlacementDecision) -> Placement {
     match decision {
         PlacementDecision::Immediate(placement) => placement,
@@ -107,6 +139,55 @@ fn initialization_waits_for_dispatch_then_releases_same_worker_and_dp() {
         evidence.decisions[0]["dp_rank"],
         evidence.decisions[1]["dp_rank"]
     );
+}
+
+#[test]
+fn committed_group_reaches_waiters_behind_another_initializer() {
+    for queue_policy in [None, Some(RouterQueuePolicy::Fcfs)] {
+        let mut policy = placement(queue_policy);
+        immediate(place(&mut policy, 1, "still-initializing", 0.0));
+        let bound = immediate(place(&mut policy, 2, "committed", 0.0));
+        for (id, session) in [(3, "still-initializing"), (4, "committed")] {
+            assert!(matches!(
+                place(&mut policy, id, session, 0.0),
+                PlacementDecision::Queued
+            ));
+        }
+        commit(&mut policy, 2, 0.0);
+        let mut released = advance(&mut policy, 0.0);
+        if queue_policy.is_some() {
+            assert!(released.is_empty(), "the bound rank is still full");
+            let queued = policy
+                .router
+                .pending
+                .entries()
+                .find(|entry| entry.payload().uuid == Uuid::from_u128(4))
+                .unwrap();
+            assert!(
+                matches!(
+                    *queued.payload().affinity_hold.borrow(),
+                    Some(Hold::Bound { .. })
+                ),
+                "a hidden waiter must hold its native lease as soon as the binding is published"
+            );
+            released = complete(&mut policy, 2, 2_000.0);
+        }
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].request_id, Uuid::from_u128(4));
+        assert_eq!(released[0].scheduler_id, bound.scheduler_id);
+        commit(&mut policy, 4, 2_000.0);
+        assert_eq!(
+            policy
+                .router
+                .evidence
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .affinity_hits,
+            1
+        );
+    }
 }
 
 #[test]

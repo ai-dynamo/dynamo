@@ -4,13 +4,14 @@
 //! Replay clock and dispatch ownership for the native session-affinity table.
 //! Selection, table eviction, lease renewal, and initialization remain Router-owned.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use aisimulate_core::replay::AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1;
 use anyhow::{Result, anyhow, ensure};
 use dynamo_kv_router::protocols::{WorkerAffinityTarget, WorkerId};
+use dynamo_kv_router::scheduling::PolicyQueue;
 use dynamo_kv_router::services::selection::affinity::{
     AcquireStep, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
 };
@@ -162,6 +163,8 @@ pub(super) struct ReplayAffinity {
     table: SessionAffinity,
     staged: HashMap<Uuid, (Hold, WorkerAffinityTarget)>,
     active: HashMap<Uuid, AffinityLease>,
+    changed_groups: HashSet<String>,
+    workers_changed: bool,
 }
 
 impl ReplayAffinity {
@@ -183,6 +186,8 @@ impl ReplayAffinity {
             table,
             staged: HashMap::new(),
             active: HashMap::new(),
+            changed_groups: HashSet::new(),
+            workers_changed: false,
         })
     }
 
@@ -227,7 +232,50 @@ impl ReplayAffinity {
             .staged
             .remove(&id)
             .ok_or_else(|| anyhow!("affinity dispatch has no staged admission for {id}"))?;
-        self.active.insert(id, self.table.commit(hold, target)?);
+        let initialized = matches!(hold, Hold::Initialize(_));
+        let lease = self.table.commit(hold, target)?;
+        if initialized {
+            self.changed_groups.insert(lease.session_id().to_owned());
+        }
+        self.active.insert(id, lease);
+        Ok(())
+    }
+
+    pub fn workers_changed(&mut self) {
+        self.workers_changed = true;
+    }
+
+    pub fn refresh_pending(
+        &mut self,
+        pending: &mut PolicyQueue<PendingRequest>,
+        workers: &HashMap<WorkerId, ReplayWorkerConfig>,
+    ) -> Result<()> {
+        if !self.workers_changed && self.changed_groups.is_empty() {
+            return Ok(());
+        }
+        // Binding publication must also reach waiters hidden behind another
+        // initializing group. Taking their native leases preserves queued TTL.
+        // Capacity changes and commits of existing bindings need no refresh.
+        let mut placement_changed = false;
+        for entry in pending.entries() {
+            let request = entry.payload();
+            if self.workers_changed
+                || request
+                    .group_key
+                    .as_ref()
+                    .is_some_and(|key| self.changed_groups.contains(key))
+            {
+                let previous = request.queue_placement();
+                self.acquire(request, workers)?;
+                request.release_initialization();
+                placement_changed |= request.queue_placement() != previous;
+            }
+        }
+        if placement_changed {
+            pending.refresh_placements(PendingRequest::queue_placement);
+        }
+        self.changed_groups.clear();
+        self.workers_changed = false;
         Ok(())
     }
 

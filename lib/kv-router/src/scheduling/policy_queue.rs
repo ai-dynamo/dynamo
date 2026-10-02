@@ -562,7 +562,8 @@ impl<T> PolicyQueue<T> {
         }
     }
 
-    pub(crate) fn recheck_all_workers(&mut self) {
+    /// Recheck blocked worker lanes after capacity or placement state changes.
+    pub fn recheck_all_workers(&mut self) {
         for class in &mut self.classes {
             class.recheck_all_workers();
         }
@@ -576,20 +577,41 @@ impl<T> PolicyQueue<T> {
         self.classes.iter().flat_map(PolicyClassQueue::entries)
     }
 
-    /// Refresh worker lanes when a host changes queued request placement.
-    /// Retains each entry's priority, enqueue order, deadline, and accounting;
-    /// previously blocked lanes become eligible for another capacity check.
+    /// Refresh changed placements after a binding or topology update. Unchanged
+    /// lanes retain their heaps; moved entries keep priority and accounting.
+    /// Hosts should use `recheck_all_workers` for ordinary capacity changes.
     pub fn refresh_placements(&mut self, mut placement: impl FnMut(&T) -> WorkerPlacement) {
         for class in &mut self.classes {
-            let shared = std::mem::take(&mut class.pending);
-            let workers = std::mem::take(&mut class.ready_by_worker);
-            class.blocked_workers.clear();
-            class.candidate_worker_heads.clear();
-            for entry in shared
-                .into_iter()
-                .chain(workers.into_values().flat_map(|ready| ready.into_iter()))
-            {
-                class.push_ready(placement(entry.payload()), entry);
+            let mut moved = Vec::new();
+            let mut refresh_lane = |ready: &mut BinaryHeap<PolicyQueueEntry<T>>, previous| {
+                if !ready
+                    .iter()
+                    .any(|entry| placement(entry.payload()) != previous)
+                {
+                    return;
+                }
+                let mut retained = Vec::with_capacity(ready.len());
+                for entry in std::mem::take(ready).into_vec() {
+                    let next = placement(entry.payload());
+                    if next == previous {
+                        retained.push(entry);
+                    } else {
+                        moved.push((next, entry));
+                    }
+                }
+                *ready = BinaryHeap::from(retained);
+            };
+            refresh_lane(&mut class.pending, WorkerPlacement::Any);
+            for (&worker, ready) in &mut class.ready_by_worker {
+                refresh_lane(ready, WorkerPlacement::Exact(worker));
+            }
+            if moved.is_empty() {
+                continue;
+            }
+            class.ready_by_worker.retain(|_, ready| !ready.is_empty());
+            class.rebuild_worker_heads();
+            for (placement, entry) in moved {
+                class.push_ready(placement, entry);
             }
         }
     }

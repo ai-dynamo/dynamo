@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Exact version of the AISimulate wheel built from the Cargo.toml source revision.
-aisimulate==0.13.0
+# Exact version and public source used by both local installs and wheel builders.
+# Keep the source revision equal to Cargo.toml until a matching release exists.
+aisimulate==0.13.0; python_version >= '3.11' and python_version < '3.14'
+aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@240aff04bc45936eac754608ced5ce0989096022#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'
