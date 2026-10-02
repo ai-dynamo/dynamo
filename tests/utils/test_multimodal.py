@@ -75,6 +75,41 @@ def test_uuid_embedding_cache_payload_checks_hit_after_gpu_eviction() -> None:
     payload.final_validation()
 
 
+def test_uuid_embedding_cache_payload_evicts_larger_nightly_cache() -> None:
+    payload = UuidPassthroughChatPayload(
+        expected_response=["green"],
+        exercise_embedding_cache=True,
+        eviction_fill_count=10,
+    )
+    fills = []
+    for iteration in range(payload.repeat_count - 1):
+        image = _image_part(payload.body_for_iteration(iteration))
+        fills.append(image["uuid"])
+        assert image["image_url"] == {"url": MULTIMODAL_IMG_URL}
+        assert payload.expected_log == []
+    assert len(fills) == len(set(fills)) == 11
+    # Each 512x512 fixture produces 256 embeddings; the pinned EC-consumer
+    # budget is 2496. Fill enough distinct entries to evict the original.
+    assert (len(fills) - 1) * 256 > 2496
+    reuse = _image_part(payload.body_for_iteration(payload.repeat_count - 1))
+    assert reuse["uuid"] == fills[0]
+    assert reuse["image_url"] is None
+    assert payload.expected_log == [
+        "Dynamo multimodal embedding cache hit: "
+        r"identifier='dynamo\-mm\-cache\-image\-1'"
+    ]
+    payload.final_validation()
+
+
+def test_uuid_embedding_cache_payload_rejects_empty_eviction_sequence() -> None:
+    with pytest.raises(ValueError, match="eviction_fill_count must be positive"):
+        UuidPassthroughChatPayload(
+            expected_response=["green"],
+            exercise_embedding_cache=True,
+            eviction_fill_count=0,
+        )
+
+
 def test_qwen35_multi_image_payload_is_order_sensitive() -> None:
     payload = make_qwen35_custom_encoder_multi_image_payload()
     content = payload.body["messages"][0]["content"]
