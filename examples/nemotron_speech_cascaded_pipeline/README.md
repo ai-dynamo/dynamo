@@ -370,6 +370,11 @@ warming at turn end. Unchanged text uses `input_text.commit`. This is a
 single-turn endpoint smoke test, not a full voice application; it does not
 synthesize the LLM response or add an integration to Pipecat or the Blueprint.
 
+The realtime text path does not currently apply `--dyn-reasoning-parser`.
+Nemotron Nano can include reasoning text before its final answer; this client
+does not filter it. Answer-only output needs separate handling before connecting
+this stream directly to TTS.
+
 Use `--llm-transport realtime-atomic` as the established-connection baseline.
 Compare it with `realtime` using the same image, model, speech, instructions,
 and output-token limit.
