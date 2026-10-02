@@ -27,8 +27,12 @@ import logging
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
 from types import ModuleType
 from typing import Any
+
+from packaging.version import InvalidVersion, Version
 
 try:
     from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
@@ -326,6 +330,32 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def supports_external_mm_hashes(engine: Any) -> bool:
+    """Return whether caller-provided MM hashes are safe for this SGLang.
+
+    SGLang 0.5.21 applies ``mm_hashes`` after processors such as Qwen-VL have
+    already built ``padded_input_ids``. Replacing each item's pad value without
+    rebuilding those IDs leaves the two representations inconsistent and can
+    crash the model's image-embedding replacement kernel. Keep routing
+    functional by letting SGLang derive its own feature hash for this release.
+    """
+    if "mm_hashes" not in filter_supported_async_generate_kwargs(
+        engine, {"mm_hashes": None}
+    ):
+        return False
+
+    try:
+        release = Version(distribution_version("sglang")).release
+    except (PackageNotFoundError, InvalidVersion):
+        logger.warning(
+            "Could not resolve the installed SGLang version; disabling external "
+            "multimodal hashes"
+        )
+        return False
+
+    return release[:3] != (0, 5, 21)
+
+
 def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:
     """Preserve cache isolation, rejecting salts an older engine cannot honor."""
     if not cache_salt:
@@ -379,4 +409,5 @@ __all__ = [
     "require_reasoning_kwargs",
     "resolved_server_args",
     "sglang_uses_mla_backend",
+    "supports_external_mm_hashes",
 ]

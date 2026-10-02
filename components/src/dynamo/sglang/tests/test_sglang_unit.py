@@ -30,6 +30,7 @@ from dynamo.sglang._compat import (
     require_reasoning_kwargs,
     resolved_server_args,
     sglang_uses_mla_backend,
+    supports_external_mm_hashes,
 )
 from dynamo.sglang.args import (
     _diffusion_generator_kwargs,
@@ -781,6 +782,22 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     kwargs = {"return_routed_experts": True}
 
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [("0.5.21", False), ("0.5.22", True)],
+)
+def test_external_mm_hashes_avoid_sglang_0521_padding_bug(
+    monkeypatch, version, expected
+):
+    class MmHashEngine:
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    monkeypatch.setattr(sglang_compat, "distribution_version", lambda _: version)
+
+    assert supports_external_mm_hashes(MmHashEngine()) is expected
 
 
 @pytest.mark.parametrize(
