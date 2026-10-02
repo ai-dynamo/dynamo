@@ -5,6 +5,7 @@
 
 use crate::local_model::runtime_config::{
     StructuralTagMode, StructuralTagScope, TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+    TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
@@ -133,7 +134,7 @@ pub(crate) fn structural_tag_decision(
     }
 
     let Some(parser_name) = parser_name else {
-        tracing::warn!(
+        tracing::debug!(
             "Structural tag is enabled but --dyn-tool-call-parser is not set; \
              structural tags will not be applied"
         );
@@ -203,23 +204,34 @@ impl OpenAIPreprocessor {
             parallel_tool_calls,
             schema_mode: self.runtime_config.structural_tag_schema,
             starts_in_reasoning: prompt_injected_reasoning
-                && !self.tool_call_structural_tag_excludes_reasoning(),
+                && !self.tool_call_structural_tag_excludes_reasoning(
+                    preprocessed_request.require_reasoning,
+                ),
         };
 
         Self::apply_tool_call_format(parser_name, builder, &ctx, preprocessed_request)
     }
 
-    fn tool_call_structural_tag_excludes_reasoning(&self) -> bool {
-        match self
-            .runtime_config
-            .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
-        {
+    fn tool_call_structural_tag_excludes_reasoning(&self, require_reasoning: bool) -> bool {
+        // vLLM advertises exclusion for the deployment; SGLang gates it per request.
+        // Once the backend consumes THINK_CLOSE, this grammar must not expect it again.
+        // Auto tool choice alone does not activate SGLang's gate.
+        self.structural_tag_reasoning_metadata(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+        ) || (require_reasoning
+            && self.structural_tag_reasoning_metadata(
+                TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
+            ))
+    }
+
+    fn structural_tag_reasoning_metadata(&self, key: &str) -> bool {
+        match self.runtime_config.get_engine_specific::<bool>(key) {
             Ok(Some(excludes_reasoning)) => excludes_reasoning,
             Ok(None) => false,
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    key = TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                    key,
                     "Ignoring invalid structural-tag reasoning metadata; using the compatibility behavior"
                 );
                 false
@@ -431,6 +443,72 @@ mod tests {
             format["elements"][0]["value"],
             "<|tool_calls_section_begin|>"
         );
+    }
+
+    #[test]
+    fn kimi_k3_reasoning_gate_avoids_duplicate_prefix_per_request() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            })),
+            strict: None,
+        }];
+        for (gate, require_reasoning, prompt_injected_reasoning, choice, expects_prefix) in [
+            (Some(true), true, true, ToolChoice::Required, false),
+            (None, true, true, ToolChoice::Required, true),
+            (Some(false), true, true, ToolChoice::Required, true),
+            (Some(true), false, true, ToolChoice::Auto, true),
+            (Some(true), true, false, ToolChoice::Required, false),
+            (
+                Some(true),
+                false,
+                false,
+                ToolChoice::Named("get_weather".to_string()),
+                false,
+            ),
+        ] {
+            let mut mdc = ModelDeploymentCard::load_from_disk(&model_path, None).unwrap();
+            mdc.runtime_config.structural_tag_mode = StructuralTagMode::On;
+            mdc.runtime_config.structural_tag_scope = StructuralTagScope::Always;
+            mdc.runtime_config.tool_call_parser = Some("kimi_k3".to_string());
+            if let Some(gate) = gate {
+                mdc.runtime_config
+                    .set_engine_specific(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, gate)
+                    .unwrap();
+            }
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            let mut request = preprocessed_request();
+            request.require_reasoning = require_reasoning;
+            assert!(
+                preprocessor
+                    .apply_tool_choice_structural_tag(
+                        &choice,
+                        &tools,
+                        None,
+                        prompt_injected_reasoning,
+                        &mut request,
+                    )
+                    .unwrap(),
+                "gate={gate:?}, require_reasoning={require_reasoning}, choice={choice:?}"
+            );
+            let tag = request
+                .sampling_options
+                .guided_decoding
+                .unwrap()
+                .structural_tag
+                .unwrap();
+            let has_prefix = tag["format"]["elements"][0]["end"] == "<|close|>think<|sep|>";
+            assert_eq!(
+                has_prefix, expects_prefix,
+                "gate={gate:?}, require_reasoning={require_reasoning}, prompt_injected_reasoning={prompt_injected_reasoning}, choice={choice:?}"
+            );
+            assert!(tag.to_string().contains("<|open|>tools<|sep|>"));
+        }
     }
 
     #[test]

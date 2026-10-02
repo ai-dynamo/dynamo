@@ -42,6 +42,11 @@ pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
     "tool_call_structural_tag_excludes_reasoning";
 
+/// A backend consumes the reasoning prefix only when `require_reasoning` is true
+/// on the request. Missing metadata leaves reasoning in the frontend grammar.
+pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_reasoning_gate";
+
 /// Describes which request-token overflows the frontend may reject early.
 ///
 /// The combined limit already accounts for engine-reserved tokens. A false
