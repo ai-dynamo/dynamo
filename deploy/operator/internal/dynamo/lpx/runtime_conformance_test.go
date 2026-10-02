@@ -95,6 +95,21 @@ func TestRuntimeDescriptorConformance(t *testing.T) {
 			require.Equal(t, strings.Join(paths, "\n"), legacy["partition_paths"])
 			require.Equal(t, strings.Join(counts, "\n"), legacy["nodes_per_partition"])
 			require.Equal(t, strings.Join(offsets, "\n"), legacy["partition_node_offsets"])
+
+			if build.Family == BuildFamilyXT {
+				t.Log("Compare old leader suffixes with the same descriptor offsets across replicas")
+				workload := &Workload{modelProjections: []*ModelProjection{projection}}
+				plan := &MaterializationPlan{ResourcePrefix: "fixture", ScalingGroupTemplate: "work-b", Agents: []ExpectedAgent{{TemplateName: "draft1"}}}
+				legacyHosts, _, err := workload.renderCyborgConfigMap(plan)
+				require.NoError(t, err)
+				for _, replica := range []string{"0", "3"} {
+					var hosts []string
+					for _, offset := range offsets {
+						hosts = append(hosts, "work-b-"+replica+"-draft1-"+offset)
+					}
+					require.Equal(t, strings.Join(hosts, "\n"), strings.ReplaceAll(legacyHosts.Data["lpu_servers"], "${GROVE_PCSG_INDEX}", replica))
+				}
+			}
 		})
 	}
 }
