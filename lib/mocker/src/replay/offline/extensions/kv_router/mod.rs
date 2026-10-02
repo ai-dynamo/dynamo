@@ -20,7 +20,7 @@ use dynamo_kv_router::protocols::{
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
     OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
-    WorkerPlacement,
+    SchedulingContext, WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::services::selection::affinity::Hold;
@@ -284,6 +284,8 @@ impl SyncReplayIndexer {
 struct PendingRequest {
     uuid: Uuid,
     token_seq: Option<Vec<SequenceHash>>,
+    // Affinity waits/retries look up cache after the binding becomes ready.
+    lookup_hashes: Option<Vec<LocalBlockHash>>,
     isl_tokens: usize,
     overlaps: OverlapScores,
     track_prefill_tokens: bool,
@@ -308,13 +310,6 @@ impl PendingRequest {
                     target.dp_rank.expect("replay affinity binds a DP rank"),
                 ))
             })
-    }
-
-    fn release_initialization(&self) {
-        let mut hold = self.affinity_hold.borrow_mut();
-        if matches!(*hold, Some(Hold::Initialize(_))) {
-            hold.take();
-        }
     }
 
     fn request_id(&self) -> String {
@@ -762,13 +757,36 @@ impl OfflineReplayRouter {
         let pending =
             self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
+        let affinity_ready = self.affinity.as_ref().map_or(Ok(true), |affinity| {
+            affinity.acquire(&pending, &self.workers_with_configs)
+        })?;
+        if !affinity_ready {
+            self.affinity
+                .as_mut()
+                .expect("affinity waiter")
+                .wait(pending);
+            return Ok(RouterEffects::default());
+        }
+        let mut effects = self.schedule_ready_request(pending, decay_now, false)?;
+        if self.affinity.is_some() {
+            effects.admissions.extend(self.drain_pending(decay_now)?);
+        }
+        Ok(effects)
+    }
+
+    fn schedule_ready_request(
+        &mut self,
+        mut pending: PendingRequest,
+        decay_now: Instant,
+        force_queue: bool,
+    ) -> Result<RouterEffects> {
         let (class_index, snapshot) = match self
             .profile
             .direct_class_index(pending.policy_class.as_deref())
         {
             Some(class_index) => (class_index, None),
             None => {
-                let snapshot = self.snapshot_for(&pending);
+                let snapshot = self.snapshot_for(&mut pending);
                 (
                     self.profile.resolve_class_index(
                         pending.policy_class.as_deref(),
@@ -779,25 +797,20 @@ impl OfflineReplayRouter {
             }
         };
         let class = self.profile.class(class_index);
-        let affinity_ready = self.affinity.as_ref().map_or(Ok(true), |affinity| {
-            affinity.acquire(&pending, &self.workers_with_configs)
-        })?;
-        let should_queue = !affinity_ready
-            || (class.queueing_enabled()
-                && (self.pending.has_backlog(class_index)
-                    || Self::request_workers_busy(
-                        &self.slots.active_tokens(decay_now),
-                        &self.workers_with_configs,
-                        class,
-                        &pending,
-                    )));
+        let should_queue = class.queueing_enabled()
+            && (force_queue
+                || self.pending.has_backlog(class_index)
+                || Self::request_workers_busy(
+                    &self.slots.active_tokens(decay_now),
+                    &self.workers_with_configs,
+                    class,
+                    &pending,
+                ));
 
         if should_queue {
-            // Queue priority may put a later sibling first (LCFS/WSPT). Only a
-            // selected request may own initialization; otherwise its siblings
-            // could hide the initializer behind a blocked queue head.
-            pending.release_initialization();
-            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&pending));
+            // Keep initialization while queued, just like the live host. Its
+            // siblings wait outside PolicyQueue until this dispatch commits.
+            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&mut pending));
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
             let placement = pending.queue_placement();
@@ -808,26 +821,19 @@ impl OfflineReplayRouter {
                         .len()
                         .saturating_mul(self.dp_size as usize),
                     snapshot,
-                    now_ms.max(0.0) / 1000.0,
+                    decay_now
+                        .saturating_duration_since(self.decay_time_epoch)
+                        .as_secs_f64(),
                     priority_jump,
                     strict_priority,
                     placement,
                     pending,
                 )
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
-            return Ok(RouterEffects {
-                admissions: if self.affinity.is_some() {
-                    self.drain_pending(decay_now)?
-                } else {
-                    Vec::new()
-                },
-            });
+            return Ok(RouterEffects::default());
         }
 
-        let uuid = request
-            .metadata()
-            .uuid
-            .expect("offline replay requests must have UUIDs before router submission");
+        let uuid = pending.uuid;
         let outcome = self.admit_request(pending, decay_now)?;
         Ok(RouterEffects {
             admissions: vec![WorkerAdmission {
@@ -903,10 +909,20 @@ impl OfflineReplayRouter {
             .as_ref()
             .map(|affinity| Arc::clone(&affinity.clock));
         let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
-        let before = self.pending.pending_count();
-        self.pending.retain(|request| request.uuid != uuid);
-        let removed = self.pending.pending_count() != before;
-        if removed && self.pending.pending_count() > 0 {
+        let before = self.pending_count();
+        let canceled = self.pending.take_if(|request| request.uuid == uuid);
+        if let Some(affinity) = &mut self.affinity {
+            for entry in &canceled {
+                let request = entry.payload();
+                if matches!(*request.affinity_hold.borrow(), Some(Hold::Initialize(_))) {
+                    affinity.retry_waiters(request.group_key.as_deref().expect("affinity group"));
+                }
+            }
+            affinity.cancel_waiter(uuid);
+        }
+        drop(canceled);
+        let removed = self.pending_count() != before;
+        if removed && self.pending_count() > 0 {
             self.wakeup_ms = clock.as_ref().map(|clock| clock.now_ms());
         }
         removed
@@ -914,6 +930,10 @@ impl OfflineReplayRouter {
 
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.pending_count()
+            + self
+                .affinity
+                .as_ref()
+                .map_or(0, ReplayAffinity::waiting_count)
     }
 
     /// Register a new worker with the router without disturbing existing slot state.
@@ -1049,13 +1069,11 @@ impl OfflineReplayRouter {
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
         let (priority_jump, strict_priority) = request.router_priorities();
-        let (overlaps, token_seq) = match replay_hashes {
+        let (overlaps, token_seq, lookup_hashes) = match replay_hashes {
             Some(replay_hashes) => {
-                let overlaps =
-                    self.indexer
-                        .find_matches_for_hashes(crate::loadgen::local_block_hashes(
-                            replay_hashes.local_block_hashes,
-                        ));
+                let hashes = crate::loadgen::local_block_hashes(replay_hashes.local_block_hashes);
+                let lookup_hashes = self.affinity.as_ref().map(|_| hashes.clone());
+                let overlaps = self.indexer.find_matches_for_hashes(hashes);
                 let token_seq = if !self.config.router_track_active_blocks {
                     None
                 } else if self.config.router_assume_kv_reuse
@@ -1076,11 +1094,21 @@ impl OfflineReplayRouter {
                         None,
                     )
                 };
-                (overlaps, token_seq)
+                (overlaps, token_seq, lookup_hashes)
             }
             None => {
                 let tokens = request_view.prompt_tokens_for_placement()?;
-                let overlaps = self.indexer.find_matches_for_request(&tokens, None);
+                let lookup_hashes = self.affinity.as_ref().map(|_| {
+                    compute_block_hash_for_seq(
+                        &tokens,
+                        self.block_size,
+                        BlockHashOptions::default(),
+                    )
+                });
+                let overlaps = match &lookup_hashes {
+                    Some(hashes) => self.indexer.find_matches_for_hashes(hashes.clone()),
+                    None => self.indexer.find_matches_for_request(&tokens, None),
+                };
                 let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
                     &self.tracking_hash,
                     self.tracking_hash_scope(),
@@ -1089,13 +1117,14 @@ impl OfflineReplayRouter {
                     BlockHashOptions::default(),
                     None,
                 );
-                (overlaps, token_seq)
+                (overlaps, token_seq, lookup_hashes)
             }
         };
 
         Ok(PendingRequest {
             uuid,
             token_seq,
+            lookup_hashes,
             isl_tokens: input_length,
             overlaps,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
@@ -1192,7 +1221,12 @@ impl OfflineReplayRouter {
         let hold = request.affinity_hold.into_inner();
         let binding_reused = hold.as_ref().and_then(Hold::target).is_some();
         if let (Some(affinity), Some(hold)) = (self.affinity.as_mut(), hold) {
-            affinity.stage(request.uuid, hold, selection.worker.into());
+            affinity.stage(
+                request.uuid,
+                hold,
+                selection.worker.into(),
+                request.group_key.as_deref().expect("affinity group"),
+            );
         }
         if let Some(evidence) = &self.evidence {
             let mut evidence = evidence
@@ -1219,56 +1253,53 @@ impl OfflineReplayRouter {
     }
 
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
-        if let Some(affinity) = &mut self.affinity {
-            affinity.refresh_pending(&mut self.pending, &self.workers_with_configs)?;
-            self.pending.recheck_all_workers();
-        }
         let mut admissions = Vec::new();
+        if let Some(affinity) = &mut self.affinity {
+            let workers_changed = std::mem::take(&mut affinity.workers_changed);
+            if workers_changed {
+                // Retry an invalidated binding through normal classification and
+                // queue admission, as the live host does after a failed target.
+                let retry = self.pending.take_if(|request| {
+                    request
+                        .affinity_hold
+                        .borrow()
+                        .as_ref()
+                        .and_then(Hold::target)
+                        .is_some_and(|target| {
+                            !self.workers_with_configs.contains_key(&target.worker_id)
+                        })
+                });
+                for entry in retry {
+                    affinity.wait(entry.into_payload());
+                }
+            }
+            let ready = affinity.take_ready_waiters(&self.workers_with_configs, workers_changed)?;
+            self.pending.recheck_all_workers();
+            for mut request in ready {
+                if let Some(hashes) = &request.lookup_hashes {
+                    request.overlaps = self.indexer.find_matches_for_hashes(hashes.clone());
+                }
+                admissions.extend(
+                    self.schedule_ready_request(request, decay_now, true)?
+                        .admissions,
+                );
+            }
+        }
         loop {
             // Most completions find an empty queue, which never consults the
             // predicate, so only snapshot active tokens once one is needed.
             let mut active_tokens = None;
             let slots = &self.slots;
             let workers = &self.workers_with_configs;
-            let affinity = &self.affinity;
-            let mut error = None;
             let popped = self.pending.pop_next(|_, class, request| {
-                if error.is_some() {
-                    return false;
-                }
-                let ready = affinity
-                    .as_ref()
-                    .map_or(Ok(true), |affinity| affinity.acquire(request, workers));
-                let dispatchable = match ready {
-                    Ok(true) => {
-                        let active_tokens =
-                            active_tokens.get_or_insert_with(|| slots.active_tokens(decay_now));
-                        !Self::request_workers_busy(active_tokens, workers, class, request)
-                    }
-                    Ok(false) => false,
-                    Err(cause) => {
-                        error = Some(cause);
-                        false
-                    }
-                };
-                // A class/lane head may be inspected without winning DRR.
-                // Only the selected request may retain initialization.
-                request.release_initialization();
-                dispatchable
+                let active_tokens =
+                    active_tokens.get_or_insert_with(|| slots.active_tokens(decay_now));
+                !Self::request_workers_busy(active_tokens, workers, class, request)
             });
-            if let Some(error) = error {
-                return Err(error);
-            }
             let Some(popped) = popped else {
                 break;
             };
             let request = popped.into_payload();
-            if let Some(affinity) = &self.affinity {
-                anyhow::ensure!(
-                    affinity.acquire(&request, &self.workers_with_configs)?,
-                    "selected replay queue head lost affinity readiness"
-                );
-            }
             let uuid = request.uuid;
             let outcome = self.admit_request(request, decay_now)?;
             admissions.push(WorkerAdmission {
@@ -1330,16 +1361,12 @@ impl OfflineReplayRouter {
         })
     }
 
-    fn snapshot_for(&self, request: &PendingRequest) -> QueueSnapshot {
-        let cached_tokens = request
-            .overlaps
-            .scores
-            .iter()
-            .filter(|(worker, _)| self.workers_with_configs.contains_key(&worker.worker_id))
-            .map(|(_, overlap)| *overlap)
-            .max()
-            .unwrap_or(0) as usize
-            * self.block_size as usize;
+    fn snapshot_for(&self, request: &mut PendingRequest) -> QueueSnapshot {
+        let mut scheduling_request =
+            request.scheduling_request(self.block_size as usize, FxHashMap::default());
+        let cached_tokens = SchedulingContext::new(&scheduling_request, &self.workers_with_configs)
+            .best_cached_tokens();
+        request.token_seq = scheduling_request.token_seq.take();
         QueueSnapshot::new(request.isl_tokens, cached_tokens)
     }
 

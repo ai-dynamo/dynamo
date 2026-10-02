@@ -577,43 +577,14 @@ impl<T> PolicyQueue<T> {
         self.classes.iter().flat_map(PolicyClassQueue::entries)
     }
 
-    /// Refresh changed placements after a binding or topology update. Unchanged
-    /// lanes retain their heaps; moved entries keep priority and accounting.
-    /// Hosts should use `recheck_all_workers` for ordinary capacity changes.
-    pub fn refresh_placements(&mut self, mut placement: impl FnMut(&T) -> WorkerPlacement) {
-        for class in &mut self.classes {
-            let mut moved = Vec::new();
-            let mut refresh_lane = |ready: &mut BinaryHeap<PolicyQueueEntry<T>>, previous| {
-                if !ready
-                    .iter()
-                    .any(|entry| placement(entry.payload()) != previous)
-                {
-                    return;
-                }
-                let mut retained = Vec::with_capacity(ready.len());
-                for entry in std::mem::take(ready).into_vec() {
-                    let next = placement(entry.payload());
-                    if next == previous {
-                        retained.push(entry);
-                    } else {
-                        moved.push((next, entry));
-                    }
-                }
-                *ready = BinaryHeap::from(retained);
-            };
-            refresh_lane(&mut class.pending, WorkerPlacement::Any);
-            for (&worker, ready) in &mut class.ready_by_worker {
-                refresh_lane(ready, WorkerPlacement::Exact(worker));
-            }
-            if moved.is_empty() {
-                continue;
-            }
-            class.ready_by_worker.retain(|_, ready| !ready.is_empty());
-            class.rebuild_worker_heads();
-            for (placement, entry) in moved {
-                class.push_ready(placement, entry);
-            }
+    /// Remove matching entries without dispatching or spending DRR credit.
+    /// Retained entries keep their keys, deadlines, and relative ordering.
+    pub fn take_if(&mut self, mut predicate: impl FnMut(&T) -> bool) -> Vec<PolicyQueueEntry<T>> {
+        let mut removed = Vec::new();
+        for class_index in 0..self.classes.len() {
+            removed.extend(self.take_if_in_class(class_index, &mut predicate).0);
         }
+        removed
     }
 
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
@@ -1072,42 +1043,52 @@ policy_classes:
     }
 
     #[test]
-    fn refreshing_placement_preserves_order_and_accounting() {
+    fn taking_entries_preserves_retained_order_deadlines_and_credit() {
         let mut queue = PolicyQueue::new(admission_profile());
-        for request in 0..3 {
+        let due = Instant::now() + std::time::Duration::from_secs(1);
+        for request in 0..4 {
             queue
-                .enqueue(
-                    0,
+                .enqueue_with_due_at(
+                    QueueMetadata {
+                        class_index: 0,
+                        snapshot: QueueSnapshot::new(10, 4),
+                        due_at: Some(due),
+                        arrival_offset_secs: 0.0,
+                    },
                     2,
-                    QueueSnapshot::new(10, 4),
-                    0.0,
                     0.0,
                     0,
-                    WorkerPlacement::Any,
+                    if request == 0 {
+                        WorkerPlacement::Any
+                    } else {
+                        WorkerPlacement::Exact(WorkerWithDpRank::new(0, request % 2))
+                    },
                     request,
                 )
                 .unwrap();
         }
-        queue.refresh_placements(|request| {
-            WorkerPlacement::Exact(WorkerWithDpRank::new(0, request % 2))
-        });
-        assert_eq!(queue.pending_count(), 3);
-        assert_eq!(queue.class_stats(0).raw_isl_tokens, 30);
-        assert_eq!(queue.class_stats(0).cached_tokens, 12);
-        assert_eq!(
-            queue
-                .pop_next(|_, _, request| request % 2 == 1)
-                .unwrap()
-                .into_payload(),
-            1
-        );
-        assert!(queue.pop_next(|_, _, _| false).is_none());
-        queue.refresh_placements(|_| WorkerPlacement::Any);
         assert_eq!(queue.pop_next(|_, _, _| true).unwrap().into_payload(), 0);
-        assert_eq!(queue.pop_next(|_, _, _| true).unwrap().into_payload(), 2);
+        let deficit = queue.classes[0].deficit;
+        assert_eq!(deficit, 4);
+        let removed = queue.take_if(|request| *request == 2);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(*removed[0].payload(), 2);
+        assert_eq!(queue.classes[0].deficit, deficit);
+        assert_eq!(
+            queue.class_stats(0),
+            PolicyQueueStats {
+                requests: 2,
+                raw_isl_tokens: 20,
+                cached_tokens: 8
+            }
+        );
+        assert_eq!(queue.due_entries.len(), 2);
+        assert_eq!(queue.next_due_at(), Some(due));
+        assert_eq!(queue.pop_next(|_, _, _| true).unwrap().into_payload(), 1);
+        assert_eq!(queue.pop_next(|_, _, _| true).unwrap().into_payload(), 3);
         assert_eq!(queue.pending_count(), 0);
-        assert_eq!(queue.class_stats(0).raw_isl_tokens, 0);
-        assert_eq!(queue.class_stats(0).cached_tokens, 0);
+        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
+        assert_eq!(queue.next_due_at(), None);
     }
 
     #[test]

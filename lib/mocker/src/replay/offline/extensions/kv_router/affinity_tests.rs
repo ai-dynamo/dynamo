@@ -3,6 +3,11 @@
 
 use super::*;
 use dynamo_kv_router::config::RouterQueuePolicy;
+use dynamo_kv_router::protocols::{
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+    KvCacheStoredBlockData,
+};
+use dynamo_kv_router::scheduling::RouterPolicyConfig;
 
 type Policy = KvRouterPlacement;
 
@@ -113,6 +118,127 @@ fn advance(policy: &mut Policy, now: f64) -> Vec<Placement> {
 fn complete(policy: &mut Policy, id: u128, now: f64) -> Vec<Placement> {
     <Policy as PlacementPolicy<DirectRequest>>::request_terminal(policy, Uuid::from_u128(id), now)
         .unwrap()
+}
+
+fn cache_request_on_rank(policy: &mut Policy, request: &DirectRequest, dp_rank: u32) {
+    let hashes = ReplayRequestHashes::from_tokens(&request.tokens, policy.router.block_size);
+    policy
+        .router
+        .on_kv_events(vec![RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id: 1,
+                dp_rank,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: hashes
+                        .local_block_hashes
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, hash)| KvCacheStoredBlockData {
+                            block_hash: ExternalSequenceBlockHash(index as u64 + 1),
+                            tokens_hash: LocalBlockHash(hash),
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+            },
+        )])
+        .unwrap();
+}
+
+#[test]
+fn affinity_wspt_ignores_cache_on_another_dp_rank() {
+    for commit_before_arrival in [true, false] {
+        let mut policy = placement(Some(RouterQueuePolicy::Wspt));
+        let bound = immediate(place(&mut policy, 1, "conversation", 0.0));
+        if commit_before_arrival {
+            commit(&mut policy, 1, 0.0);
+        }
+        let long = request(2);
+        cache_request_on_rank(&mut policy, &long, 1 - bound.scheduler_id as u32);
+        let mut short = request(3);
+        short.tokens = vec![9; 16];
+        for request in [&long, &short] {
+            assert!(matches!(
+                policy
+                    .place(
+                        request,
+                        KvReplayMetadata::default(),
+                        Some("conversation".into()),
+                        0.0
+                    )
+                    .unwrap()
+                    .decision,
+                PlacementDecision::Queued
+            ));
+        }
+        if !commit_before_arrival {
+            commit(&mut policy, 1, 0.0);
+        }
+        let released = complete(&mut policy, 1, 0.0);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].request_id, Uuid::from_u128(3));
+        assert_eq!(released[0].scheduler_id, bound.scheduler_id);
+        commit(&mut policy, 3, 0.0);
+        let released = complete(&mut policy, 3, 0.0);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].request_id, Uuid::from_u128(2));
+        assert_eq!(released[0].scheduler_id, bound.scheduler_id);
+    }
+}
+
+#[test]
+fn affinity_cache_bucket_ignores_cache_on_another_dp_rank() {
+    for commit_before_arrival in [true, false] {
+        let mut policy = placement(Some(RouterQueuePolicy::Wspt));
+        let profile = RouterPolicyConfig::from_yaml(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 32
+    bucket: uncached
+policy_classes:
+  - name: cached
+    policy_family: standard
+    cache_bucket: cached
+    quantum: 1
+    prefill_busy_threshold: 8
+  - name: uncached
+    policy_family: standard
+    cache_bucket: uncached
+    quantum: 1
+    prefill_busy_threshold: 8
+"#,
+        )
+        .unwrap()
+        .resolve_profile(None, None, RouterQueuePolicy::Wspt);
+        policy.router.pending = PolicyQueue::new(profile.clone());
+        policy.router.profile = profile;
+        let bound = immediate(place(&mut policy, 1, "conversation", 0.0));
+        if commit_before_arrival {
+            commit(&mut policy, 1, 0.0);
+        }
+        cache_request_on_rank(&mut policy, &request(2), 1 - bound.scheduler_id as u32);
+        assert!(matches!(
+            place(&mut policy, 2, "conversation", 0.0),
+            PlacementDecision::Queued
+        ));
+        if !commit_before_arrival {
+            commit(&mut policy, 1, 0.0);
+        }
+        assert!(advance(&mut policy, 0.0).is_empty());
+        let queued = policy.router.pending.entries().next().unwrap();
+        assert_eq!(
+            policy.router.profile.class(queued.class_index()).name,
+            "uncached"
+        );
+        assert_eq!(queued.snapshot().cached_tokens, 0);
+        assert_eq!(queued.snapshot().scheduling_cost_tokens, 64);
+    }
 }
 
 #[test]
@@ -251,7 +377,7 @@ fn virtual_ttl_starts_at_last_terminal_and_accepts_fractional_seconds() {
 }
 
 #[test]
-fn lcfs_siblings_do_not_hide_a_queued_initializer() {
+fn lcfs_waits_for_the_native_initialization_owner() {
     let mut policy = placement(Some(RouterQueuePolicy::Lcfs));
     // Occupy both DP ranks before either of the two queued siblings is selected.
     immediate(place(&mut policy, 1, "busy-a", 0.0));
@@ -266,23 +392,173 @@ fn lcfs_siblings_do_not_hide_a_queued_initializer() {
         place(&mut policy, 4, "siblings", 2.0),
         PlacementDecision::Queued
     ));
+    assert_eq!(policy.router.pending.pending_count(), 1);
+    assert_eq!(policy.router.pending_count(), 2);
     let released = complete(&mut policy, 1, 3.0);
     assert_eq!(released.len(), 1);
     assert_eq!(
         released[0].request_id,
-        Uuid::from_u128(4),
-        "native LCFS order must be preserved"
+        Uuid::from_u128(3),
+        "the live host keeps initialization through queueing; its sibling has not entered LCFS yet"
     );
-    commit(&mut policy, 4, 3.0);
+    commit(&mut policy, 3, 3.0);
     assert!(
         advance(&mut policy, 3.0).is_empty(),
         "bound busy rank must retain the sibling in the policy queue"
     );
-    let last = complete(&mut policy, 4, 4.0);
+    let last = complete(&mut policy, 3, 4.0);
     assert_eq!(last.len(), 1);
-    assert_eq!(last[0].request_id, Uuid::from_u128(3));
+    assert_eq!(last[0].request_id, Uuid::from_u128(4));
     assert_eq!(last[0].scheduler_id, released[0].scheduler_id);
-    commit(&mut policy, 3, 4.0);
+    commit(&mut policy, 4, 4.0);
+}
+
+#[test]
+fn canceling_a_queued_initializer_wakes_its_waiting_sibling() {
+    let mut policy = placement(Some(RouterQueuePolicy::Wspt));
+    for (id, session) in [(1, "busy-a"), (2, "busy-b")] {
+        immediate(place(&mut policy, id, session, 0.0));
+        commit(&mut policy, id, 0.0);
+    }
+    for id in 3..=5 {
+        assert!(matches!(
+            place(&mut policy, id, "waiting", 0.0),
+            PlacementDecision::Queued
+        ));
+    }
+    assert_eq!(policy.router.pending_count(), 3);
+    assert!(policy.router.cancel_pending(Uuid::from_u128(5)));
+    assert!(policy.router.cancel_pending(Uuid::from_u128(3)));
+    assert_eq!(policy.router.pending_count(), 1);
+    assert_eq!(policy.router.wakeup_ms, Some(0.0));
+    assert!(advance(&mut policy, 0.0).is_empty());
+    let released = complete(&mut policy, 1, 0.0);
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].request_id, Uuid::from_u128(4));
+    assert_eq!(policy.router.pending_count(), 0);
+    commit(&mut policy, 4, 0.0);
+}
+
+#[test]
+fn affinity_waiters_observe_cache_at_binding_readiness() {
+    for compact_hashes in [false, true] {
+        let mut policy = placement(Some(RouterQueuePolicy::Wspt));
+        let bound = immediate(place(&mut policy, 1, "conversation", 0.0));
+        assert!(matches!(
+            policy
+                .place(
+                    &request(2),
+                    KvReplayMetadata::from_hashes(compact_hashes.then(|| {
+                        ReplayRequestHashes::from_tokens(
+                            &request(2).tokens,
+                            policy.router.block_size,
+                        )
+                    })),
+                    Some("conversation".into()),
+                    0.0,
+                )
+                .unwrap()
+                .decision,
+            PlacementDecision::Queued
+        ));
+        assert_eq!(policy.router.pending.pending_count(), 0);
+        cache_request_on_rank(&mut policy, &request(2), bound.scheduler_id as u32);
+        commit(&mut policy, 1, 0.0);
+        assert!(advance(&mut policy, 0.0).is_empty());
+        let queued = policy.router.pending.entries().next().unwrap();
+        assert_eq!(queued.snapshot().cached_tokens, 64);
+        assert_eq!(queued.snapshot().scheduling_cost_tokens, 1);
+        assert!(
+            queued
+                .payload()
+                .token_seq
+                .as_ref()
+                .is_some_and(|sequence| !sequence.is_empty())
+        );
+    }
+}
+
+#[test]
+fn affinity_waiters_use_normal_queue_admission_limits() {
+    let mut policy = placement(Some(RouterQueuePolicy::Wspt));
+    let profile = RouterPolicyConfig::from_yaml(
+        r#"
+default_policy_family: limited
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 32
+    bucket: uncached
+policy_classes:
+  - name: cached
+    policy_family: limited
+    cache_bucket: cached
+    quantum: 1
+    prefill_busy_threshold: 8
+  - name: limited
+    policy_family: limited
+    cache_bucket: uncached
+    quantum: 1
+    prefill_busy_threshold: 8
+    request_queue_limit_per_worker: 1
+"#,
+    )
+    .unwrap()
+    .resolve_profile(None, None, RouterQueuePolicy::Wspt);
+    policy.router.pending = PolicyQueue::new(profile.clone());
+    policy.router.profile = profile;
+    let bound = immediate(place(&mut policy, 1, "conversation", 0.0));
+    cache_request_on_rank(&mut policy, &request(2), 1 - bound.scheduler_id as u32);
+    for id in 2..=4 {
+        assert!(matches!(
+            place(&mut policy, id, "conversation", 0.0),
+            PlacementDecision::Queued
+        ));
+    }
+    commit(&mut policy, 1, 0.0);
+    let error =
+        <Policy as PlacementPolicy<DirectRequest>>::advance_clock(&mut policy, 0.0).unwrap_err();
+    let rejection = error
+        .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+        .unwrap();
+    assert_eq!(rejection.policy_class, "limited");
+    assert_eq!((rejection.current, rejection.limit), (2, 2));
+    assert_eq!(policy.router.pending_count(), 2);
+}
+
+#[test]
+fn removed_affinity_worker_retries_queue_admission_and_waiters() {
+    let mut policy = placement(Some(RouterQueuePolicy::Wspt));
+    immediate(place(&mut policy, 1, "conversation", 0.0));
+    commit(&mut policy, 1, 0.0);
+    for id in 2..=3 {
+        assert!(matches!(
+            place(&mut policy, id, "conversation", 0.0),
+            PlacementDecision::Queued
+        ));
+    }
+    policy.router.remove_worker(0).unwrap();
+    assert!(
+        policy
+            .router
+            .on_topology_changed(0.0)
+            .unwrap()
+            .admissions
+            .is_empty()
+    );
+    assert_eq!(policy.router.pending_count(), 2);
+    policy.router.add_worker(1).unwrap();
+    let released = policy.router.on_topology_changed(0.0).unwrap().admissions;
+    assert_eq!(released.len(), 1);
+    let first = released[0].uuid;
+    assert!(released[0].worker_idx >= 2);
+    commit(&mut policy, first.as_u128(), 0.0);
+    assert!(advance(&mut policy, 0.0).is_empty());
+    let released = complete(&mut policy, first.as_u128(), 0.0);
+    assert_eq!(released.len(), 1);
+    assert_ne!(released[0].request_id, first);
+    assert!(released[0].scheduler_id >= 2);
+    assert_eq!(policy.router.pending_count(), 0);
 }
 
 #[test]
