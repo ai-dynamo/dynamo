@@ -4887,6 +4887,10 @@ class InstrumentedScheduler(AsyncScheduler):
         needs. Inkling's convolution cache is a SlidingWindowSpec too, so
         native allocation and forward execution initialize all four streams
         without assuming a tensor layout or borrowing writable state.
+
+        The layout check is necessary but not sufficient: the gate in
+        ``_kvwarm_warm_eligible`` also requires experts or recurrent-state
+        layers, because dense attention-only models are content-insensitive.
         """
         groups = self.kv_cache_manager.kv_cache_config.kv_cache_groups
         specs = [group.kv_cache_spec for group in groups]
@@ -5006,7 +5010,12 @@ class InstrumentedScheduler(AsyncScheduler):
                     False,
                 )
             )
-            self._kvwarm_native = self._kvwarm_native_layout()
+            # Native prefill only pays off when decode timing depends on KV
+            # content: expert routing, or recurrent state that synthetic KV
+            # cannot reproduce. Dense attention-only models stay synthetic.
+            self._kvwarm_native = self._kvwarm_native_layout() and (
+                has_experts or bool(self._kvwarm_state_layer_groups())
+            )
             if self._kvwarm_native:
                 reason = self._kvwarm_probe_content()
                 eligible = reason is None

@@ -5081,9 +5081,7 @@ def _kvwarm_native_gate_stub(*, experts=8, ep=False, prefix=False):
 
 
 @pytest.mark.core
-@pytest.mark.parametrize(
-    "experts,ep,prefix", [(8, False, False), (8, True, True), (0, False, False)]
-)
+@pytest.mark.parametrize("experts,ep,prefix", [(8, False, False), (8, True, True)])
 def test_kvwarm_sliding_window_uses_native_prefills_without_ep_or_prefix_cache(
     experts, ep, prefix
 ):
@@ -5092,6 +5090,18 @@ def test_kvwarm_sliding_window_uses_native_prefills_without_ep_or_prefix_cache(
     assert stub._kvwarm_warm_eligible()
     assert stub._kvwarm_native
     assert stub._kvwarm_meta["initialization_strategy"] == "native_exact_context"
+
+
+@pytest.mark.core
+def test_kvwarm_native_skips_dense_attention_only_layouts():
+    # Dense attention-only models are content-insensitive: synthetic KV is
+    # correct by construction, so native prefill would add cost and no fidelity.
+    stub = _kvwarm_native_gate_stub(experts=0, ep=False, prefix=False)
+
+    assert not stub._kvwarm_warm_eligible()
+    assert not stub._kvwarm_native
+    assert stub._kvwarm_meta["skip_reason"] == "dense_model_content_insensitive"
+    assert "initialization_strategy" not in stub._kvwarm_meta
 
 
 @pytest.mark.core
