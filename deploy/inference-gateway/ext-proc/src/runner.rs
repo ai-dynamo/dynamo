@@ -44,15 +44,14 @@ const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 
 struct Config {
     namespace_filter: NamespaceFilter,
+    namespace_prefix_mode: NamespacePrefixMode,
     component: String,
 }
 
 impl Config {
     fn from_env() -> Self {
         let namespace_filter = match env_or("DYN_NAMESPACE_PREFIX", "") {
-            Some(prefix) => {
-                NamespaceFilter::Prefix(prefix).with_prefix_mode(NamespacePrefixMode::from_env())
-            }
+            Some(prefix) => NamespaceFilter::Prefix(prefix),
             None => NamespaceFilter::Exact(
                 env_or("DYN_NAMESPACE", "").unwrap_or_else(|| "vllm-agg".to_string()),
             ),
@@ -66,6 +65,7 @@ impl Config {
 
         Self {
             namespace_filter,
+            namespace_prefix_mode: NamespacePrefixMode::from_env(),
             component: env_or("DYN_COMPONENT_NAME", "").unwrap_or_else(|| "backend".to_string()),
         }
     }
@@ -207,6 +207,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
         port = GRPC_PORT,
         health_port = HEALTH_PORT,
         namespace_filter = ?config.namespace_filter,
+        namespace_prefix_mode = ?config.namespace_prefix_mode,
         component = %config.component,
         standalone,
         "Starting Dynamo Rust EPP"
@@ -318,7 +319,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
                     tracing::info!("Shutdown received during Dynamo discovery initialization");
                     return Ok(());
                 }
-                router = Router::from_discovery_with_filter(config.namespace_filter, &config.component) => router?,
+                router = Router::from_discovery_with_prefix_mode(config.namespace_filter, config.namespace_prefix_mode, &config.component) => router?,
             };
             if draining.is_cancelled() {
                 tracing::info!("Shutdown received before Dynamo discovery serving started");
@@ -532,14 +533,20 @@ mod tests {
                     ("DYN_NAMESPACE_PREFIX_STRICT", strict),
                 ],
                 || {
-                    let filter = Config::from_env().namespace_filter;
-                    assert!(filter.matches("default-foo"));
+                    let config = Config::from_env();
+                    let filter = config.namespace_filter;
+                    let mode = config.namespace_prefix_mode;
+                    assert!(filter.matches_with_prefix_mode("default-foo", mode));
                     assert_eq!(
-                        filter.matches("default-foo-1a2b3c4d"),
+                        filter.matches_with_prefix_mode("default-foo-1a2b3c4d", mode),
                         generation,
                         "{filter:?}"
                     );
-                    assert_eq!(filter.matches("default-foo-bar"), sibling, "{filter:?}");
+                    assert_eq!(
+                        filter.matches_with_prefix_mode("default-foo-bar", mode),
+                        sibling,
+                        "{filter:?}"
+                    );
                 },
             );
         }

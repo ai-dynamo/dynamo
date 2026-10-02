@@ -145,9 +145,9 @@ impl Router {
     /// This waits for at least one decode worker to appear, fetches the model
     /// card, initializes the preprocessor, and creates both routers.
     pub async fn from_discovery(namespace: &str, component: &str) -> Result<Self> {
-        Self::from_discovery_with_filter(
-            NamespaceFilter::Prefix(namespace.to_string())
-                .with_prefix_mode(NamespacePrefixMode::from_env()),
+        Self::from_discovery_with_prefix_mode(
+            NamespaceFilter::Prefix(namespace.to_string()),
+            NamespacePrefixMode::from_env(),
             component,
         )
         .await
@@ -157,11 +157,22 @@ impl Router {
         namespace_filter: NamespaceFilter,
         component: &str,
     ) -> Result<Self> {
+        Self::from_discovery_with_prefix_mode(
+            namespace_filter,
+            NamespacePrefixMode::Literal,
+            component,
+        )
+        .await
+    }
+
+    pub(crate) async fn from_discovery_with_prefix_mode(
+        namespace_filter: NamespaceFilter,
+        namespace_prefix_mode: NamespacePrefixMode,
+        component: &str,
+    ) -> Result<Self> {
         let namespace = match &namespace_filter {
             NamespaceFilter::Global => GLOBAL_NAMESPACE,
-            NamespaceFilter::Exact(namespace)
-            | NamespaceFilter::Prefix(namespace)
-            | NamespaceFilter::WorkerGenerationPrefix(namespace) => namespace,
+            NamespaceFilter::Exact(namespace) | NamespaceFilter::Prefix(namespace) => namespace,
         };
         let container_discovery = validate_kube_discovery_mode()?;
 
@@ -171,7 +182,7 @@ impl Router {
         // Wait for workers
         wait_for_discovery_sync(&drt).await;
 
-        let bootstrap = init_preprocessor(&drt, &namespace_filter).await?;
+        let bootstrap = init_preprocessor(&drt, &namespace_filter, namespace_prefix_mode).await?;
         let block_size = bootstrap.card.kv_cache_block_size;
         let model_name = bootstrap.card.display_name.clone();
         let enable_eagle = bootstrap.card.runtime_config.enable_eagle;
@@ -788,14 +799,17 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime) {
 async fn init_preprocessor(
     drt: &DistributedRuntime,
     namespace_filter: &NamespaceFilter,
+    namespace_prefix_mode: NamespacePrefixMode,
 ) -> Result<DiscoveredModelBootstrap> {
     loop {
-        match fetch_preprocessor_from_discovery(drt, namespace_filter).await {
+        match fetch_preprocessor_from_discovery(drt, namespace_filter, namespace_prefix_mode).await
+        {
             Ok(result) => return Ok(result),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     ?namespace_filter,
+                    ?namespace_prefix_mode,
                     "Model card not available yet, retrying in 5s..."
                 );
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -807,6 +821,7 @@ async fn init_preprocessor(
 async fn fetch_preprocessor_from_discovery(
     drt: &DistributedRuntime,
     namespace_filter: &NamespaceFilter,
+    namespace_prefix_mode: NamespacePrefixMode,
 ) -> Result<DiscoveredModelBootstrap> {
     let discovery = drt.discovery();
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
@@ -833,7 +848,7 @@ async fn fetch_preprocessor_from_discovery(
 
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            if !namespace_filter.matches(namespace) {
+            if !namespace_filter.matches_with_prefix_mode(namespace, namespace_prefix_mode) {
                 continue;
             }
 
@@ -1709,17 +1724,21 @@ mod tests {
             .await
             .unwrap();
 
-        let manual =
-            fetch_preprocessor_from_discovery(&drt, &NamespaceFilter::Prefix("default-foo".into()))
-                .await
-                .unwrap();
+        let manual = fetch_preprocessor_from_discovery(
+            &drt,
+            &NamespaceFilter::Prefix("default-foo".into()),
+            NamespacePrefixMode::Literal,
+        )
+        .await
+        .unwrap();
         assert_eq!(manual.actual_namespace, "default-foo-bar");
 
-        let filter = NamespaceFilter::WorkerGenerationPrefix("default-foo".into());
-        let rejected = fetch_preprocessor_from_discovery(&drt, &filter)
-            .await
-            .err()
-            .expect("sibling model must be excluded");
+        let filter = NamespaceFilter::Prefix("default-foo".into());
+        let rejected =
+            fetch_preprocessor_from_discovery(&drt, &filter, NamespacePrefixMode::WorkerGeneration)
+                .await
+                .err()
+                .expect("sibling model must be excluded");
         assert!(
             rejected
                 .to_string()
@@ -1736,15 +1755,19 @@ mod tests {
         dynamo_llm::local_model::register_model_card(&generation, &card)
             .await
             .unwrap();
-        let selected = fetch_preprocessor_from_discovery(&drt, &filter)
-            .await
-            .unwrap();
-        assert_eq!(selected.actual_namespace, "default-foo-1a2b3c4d");
-        let exact =
-            fetch_preprocessor_from_discovery(&drt, &NamespaceFilter::Exact("default-foo".into()))
+        let selected =
+            fetch_preprocessor_from_discovery(&drt, &filter, NamespacePrefixMode::WorkerGeneration)
                 .await
-                .err()
-                .expect("exact scope must exclude worker generations");
+                .unwrap();
+        assert_eq!(selected.actual_namespace, "default-foo-1a2b3c4d");
+        let exact = fetch_preprocessor_from_discovery(
+            &drt,
+            &NamespaceFilter::Exact("default-foo".into()),
+            NamespacePrefixMode::WorkerGeneration,
+        )
+        .await
+        .err()
+        .expect("exact scope must exclude worker generations");
         assert!(
             exact
                 .to_string()

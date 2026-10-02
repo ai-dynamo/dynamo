@@ -172,7 +172,7 @@ fn namespace_scope(filter: &NamespaceFilter) -> &str {
     match filter {
         NamespaceFilter::Global => GLOBAL_NAMESPACE,
         NamespaceFilter::Exact(namespace) => namespace,
-        NamespaceFilter::Prefix(prefix) | NamespaceFilter::WorkerGenerationPrefix(prefix) => prefix,
+        NamespaceFilter::Prefix(prefix) => prefix,
     }
 }
 
@@ -184,12 +184,16 @@ fn namespace_scope(filter: &NamespaceFilter) -> &str {
 /// here are RL control endpoints, so the scope is the prefix itself plus the
 /// hyphen-delimited worker generations beneath it — the same shape
 /// `DYN_NAMESPACE_WORKER_SUFFIX` produces.
-fn namespace_in_scope(filter: &NamespaceFilter, namespace: &str) -> bool {
-    match filter {
-        NamespaceFilter::Prefix(prefix) => namespace
+fn namespace_in_scope(
+    filter: &NamespaceFilter,
+    namespace: &str,
+    mode: NamespacePrefixMode,
+) -> bool {
+    match (filter, mode) {
+        (NamespaceFilter::Prefix(prefix), NamespacePrefixMode::Literal) => namespace
             .strip_prefix(prefix.as_str())
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('-')),
-        filter => filter.matches(namespace),
+        _ => filter.matches_with_prefix_mode(namespace, mode),
     }
 }
 
@@ -267,6 +271,7 @@ type EndpointKey = (String, String, String);
 pub struct RlDiscoveryState {
     config: Arc<RlDiscoveryConfig>,
     namespace_filter: NamespaceFilter,
+    namespace_prefix_mode: NamespacePrefixMode,
     /// Cache of request-plane clients keyed by (namespace, component, endpoint).
     /// A `Client` spawns a runtime-lived instance-monitor task and has no per-client
     /// Drop cleanup, so building one per request would leak a task per (request*worker).
@@ -292,9 +297,10 @@ impl RlDiscoveryState {
             Some(&config.namespace),
             std::env::var("DYN_NAMESPACE_PREFIX").ok().as_deref(),
             std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok().as_deref(),
-        )
-        .with_prefix_mode(NamespacePrefixMode::from_env());
-        Self::new_with_namespace_filter(config, namespace_filter)
+        );
+        let mut state = Self::new_with_namespace_filter(config, namespace_filter);
+        state.namespace_prefix_mode = NamespacePrefixMode::from_env();
+        state
     }
 
     fn new_with_namespace_filter(
@@ -305,6 +311,7 @@ impl RlDiscoveryState {
         Self {
             config: Arc::new(config),
             namespace_filter,
+            namespace_prefix_mode: NamespacePrefixMode::Literal,
             clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             probe_semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
         }
@@ -396,9 +403,9 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
                 namespace: namespace.clone(),
             },
         ),
-        NamespaceFilter::Prefix(_)
-        | NamespaceFilter::WorkerGenerationPrefix(_)
-        | NamespaceFilter::Global => (DiscoveryQuery::AllEndpoints, DiscoveryQuery::AllModels),
+        NamespaceFilter::Prefix(_) | NamespaceFilter::Global => {
+            (DiscoveryQuery::AllEndpoints, DiscoveryQuery::AllModels)
+        }
     };
 
     let endpoint_instances = config.runtime.discovery().list(endpoint_query).await?;
@@ -411,9 +418,11 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .unwrap_or_default()
         .into_iter()
         .filter(|instance| match instance {
-            DiscoveryInstance::Model { namespace, .. } => {
-                namespace_in_scope(&state.namespace_filter, namespace)
-            }
+            DiscoveryInstance::Model { namespace, .. } => namespace_in_scope(
+                &state.namespace_filter,
+                namespace,
+                state.namespace_prefix_mode,
+            ),
             _ => true,
         })
         .collect();
@@ -425,7 +434,13 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
             DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
             _ => None,
         })
-        .filter(|endpoint| namespace_in_scope(&state.namespace_filter, &endpoint.namespace))
+        .filter(|endpoint| {
+            namespace_in_scope(
+                &state.namespace_filter,
+                &endpoint.namespace,
+                state.namespace_prefix_mode,
+            )
+        })
         .filter(|endpoint| endpoint.endpoint == config.rl_endpoint)
         .filter(|endpoint| {
             config
@@ -1116,10 +1131,26 @@ mod tests {
     fn prefix_scope_stops_at_a_hyphen() {
         let filter = NamespaceFilter::Prefix("myns-dgd".to_string());
 
-        assert!(namespace_in_scope(&filter, "myns-dgd"));
-        assert!(namespace_in_scope(&filter, "myns-dgd-abc123"));
-        assert!(!namespace_in_scope(&filter, "myns-dgd2"));
-        assert!(!namespace_in_scope(&filter, "myns"));
+        assert!(namespace_in_scope(
+            &filter,
+            "myns-dgd",
+            NamespacePrefixMode::Literal
+        ));
+        assert!(namespace_in_scope(
+            &filter,
+            "myns-dgd-abc123",
+            NamespacePrefixMode::Literal
+        ));
+        assert!(!namespace_in_scope(
+            &filter,
+            "myns-dgd2",
+            NamespacePrefixMode::Literal
+        ));
+        assert!(!namespace_in_scope(
+            &filter,
+            "myns",
+            NamespacePrefixMode::Literal
+        ));
     }
 
     #[test]
@@ -1131,8 +1162,16 @@ mod tests {
             NamespaceFilter::from_namespace_and_prefix(Some("ns"), Some(GLOBAL_NAMESPACE)),
             "a frontend with globalDynamoNamespace must not route to workers RL cannot see"
         );
-        assert!(namespace_in_scope(&filter, "mydgd-9ed17bcc"));
-        assert!(namespace_in_scope(&filter, GLOBAL_NAMESPACE));
+        assert!(namespace_in_scope(
+            &filter,
+            "mydgd-9ed17bcc",
+            NamespacePrefixMode::Literal
+        ));
+        assert!(namespace_in_scope(
+            &filter,
+            GLOBAL_NAMESPACE,
+            NamespacePrefixMode::Literal
+        ));
         assert_eq!(namespace_scope(&filter), GLOBAL_NAMESPACE);
     }
 

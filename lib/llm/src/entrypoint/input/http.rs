@@ -247,8 +247,7 @@ async fn run_with_router_plugins(
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 model.namespace(),
                 model.namespace_prefix(),
-            )
-            .with_prefix_mode(NamespacePrefixMode::from_env());
+            );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();
@@ -377,6 +376,7 @@ async fn run_watcher(
         metrics.clone(),
         plugins,
     );
+    watch_obj.set_namespace_prefix_mode(NamespacePrefixMode::from_env());
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);

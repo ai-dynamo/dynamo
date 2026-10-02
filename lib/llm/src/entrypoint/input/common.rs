@@ -344,6 +344,7 @@ pub async fn prepare_engine(
             if !local_model.path().as_os_str().is_empty() {
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
             }
+            watcher.set_namespace_prefix_mode(NamespacePrefixMode::from_env());
             watcher.set_tokenizer_backend(local_model.runtime_config().tokenizer_backend);
             watcher.set_tokenizer_fallback_enabled(
                 local_model.runtime_config().tokenizer_fallback_enabled,
@@ -360,8 +361,7 @@ pub async fn prepare_engine(
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 local_model.namespace(),
                 local_model.namespace_prefix(),
-            )
-            .with_prefix_mode(NamespacePrefixMode::from_env());
+            );
             let _watcher_task = tokio::spawn(async move {
                 inner_watch_obj
                     .watch(discovery_stream, namespace_filter)

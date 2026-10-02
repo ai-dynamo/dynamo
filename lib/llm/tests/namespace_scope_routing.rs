@@ -183,7 +183,11 @@ struct Frontend {
 }
 
 impl Frontend {
-    async fn start(runtime: &DistributedRuntime, scope: NamespaceFilter) -> Self {
+    async fn start(
+        runtime: &DistributedRuntime,
+        scope: NamespaceFilter,
+        prefix_mode: NamespacePrefixMode,
+    ) -> Self {
         let drt = runtime.clone();
         let (listener, port) = ports::bind_random_port().await;
         let service = HttpService::builder()
@@ -199,7 +203,7 @@ impl Frontend {
             .list_and_watch(DiscoveryQuery::AllModels, Some(cancel.clone()))
             .await
             .unwrap();
-        let watcher = Arc::new(ModelWatcher::new(
+        let mut watcher = ModelWatcher::new(
             drt,
             manager.clone(),
             RouterConfig {
@@ -211,7 +215,9 @@ impl Frontend {
             None,
             None,
             service.state().metrics_clone(),
-        ));
+        );
+        watcher.set_namespace_prefix_mode(prefix_mode);
+        let watcher = Arc::new(watcher);
         let watch = tokio::spawn(watcher.watch(stream, scope));
         let http = service.spawn_with_listener(cancel.clone(), listener).await;
         Self {
@@ -292,15 +298,15 @@ async fn namespace_scope_controls_http_routing_and_worker_rollover() {
     let sibling = Worker::start(&drt, "default-foo-bar", "bar-model", "sibling").await;
     let legacy = Worker::start(&drt, "default-foo-legacy", "legacy-model", "legacy").await;
     let literal = NamespaceFilter::from_namespace_and_prefix(None, Some("default-foo"));
-    let strict = Frontend::start(
+    let strict =
+        Frontend::start(&drt, literal.clone(), NamespacePrefixMode::WorkerGeneration).await;
+    let manual = Frontend::start(&drt, literal, NamespacePrefixMode::Literal).await;
+    let exact = Frontend::start(
         &drt,
-        literal
-            .clone()
-            .with_prefix_mode(NamespacePrefixMode::WorkerGeneration),
+        NamespaceFilter::Exact("default-foo".into()),
+        NamespacePrefixMode::WorkerGeneration,
     )
     .await;
-    let manual = Frontend::start(&drt, literal).await;
-    let exact = Frontend::start(&drt, NamespaceFilter::Exact("default-foo".into())).await;
 
     strict.wait_namespaces("foo-model", &["default-foo"]).await;
     strict
