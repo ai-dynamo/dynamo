@@ -13,7 +13,7 @@
 #[cfg(feature = "mm-routing")]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
-    use dynamo_llm::preprocessor::lightseek_mm::LightseekMmCounter;
+    use dynamo_llm::preprocessor::mm_routing::image::ImageRoutingProcessor;
     use std::path::PathBuf;
 
     let mut args = std::env::args().skip(1);
@@ -47,8 +47,13 @@ fn main() -> anyhow::Result<()> {
         model_type
     );
 
-    let counter = LightseekMmCounter::try_new(&model_id, model_type.as_deref(), &model_dir)?;
+    let counter = ImageRoutingProcessor::try_new(&model_id, model_type.as_deref(), &model_dir)?;
     println!("counter for '{}' constructed", counter.model_id());
+    anyhow::ensure!(
+        !counter.uses_request_context_budget(),
+        "this single-image example cannot report an exact count for request-budgeted processors; \
+         exact counting requires the complete image batch, rendered-text length, and model context length"
+    );
 
     let img_bytes = std::fs::read(&image_path)?;
     let (w, h) = image::ImageReader::new(std::io::Cursor::new(&img_bytes))

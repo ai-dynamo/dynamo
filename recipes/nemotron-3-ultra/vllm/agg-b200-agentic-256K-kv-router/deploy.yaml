@@ -118,7 +118,7 @@ spec:
             readOnly: true
         - name: runtime-tmp
           emptyDir: {}
-  - name: VllmWorker
+  - name: worker
     type: worker
     replicas: 2
     sharedMemorySize: 64Gi

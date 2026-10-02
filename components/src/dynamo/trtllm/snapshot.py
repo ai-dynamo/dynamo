@@ -37,6 +37,7 @@ def _create_runtime(
     discovery_backend: str,
     request_plane: str,
     event_plane: str | None,
+    response_plane: str = "tcp",
 ) -> tuple[Any, Any]:
     from dynamo.common.utils.runtime import create_runtime as _create_runtime
 
@@ -44,6 +45,7 @@ def _create_runtime(
         discovery_backend=discovery_backend,
         request_plane=request_plane,
         event_plane=event_plane,
+        response_plane=response_plane,
     )
 
 
@@ -153,6 +155,7 @@ class _SnapshotRuntimeProxy:
             discovery_backend=config.discovery_backend,
             request_plane=config.request_plane,
             event_plane=config.event_plane,
+            response_plane=config.response_plane,
         )
         from dynamo.common.snapshot.lifecycle import elect_and_wake
 

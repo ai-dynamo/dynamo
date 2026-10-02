@@ -42,7 +42,6 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -145,8 +144,8 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	if compatibilityErr := stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
 		dynamoComponentDeployment.Spec.Experimental,
 	)...); compatibilityErr != nil {
-		if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
-			return ctrl.Result{}, fmt.Errorf("clear GPU shape for invalid checkpoint configuration: %w", clearErr)
+		if clearErr := r.clearDCDComponentProjections(ctx, req); clearErr != nil {
+			return ctrl.Result{}, fmt.Errorf("clear component projections for invalid checkpoint configuration: %w", clearErr)
 		}
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
@@ -282,8 +281,8 @@ func (r *DynamoComponentDeploymentReconciler) recordReconcileError(
 ) {
 	logs := log.FromContext(ctx)
 	logs.Error(reconcileErr, "Failed to reconcile DynamoComponentDeployment.")
-	if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
-		logs.Error(clearErr, "Failed to clear DynamoComponentDeployment GPU shape after reconcile error")
+	if clearErr := r.clearDCDComponentProjections(ctx, req); clearErr != nil {
+		logs.Error(clearErr, "Failed to clear DynamoComponentDeployment projections after reconcile error")
 	}
 
 	ownershipConflictCondition, ownershipConflictTransition := applyOwnershipConflict(dcd.Status.Conditions, dcd.Generation, reconcileErr)
@@ -342,6 +341,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		"deploymentAvailableReplicas", deployment.Status.AvailableReplicas,
 		"deploymentReadyReplicas", deployment.Status.ReadyReplicas)
 
+	ready := IsDeploymentReady(deployment)
 	serviceReplicaStatus := &nvidiacomv1beta1.ComponentReplicaStatus{
 		ComponentKind:     nvidiacomv1beta1.ComponentKindDeployment,
 		ComponentNames:    []string{deployment.Name},
@@ -351,6 +351,10 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		ReadyReplicas:     &deployment.Status.ReadyReplicas,
 		AvailableReplicas: &deployment.Status.AvailableReplicas,
 	}
+	applyComponentRuntimeStatus(serviceReplicaStatus, dynamo.ResolveComponentRuntimeStatus(
+		&deployment.Spec.Template.Spec,
+		deployment.Spec.Template.Annotations,
+	))
 	gpuShape, err := dynamo.ResolveGPUShape(
 		ctx,
 		r.Client,
@@ -363,7 +367,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	}
 	gpuShapeStatus := &gpuShape
 
-	if IsDeploymentReady(deployment) {
+	if ready {
 		return ComponentReconcileResult{
 			modified:             deploymentModified,
 			status:               metav1.ConditionTrue,
@@ -460,6 +464,10 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
 	lwsReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment)
+	applyComponentRuntimeStatus(&lwsReplicaStatus, dynamo.ResolveComponentRuntimeStatus(
+		&lwsObj.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec,
+		lwsObj.Spec.LeaderWorkerTemplate.LeaderTemplate.Annotations,
+	))
 	groupSize := dynamoComponentDeployment.GetNumberOfNodes()
 	gpuShape, err := dynamo.ResolveGPUShape(
 		ctx,
@@ -541,18 +549,25 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 	return nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) clearDCDGPUShape(ctx context.Context, req ctrl.Request) error {
+func (r *DynamoComponentDeploymentReconciler) clearDCDComponentProjections(ctx context.Context, req ctrl.Request) error {
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, dcd); err != nil {
 		return err
 	}
 	if dcd.Status.Component == nil ||
-		(dcd.Status.Component.GPUsPerEngine == nil && dcd.Status.Component.GPUsPerReplica == nil) {
+		(dcd.Status.Component.GPUsPerEngine == nil &&
+			dcd.Status.Component.GPUsPerReplica == nil &&
+			dcd.Status.Component.ServedModelName == "" &&
+			dcd.Status.Component.RuntimeComponentName == "" &&
+			dcd.Status.Component.GPUPowerLimitWatts == nil) {
 		return nil
 	}
 	original := dcd.DeepCopy()
 	dcd.Status.Component.GPUsPerEngine = nil
 	dcd.Status.Component.GPUsPerReplica = nil
+	dcd.Status.Component.ServedModelName = ""
+	dcd.Status.Component.RuntimeComponentName = ""
+	dcd.Status.Component.GPUPowerLimitWatts = nil
 	return r.Status().Patch(ctx, dcd, client.MergeFrom(original))
 }
 
@@ -1003,7 +1018,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 	}
 
 	m := ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(generationOrDeletionChangedPredicate())).
+		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(commonController.GenerationOrDeletionChangedPredicate())).
 		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
@@ -1062,9 +1077,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
-	// Wrap with metrics collection
-	observedReconciler := observability.NewObservedReconciler(r, commonconsts.ResourceTypeDynamoComponentDeployment)
-	return m.Complete(observedReconciler)
+	return m.Complete(r)
 }
 
 func (r *DynamoComponentDeploymentReconciler) GetRecorder() events.EventRecorder {

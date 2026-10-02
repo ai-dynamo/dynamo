@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -978,6 +979,21 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "VllmDecodeWorker",
 				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name: v1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: commonconsts.MainContainerName, Image: "leader:latest", Args: []string{"serve"},
+						}}}},
+					},
+					{
+						Name: v1beta1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: commonconsts.MainContainerName, Image: "worker:latest", Args: []string{"serve"},
+						}}}},
+					},
+				},
 			},
 		},
 	}
@@ -1004,12 +1020,25 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 			WithScheme(s).
 			WithObjects(dcd, existingLeaderWorkerSet).
 			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{LWS: true}},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
 	}
 
 	componentType, err := r.getDCDWorkloadComponentType(context.Background(), dcd)
 	require.NoError(t, err)
 	require.Equal(t, commonconsts.ComponentTypeWorker, componentType)
+
+	leaderTemplate, workerTemplate, err := r.workloadRenderer().renderMultinodePodTemplateSpecs(context.Background(), dcd)
+	require.NoError(t, err)
+	for _, podTemplate := range []*corev1.PodTemplateSpec{leaderTemplate, workerTemplate} {
+		require.Equal(t, commonconsts.ComponentTypeWorker,
+			podTemplate.Labels[commonconsts.KubeLabelDynamoComponentType])
+		require.Equal(t, commonconsts.ComponentTypeDecode,
+			podTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType])
+	}
 }
 
 func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t *testing.T) {
@@ -1404,7 +1433,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											TimeoutSeconds:   4,
 											PeriodSeconds:    5,
 											SuccessThreshold: 0,
-											FailureThreshold: 1,
+											FailureThreshold: 3,
 										},
 										ReadinessProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
@@ -1822,6 +1851,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 				},
 			},
 		})
+		if dcd.Spec.PodTemplate.Annotations == nil {
+			dcd.Spec.PodTemplate.Annotations = map[string]string{}
+		}
+		dcd.Spec.PodTemplate.Annotations[commonconsts.SnapshotCandidateCompatibilityHashAnnotation] = "compatibility-v1"
 		return dcd
 	}
 
@@ -1848,9 +1881,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		require.NoError(t, checkpoint.ApplyRestoreCandidateMetadata(
 			dcd.Spec.PodTemplate.Annotations,
 			&checkpoint.CheckpointInfo{
-				Enabled:          true,
-				AutomaticCapture: true,
-				StartupPolicy:    v1alpha1.CheckpointStartupPolicyImmediate,
+				Enabled:                   true,
+				AutomaticCapture:          true,
+				StartupPolicy:             v1alpha1.CheckpointStartupPolicyImmediate,
+				SnapshotCompatibilityHash: "compatibility-v1",
 				AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
 					Name: "checkpoint-job",
 					UID:  types.UID("snapshot-job-uid"),
@@ -1858,6 +1892,28 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			},
 		))
 	}
+
+	t.Run("role template preserves automatic SnapshotJob handoff", func(t *testing.T) {
+		dcd := makeDCD("")
+		stampAutomaticCandidate(t, dcd)
+		roleTemplate := dcd.Spec.PodTemplate.DeepCopy()
+		dcd.Spec.PodTemplate = nil
+		dcd.Spec.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+		dcd.Spec.Roles = []v1beta1.ComponentRoleSpec{
+			{Name: v1beta1.ComponentRoleLeader, PodTemplate: roleTemplate.DeepCopy()},
+			{Name: v1beta1.ComponentRoleWorker, PodTemplate: roleTemplate.DeepCopy()},
+		}
+
+		podTemplateSpec, err := makeReconciler(dcd).workloadRenderer().generatePodTemplateSpec(
+			context.Background(), dcd, dynamo.RoleLeader, noContainerGPUs(),
+		)
+
+		require.NoError(t, err)
+		assert.Equal(t, commonconsts.RestoreCandidateSourceSnapshotJob,
+			podTemplateSpec.Annotations[commonconsts.RestoreCandidateSourceKindAnnotation])
+		assert.Equal(t, "snapshot-job-uid",
+			podTemplateSpec.Annotations[commonconsts.SnapshotJobCandidateUIDAnnotation])
+	})
 
 	t.Run("automatic capture completion does not change the Immediate Pod template", func(t *testing.T) {
 		t.Log("Given the same custom-target DGD-managed SnapshotJob candidate before and after its PodSnapshot is Ready")
@@ -1875,7 +1931,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			corev1.Container{Name: "engine-0", Image: "test-image:latest"},
 		)
 		stampAutomaticCandidate(t, readyDCD)
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Spec.Source.PodRef.Containers = []string{"engine-0"}
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
@@ -1901,7 +1957,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	t.Run("DGD-managed checkpointRef resolves only a native PodSnapshot", func(t *testing.T) {
 		t.Log("Given a DGD-managed DCD reference and a Ready compatible PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		r := makeReconciler(dcd, snapshot)
 
 		t.Log("When the DCD workload template is rendered")
@@ -1924,7 +1980,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	t.Run("pending explicit snapshot keeps Immediate workload cold-start shaped", func(t *testing.T) {
 		t.Log("Given an Immediate DCD referencing a compatible PodSnapshot that is not Ready")
 		dcd := makeDCD("worker-snapshot")
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", false)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", false)
 		r := makeReconciler(dcd, snapshot)
 
 		t.Log("When the DCD workload template is rendered")
@@ -1945,7 +2001,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		t.Log("Given a WaitForCheckpoint DCD and a Ready compatible PodSnapshot with no legacy checkpoint")
 		dcd := makeDCD("worker-snapshot")
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		r := makeReconciler(dcd, snapshot)
 
 		t.Log("When the DCD workload template is rendered after the startup gate opens")
@@ -1970,19 +2026,20 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		require.NoError(t, (&componentWorkloadsReconciler{}).applyCheckpointStartupPolicy(
 			dcd,
 			&checkpoint.CheckpointInfo{
-				Enabled:          true,
-				Exists:           true,
-				Ready:            true,
-				AutomaticCapture: true,
-				CheckpointName:   "worker-snapshot",
-				StartupPolicy:    v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				Enabled:                   true,
+				Exists:                    true,
+				Ready:                     true,
+				AutomaticCapture:          true,
+				CheckpointName:            "worker-snapshot",
+				StartupPolicy:             v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				SnapshotCompatibilityHash: "compatibility-v1",
 				AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
 					Name: "checkpoint-job",
 					UID:  types.UID("snapshot-job-uid"),
 				},
 			},
 		))
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
@@ -2007,7 +2064,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		t.Log("Given a generated DCD referencing another DGD's retained automatic PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
 		stampAutomaticCandidate(t, dcd)
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "different-dgd-uid"
@@ -2028,7 +2085,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	t.Run("DGD explicit checkpointRef cannot adopt a retained automatic checkpoint", func(t *testing.T) {
 		t.Log("Given a generated DCD with an explicit reference to a retained automatic PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
@@ -2050,7 +2107,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		t.Log("Given a standalone DCD referencing a retained automatic PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
 		dcd.OwnerReferences = nil
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
@@ -3096,7 +3153,7 @@ func TestSetStatusConditionAndServiceReplicaStatusPublishesGPUShape(t *testing.T
 	assert.Equal(t, int64(0), *updated.Status.Component.GPUsPerReplica)
 
 	t.Log("Clear both fields before reporting a later provider failure")
-	require.NoError(t, reconciler.clearDCDGPUShape(t.Context(), ctrl.Request{
+	require.NoError(t, reconciler.clearDCDComponentProjections(t.Context(), ctrl.Request{
 		NamespacedName: client.ObjectKeyFromObject(dcd),
 	}))
 	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
@@ -3346,7 +3403,6 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 	got, err := reconciler.workloadRenderer().generateWorkerPodTemplateSpec(
 		context.Background(),
 		dcd,
-		map[string]string{"app": "demo"},
 		noContainerGPUs(),
 	)
 	require.NoError(t, err)
@@ -3460,4 +3516,115 @@ func TestRenderMultinodePodTemplateSpecs_VLLMMultinodeDRA(t *testing.T) {
 	assert.Contains(t, worker.Args, "$(LWS_WORKER_INDEX)")
 	assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, leader.Resources.Claims)
 	assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, worker.Resources.Claims)
+}
+
+func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing.T) {
+	t.Log("Create an LWS component with distinct complete leader and worker templates")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "role-templates",
+			Namespace: "default",
+			Labels:    map[string]string{"template-source": "dcd"},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkSGLang),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name: v1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{"template-source": "leader"},
+								Annotations: map[string]string{
+									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+								},
+							},
+							Spec: corev1.PodSpec{
+								ResourceClaims: []corev1.PodResourceClaim{{Name: "devices", ResourceClaimTemplateName: ptr.To("leader-devices")}},
+								Containers: []corev1.Container{{
+									Name:    commonconsts.MainContainerName,
+									Image:   "sglang-leader:1.5.0",
+									Command: []string{"python3"},
+									Args: []string{
+										"-m", "dynamo.sglang",
+										"--nnodes", "2",
+										"--node-rank", "$(DYNAMO_RANK)",
+										"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+										"--user-owned-launch", "leader",
+									},
+									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
+								}},
+							},
+						},
+					},
+					{
+						Name: v1beta1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{"template-source": "worker"},
+								Annotations: map[string]string{
+									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+								},
+							},
+							Spec: corev1.PodSpec{
+								ResourceClaims: []corev1.PodResourceClaim{{Name: "devices", ResourceClaimTemplateName: ptr.To("worker-devices")}},
+								Containers: []corev1.Container{{
+									Name:    commonconsts.MainContainerName,
+									Image:   "sglang-worker:1.5.0",
+									Command: []string{"python3"},
+									Args: []string{
+										"-m", "dynamo.sglang",
+										"--nnodes", "2",
+										"--node-rank", "$(DYNAMO_RANK)",
+										"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+										"--user-owned-launch", "worker",
+									},
+									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+
+	leader, worker, err := reconciler.workloadRenderer().renderMultinodePodTemplateSpecs(t.Context(), dcd)
+	require.NoError(t, err)
+
+	t.Log("Verify LWS receives each complete role template and preserves user-owned launch arguments")
+	assert.Equal(t, "sglang-leader:1.5.0", leader.Spec.Containers[0].Image)
+	assert.Equal(t, "leader", leader.Labels["template-source"])
+	assert.Equal(t, "leader-devices", *leader.Spec.ResourceClaims[0].ResourceClaimTemplateName)
+	assert.Equal(t, []string{
+		"-m", "dynamo.sglang",
+		"--nnodes", "2",
+		"--node-rank", "$(DYNAMO_RANK)",
+		"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+		"--user-owned-launch", "leader",
+	}, leader.Spec.Containers[0].Args)
+	assert.NotContains(t, strings.Join(leader.Spec.Containers[0].Args, " "), "LWS_")
+	assert.Equal(t, "sglang-worker:1.5.0", worker.Spec.Containers[0].Image)
+	assert.Equal(t, "worker", worker.Labels["template-source"])
+	assert.Equal(t, "worker-devices", *worker.Spec.ResourceClaims[0].ResourceClaimTemplateName)
+	assert.Equal(t, []string{
+		"-m", "dynamo.sglang",
+		"--nnodes", "2",
+		"--node-rank", "$(DYNAMO_RANK)",
+		"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+		"--user-owned-launch", "worker",
+	}, worker.Spec.Containers[0].Args)
+	assert.NotContains(t, strings.Join(worker.Spec.Containers[0].Args, " "), "LWS_")
+
 }

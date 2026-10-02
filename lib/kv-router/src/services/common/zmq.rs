@@ -59,6 +59,7 @@ impl ZmqSocket {
     }
 
     pub(crate) fn connect(&self, endpoint: &str) -> Result<()> {
+        set_ipv6_for(self.socket(), endpoint)?;
         self.socket().connect(endpoint)?;
         Ok(())
     }
@@ -161,6 +162,13 @@ impl ZmqSocket {
     }
 }
 
+/// libzmq resolves TCP hosts as IPv4 unless `ZMQ_IPV6` is set, and snapshots the option per
+/// bind or connect. [`validate_endpoint`] rejects unbracketed IPv6 literals.
+fn set_ipv6_for(socket: &zmq::Socket, endpoint: &str) -> Result<()> {
+    socket.set_ipv6(endpoint.starts_with("tcp://["))?;
+    Ok(())
+}
+
 fn configure_common_socket(socket: &zmq::Socket) -> Result<()> {
     socket.set_linger(ZMQ_LINGER_MS)?;
     socket.set_reconnect_ivl(ZMQ_RECONNECT_IVL_MS)?;
@@ -206,10 +214,17 @@ where
     ZmqSocket::new(socket)
 }
 
+#[cfg(any(test, feature = "standalone-indexer"))]
 pub(crate) fn create_sub_socket(topic: &[u8]) -> Result<ZmqSocket> {
+    create_sub_socket_topics(&[topic])
+}
+
+pub(crate) fn create_sub_socket_topics(topics: &[&[u8]]) -> Result<ZmqSocket> {
     build_socket(zmq::SUB, |socket| {
         configure_receive_socket(socket)?;
-        socket.set_subscribe(topic)?;
+        for topic in topics {
+            socket.set_subscribe(topic)?;
+        }
         Ok(())
     })
 }
@@ -225,6 +240,7 @@ pub(crate) fn connect_sub_socket(endpoint: &str) -> Result<SharedSocket> {
 pub(crate) fn connect_dealer_socket(endpoint: &str) -> Result<SharedSocket> {
     Ok(Arc::new(Mutex::new(build_socket(zmq::DEALER, |socket| {
         configure_bidirectional_socket(socket)?;
+        set_ipv6_for(socket, endpoint)?;
         socket.connect(endpoint)?;
         Ok(())
     })?)))
@@ -238,6 +254,7 @@ pub(crate) fn connect_dealer_socket(endpoint: &str) -> Result<SharedSocket> {
 pub(crate) fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
     build_socket(zmq::PUB, |socket| {
         configure_send_socket(socket)?;
+        set_ipv6_for(socket, endpoint)?;
         socket.bind(endpoint)?;
         Ok(())
     })
@@ -296,5 +313,42 @@ pub(crate) fn validate_endpoint(endpoint: &str) -> Result<()> {
         other => Err(anyhow!(
             "invalid ZMQ endpoint `{endpoint}`: unsupported scheme `{other}`"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn bracketed_ipv6_endpoints_connect() {
+        if let Err(error) = std::net::TcpListener::bind("[::1]:0") {
+            eprintln!("Skipping IPv6 ZMQ test: {error}");
+            return;
+        }
+        let mut publisher = create_bound_pub_socket("tcp://[::1]:*").unwrap();
+        let endpoint = publisher.socket().get_last_endpoint().unwrap().unwrap();
+        validate_endpoint(&endpoint).unwrap();
+        let mut subscriber = create_sub_socket(b"").unwrap();
+        subscriber.connect(&endpoint).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                publisher
+                    .send_multipart(vec![b"ipv6".to_vec()])
+                    .await
+                    .unwrap();
+                if let Ok(frames) =
+                    tokio::time::timeout(Duration::from_millis(50), subscriber.recv_multipart())
+                        .await
+                {
+                    assert_eq!(frames.unwrap(), vec![b"ipv6".to_vec()]);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("IPv6 SUB socket should receive the message");
     }
 }

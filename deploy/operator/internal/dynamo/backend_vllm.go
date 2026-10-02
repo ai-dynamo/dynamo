@@ -32,6 +32,7 @@ const (
 
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
+	roleLaunchOwnership       roleLaunchOwnership
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
@@ -55,15 +56,25 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	annotations := GetPodTemplateAnnotations(component)
 
 	if isMultinode {
-		containerGPUs, err := containerGPUCount()
-		if err != nil {
-			return fmt.Errorf("failed to resolve container GPUs: %w", err)
+		preserveRoleLaunch := b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate
+		launchArgs := parseVLLMLaunchArgs(getExpandedCommandLine(container))
+		roleTemplateMP := preserveRoleLaunch && launchArgs.IsMpDistributedExecutorBackend
+		if roleTemplateMP {
+			if err := ensureContainerCommandLineFlag(container, "--master-port", commonconsts.VLLMMpMasterPort, "vllm", "vllm", "serve"); err != nil {
+				return err
+			}
+		}
+		if !preserveRoleLaunch {
+			containerGPUs, err := containerGPUCount()
+			if err != nil {
+				return fmt.Errorf("failed to resolve container GPUs: %w", err)
+			}
+
+			// Apply multinode-specific argument modifications.
+			updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations)
 		}
 
-		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations)
-
-		if shouldUseMpBackend(annotations) {
+		if roleTemplateMP || (!preserveRoleLaunch && shouldUseMpBackend(annotations)) {
 			container.Env = append(container.Env, corev1.EnvVar{
 				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
 				ValueFrom: &corev1.EnvVarSource{
@@ -141,6 +152,61 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	return nil
 }
 
+// ensureContainerCommandLineFlag adds one operator-owned flag while preserving
+// the authored command shape. It handles both Python module launches and direct
+// executables such as `vllm serve`.
+func ensureContainerCommandLineFlag(container *corev1.Container, flag, value, framework, executable, subcommand string) error {
+	if hasArg(getExpandedCommandLine(container), flag, value) {
+		return nil
+	}
+	injectFlagsIntoContainerCommand(container, flag+" "+value, false, framework)
+	if !hasArg(getExpandedCommandLine(container), flag, value) {
+		for i, arg := range container.Args {
+			modified := injectFlagsIntoDirectCommand(arg, flag+" "+value, executable, subcommand)
+			if modified != arg {
+				container.Args[i] = modified
+				break
+			}
+		}
+	}
+	if !hasArg(getExpandedCommandLine(container), flag, value) {
+		for i, command := range container.Command {
+			modified := injectFlagsIntoDirectCommand(command, flag+" "+value, executable, subcommand)
+			if modified != command {
+				container.Command[i] = modified
+				break
+			}
+		}
+	}
+	if !hasArg(getExpandedCommandLine(container), flag, value) &&
+		(len(container.Command) == 0 || !isShellCommand(container.Command[0])) {
+		container.Args = append(container.Args, flag, value)
+	}
+	if !hasArg(getExpandedCommandLine(container), flag, value) {
+		return fmt.Errorf("could not add operator-owned flag %q to the container command line", flag)
+	}
+	return nil
+}
+
+func injectFlagsIntoDirectCommand(command, flags, executable, subcommand string) string {
+	directCommand := strings.TrimSpace(executable + " " + subcommand)
+	pattern := fmt.Sprintf(`(^|\s)((?:exec\s+)?%s(?:\s+[^|&;]*)?)(\s|$|[|&;])`, regexp.QuoteMeta(directCommand))
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllStringFunc(command, func(match string) string {
+		submatches := re.FindStringSubmatch(match)
+		if len(submatches) < 4 {
+			return match
+		}
+		return fmt.Sprintf("%s%s %s%s", submatches[1], strings.TrimSpace(submatches[2]), flags, submatches[3])
+	})
+}
+
+func isShellCommand(command string) bool {
+	parts := strings.Split(command, "/")
+	base := parts[len(parts)-1]
+	return base == "sh" || base == "bash"
+}
+
 const (
 	waitLeaderConfigMapSuffix = "wait-leader-script"
 	waitLeaderScriptKey       = "wait-for-leader.py"
@@ -168,9 +234,16 @@ def _k8s_api():
     ns = open(f"{SA}/namespace").read()
     return f"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods"
 
+def resolve_leader_ip():
+    # gethostbyname is IPv4-only; fall back to IPv6 for IPv6-only clusters.
+    try:
+        return socket.gethostbyname(host)
+    except socket.gaierror:
+        return socket.getaddrinfo(host, None, socket.AF_INET6, socket.SOCK_STREAM)[0][4][0]
+
 def leader_pod_is_healthy():
     try:
-        ip = socket.gethostbyname(host)
+        ip = resolve_leader_ip()
     except socket.gaierror:
         return False, "DNS resolution failed", None, None
     try:
@@ -304,20 +377,21 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 		return false
 	}
 
-	return containerCommandLineHasArg(&podSpec.Containers[0], distributedExecutorFlag, "mp")
+	args := parseVLLMLaunchArgs(getExpandedCommandLine(&podSpec.Containers[0]))
+	return args.IsMpDistributedExecutorBackend
 }
 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
 func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) {
-	expandedArgs := getExpandedArgs(container)
-	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, containerGPUs)
+	args := parseVLLMLaunchArgs(getExpandedArgs(container))
+	needsDistributed := needsTensorParallelMultinodeLaunch(args, containerGPUs)
 
 	if needsDistributed && shouldUseMpBackend(annotations) {
 		injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
 	} else if needsDistributed {
 		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
-	} else if hasFlag(expandedArgs, enableElasticEPFlag) {
+	} else if args.IsElasticEPEnabled {
 		// Elastic EP requires a single Ray cluster spanning all nodes.
 		// The operator's RPC-based DP coordination (--data-parallel-hybrid-lb) is
 		// explicitly incompatible with elastic EP — vLLM raises NotImplementedError
@@ -329,8 +403,8 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		// only the leader node is in the Ray cluster when create_dp_placement_groups runs,
 		// so vLLM naturally places all initial DP workers on the leader node.
 		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
-	} else if needsDataParallelMultinodeLaunch(expandedArgs, containerGPUs) {
-		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes)
+	} else if needsDataParallelMultinodeLaunch(args, containerGPUs) {
+		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, args)
 	} else {
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
@@ -344,7 +418,7 @@ func getExpandedArgs(container *corev1.Container) []string {
 	for _, arg := range container.Args {
 		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
 	}
-	return expandedArgs
+	return normalizeVLLMFlags(expandedArgs)
 }
 
 // shouldUseMpBackend determines whether to use multiprocessing (mp) or Ray for vLLM
@@ -562,20 +636,26 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 // would launch a process nothing ever talks to.
 //
 // Detection scans the full command line (Command + Args) so the flags are found
-// whether the manifest carries them in Command or Args, and it accepts vLLM's
-// long --data-parallel-backend flag and its documented -dpb alias in both the
-// "flag value" and "flag=value" spellings — vLLM's argparse treats all of these
-// as equivalent, so any of them must trigger Ray-head injection.
+// whether the manifest carries them in Command or Args, and parseVLLMLaunchArgs
+// accepts vLLM's long --data-parallel-backend flag, its documented -dpb alias,
+// and underscore/equals spellings of either -- vLLM's argparse treats all of
+// these as equivalent, so any of them must trigger Ray-head injection.
 func IsElasticEPRayLaunch(container *corev1.Container) bool {
-	expanded := getExpandedCommandLine(container)
-	return hasFlag(expanded, enableElasticEPFlag) &&
-		(hasArg(expanded, dataParallelBackendFlag, dataParallelBackendRay) ||
-			hasArg(expanded, dataParallelBackendShortFlag, dataParallelBackendRay))
+	args := parseVLLMLaunchArgs(getExpandedCommandLine(container))
+	return args.IsElasticEPEnabled && args.IsRayDataParallelBackend
 }
 
 // getExpandedCommandLine flattens Command and Args and splits any space-joined
 // tokens, so flag detection works whether the manifest puts flags in Command or
 // Args and whether they are separate list items or a single combined string.
+//
+// TODO: an "sh -c" script is split on whitespace here (and in getExpandedArgs)
+// rather than read the way the shell reads it, so a flag inside a shell comment
+// ("# --tensor-parallel-size 4") counts as a real occurrence and can be the one
+// parseVLLMLaunchArgs resolves, although vLLM never receives it. Either drop
+// everything from a word starting with "#" to the end of its line before
+// splitting, or parse the script with a shell parser such as mvdan.cc/sh to get
+// exactly the argv vLLM receives (comments, quotes and variables).
 func getExpandedCommandLine(container *corev1.Container) []string {
 	commandLine := make([]string, 0, len(container.Command)+len(container.Args))
 	commandLine = append(commandLine, container.Command...)
@@ -584,29 +664,215 @@ func getExpandedCommandLine(container *corev1.Container) []string {
 	for _, arg := range commandLine {
 		expanded = append(expanded, strings.Fields(arg)...)
 	}
-	return expanded
+	return normalizeVLLMFlags(expanded)
 }
 
-// hasFlag returns true if flag exists in expandedArgs.
-func hasFlag(expandedArgs []string, flag string) bool {
-	for _, arg := range expandedArgs {
-		if arg == flag {
-			return true
+// vllmShortFlagAliases maps vLLM's documented short flag names to their canonical long form.
+// Kept here rather than at each reader so a new alias is added once.
+var vllmShortFlagAliases = map[string]string{
+	"-tp":                        tensorParallelSizeFlag,
+	"-pp":                        pipelineParallelSizeFlag,
+	"-dp":                        dataParallelSizeFlag,
+	"-dpl":                       dataParallelSizeLocalFlag,
+	dataParallelBackendShortFlag: dataParallelBackendFlag,
+}
+
+// vllmNormalizedFlags is the set of canonical long flags parseVLLMLaunchArgs actually
+// looks for. Underscore-to-dash rewriting in
+// normalizeVLLMFlags is restricted to this set: vLLM's FlexibleArgumentParser treats "_"
+// and "-" as interchangeable in long option names ("--tensor_parallel_size" ==
+// "--tensor-parallel-size"), so a token is only rewritten when its dashed form is one of
+// these -- an unrelated flag's spelling is left alone.
+var vllmNormalizedFlags = map[string]bool{
+	tensorParallelSizeFlag:    true,
+	pipelineParallelSizeFlag:  true,
+	dataParallelSizeFlag:      true,
+	dataParallelSizeLocalFlag: true,
+	dataParallelBackendFlag:   true,
+	enableElasticEPFlag:       true,
+	distributedExecutorFlag:   true,
+}
+
+// vllmValueFlags is the subset of vllmNormalizedFlags that take a value, and is what
+// equals-form splitting is restricted to. Splitting anything outside it would invent a
+// flag that vLLM never sees:
+//   - An unrelated option carrying one of these as its value must stay whole:
+//     "--served-model-name=--enable-elastic-ep" must not become a standalone
+//     "--enable-elastic-ep" that IsElasticEPRayLaunch would match.
+//   - --enable-elastic-ep itself is absent because vLLM registers it with
+//     argparse.BooleanOptionalAction, so it takes no argument and
+//     "--enable-elastic-ep=false" is not a request for elastic EP.
+var vllmValueFlags = map[string]bool{
+	tensorParallelSizeFlag:    true,
+	pipelineParallelSizeFlag:  true,
+	dataParallelSizeFlag:      true,
+	dataParallelSizeLocalFlag: true,
+	dataParallelBackendFlag:   true,
+	distributedExecutorFlag:   true,
+}
+
+// shellControlChars are the POSIX shell control operators and redirection characters.
+// strings.Fields has already consumed whitespace, so one of these surviving inside a token
+// means the shell ended the word there -- everything from it on is the next command, and
+// the engine only ever sees "ray" in "--data-parallel-backend=ray;".
+const shellControlChars = ";&|<>()"
+
+// vllmStringValueFlags is the subset of vllmValueFlags whose value parseVLLMLaunchArgs
+// compares as a string, and is the only place a shell terminator is trimmed.
+//
+// Trimming is kept to these two because they are the two whose values were previously
+// matched by substring, which tolerated a terminator glued to the value; the numeric flags
+// have always gone through strconv.ParseInt, which does not. Restricting the trim the same
+// way leaves every numeric flag resolving exactly as it does today.
+//
+// It is safe here because every legal value of these two is a backend name (ray, mp, uni,
+// external_launcher) or a Python dotted import path, none of which can contain a shell
+// control character. This is deliberately not a shell parser: a quoted value ("ray") or
+// one built by expansion ($(BACKEND)) reads the same as it does today.
+var vllmStringValueFlags = map[string]bool{
+	dataParallelBackendFlag: true,
+	distributedExecutorFlag: true,
+}
+
+// trimShellTerminator returns the part of value that the shell would actually pass to the
+// program.
+func trimShellTerminator(value string) string {
+	if i := strings.IndexAny(value, shellControlChars); i >= 0 {
+		return value[:i]
+	}
+	return value
+}
+
+// normalizeVLLMFlags standardizes tokenized command-line arguments into a
+// single format: "--long-flag" followed by a separate "value" token. It
+// expands short aliases (e.g., "-dp" to "--data-parallel-size"), rewrites
+// underscore spellings of the flags this package reads to their dashed
+// form (e.g., "--tensor_parallel_size" to "--tensor-parallel-size"), splits
+// combined pairs (e.g., "--flag=value") for the flags that take a value, and
+// drops a shell control operator a manifest glued to the value of a
+// vllmStringValueFlags flag.
+func normalizeVLLMFlags(expanded []string) []string {
+	normalized := make([]string, 0, len(expanded))
+	trimNextValue := false
+	for _, arg := range expanded {
+		if trimNextValue {
+			trimNextValue = false
+			// A token starting with "-" is the next flag, not the previous
+			// flag's value, so let it fall through and be canonicalized.
+			if !strings.HasPrefix(arg, "-") {
+				normalized = append(normalized, trimShellTerminator(arg))
+				continue
+			}
+		}
+		flag, value, hasEquals := strings.Cut(arg, "=")
+		if canonical, ok := vllmShortFlagAliases[flag]; ok {
+			flag = canonical
+		} else if dashed := strings.ReplaceAll(flag, "_", "-"); vllmNormalizedFlags[dashed] {
+			flag = dashed
+		}
+		if hasEquals && !vllmValueFlags[flag] {
+			normalized = append(normalized, arg)
+			continue
+		}
+		if hasEquals {
+			if vllmStringValueFlags[flag] {
+				value = trimShellTerminator(value)
+			}
+			// No legal value of these flags begins with "--", so a value that
+			// does is not a value. Keeping the token whole stops it becoming a
+			// standalone flag that an exact-match reader would honor.
+			if strings.HasPrefix(value, "--") {
+				normalized = append(normalized, arg)
+				continue
+			}
+			normalized = append(normalized, flag, value)
+			continue
+		}
+		normalized = append(normalized, flag)
+		// Only --distributed-executor-backend is trimmed in the separated form.
+		// It is the one flag whose space-separated spelling was previously read
+		// off the unsplit command string, where the substring match spanned the
+		// space and tolerated a terminator on the value.
+		trimNextValue = flag == distributedExecutorFlag
+	}
+	return normalized
+}
+
+// vllmLaunchArgs is the result of parsing a container's launch command line exactly once,
+// so one place interprets vLLM flag semantics (aliases, equals and underscore spellings)
+// and two readers cannot disagree.
+type vllmLaunchArgs struct {
+	TensorParallelSize   int64
+	PipelineParallelSize int64
+	DataParallelSize     int64
+	// HasDataParallelSize distinguishes "--data-parallel-size not present" from
+	// "present and equal to vLLM's default of 1" -- callers use this to avoid
+	// injecting a duplicate flag when one is already present (e.g. from the profiler).
+	HasDataParallelSize            bool
+	IsRayDataParallelBackend       bool
+	IsElasticEPEnabled             bool
+	IsMpDistributedExecutorBackend bool
+}
+
+// WorldSize is the number of ranks one engine occupies.
+func (a vllmLaunchArgs) WorldSize() int64 {
+	return a.TensorParallelSize * a.PipelineParallelSize
+}
+
+// parseVLLMLaunchArgs reads an already-normalized list (see getExpandedArgs /
+// getExpandedCommandLine) in one pass. Each occurrence of a flag overwrites the field it
+// sets, so a repeated flag resolves to its final occurrence, as it does in vLLM's
+// argparse. A size value that does not parse as an integer leaves the earlier value in
+// place.
+func parseVLLMLaunchArgs(expandedArgs []string) vllmLaunchArgs {
+	args := vllmLaunchArgs{TensorParallelSize: 1, PipelineParallelSize: 1, DataParallelSize: 1}
+	for i, arg := range expandedArgs {
+		// Presence flags count even when nothing follows them.
+		switch arg {
+		case dataParallelSizeFlag:
+			args.HasDataParallelSize = true
+		case enableElasticEPFlag:
+			args.IsElasticEPEnabled = true
+		}
+
+		// A trailing flag has no value to apply.
+		if i+1 >= len(expandedArgs) {
+			continue
+		}
+		value := expandedArgs[i+1]
+		switch arg {
+		case tensorParallelSizeFlag:
+			args.TensorParallelSize = parseSizeOr(value, args.TensorParallelSize)
+		case pipelineParallelSizeFlag:
+			args.PipelineParallelSize = parseSizeOr(value, args.PipelineParallelSize)
+		case dataParallelSizeFlag:
+			args.DataParallelSize = parseSizeOr(value, args.DataParallelSize)
+		case dataParallelBackendFlag:
+			args.IsRayDataParallelBackend = value == dataParallelBackendRay
+		case distributedExecutorFlag:
+			args.IsMpDistributedExecutorBackend = value == "mp"
 		}
 	}
-	return false
+	return args
 }
 
-func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32) {
-	expandedArgs := getExpandedArgs(container)
+// parseSizeOr returns value parsed as an integer, or current when it does not parse.
+func parseSizeOr(value string, current int64) int64 {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return current
+	}
+	return parsed
+}
+
+func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, args vllmLaunchArgs) {
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 
 	// Calculate engines per node
-	worldSize := getWorldSize(expandedArgs) // TP * PP per engine
-	dataParallelSizeLocal := containerGPUs / worldSize
+	dataParallelSizeLocal := containerGPUs / args.WorldSize()
 
 	// Get total DP size from args, or calculate from nodes
-	totalDPSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
+	totalDPSize := args.DataParallelSize
 	if totalDPSize == 1 {
 		totalDPSize = dataParallelSizeLocal * int64(numberOfNodes)
 	}
@@ -620,7 +886,7 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 		// Hybrid LB mode: local DP coordination within node, Dynamo routes between nodes
 		flags = []string{"--data-parallel-hybrid-lb"}
 		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
-		if !hasFlag(expandedArgs, dataParallelSizeFlag) {
+		if !args.HasDataParallelSize {
 			flags = append(flags, dataParallelSizeFlag, strconv.FormatInt(totalDPSize, 10))
 		}
 		flags = append(flags,
@@ -639,7 +905,7 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 
 		flags = []string{"--data-parallel-hybrid-lb"}
 		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
-		if !hasFlag(expandedArgs, dataParallelSizeFlag) {
+		if !args.HasDataParallelSize {
 			flags = append(flags, dataParallelSizeFlag, strconv.FormatInt(totalDPSize, 10))
 		}
 		flags = append(flags,
@@ -655,38 +921,17 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 
 // needsMultinodeDistributedLaunch returns true when the model's world size (TP * PP)
 // exceeds the GPU count of one engine container, requiring multi-node distribution (via mp or ray).
-func needsTensorParallelMultinodeLaunch(expandedArgs []string, containerGPUs int64) bool {
+func needsTensorParallelMultinodeLaunch(args vllmLaunchArgs, containerGPUs int64) bool {
 	if containerGPUs == 0 {
 		return false
 	}
-	return getWorldSize(expandedArgs) > containerGPUs
-}
-
-func getWorldSize(expandedArgs []string) int64 {
-	tensorParallelSize := getFlagValue(expandedArgs, tensorParallelSizeFlag)
-	pipelineParallelSize := getFlagValue(expandedArgs, pipelineParallelSizeFlag)
-	return tensorParallelSize * pipelineParallelSize
+	return args.WorldSize() > containerGPUs
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
-func needsDataParallelMultinodeLaunch(expandedArgs []string, containerGPUs int64) bool {
-	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
+func needsDataParallelMultinodeLaunch(args vllmLaunchArgs, containerGPUs int64) bool {
 	if containerGPUs == 0 {
 		return false
 	}
-	return getWorldSize(expandedArgs)*dataParallelSize > containerGPUs
-}
-
-func getFlagValue(expandedArgs []string, flag string) int64 {
-	var flagValue int64 = 1
-	for i, arg := range expandedArgs {
-		if arg == flag && (i+1 < len(expandedArgs)) {
-			flagValue, err := strconv.ParseInt(expandedArgs[i+1], 10, 64)
-			if err != nil {
-				continue
-			}
-			return flagValue
-		}
-	}
-	return flagValue
+	return args.WorldSize()*args.DataParallelSize > containerGPUs
 }

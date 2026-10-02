@@ -26,6 +26,7 @@ from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     UUID_ONLY_VARIANT_KEY,
     ImageLoader,
+    image_cache_scope_from_request,
 )
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlReceiver,
@@ -145,44 +146,55 @@ def _video_media_io_kwargs(request: dict) -> dict:
 def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
+    use_audio_in_video: bool = False,
+    explicit_audio_count: int | None = None,
+    video_count: int | None = None,
 ) -> Optional[dict[str, list[str | None]]]:
-    """Normalize vLLM image cache identities without changing opaque values."""
+    """Map Dynamo media keys to vLLM cache identities."""
+    if use_audio_in_video and (explicit_audio_count is None or video_count is None):
+        raise ValueError(
+            "explicit_audio_count and video_count are required when "
+            "use_audio_in_video is enabled"
+        )
     if raw_uuids is None:
         return None
     if not isinstance(raw_uuids, dict):
         raise ValueError("multi_modal_uuids must be an object")
 
+    mm_uuids: dict[str, list[str | None]] = {}
     for modality, values in raw_uuids.items():
-        if modality == IMAGE_URL_KEY:
-            continue
-        has_uuid = (
-            any(value is not None for value in values)
-            if isinstance(values, list)
-            else values is not None
-        )
-        if has_uuid:
-            raise ValueError(
-                "multimodal cache UUIDs must use the 'image_url' modality key"
-            )
+        if not isinstance(values, list):
+            raise ValueError(f"multi_modal_uuids[{modality!r}] must be a list")
+        for index, value in enumerate(values):
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(
+                    f"multi_modal_uuids[{modality!r}] entries must be non-empty "
+                    f"strings or null; got invalid entry at index {index}"
+                )
 
-    if IMAGE_URL_KEY not in raw_uuids:
-        return None
-    image_uuids = raw_uuids[IMAGE_URL_KEY]
-    if not isinstance(image_uuids, list):
-        raise ValueError("multi_modal_uuids['image_url'] must be a list")
-    for index, value in enumerate(image_uuids):
-        if value is not None and (not isinstance(value, str) or not value):
-            raise ValueError(
-                "multi_modal_uuids['image_url'] entries must be non-empty "
-                f"strings or null; got invalid entry at index {index}"
-            )
-    if not any(value is not None for value in image_uuids):
-        return None
-    backend_modality = _normalize_forwarded_mm_modality(
-        "image",
-        use_unified_vision_chunk,
-    )
-    return {backend_modality: list(image_uuids)}
+        backend_modality = str(modality)
+        if backend_modality.endswith("_url"):
+            backend_modality = backend_modality.removesuffix("_url")
+        backend_modality = _normalize_forwarded_mm_modality(
+            backend_modality,
+            use_unified_vision_chunk,
+        )
+        mm_uuids.setdefault(backend_modality, []).extend(values)
+
+    if use_audio_in_video:
+        explicit_audio_count = explicit_audio_count or 0
+        video_count = video_count or 0
+        if "video" in mm_uuids or "audio" in mm_uuids:
+            video_uuids = mm_uuids.get("video", [None] * video_count)
+            audio_uuids = mm_uuids.get("audio", [None] * explicit_audio_count)
+            mm_uuids["audio"] = audio_uuids + video_uuids
+
+    mm_uuids = {
+        modality: uuids
+        for modality, uuids in mm_uuids.items()
+        if any(uuid is not None for uuid in uuids)
+    }
+    return mm_uuids or None
 
 
 def _get_modality_extra_values(
@@ -541,6 +553,7 @@ class VllmMultimodalRequestProcessor:
                             request_id,
                             model=self.model,
                             context=context,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                     )
 
@@ -549,7 +562,9 @@ class VllmMultimodalRequestProcessor:
             if image_key not in vllm_mm_data and image_items:
                 with _nvtx.annotate("mm_backend:image_download", color="green"):
                     images = await self.image_loader.load_image_batch(
-                        image_items, preserve_uuid_slots=True
+                        image_items,
+                        cache_scope=image_cache_scope_from_request(request),
+                        preserve_uuid_slots=True,
                     )
                 if images:
                     if self.use_unified_vision_chunk:
@@ -774,9 +789,16 @@ class VllmMultimodalRequestProcessor:
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
+        raw_mm_data = request.get("multi_modal_data") or {}
         mm_uuids = _build_user_mm_uuids(
             request.get("multi_modal_uuids"),
             self.use_unified_vision_chunk,
+            use_audio_in_video=bool(
+                mm_processor_kwargs
+                and mm_processor_kwargs.get("use_audio_in_video", False)
+            ),
+            explicit_audio_count=len(raw_mm_data.get(AUDIO_URL_KEY, [])),
+            video_count=len(raw_mm_data.get(VIDEO_URL_KEY, [])),
         )
         if mm_uuids is None:
             mm_uuids = _build_forwarded_mm_uuids(
@@ -850,17 +872,30 @@ class VllmMultimodalRequestProcessor:
                 ]
                 has_mm_data = False
 
-            # Preserve the fallback: video/audio media is loaded again
-            # on decode because the handoff currently carries image metadata only.
-            if multi_modal_data is None and has_mm_data:
+            # Video/audio media is loaded again on decode because the handoff
+            # currently carries image metadata only. For mixed requests, merge
+            # it with the reconstructed Qwen image placeholder.
+            if has_mm_data:
                 mm_map = request["multi_modal_data"]
-                if mm_map.get(VIDEO_URL_KEY) or mm_map.get(AUDIO_URL_KEY):
-                    multi_modal_data = await self.extract_multimodal_data(
-                        request,
+                local_mm_map = {
+                    key: mm_map[key]
+                    for key in (VIDEO_URL_KEY, AUDIO_URL_KEY)
+                    if mm_map.get(key)
+                }
+                if local_mm_map:
+                    local_request = dict(request)
+                    local_request["multi_modal_data"] = local_mm_map
+                    local_mm_data = await self.extract_multimodal_data(
+                        local_request,
                         request_id,
                         context,
                         mm_processor_kwargs,
                     )
+                    if local_mm_data:
+                        if multi_modal_data is None:
+                            multi_modal_data = local_mm_data
+                        else:
+                            multi_modal_data.update(local_mm_data)
         elif mode == DisaggregationMode.AGGREGATED:
             pre_rendered = await self.try_receive_mm_kwargs(request)
             if pre_rendered is None:
