@@ -449,7 +449,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         }
 
         if batch.events.len() > MAX_INGRESS_EVENTS
-            || event_block_count(&batch.events) > MAX_INGRESS_BLOCKS
+            || (batch.events.len() > 1 && event_block_count(&batch.events) > MAX_INGRESS_BLOCKS)
         {
             self.fail_source(batch.generation, "oversized ingress envelope");
             anyhow::bail!("oversized ingress envelope");
@@ -1635,7 +1635,7 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
             &mut cache_owner_normalizer,
         );
 
-        let chunks = bounded_ingress_chunks(events)?;
+        let chunks = bounded_ingress_chunks(events);
         let final_chunk_index = chunks.len().saturating_sub(1);
         for (chunk_index, events) in chunks.into_iter().enumerate() {
             let envelope = IngressBatch {
@@ -1766,18 +1766,17 @@ fn normalize_raw_batch(
     }
 }
 
-fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Result<Vec<Vec<PlacementEvent>>> {
+/// Split a raw batch into bounded ingress chunks. An event larger than the block bound is
+/// still interpretable, so it travels alone rather than failing the source.
+fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Vec<Vec<PlacementEvent>> {
     if events.is_empty() {
-        return Ok(vec![Vec::new()]);
+        return vec![Vec::new()];
     }
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut current_blocks = 0usize;
     for event in events {
         let blocks = event_block_count(std::slice::from_ref(&event));
-        if blocks > MAX_INGRESS_BLOCKS {
-            anyhow::bail!("one ingress event exceeds the block bound");
-        }
         if !current.is_empty()
             && (current.len() == MAX_INGRESS_EVENTS
                 || current_blocks.saturating_add(blocks) > MAX_INGRESS_BLOCKS)
@@ -1791,7 +1790,7 @@ fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Result<Vec<Vec<Placeme
     if !current.is_empty() {
         chunks.push(current);
     }
-    Ok(chunks)
+    chunks
 }
 
 #[cfg(test)]
@@ -1915,6 +1914,34 @@ mod tests {
                 dp_rank: worker.dp_rank,
             },
         )
+    }
+
+    fn oversized_store(worker: WorkerWithDpRank) -> PlacementEvent {
+        let mut event = store(worker, ResidencyDomain::Worker, None, 1, 1);
+        let KvCacheEventData::Stored(data) = &mut event.event.data else {
+            unreachable!("store builds a Stored event");
+        };
+        let first_block = 1_000_000;
+        data.blocks = (first_block..=first_block + MAX_INGRESS_BLOCKS as u64)
+            .map(|block| KvCacheStoredBlockData {
+                block_hash: ExternalSequenceBlockHash(block),
+                tokens_hash: LocalBlockHash(block),
+                mm_extra_info: None,
+            })
+            .collect();
+        event
+    }
+
+    #[test]
+    fn oversized_event_travels_in_its_own_chunk() {
+        let worker = WorkerWithDpRank::new(17, 3);
+        let small = || store(worker, ResidencyDomain::Worker, None, 1, 1);
+        let chunks = bounded_ingress_chunks(vec![small(), oversized_store(worker), small()]);
+        let blocks: Vec<_> = chunks
+            .iter()
+            .map(|chunk| event_block_count(chunk))
+            .collect();
+        assert_eq!(blocks, [1, MAX_INGRESS_BLOCKS + 1, 1]);
     }
 
     fn raw_store(medium: Option<&str>, ownership: Option<&str>, block: u64) -> RawKvEvent {
@@ -2689,6 +2716,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status.load().outbound_cursor, 3);
+        assert!(status.load().attachment.as_ref().unwrap().ready);
+
+        // A single event above the chunk block bound is interpretable and must not fail closed.
+        coordinator
+            .handle_ingress(IngressBatch {
+                generation: attachment.generation,
+                source_cursor: 4,
+                chunk_index: 0,
+                final_chunk: true,
+                events: vec![oversized_store(worker)],
+                source_fault: None,
+                cache_owner_fault: None,
+            })
+            .await
+            .unwrap();
         assert!(status.load().attachment.as_ref().unwrap().ready);
     }
 }

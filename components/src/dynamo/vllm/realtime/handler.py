@@ -216,6 +216,15 @@ class RealtimeTranscriptionHandler:
             model_name=model_name,
             model_path=model_path,
         )
+        # Keep vLLM optional for protocol-only users of this module.
+        from vllm.model_executor.models.interfaces import supports_realtime
+
+        if not supports_realtime(serving.model_cls):
+            raise ValueError(
+                f"Model '{model_name}' does not support realtime transcription. "
+                "Use a vLLM SupportsRealtime architecture; some models require "
+                "--hf-overrides."
+            )
         speech_config = serving.model_cls.get_speech_to_text_config(
             serving.model_config, "transcribe"
         )

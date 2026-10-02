@@ -29,6 +29,7 @@ def _write_burst_idle_trace(
     output_tokens,
     sentinel_ms=12_000.0,
     request_count=32,
+    trace_format="mooncake",
 ):
     trace_path = tmp_path / "planner_burst_idle.jsonl"
     records = [
@@ -48,6 +49,30 @@ def _write_burst_idle_trace(
             "hash_ids": [10_000],
         }
     )
+    if trace_format == "agentic_mooncake":
+        records = [
+            {
+                "schema": "dynamo.agentic_mooncake",
+                "version": 2,
+                "block_size": 512,
+                "hash_id_scope": "local",
+                "source": {"format": "test-fixture", "digest": "planner-burst"},
+            },
+            *[
+                {
+                    "request_id": f"request-{index}",
+                    "play_id": f"play-{index}",
+                    "session_id": f"session-{index}",
+                    "model": "target-model",
+                    "not_before_ms": record["timestamp"],
+                    "input_length": record["input_length"],
+                    "output_length": record["output_length"],
+                    "hash_ids": record["hash_ids"],
+                    "dependencies": [],
+                }
+                for index, record in enumerate(records)
+            ],
+        ]
     trace_path.write_text(
         "\n".join(json.dumps(record) for record in records) + "\n",
         encoding="utf-8",
@@ -93,6 +118,51 @@ def _planner_config(mode, report_output_dir, scale_component=None):
     return config
 
 
+@pytest.mark.parametrize("disagg", [False, True])
+@pytest.mark.parametrize("concurrency", [None, 1])
+def test_delta_replay_accumulates_context_with_planner(tmp_path, disagg, concurrency):
+    trace = tmp_path / "delta.jsonl"
+    trace.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "session_id": "conversation",
+                    "timestamp": index * 10,
+                    **({"delay": 5} if index else {}),
+                    "input_length": length,
+                    "output_length": 4,
+                    "hash_ids": [index],
+                }
+            )
+            for index, length in enumerate((64, 16))
+        )
+        + "\n"
+    )
+    args = MockEngineArgs(block_size=64, num_gpu_blocks=16, speedup_ratio=1000.0)
+    engines = (
+        {
+            "prefill_engine_args": args.with_overrides(worker_type="prefill"),
+            "decode_engine_args": args.with_overrides(worker_type="decode"),
+        }
+        if disagg
+        else {"extra_engine_args": args}
+    )
+    config = _planner_config("disagg" if disagg else "agg", tmp_path)
+    config["scheduling"]["scale_interval_seconds"] = 0.001
+    report = run_trace_replay(
+        trace,
+        **engines,
+        trace_format="mooncake-delta",
+        replay_concurrency=concurrency,
+        router_mode="kv_router",
+        planner_config=config,
+    )
+    assert report.summary["completed_requests"] == 2
+    assert report.summary["total_input_tokens"] == 64 + (64 + 4 + 16)
+    assert report.summary["total_output_tokens"] == 8
+    assert report.planner.total_ticks > 0
+
+
 def _assert_lifecycle_operations_are_consistent(operations):
     assert [operation["operation_ordinal"] for operation in operations] == list(
         range(len(operations))
@@ -121,11 +191,15 @@ def _assert_lifecycle_operations_are_consistent(operations):
             )
 
 
-def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
+@pytest.mark.parametrize(
+    "trace_format", ["mooncake", "mooncake-delta", "agentic_mooncake"]
+)
+def test_actual_aggregated_planner_scales_up_then_down(tmp_path, trace_format):
     trace_path = _write_burst_idle_trace(
         tmp_path,
         input_tokens=128,
         output_tokens=512,
+        trace_format=trace_format,
     )
     report = run_trace_replay(
         trace_path,
@@ -137,6 +211,8 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
         ),
         num_workers=1,
         planner_config=_planner_config("agg", tmp_path),
+        trace_format=trace_format,
+        execution_model="target-model" if trace_format == "agentic_mooncake" else None,
     )
 
     assert report.per_request is None
@@ -209,11 +285,15 @@ def test_summary_only_planner_replay_keeps_metrics_decisions_and_tick_count(tmp_
         pytest.param("decode", 64, 128, id="decode"),
     ],
 )
+@pytest.mark.parametrize(
+    "trace_format", ["mooncake", "mooncake-delta", "agentic_mooncake"]
+)
 def test_actual_disaggregated_planner_scales_each_pool_up_then_down(
     tmp_path,
     component,
     input_tokens,
     output_tokens,
+    trace_format,
 ):
     trace_path = _write_burst_idle_trace(
         tmp_path,
@@ -221,6 +301,7 @@ def test_actual_disaggregated_planner_scales_each_pool_up_then_down(
         output_tokens=output_tokens,
         sentinel_ms=12_000.0 if component == "prefill" else 500_000.0,
         request_count=2 if component == "prefill" else 32,
+        trace_format=trace_format,
     )
     prefill_args = MockEngineArgs(
         block_size=64,
@@ -245,6 +326,8 @@ def test_actual_disaggregated_planner_scales_each_pool_up_then_down(
         num_prefill_workers=1,
         num_decode_workers=1,
         planner_config=_planner_config("disagg", tmp_path, component),
+        trace_format=trace_format,
+        execution_model="target-model" if trace_format == "agentic_mooncake" else None,
     )
 
     events = [
