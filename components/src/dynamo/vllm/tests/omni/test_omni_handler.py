@@ -1267,6 +1267,25 @@ def image_request_handler():
 
 class TestImageReferenceInputs:
     @pytest.mark.asyncio
+    async def test_rejected_controls_do_not_load_reference(self, image_request_handler):
+        handler = image_request_handler
+        handler._image_loader.load_image.side_effect = AssertionError(
+            "Invalid controls must be rejected before image loading"
+        )
+        request = {
+            "prompt": "edit",
+            "input_reference": "https://example.com/ref.png",
+            "extra_args": {"media_passthrough": {"guardrails": False}},
+        }
+
+        with pytest.raises(InvalidArgument, match="cannot be set per request"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        handler._image_loader.load_image.assert_not_awaited()
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "model_class_name, image_modality, edit_prompt",
         [

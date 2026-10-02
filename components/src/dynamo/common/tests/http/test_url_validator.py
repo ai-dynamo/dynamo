@@ -508,6 +508,34 @@ def test_describe_media_source_elides_data_uri_payload(scheme) -> None:
     assert "payload elided" in label
 
 
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_malformed_inline_source_label_elides_payload(scheme) -> None:
+    source = scheme + "://[;base64,private-inline-payload"
+
+    label = describe_media_source(source)
+
+    assert "private-inline-payload" not in label
+    assert len(label) < 200
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (
+            "https://user:private-password@example.com/ref.png?sig=private-token#private-fragment",
+            "https://example.com/ref.png",
+        ),
+        ("http://example.com/ref.png?sig=private-token", "http://example.com/ref.png"),
+        (
+            "https://user:private-password@[::1]:1234/ref.png?sig=private-token",
+            "https://[::1]:1234/ref.png",
+        ),
+    ],
+)
+def test_http_source_label_redacts_credentials(source, expected) -> None:
+    assert describe_media_source(source) == expected
+
+
 def test_validate_local_path_keeps_an_ordinary_path_intact(tmp_path) -> None:
     """Control: bounding must not change the message for a normal path."""
     policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
