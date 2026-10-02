@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
+use crate::metrics::Metrics;
 use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
 
 const GRPC_PORT: u16 = 9002;
@@ -275,6 +276,10 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
         shutdown_task,
     };
 
+    // One recorder process-wide, shared by the router (phase and callback
+    // metrics) and the ext_proc server (request lifecycle metrics).
+    let metrics = crate::metrics::Metrics::global();
+
     let result = async {
         if standalone {
             let selector_cfg = EppStandaloneConfig::from_env()?;
@@ -290,7 +295,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
                     tracing::info!("Shutdown received during standalone EPP initialization");
                     return Ok(());
                 }
-                router = crate::EppRouter::from_selector(selector_cfg, policy_registry) => Arc::new(router?),
+                router = crate::EppRouter::from_selector(selector_cfg, policy_registry, metrics.clone()) => Arc::new(router?),
             };
             if draining.is_cancelled() {
                 tracing::info!("Shutdown received before standalone EPP serving started");
@@ -303,6 +308,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
                 health_reporter,
                 draining,
                 shutdown,
+                metrics.clone(),
             )
             .await
         } else {
@@ -326,6 +332,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
                 health_reporter,
                 draining,
                 shutdown,
+                metrics.clone(),
             )
             .await
         }
@@ -343,6 +350,7 @@ async fn serve<P: crate::EndpointPicker>(
     health_reporter: tonic_health::server::HealthReporter,
     draining: CancellationToken,
     shutdown: CancellationToken,
+    metrics: Arc<Metrics>,
 ) -> Result<()> {
     // Continuously mirror readiness onto the health status. `is_ready()` is a
     // *live* signal that can flip both ways — standalone discovery clears it when
@@ -401,7 +409,7 @@ async fn serve<P: crate::EndpointPicker>(
         })
     };
 
-    let server = ExtProcServer::new(picker);
+    let server = ExtProcServer::new(picker, metrics);
     // Default to TLS. Verified working with kGateway (`appProtocol: http2`
     // upstreams negotiate h2 over TLS via ALPN when the cert is presented).
     // Set DYN_SECURE_SERVING=false to fall back to plaintext h2c, e.g. for
