@@ -1,0 +1,342 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use super::*;
+use axum::http::{Method, Uri};
+use tokio::net::TcpListener;
+use tokio::sync::{Notify, mpsc};
+use tokio::task::JoinHandle;
+
+struct Server {
+    origin: String,
+    cancel: CancellationToken,
+    task: Option<JoinHandle<anyhow::Result<()>>>,
+}
+
+impl Server {
+    async fn start(router: Router) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let cancel = CancellationToken::new();
+        let shutdown = cancel.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown.cancelled_owned())
+                .await?;
+            Ok(())
+        });
+        Self {
+            origin,
+            cancel,
+            task: Some(task),
+        }
+    }
+
+    async fn stop(mut self) {
+        self.cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), self.task.as_mut().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let _ = self.task.take();
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+struct Captured {
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+}
+
+async fn echo_request(State(sender): State<mpsc::Sender<Captured>>, request: Request) -> Response {
+    let (parts, body) = request.into_parts();
+    let body = match axum::body::to_bytes(body, 1024 * 1024).await {
+        Ok(body) => body,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let response_body = body.clone();
+    sender
+        .send(Captured {
+            method: parts.method,
+            uri: parts.uri,
+            headers: parts.headers,
+            body,
+        })
+        .await
+        .unwrap();
+    (
+        StatusCode::MULTI_STATUS,
+        [
+            ("content-type", "application/x-ndjson"),
+            ("connection", "x-upstream-hop"),
+            ("x-upstream-hop", "remove-me"),
+            ("x-upstream-trace", "keep-me"),
+        ],
+        response_body,
+    )
+        .into_response()
+}
+
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn proxies_full_batch_api_and_nested_mounts_without_changing_requests() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (sender, mut captured) = mpsc::channel(1);
+        let upstream = Server::start(Router::new().fallback(echo_request).with_state(sender)).await;
+        let (docs, proxy) = router(
+            &upstream.origin,
+            Some("/api".to_string()),
+            Some("/api/batches".to_string()),
+            1024,
+            CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(docs.len(), 9);
+        let proxy = Server::start(proxy).await;
+        let client = client();
+        let multipart = "--batch-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"input.jsonl\"\r\nContent-Type: application/jsonl\r\n\r\n{\"custom_id\":\"one\"}\n\r\n--batch-boundary--\r\n";
+        for (method, path, upstream_path) in [
+            (Method::GET, "/api", "/v1/files"),
+            (Method::POST, "/api", "/v1/files"),
+            (Method::GET, "/api/file-1", "/v1/files/file-1"),
+            (Method::DELETE, "/api/file-1", "/v1/files/file-1"),
+            (Method::GET, "/api/file-1/content", "/v1/files/file-1/content"),
+            (Method::GET, "/api/batches", "/v1/batches"),
+            (Method::POST, "/api/batches", "/v1/batches"),
+            (Method::GET, "/api/batches/batch-1", "/v1/batches/batch-1"),
+            (Method::POST, "/api/batches/batch-1/cancel", "/v1/batches/batch-1/cancel"),
+        ] {
+            let body = if method == Method::POST && path == "/api" {
+                multipart
+            } else {
+                ""
+            };
+            let response = client
+                .request(method.clone(), format!("{}{path}?after=a%2Fb&limit=2", proxy.origin))
+                .header("authorization", "Bearer test-token")
+                .header("x-tenant-id", "tenant-a")
+                .header("content-type", "multipart/form-data; boundary=batch-boundary")
+                .header("connection", "x-client-hop")
+                .header("x-client-hop", "remove-me")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+            assert_eq!(response.headers()["x-upstream-trace"], "keep-me");
+            assert_eq!(response.headers()["content-type"], "application/x-ndjson");
+            assert!(!response.headers().contains_key("x-upstream-hop"));
+            assert!(!response.headers().contains_key("connection"));
+            assert_eq!(response.bytes().await.unwrap(), body.as_bytes());
+            let request = captured.recv().await.unwrap();
+            assert_eq!(request.method, method);
+            assert_eq!(request.uri.path(), upstream_path);
+            assert_eq!(request.uri.query(), Some("after=a%2Fb&limit=2"));
+            assert_eq!(request.body, body.as_bytes());
+            assert_eq!(request.headers["authorization"], "Bearer test-token");
+            assert_eq!(request.headers["x-tenant-id"], "tenant-a");
+            assert_eq!(request.headers["content-type"], "multipart/form-data; boundary=batch-boundary");
+            assert!(!request.headers.contains_key("x-client-hop"));
+        }
+        proxy.stop().await;
+        upstream.stop().await;
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn rejects_invalid_configuration_and_oversize_uploads() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for origin in [
+            "ftp://example.test",
+            "http://user@example.test",
+            "http://example.test/path",
+            "http://example.test/?query=x",
+            "http://example.test/#fragment",
+        ] {
+            assert!(router(origin, None, None, 8, CancellationToken::new()).is_err());
+        }
+        for path in ["/", "/files/", "files", "/files/{id}"] {
+            assert!(
+                router(
+                    "http://example.test",
+                    Some(path.to_string()),
+                    None,
+                    8,
+                    CancellationToken::new()
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            router(
+                "http://example.test",
+                Some("/same".to_string()),
+                Some("/same".to_string()),
+                8,
+                CancellationToken::new()
+            )
+            .is_err()
+        );
+        let (sender, mut captured) = mpsc::channel(1);
+        let upstream = Server::start(Router::new().fallback(echo_request).with_state(sender)).await;
+        let (_, proxy) = router(&upstream.origin, None, None, 8, CancellationToken::new()).unwrap();
+        let proxy = Server::start(proxy).await;
+        let client = client();
+        let response = client
+            .post(format!("{}/v1/files", proxy.origin))
+            .body("123456789")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(captured.try_recv().is_err());
+        let chunks = futures::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"12345678")),
+            Ok(Bytes::from_static(b"9")),
+        ]);
+        let response = client
+            .post(format!("{}/v1/files", proxy.origin))
+            .body(reqwest::Body::wrap_stream(chunks))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        proxy.stop().await;
+        upstream.stop().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn streams_output_and_preserves_redirects_failures_and_cancellation() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let release = Arc::new(Notify::new());
+        let stream_release = release.clone();
+        let upstream = Server::start(Router::new().fallback(move || {
+            let release = stream_release.clone();
+            async move {
+                let body = async_stream::stream! {
+                    yield Ok::<_, std::io::Error>(Bytes::from_static(b"first\n"));
+                    release.notified().await;
+                    yield Ok(Bytes::from_static(b"second\n"));
+                };
+                Body::from_stream(body)
+            }
+        }))
+        .await;
+        let cancel = CancellationToken::new();
+        let (_, proxy) = router(&upstream.origin, None, None, 1024, cancel.clone()).unwrap();
+        let proxy = Server::start(proxy).await;
+        let client = client();
+        let mut response = client
+            .get(format!("{}/v1/files/file-1/content", proxy.origin))
+            .send()
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, "first\n");
+        release.notify_one();
+        assert_eq!(response.bytes().await.unwrap(), "second\n");
+        cancel.cancel();
+        assert_eq!(
+            client
+                .get(format!("{}/v1/batches", proxy.origin))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        proxy.stop().await;
+        upstream.stop().await;
+
+        let upstream = Server::start(Router::new().fallback(|request: Request| async move {
+            if request.uri().path() == "/v1/batches/bad" {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "7")],
+                    Json(serde_json::json!({"error": {"message": "queue full"}})),
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                [("location", "http://must-not-follow.invalid")],
+                "redirect-body",
+            )
+                .into_response()
+        }))
+        .await;
+        let (_, proxy) =
+            router(&upstream.origin, None, None, 1024, CancellationToken::new()).unwrap();
+        let proxy = Server::start(proxy).await;
+        let response = client
+            .get(format!("{}/v1/batches", proxy.origin))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response.headers()["location"],
+            "http://must-not-follow.invalid"
+        );
+        assert_eq!(response.text().await.unwrap(), "redirect-body");
+        let response = client
+            .get(format!("{}/v1/batches/bad", proxy.origin))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["retry-after"], "7");
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap(),
+            serde_json::json!({"error": {"message": "queue full"}})
+        );
+        proxy.stop().await;
+        upstream.stop().await;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let (_, proxy) = router(&unavailable, None, None, 1024, CancellationToken::new()).unwrap();
+        let proxy = Server::start(proxy).await;
+        let response = client
+            .post(format!("{}/v1/batches", proxy.origin))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["error"]["message"],
+            "Unable to reach Batch gateway"
+        );
+        proxy.stop().await;
+    })
+    .await
+    .unwrap();
+}

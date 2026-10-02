@@ -762,6 +762,10 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_batch_endpoints: bool,
 
+    /// Internal Batch Gateway origin. When set, expose the complete Batch API through this frontend.
+    #[builder(default = "None")]
+    batch_gateway_url: Option<String>,
+
     /// Experimental engine-native Generate APIs. **Disabled by default**. The
     /// builder flag mounts both vLLM `/inference/v1/generate` and SGLang
     /// `/generate`; the backend-specific `DYN_*_ENABLE_*` variables mount one.
@@ -1316,9 +1320,10 @@ impl HttpServiceConfigBuilder {
         state
             .flags
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
-        state
-            .flags
-            .set(&EndpointType::Batch, config.enable_batch_endpoints);
+        state.flags.set(
+            &EndpointType::Batch,
+            config.enable_batch_endpoints || config.batch_gateway_url.is_some(),
+        );
         state.flags.set(
             &EndpointType::AnthropicMessages,
             anthropic_endpoints_enabled,
@@ -1423,6 +1428,15 @@ impl HttpServiceConfigBuilder {
             let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
             system_routes.push(route_set.into_parts());
         }
+        if let Some(gateway) = config.batch_gateway_url.as_deref() {
+            system_routes.push(super::batch_proxy::router(
+                gateway,
+                var(HTTP_SVC_FILES_PATH_ENV).ok(),
+                var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
+                super::openai::get_body_limit(),
+                state.cancel_token().clone(),
+            )?);
+        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
@@ -1435,7 +1449,7 @@ impl HttpServiceConfigBuilder {
             anthropic_endpoints_enabled,
             vllm_generate_enabled,
             sglang_generate_enabled,
-            config.enable_batch_endpoints,
+            config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -2106,6 +2120,41 @@ mod tests {
     async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {
         let (port, _, handle) = spawn_service(|builder| builder).await;
         (port, handle)
+    }
+
+    #[tokio::test]
+    async fn test_batch_proxy_uses_frontend_without_inference_admission() {
+        let mut gateway = mockito::Server::new_async().await;
+        let list = gateway
+            .mock("GET", "/v1/batches")
+            .match_header("authorization", "Bearer batch-test")
+            .with_status(200)
+            .with_body(r#"{"object":"list","data":[]}"#)
+            .create_async()
+            .await;
+        let (port, state, handle) =
+            spawn_service(|builder| builder.batch_gateway_url(Some(gateway.url()))).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        // No model is registered: batch control-plane calls must still work.
+        let response = client
+            .get(format!("http://127.0.0.1:{port}/v1/batches"))
+            .header("authorization", "Bearer batch-test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["object"],
+            "list"
+        );
+        assert_eq!(state.inflight_count(), 0);
+        list.assert_async().await;
+        handle.abort();
+        let _ = handle.await;
     }
 
     /// Verifies that an unsupported content type returns the standard JSON error

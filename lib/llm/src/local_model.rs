@@ -65,6 +65,7 @@ pub struct LocalModelBuilder {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
@@ -91,6 +92,7 @@ impl Default for LocalModelBuilder {
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
             http_metrics_port: None,
+            batch_gateway_url: None,
             metrics_config: Default::default(),
             frontend_api_config: Default::default(),
             tls_cert_path: Default::default(),
@@ -167,6 +169,11 @@ impl LocalModelBuilder {
 
     pub fn http_metrics_port(&mut self, port: Option<u16>) -> &mut Self {
         self.http_metrics_port = port;
+        self
+    }
+
+    pub fn batch_gateway_url(&mut self, url: Option<String>) -> &mut Self {
+        self.batch_gateway_url = url;
         self
     }
 
@@ -368,6 +375,7 @@ impl LocalModelBuilder {
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
                 http_metrics_port: self.http_metrics_port,
+                batch_gateway_url: self.batch_gateway_url.take(),
                 metrics_config: self.metrics_config.clone(),
                 frontend_api_config: self.frontend_api_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
@@ -425,6 +433,7 @@ impl LocalModelBuilder {
             http_host: self.http_host.take(),
             http_port: self.http_port,
             http_metrics_port: self.http_metrics_port,
+            batch_gateway_url: self.batch_gateway_url.take(),
             metrics_config: self.metrics_config.clone(),
             frontend_api_config: self.frontend_api_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
@@ -450,6 +459,7 @@ pub struct LocalModel {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
@@ -566,6 +576,10 @@ impl LocalModel {
 
     pub fn http_metrics_port(&self) -> Option<u16> {
         self.http_metrics_port
+    }
+
+    pub fn batch_gateway_url(&self) -> Option<&str> {
+        self.batch_gateway_url.as_deref()
     }
 
     pub fn metrics_prefix(&self) -> Option<String> {
