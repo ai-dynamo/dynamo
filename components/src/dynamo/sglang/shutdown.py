@@ -31,6 +31,8 @@ def defer_engine_signals(loop: asyncio.AbstractEventLoop, shutdown: WorkerShutdo
             original_add(sig, callback, *args)
 
     async def run_deferred():
+        if signum is None:
+            return
         for callback, args in callbacks.get(signum, []):
             result = callback(*args)
             if inspect.isawaitable(result):
@@ -38,10 +40,10 @@ def defer_engine_signals(loop: asyncio.AbstractEventLoop, shutdown: WorkerShutdo
 
     for sig in signals:
         previous[sig] = signal.signal(sig, on_signal)
-    loop.add_signal_handler = capture
+    loop.add_signal_handler = capture  # type: ignore[method-assign, assignment]
     try:
         yield run_deferred
     finally:
-        loop.add_signal_handler = original_add
+        loop.add_signal_handler = original_add  # type: ignore[method-assign]
         for sig, handler in previous.items():
             signal.signal(sig, handler)

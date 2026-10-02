@@ -26,14 +26,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from dynamo.common.utils.worker_shutdown import child_shutdown_environment
-
 import vllm
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
 from vllm.v1.executor import Executor
+
+from dynamo.common.utils.worker_shutdown import child_shutdown_environment
 
 logger = logging.getLogger(__name__)
 

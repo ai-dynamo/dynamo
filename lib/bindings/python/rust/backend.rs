@@ -26,10 +26,7 @@ use dynamo_backend_common::{
     LlmRegistration as RsLlmRegistration, MetricsBindings, MetricsCtx, OnPublisherReady,
     PreprocessedRequest, RawEngine, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
-    shutdown::{
-        KvTransferFallback as RsKvTransferFallback, ShutdownConfig as RsShutdownConfig,
-        is_valid_configured_secs as rs_is_valid_configured_secs,
-    },
+    shutdown::{KvTransferFallback as RsKvTransferFallback, ShutdownConfig as RsShutdownConfig},
 };
 use dynamo_llm::local_model::runtime_config::{
     StructuralTagMode as RsStructuralTagMode, StructuralTagSchemaMode as RsStructuralTagSchemaMode,
@@ -457,32 +454,18 @@ impl ShutdownConfig {
         // Validated here, not at shutdown: `Duration::from_secs_f64` panics on
         // a value it cannot represent, and a panic while shutting down aborts
         // the drain. `inf` and `1e30` both reach that call unless rejected.
-        for (name, value) in [
-            ("total_secs", total_secs),
-            ("router_grace_secs", router_grace_secs),
-            ("inflight_timeout_secs", inflight_timeout_secs),
-            ("kv_transfer_timeout_secs", kv_transfer_timeout_secs),
-            ("cleanup_timeout_secs", cleanup_timeout_secs),
-        ] {
-            if let Some(value) = value
-                && !rs_is_valid_configured_secs(value)
-            {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "{name} must be a finite, non-negative number of seconds \
-                     within a sane range, got {value}"
-                )));
-            }
-        }
-        Ok(Self {
-            inner: RsShutdownConfig {
-                total_secs,
-                router_grace_secs,
-                inflight_timeout_secs,
-                kv_transfer_timeout_secs,
-                cleanup_timeout_secs,
-                kv_transfer_fallback,
-            },
-        })
+        let inner = RsShutdownConfig {
+            total_secs,
+            router_grace_secs,
+            inflight_timeout_secs,
+            kv_transfer_timeout_secs,
+            cleanup_timeout_secs,
+            kv_transfer_fallback,
+        };
+        inner
+            .validate()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        Ok(Self { inner })
     }
 
     // Getters exist so Python can observe what was actually forwarded across

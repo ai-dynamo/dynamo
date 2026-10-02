@@ -21,10 +21,10 @@ import time
 import types
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
+import sglang as sgl
+
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.common.utils.graceful_shutdown import get_grace_period_seconds
-
-import sglang as sgl
 
 if TYPE_CHECKING:
     from dynamo.common.utils.worker_shutdown import WorkerShutdown

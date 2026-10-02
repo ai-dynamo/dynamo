@@ -128,8 +128,11 @@ impl RuntimeMetrics {
     /// Register framework shutdown instruments in this endpoint's registry.
     fn shutdown_metrics(&self) -> PyResult<ShutdownMetrics> {
         Ok(ShutdownMetrics {
-            inner: dynamo_backend_common::metrics::ShutdownMetrics::new(self.hierarchy.as_ref(), &[])
-                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?,
+            inner: dynamo_backend_common::metrics::ShutdownMetrics::new(
+                self.hierarchy.as_ref(),
+                &[],
+            )
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?,
         })
     }
     /// Register a callback that returns Prometheus exposition text. The

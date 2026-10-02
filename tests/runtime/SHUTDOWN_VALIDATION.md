@@ -71,6 +71,14 @@ The September 22 implementation was validated before being split into the three-
 
 The focused Python suite passed 7 coordinator unit tests and 12 transport/process cases. Container runs use Qwen3-0.6B and the images listed below; the revised runs completed their streams, exited zero, and left no live captured engine descendants. Measured SIGTERM-to-exit times were 12.90 seconds for vLLM, 8.69 seconds for SGLang, and 6.13 seconds for TensorRT-LLM, all against a 30-second total. These are aggregated Python results, not sidecar or active-KV-transfer results.
 
+### Review-comment fixes: September 30, 2026
+
+The local follow-up to `08870e07ffa1164e469b1e0014ee5ee3ab3e0469` closes teardown enrollment before the runtime snapshots pending cleanup, keeps native signal handling active through runtime teardown, validates Rust shutdown overrides, and distinguishes failed KV queries from unsupported introspection. Python preserves a completed worker's original failure and disarms its watchdog after completed teardown; failed discovery withdrawal is reported without stopping later stages. Operator validation now checks the default budget for the primary worker without imposing that default on unrelated containers or non-worker components.
+
+Validation passed 13 runtime shutdown tests, 181 backend-common tests, and 66 Python binding/coordinator/transport/process/probe tests against rebuilt bindings. All 13 process probes also passed with an intentionally invalid inherited `NATS_SERVER`, exercising the CI environment-isolation fix. The cached vLLM 1.4.1 runtime image passed 16 embedding-supervisor tests; the pinned SGLang v0.5.19 image passed 24 gateway tests. Both container runs were CPU-only. The entire operator pod-generation package passed in `golang:1.26.6`. Backend-common Clippy with warnings denied, targeted SGLang mypy, workspace/binding formatting, changed-file pre-commit hooks, and docs lint passed.
+
+The exact failing CI image could not be pulled because its ECR registry requires unavailable credentials. These local results are not a fresh GitHub CI pass. GPU serving, multinode KV transfers, and Kubernetes deletion were not rerun. The Python suite still reports pending runtime tasks at interpreter exit; bounded shutdown does not establish complete resource retirement.
+
 ### Review-fix validation: September 22, 2026
 
 The subsequent review fixes preserve the established worker-unavailable wire identity for draining rejections, isolate gateway children from the parent's signal group, bound the generic worker's complete runtime teardown, and propagate native cleanup failures with a failed stage outcome. They also remove unused shutdown and engine-route scaffolding and correct the budget documentation.

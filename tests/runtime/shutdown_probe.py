@@ -34,6 +34,8 @@ class ProbeEngine(RawEngine):
         raise NotImplementedError
 
     async def start(self, worker_id):
+        if sys.argv[1] == "sdk-error-signal":
+            raise RuntimeError("synthetic startup failure")
         # Signal after the Rust listener is installed but before start returns.
         asyncio.get_running_loop().call_soon(signal_self)
         await asyncio.sleep(0.05)
@@ -44,6 +46,11 @@ class ProbeEngine(RawEngine):
 
     async def cleanup(self):
         print("CLEANUP_STARTED", flush=True)
+        if sys.argv[1] == "sdk-error-signal":
+            signal_self()
+            await asyncio.sleep(0.05)
+            signal_self()
+            await asyncio.sleep(10)
         if sys.argv[1] == "sdk-wedged":
             ctypes.PyDLL(None).sleep(30)
         if sys.argv[1] == "sdk-failed":
@@ -325,7 +332,31 @@ async def gateway_probe():
 
 if __name__ == "__main__":
     mode = sys.argv[1]
-    if mode.startswith("sdk-"):
+    if mode == "python-failed":
+
+        async def failed_probe():
+            class Runtime:
+                async def shutdown_and_wait(self):
+                    print("RUNTIME_FINISHED", flush=True)
+
+            async def failed_worker():
+                try:
+                    raise ValueError("original worker failure")
+                finally:
+                    print("ENGINE_CLEANED", flush=True)
+
+            shutdown = WorkerShutdown(Runtime(), [], asyncio.Event())
+            try:
+                await shutdown.run(failed_worker(), install_signals=False)
+            except ValueError as error:
+                assert str(error) == "original worker failure"
+            else:
+                raise AssertionError("worker failure was lost")
+            await asyncio.sleep(3.2)
+            print("HOST_SURVIVED", flush=True)
+
+        asyncio.run(failed_probe())
+    elif mode.startswith("sdk-"):
         asyncio.run(sdk_probe())
     elif mode == "embedding-child":
         asyncio.run(embedding_child())

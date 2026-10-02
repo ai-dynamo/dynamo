@@ -43,7 +43,9 @@ def get_grace_period_seconds() -> float:
     return parsed
 
 
-async def _unregister_endpoints(endpoints: Iterable) -> None:
+async def _unregister_endpoints(
+    endpoints: Iterable, *, report_failure: bool = False
+) -> None:
     seen = set()
     tasks = []
     for endpoint in endpoints:
@@ -63,6 +65,9 @@ async def _unregister_endpoints(endpoints: Iterable) -> None:
                 "Failed to unregister endpoint instance from discovery: %s",
                 result,
             )
+    errors = [result for result in results if isinstance(result, Exception)]
+    if report_failure and errors:
+        raise RuntimeError("discovery unregistration failed") from errors[0]
 
 
 async def graceful_shutdown_with_discovery(

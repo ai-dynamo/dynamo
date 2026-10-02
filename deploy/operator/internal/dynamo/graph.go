@@ -1810,7 +1810,7 @@ func GenerateBasePodSpec(
 	}
 
 	// Validate the effective shutdown configuration after all pod overrides.
-	if err := validateShutdownBudget(&podSpec); err != nil {
+	if err := validateShutdownBudget(&podSpec, IsWorkerComponent(string(component.ComponentType))); err != nil {
 		return nil, err
 	}
 

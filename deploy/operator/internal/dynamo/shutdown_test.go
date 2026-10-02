@@ -20,7 +20,9 @@ func TestValidateShutdownBudget(t *testing.T) {
 		env       []corev1.EnvVar
 		wantError bool
 	}{
-		{"existing template unchanged", 10, nil, false},
+		{"default total exceeds grace", 10, nil, true},
+		{"default total fits", 35, nil, false},
+		{"empty total uses default", 10, []corev1.EnvVar{{Name: "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", Value: " "}}, true},
 		{"exact margin", 35, []corev1.EnvVar{{Name: "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", Value: "30"}}, false},
 		{"insufficient margin", 34, []corev1.EnvVar{{Name: "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", Value: "30"}}, true},
 		{"legacy alias", 35, []corev1.EnvVar{{Name: "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", Value: " 30 "}}, false},
@@ -34,9 +36,22 @@ func TestValidateShutdownBudget(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Validate the final pod grace period against the configured worker total")
 			pod := corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(tc.grace), Containers: []corev1.Container{{Name: "worker", Env: tc.env}}}
-			if err := validateShutdownBudget(&pod); (err != nil) != tc.wantError {
+			if err := validateShutdownBudget(&pod, true); (err != nil) != tc.wantError {
 				t.Fatalf("validation error = %v, want error = %v", err, tc.wantError)
 			}
 		})
+	}
+	// A logging sidecar must not impose the worker default on an explicitly
+	// shorter worker budget; non-worker components do not inherit it either.
+	pod := corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To[int64](10), Containers: []corev1.Container{
+		{Name: "worker", Env: []corev1.EnvVar{{Name: "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", Value: "5"}}},
+		{Name: "logger"},
+	}}
+	if err := validateShutdownBudget(&pod, true); err != nil {
+		t.Fatal(err)
+	}
+	pod.Containers = []corev1.Container{{Name: "frontend"}}
+	if err := validateShutdownBudget(&pod, false); err != nil {
+		t.Fatal(err)
 	}
 }

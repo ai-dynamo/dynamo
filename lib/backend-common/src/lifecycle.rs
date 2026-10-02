@@ -424,6 +424,7 @@ pub async fn stage_kv_quiescence(
             // `reason` on `dynamo_component_shutdown_stage_seconds`, which
             // could then not distinguish "no introspection" from "no budget".
             Err(()) if allowance.is_some_and(|limit| limit.is_zero()) => StageReason::Skipped,
+            Err(()) if last_error.is_some() => StageReason::Failed,
             Err(()) => StageReason::Unsupported,
         },
     };
@@ -469,6 +470,34 @@ async fn maybe_timeout<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_quiescence_queries_wait_but_are_not_unsupported() {
+        struct Broken;
+        #[async_trait::async_trait]
+        impl QuiescenceCheck for Broken {
+            async fn is_quiescent(&self) -> Result<Option<bool>> {
+                anyhow::bail!("query failed")
+            }
+        }
+        let config = crate::shutdown::ShutdownConfig {
+            total_secs: Some(10.0),
+            kv_transfer_timeout_secs: Some(1.0),
+            ..Default::default()
+        };
+        let budget = ShutdownBudget::from_config(&config);
+        let started = tokio::time::Instant::now();
+        let outcome = stage_kv_quiescence(
+            &Broken,
+            DisaggregationMode::Prefill,
+            &budget,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert_eq!(outcome.reason, StageReason::Failed);
+        assert_eq!(outcome.detail.as_deref(), Some("query failed"));
+    }
 
     #[test]
     fn request_tracker_rejects_after_drain_starts() {

@@ -75,7 +75,7 @@ pub struct Runtime {
     /// on cancellation. Phase 3 only cancels; without joining these the process
     /// could exit with the lease still held, which is the stale-registration
     /// symptom this teardown exists to remove.
-    teardown_tasks: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
+    teardown_tasks: Arc<std::sync::Mutex<Option<Vec<JoinHandle<()>>>>>,
     shutdown_completion: Arc<std::sync::OnceLock<tokio::sync::watch::Receiver<bool>>>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
@@ -119,7 +119,7 @@ impl Runtime {
             endpoint_shutdown_token,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             active_drain_timeout: Arc::new(std::sync::OnceLock::new()),
-            teardown_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+            teardown_tasks: Arc::new(std::sync::Mutex::new(Some(Vec::new()))),
             shutdown_completion: Arc::new(std::sync::OnceLock::new()),
             compute_pool,
             block_in_place_permits,
@@ -344,21 +344,24 @@ impl Runtime {
         self.endpoint_shutdown_token.child_token()
     }
 
-    /// Get access to the graceful shutdown tracker
-    /// Bound for an endpoint's in-flight drain.
-    ///
-    /// During shutdown this is the value Phase 2 is waiting with, so the drain
-    /// and the wait for it cannot disagree. Outside shutdown — an endpoint
-    /// unregistered on its own, e.g. a sleeping worker — it is the runtime
-    /// default, which is the behaviour that existed before.
-    /// Register a task whose cleanup runs on primary-token cancellation, so
-    /// [`shutdown_and_wait`](Self::shutdown_and_wait) joins it after Phase 3.
-    pub(crate) fn register_teardown_task(&self, handle: JoinHandle<()>) {
-        if let Ok(mut tasks) = self.teardown_tasks.lock() {
-            tasks.push(handle);
-        }
+    /// Enroll cleanup before acquiring a resource. Dropping the returned guard
+    /// completes enrollment; Phase 3 closes enrollment and awaits existing guards.
+    pub(crate) fn teardown_guard(&self) -> anyhow::Result<tokio::sync::oneshot::Sender<()>> {
+        let mut tasks = self
+            .teardown_tasks
+            .lock()
+            .map_err(|_| anyhow::anyhow!("teardown registry poisoned"))?;
+        let tasks = tasks
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("runtime teardown has started"))?;
+        let (guard, completed) = tokio::sync::oneshot::channel();
+        tasks.push(tokio::spawn(async move {
+            let _ = completed.await;
+        }));
+        Ok(guard)
     }
 
+    /// Use the active shutdown bound, or the runtime default outside shutdown.
     pub(crate) fn endpoint_drain_timeout(&self) -> Duration {
         self.active_drain_timeout
             .get()
@@ -497,7 +500,8 @@ impl Runtime {
             // a task would otherwise hang here forever.
             let pending: Vec<JoinHandle<()>> = teardown_tasks
                 .lock()
-                .map(|mut tasks| std::mem::take(&mut *tasks))
+                .ok()
+                .and_then(|mut tasks| tasks.take())
                 .unwrap_or_default();
             if !pending.is_empty() {
                 tracing::debug!(count = pending.len(), "Joining teardown tasks");
@@ -652,15 +656,18 @@ mod tests {
         // primary token is cancelled, and takes a moment to finish.
         let token = runtime.primary_token();
         let flag = revoked.clone();
-        runtime.register_teardown_task(tokio::spawn(async move {
+        let guard = runtime.teardown_guard().unwrap();
+        tokio::spawn(async move {
+            let _guard = guard;
             token.cancelled().await;
             revoking.send(()).unwrap();
             released.await.unwrap();
             flag.store(true, Ordering::SeqCst);
-        }));
+        });
 
         runtime.shutdown();
         started.await.unwrap();
+        assert!(runtime.teardown_guard().is_err());
         // The detached sequence already owns the handles. A second caller must
         // still wait, and abandoning that caller must not abandon revocation.
         let waiter = tokio::spawn({

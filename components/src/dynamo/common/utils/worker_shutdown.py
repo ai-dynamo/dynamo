@@ -231,8 +231,10 @@ class WorkerShutdown:
 
     async def _cleanup_worker(self) -> None:
         assert self._worker is not None
-        if not self._worker.done():
-            self._worker.cancel()
+        if self._worker.done():
+            # run() propagates this task's result after runtime teardown.
+            return
+        self._worker.cancel()
         try:
             await asyncio.shield(self._worker)
         except asyncio.CancelledError:
@@ -244,7 +246,7 @@ class WorkerShutdown:
             self.notify_children()
         await self._stage(
             "unregister",
-            _unregister_endpoints(list(self.endpoints)),
+            _unregister_endpoints(list(self.endpoints), report_failure=True),
             self._drain_remaining(),
         )
         grace = min(self._caps["router_grace"], self._drain_remaining())
@@ -323,10 +325,12 @@ class WorkerShutdown:
                 )
                 and runtime_clean
             )
-        if clean and runtime_clean:
+        if self._worker.done() and runtime_clean:
             assert self._watchdog is not None
             self._watchdog.finish()
-        else:
+            if not self._worker.cancelled():
+                self._worker.result()
+        if not (clean and runtime_clean):
             raise RuntimeError("worker shutdown did not complete")
 
     async def run(self, worker: Coroutine, *, install_signals: bool = True) -> None:

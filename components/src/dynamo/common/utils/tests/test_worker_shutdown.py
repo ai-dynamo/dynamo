@@ -230,6 +230,39 @@ def test_canonical_budget_overrides_alias_and_reserves_cleanup(
     asyncio.run(run())
 
 
+def test_unregister_failure_is_observed_without_stopping_teardown(shutdown_env):
+    # Regression: swallowed discovery errors reported a successful withdrawal.
+    async def run():
+        class Endpoint:
+            async def unregister_endpoint_instance(self):
+                raise RuntimeError("discovery unavailable")
+
+        class Runtime:
+            async def shutdown_and_wait(self):
+                pass
+
+        shutdown = ws.WorkerShutdown(Runtime(), [Endpoint()], asyncio.Event())
+        shutdown._metrics = Mock()
+
+        async def worker():
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(shutdown.run(worker(), install_signals=False))
+        await asyncio.sleep(0)
+        shutdown.request_shutdown()
+        await task
+        outcomes = [
+            (call.args[0], call.args[1])
+            for call in shutdown._metrics.record_stage.call_args_list
+        ]
+        assert ("unregister", "failed") in outcomes
+        assert ("unregister", "completed") not in outcomes
+        assert ("runtime", "completed") in outcomes
+        shutdown_env.finish.assert_called_once()
+
+    asyncio.run(run())
+
+
 def test_native_watchdog_exits_even_when_python_holds_gil():
     # Regression: Python and asyncio timers cannot rescue a thread holding the
     # GIL inside engine cleanup. Run that failure in an isolated process.

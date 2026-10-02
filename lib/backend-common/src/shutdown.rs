@@ -261,6 +261,27 @@ pub struct ShutdownConfig {
     pub kv_transfer_fallback: Option<KvTransferFallback>,
 }
 
+impl ShutdownConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("total_secs", self.total_secs),
+            ("router_grace_secs", self.router_grace_secs),
+            ("inflight_timeout_secs", self.inflight_timeout_secs),
+            ("kv_transfer_timeout_secs", self.kv_transfer_timeout_secs),
+            ("cleanup_timeout_secs", self.cleanup_timeout_secs),
+        ] {
+            if let Some(value) = value
+                && !is_valid_configured_secs(value)
+            {
+                return Err(format!(
+                    "{name} must be finite, non-negative seconds within a sane range, got {value}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Per-stage caps, resolved once when the budget is armed so a stage cannot
 /// observe a different value than the one the deadline was computed against.
 #[derive(Clone, Copy, Debug)]
@@ -906,6 +927,14 @@ mod tests {
         assert!(is_valid_configured_secs(MAX_CONFIGURED_SECS));
         for bad in [f64::INFINITY, f64::NAN, 1e30, -1.0] {
             assert!(!is_valid_configured_secs(bad), "{bad} must be rejected");
+            assert!(
+                ShutdownConfig {
+                    total_secs: Some(bad),
+                    ..Default::default()
+                }
+                .validate()
+                .is_err()
+            );
         }
     }
 
