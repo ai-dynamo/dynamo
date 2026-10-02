@@ -30,6 +30,9 @@ type planResolution struct {
 	retiringReplicaIDs []ReplicaID
 	restoredMembership []ReplicaNativeMembership
 	remappedMembership []ReplicaNativeMembership
+	// survivorMembership preserves exact per-member identity for partially active allocations.
+	survivorMembership []ReplicaMembership
+	removedMembership  []ReplicaMembership
 }
 
 // NewGroupStatus validates and captures one already-running Engine Group as the initial durable status.
@@ -58,7 +61,7 @@ func NewGroupStatus(
 				membership.ReplicaID,
 			)
 		}
-		if !membershipMatchesIncarnation(membership, allocation.Incarnation) {
+		if !MembershipMatchesIncarnation(membership, allocation.Incarnation) {
 			return GroupStatus{}, fmt.Errorf(
 				"committed replica %q does not match its physical allocation",
 				membership.ReplicaID,
@@ -66,9 +69,10 @@ func NewGroupStatus(
 		}
 		current := cloneReplicaIncarnation(allocation.Incarnation)
 		registry.Replicas = append(registry.Replicas, ReplicaRecord{
-			ReplicaID: membership.ReplicaID,
-			SlotID:    allocation.Incarnation.SlotID,
-			Current:   &current,
+			ReplicaID:            membership.ReplicaID,
+			SlotID:               allocation.Incarnation.SlotID,
+			Current:              &current,
+			DesiredNativeMembers: nativeMemberIDs(membership.Members),
 		})
 	}
 	if err := validateRegistry(registry); err != nil {
@@ -132,7 +136,7 @@ func validateResolvedPlan(
 	case PlanKindRetire:
 		resolution, err = resolveRetirement(base, plan.Change.Retire)
 	case PlanKindReduceToSurvivors:
-		resolution, err = resolveSurvivorReduction(base, plan.Change.ReduceToSurvivors)
+		resolution, err = resolveSurvivorReduction(base, registry, plan.Change.ReduceToSurvivors)
 	case PlanKindRestore:
 		resolution, err = resolveRestoration(base, registry, plan.Change.Restore)
 	case PlanKindRemap:
@@ -267,41 +271,64 @@ func resolveRetirement(base MembershipTopology, change *RetireChange) (planResol
 		kind:               PlanKindRetire,
 		targetReplicaIDs:   normalizeReplicaIDs(targetIDs),
 		retiringReplicaIDs: normalizeReplicaIDs(change.Replicas),
+		removedMembership:  membershipsForReplicaIDs(base, change.Replicas),
 	}, nil
 }
 
 func resolveSurvivorReduction(
 	base MembershipTopology,
+	registry ReplicaRegistry,
 	change *ReduceToSurvivorsChange,
 ) (planResolution, error) {
-	baseIDs := replicaIDSet(topologyReplicaIDs(base))
-	survivors := replicaIDSet(change.Survivors)
-	if len(survivors) != len(change.Survivors) {
-		return planResolution{}, errors.New("survivor set contains duplicate replica IDs")
-	}
-	for replicaID := range survivors {
-		if replicaID == "" {
-			return planResolution{}, errors.New("survivor replica ID must not be empty")
-		}
-		if _, found := baseIDs[replicaID]; !found {
-			return planResolution{}, fmt.Errorf("survivor %q is absent from the base topology", replicaID)
-		}
-	}
-	if len(survivors) == len(baseIDs) {
-		return planResolution{}, errors.New("survivor reduction must remove at least one replica")
+	// Failure recovery must preserve a serving world; reaching zero requires explicit terminal retirement.
+	if len(change.Survivors) == 0 {
+		return planResolution{}, errors.New("survivor reduction must retain at least one native member; use Retire to reach zero")
 	}
 
-	retiring := make([]ReplicaID, 0, len(baseIDs)-len(survivors))
-	for replicaID := range baseIDs {
-		if _, retained := survivors[replicaID]; !retained {
-			retiring = append(retiring, replicaID)
+	seen := make(map[ReplicaID]struct{}, len(change.Survivors))
+	survivors := make([]ReplicaMembership, 0, len(change.Survivors))
+	for _, requested := range change.Survivors {
+		record, recorded := registry.Find(requested.ReplicaID)
+		if !recorded || record.SlotID != requested.SlotID {
+			return planResolution{}, fmt.Errorf("survivor replica %q changes its stable slot", requested.ReplicaID)
+		}
+		original, found := membershipByID(base, requested.ReplicaID)
+		if !found || len(requested.NativeMembers) == 0 {
+			return planResolution{}, fmt.Errorf("survivor %q is absent or has no native members", requested.ReplicaID)
+		}
+		if _, duplicate := seen[requested.ReplicaID]; duplicate {
+			return planResolution{}, errors.New("survivor set contains duplicate replica IDs")
+		}
+		retained := ReplicaMembership{ReplicaID: requested.ReplicaID}
+		for _, id := range requested.NativeMembers {
+			if slices.ContainsFunc(retained.Members, func(member NativeMemberIncarnation) bool { return member.ID == id }) {
+				return planResolution{}, fmt.Errorf("survivor member %q is duplicated", id)
+			}
+			index := slices.IndexFunc(original.Members, func(member NativeMemberIncarnation) bool { return member.ID == id })
+			if index < 0 {
+				return planResolution{}, fmt.Errorf("survivor member %q is absent from replica %q", id, requested.ReplicaID)
+			}
+			retained.Members = append(retained.Members, original.Members[index])
+		}
+		survivors = append(survivors, retained)
+		seen[requested.ReplicaID] = struct{}{}
+	}
+	removed := subtractMemberships(base.Replicas, survivors)
+	if len(removed) == 0 {
+		return planResolution{}, errors.New("survivor reduction must remove at least one native member")
+	}
+	retiring := make([]ReplicaID, 0)
+	for _, membership := range base.Replicas {
+		if _, retained := seen[membership.ReplicaID]; !retained {
+			retiring = append(retiring, membership.ReplicaID)
 		}
 	}
-
 	return planResolution{
 		kind:               PlanKindReduceToSurvivors,
-		targetReplicaIDs:   normalizeReplicaIDs(change.Survivors),
+		targetReplicaIDs:   topologyReplicaIDs(MembershipTopology{Replicas: survivors}),
 		retiringReplicaIDs: normalizeReplicaIDs(retiring),
+		survivorMembership: normalizeMemberships(survivors),
+		removedMembership:  removed,
 	}, nil
 }
 
@@ -344,13 +371,12 @@ func resolveRestoration(
 		if len(record.History) == 0 {
 			return planResolution{}, fmt.Errorf("restored replica %q has no excluded membership history", target.ReplicaID)
 		}
-		latest := record.History[len(record.History)-1]
 		if !slices.Equal(
-			normalizeNativeMembers(latest.NativeMembers),
+			normalizeNativeMembers(record.DesiredNativeMembers),
 			normalizeNativeMembers(target.NativeMembers),
 		) {
 			return planResolution{}, fmt.Errorf(
-				"restored replica %q native membership does not match its latest excluded incarnation",
+				"restored replica %q native membership does not match its desired assignment",
 				target.ReplicaID,
 			)
 		}
@@ -472,8 +498,8 @@ func validateJoiningLifecycle(
 
 	seen := make(map[NativeMemberID]ReplicaID)
 	for _, membership := range base.Replicas {
-		for _, nativeMember := range membership.NativeMembers {
-			seen[nativeMember] = membership.ReplicaID
+		for _, nativeMember := range membership.Members {
+			seen[nativeMember.ID] = membership.ReplicaID
 		}
 	}
 	for _, membership := range planned {
@@ -526,30 +552,29 @@ func validateTopology(topology MembershipTopology) error {
 	nativeMembers := make(map[NativeMemberID]struct{})
 	for _, membership := range topology.Replicas {
 		replicaID := membership.ReplicaID
-		runtimeIncarnation := membership.RuntimeIncarnation
-		if replicaID == "" || runtimeIncarnation == "" {
-			return errors.New("topology contains an incomplete replica or runtime identity")
+		if replicaID == "" {
+			return errors.New("topology contains an incomplete replica identity")
 		}
-		if len(membership.NativeMembers) == 0 {
+		if len(membership.Members) == 0 {
 			return fmt.Errorf("replica %q has no native members", replicaID)
 		}
 		if _, duplicate := replicaIDs[replicaID]; duplicate {
 			return fmt.Errorf("replica %q appears more than once", replicaID)
 		}
-		if _, duplicate := runtimes[runtimeIncarnation]; duplicate {
-			return fmt.Errorf("runtime incarnation %q appears more than once", runtimeIncarnation)
-		}
-		for _, nativeMember := range membership.NativeMembers {
-			if nativeMember == "" {
+		for _, member := range membership.Members {
+			if member.ID == "" || member.RuntimeIncarnation == "" {
 				return fmt.Errorf("replica %q has an empty native member ID", replicaID)
 			}
-			if _, duplicate := nativeMembers[nativeMember]; duplicate {
-				return fmt.Errorf("native member %q appears more than once", nativeMember)
+			if _, duplicate := nativeMembers[member.ID]; duplicate {
+				return fmt.Errorf("native member %q appears more than once", member.ID)
 			}
-			nativeMembers[nativeMember] = struct{}{}
+			if _, duplicate := runtimes[member.RuntimeIncarnation]; duplicate {
+				return fmt.Errorf("runtime incarnation %q appears more than once", member.RuntimeIncarnation)
+			}
+			nativeMembers[member.ID] = struct{}{}
+			runtimes[member.RuntimeIncarnation] = struct{}{}
 		}
 		replicaIDs[replicaID] = struct{}{}
-		runtimes[runtimeIncarnation] = struct{}{}
 	}
 	return nil
 }
@@ -561,11 +586,13 @@ func validateIncarnation(incarnation ReplicaIncarnation) error {
 	if incarnation.SlotID == "" {
 		return fmt.Errorf("replica %q slot must not be empty", incarnation.ReplicaID)
 	}
-	if incarnation.RuntimeIncarnation == "" {
-		return fmt.Errorf("replica %q runtime incarnation must not be empty", incarnation.ReplicaID)
-	}
 	if len(incarnation.CapacityRefs) == 0 {
 		return fmt.Errorf("replica %q has no physical capacity references", incarnation.ReplicaID)
+	}
+	if err := validateTopology(MembershipTopology{Generation: 1, Replicas: []ReplicaMembership{
+		{ReplicaID: incarnation.ReplicaID, Members: incarnation.Members},
+	}}); err != nil {
+		return fmt.Errorf("validate allocation member incarnations: %w", err)
 	}
 
 	seen := make(map[PodUID]struct{}, len(incarnation.CapacityRefs))
@@ -586,6 +613,7 @@ func validateRegistry(registry ReplicaRegistry) error {
 	slots := make(map[CapacitySlotID]struct{}, len(registry.Replicas))
 	runtimes := make(map[RuntimeIncarnationID]ReplicaID)
 	podUIDs := make(map[PodUID]ReplicaID)
+	desiredMembers := make(map[NativeMemberID]ReplicaID)
 	for _, record := range registry.Replicas {
 		if record.ReplicaID == "" || record.SlotID == "" {
 			return errors.New("replica registry contains an incomplete stable identity")
@@ -595,6 +623,16 @@ func validateRegistry(registry ReplicaRegistry) error {
 		}
 		if _, duplicate := slots[record.SlotID]; duplicate {
 			return fmt.Errorf("registry slot %q appears more than once", record.SlotID)
+		}
+		// Desired rank ownership stays disjoint even when a process is masked or its allocation has been released.
+		for _, member := range record.DesiredNativeMembers {
+			if member == "" {
+				return fmt.Errorf("replica %q has an empty desired native member", record.ReplicaID)
+			}
+			if owner, duplicate := desiredMembers[member]; duplicate {
+				return fmt.Errorf("desired native member %q belongs to replica %q and replica %q", member, owner, record.ReplicaID)
+			}
+			desiredMembers[member] = record.ReplicaID
 		}
 		if record.Current != nil {
 			if err := validateRecordIncarnation(record, *record.Current); err != nil {
@@ -634,15 +672,12 @@ func registerIncarnationIdentities(
 	runtimes map[RuntimeIncarnationID]ReplicaID,
 	podUIDs map[PodUID]ReplicaID,
 ) error {
-	if replicaID, duplicate := runtimes[incarnation.RuntimeIncarnation]; duplicate {
-		return fmt.Errorf(
-			"runtime incarnation %q belongs to both replica %q and replica %q",
-			incarnation.RuntimeIncarnation,
-			replicaID,
-			incarnation.ReplicaID,
-		)
+	for _, member := range incarnation.Members {
+		if replicaID, duplicate := runtimes[member.RuntimeIncarnation]; duplicate {
+			return fmt.Errorf("process incarnation %q belongs to replica %q and replica %q", member.RuntimeIncarnation, replicaID, incarnation.ReplicaID)
+		}
+		runtimes[member.RuntimeIncarnation] = incarnation.ReplicaID
 	}
-	runtimes[incarnation.RuntimeIncarnation] = incarnation.ReplicaID
 	for _, capacityRef := range incarnation.CapacityRefs {
 		if replicaID, duplicate := podUIDs[capacityRef.UID]; duplicate {
 			return fmt.Errorf(
@@ -724,18 +759,20 @@ func validateTrafficObservation(observation TrafficObservation) error {
 }
 
 func validateMembershipIdentitySet(memberships []ReplicaMembership) error {
-	seen := make(map[ReplicaID]struct{}, len(memberships))
+	seen := make(map[RuntimeIncarnationID]struct{})
 	for _, membership := range memberships {
-		if membership.ReplicaID == "" || membership.RuntimeIncarnation == "" {
-			return errors.New("traffic membership contains an incomplete replica or runtime identity")
+		if membership.ReplicaID == "" || len(membership.Members) == 0 {
+			return errors.New("membership evidence contains an incomplete replica identity")
 		}
-		if len(membership.NativeMembers) == 0 {
-			return fmt.Errorf("replica %q has no native members", membership.ReplicaID)
+		for _, member := range membership.Members {
+			if member.ID == "" || member.RuntimeIncarnation == "" {
+				return errors.New("membership evidence contains an incomplete process identity")
+			}
+			if _, duplicate := seen[member.RuntimeIncarnation]; duplicate {
+				return fmt.Errorf("process %q appears more than once in membership evidence", member.RuntimeIncarnation)
+			}
+			seen[member.RuntimeIncarnation] = struct{}{}
 		}
-		if _, duplicate := seen[membership.ReplicaID]; duplicate {
-			return fmt.Errorf("replica %q appears more than once", membership.ReplicaID)
-		}
-		seen[membership.ReplicaID] = struct{}{}
 	}
 	return nil
 }

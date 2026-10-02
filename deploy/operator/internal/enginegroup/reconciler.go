@@ -177,9 +177,15 @@ func (c *Coordinator) reconcileDesiredPlan(
 			status.Transition.Outcome == TransitionOutcomeRolledBack ||
 			canReplaceBlockedTransition(status)) &&
 		desiredPlan != nil && desiredPlan.ID != status.Transition.Spec.Plan.ID {
-		status.Transition = nil
-		status.Topologies = compactTopologyHistory(status.Topologies)
-		status.Registry = compactRegistryHistory(status.Registry)
+		candidate := cloneStatus(status)
+		candidate.Transition = nil
+		candidate.Topologies = compactTopologyHistory(candidate.Topologies)
+		candidate.Registry = compactRegistryHistory(candidate.Registry)
+		started, startErr := c.startTransition(candidate, observedTopology, *desiredPlan)
+		if startErr != nil {
+			return true, ReconcileResult{Status: status}, startErr
+		}
+		return true, ReconcileResult{Status: started, Requeue: true}, nil
 	}
 
 	// Freeze a new resolved plan and its stable logical slots before creating capacity or changing traffic.
@@ -219,21 +225,39 @@ func (c *Coordinator) recoverMembershipAuthority(
 ) (bool, GroupStatus) {
 	if status.Transition == nil || status.Transition.Outcome != TransitionOutcomeBlocked ||
 		status.Transition.Failure == nil ||
-		status.Transition.Failure.Reason != "UnknownMembershipOutcome" ||
+		(status.Transition.Failure.Reason != "UnknownMembershipOutcome" &&
+			status.Transition.Failure.Reason != "TopologyChangedWhilePending" &&
+			status.Transition.Failure.Reason != "TopologyChangedWithoutTransition" &&
+			status.Transition.Failure.Reason != "ConflictingTopologyObservation" &&
+			status.Transition.Failure.Reason != "RejectedAfterTopologyChanged") ||
 		status.Membership.Observed.Transition == nil {
 		return false, status
 	}
 
 	observed := status.Membership.Observed.Transition
+	base, found := status.Topologies.Snapshot(status.Transition.Spec.BaseTopologyGeneration)
+	if !found {
+		return false, status
+	}
 	switch observed.Phase {
-	case MembershipTransitionPhasePending, MembershipTransitionPhaseCommitted:
+	case MembershipTransitionPhasePending:
+		if !sameTopology(base, observedTopology) {
+			return false, status
+		}
+		status.Transition.Outcome = TransitionOutcomeProgressing
+		status.Transition.Failure = nil
+		status.Transition.UpdatedAt = c.now()
+		return true, status
+	case MembershipTransitionPhaseCommitted:
+		if observed.ResultTopology == nil || !sameTopology(*observed.ResultTopology, observedTopology) {
+			return false, status
+		}
 		status.Transition.Outcome = TransitionOutcomeProgressing
 		status.Transition.Failure = nil
 		status.Transition.UpdatedAt = c.now()
 		return true, status
 	case MembershipTransitionPhaseRejected:
-		base, found := status.Topologies.Snapshot(status.Transition.Spec.BaseTopologyGeneration)
-		if !found || !sameTopology(base, observedTopology) {
+		if !sameTopology(base, observedTopology) {
 			return false, status
 		}
 		c.beginRollback(&status, *observed.Failure)
@@ -327,7 +351,7 @@ func (c *Coordinator) reconcilePreparedTransition(
 	}
 
 	// The committed and verified topology becomes routable only through a new revisioned absolute traffic projection.
-	ready, persist, err = c.reconcileCommittedTraffic(ctx, groupID, &next, base, committed, resolution)
+	ready, persist, err = c.reconcileCommittedTraffic(ctx, groupID, &next, committed, resolution)
 	if err != nil || persist || !ready {
 		return ReconcileResult{Status: next, Requeue: err == nil}, err
 	}
@@ -398,7 +422,7 @@ func canReplaceBlockedTransition(status GroupStatus) bool {
 		return false
 	}
 	current, found := status.Topologies.Current()
-	if !found || len(status.Capacity.Observed.Allocations) != len(current.Replicas) {
+	if !found || !sameTopology(current, status.Membership.Observed.CommittedTopology) {
 		return false
 	}
 	currentRecords := 0
@@ -413,9 +437,15 @@ func canReplaceBlockedTransition(status GroupStatus) bool {
 	for _, membership := range current.Replicas {
 		allocation, found := allocationByID(status.Capacity.Observed, membership.ReplicaID)
 		record, recorded := status.Registry.Find(membership.ReplicaID)
-		if !found || !recorded || record.Current == nil ||
-			!sameIncarnation(allocation.Incarnation, *record.Current) ||
-			!membershipMatchesIncarnation(membership, *record.Current) {
+		if !recorded || record.Current == nil ||
+			(found && !sameIncarnation(allocation.Incarnation, *record.Current)) ||
+			!MembershipMatchesIncarnation(membership, *record.Current) {
+			return false
+		}
+	}
+	// Missing failed capacity is recoverable; unrelated or uncorrelated extra allocations are not adopted.
+	for _, allocation := range status.Capacity.Observed.Allocations {
+		if _, present := membershipByID(current, allocation.Incarnation.ReplicaID); !present {
 			return false
 		}
 	}
@@ -518,7 +548,7 @@ func sameResolvedPlan(left, right ResolvedPlan) bool {
 			slices.Equal(left.Change.Retire.Replicas, right.Change.Retire.Replicas)
 	case PlanKindReduceToSurvivors:
 		return left.Change.ReduceToSurvivors != nil && right.Change.ReduceToSurvivors != nil &&
-			slices.Equal(left.Change.ReduceToSurvivors.Survivors, right.Change.ReduceToSurvivors.Survivors)
+			sameNativeMemberships(left.Change.ReduceToSurvivors.Survivors, right.Change.ReduceToSurvivors.Survivors)
 	case PlanKindRestore:
 		return left.Change.Restore != nil && right.Change.Restore != nil &&
 			sameRestorationTargets(left.Change.Restore.Replicas, right.Change.Restore.Replicas)

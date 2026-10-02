@@ -30,11 +30,21 @@ func (c *Coordinator) reconcileRollbackTraffic(
 	status *GroupStatus,
 	base MembershipTopology,
 ) (ready bool, persist bool, err error) {
+	// A rejected recovery cannot revive failed members, even if the base topology still names them.
+	unavailable := cloneReplicaMemberships(status.Membership.Observed.UnavailableMembers)
+	if status.Transition.Spec.Plan.Change.Kind == PlanKindReduceToSurvivors {
+		resolution, resolveErr := validateResolvedPlan(base, status.Registry, status.Transition.Spec.Plan)
+		if resolveErr != nil {
+			return false, false, resolveErr
+		}
+		unavailable = append(unavailable, resolution.removedMembership...)
+	}
 	target := TrafficTarget{
 		TransitionID:       status.Transition.Spec.ID,
 		TopologyGeneration: base.Generation,
-		Admitted:           normalizeMemberships(base.Replicas),
+		Admitted:           subtractMemberships(base.Replicas, unavailable),
 	}
+	target = retainHeldMemberDrains(*status, target, nil)
 	if status.Traffic.Desired == nil || !sameTrafficTargetIntent(*status.Traffic.Desired, target) {
 		revision, revisionErr := c.nextControlRevision(status)
 		if revisionErr != nil {
@@ -63,9 +73,6 @@ func (c *Coordinator) reconcileRollbackTraffic(
 	}
 	return true, false, nil
 }
-
-// reconcileMaintainedTargets keeps the last adapter-acknowledged physical and traffic levels converged after progress
-// stops. A newer definitively rejected target remains durable for diagnosis but is never replayed here.
 
 func (c *Coordinator) reconcilePreMembershipTraffic(
 	ctx context.Context,
@@ -113,11 +120,10 @@ func (c *Coordinator) reconcileCommittedTraffic(
 	ctx context.Context,
 	groupID GroupID,
 	status *GroupStatus,
-	base MembershipTopology,
 	committed MembershipTopology,
 	resolution planResolution,
 ) (ready bool, persist bool, err error) {
-	target := buildCommittedTrafficTarget(*status, base, committed, resolution)
+	target := buildCommittedTrafficTarget(*status, committed, resolution)
 	if status.Traffic.Desired == nil ||
 		!sameTrafficTargetIntent(*status.Traffic.Desired, target) {
 		revision, revisionErr := c.nextControlRevision(status)
@@ -153,64 +159,78 @@ func buildPreMembershipTrafficTarget(
 	base MembershipTopology,
 	resolution planResolution,
 ) TrafficTarget {
-	retiring := replicaIDSet(resolution.retiringReplicaIDs)
 	admitted := make([]ReplicaMembership, 0, len(base.Replicas))
 	if status.Transition.Spec.Plan.TrafficRequirement == TrafficRequirementKeepServing {
-		for _, membership := range base.Replicas {
-			if _, removed := retiring[membership.ReplicaID]; !removed {
-				admitted = append(admitted, cloneReplicaMembership(membership))
-			}
-		}
+		admitted = subtractMemberships(base.Replicas, resolution.removedMembership)
 	}
 
 	drain := make([]TrafficDrainTarget, 0)
 	if status.Transition.Spec.Plan.TrafficRequirement == TrafficRequirementQuiesceGroup {
-		for _, membership := range base.Replicas {
-			mode := TrafficDrainModeGraceful
-			if _, retiringMember := retiring[membership.ReplicaID]; retiringMember &&
-				status.Transition.Spec.Plan.Change.Kind == PlanKindReduceToSurvivors {
-				mode = TrafficDrainModeConfirmInactive
-			}
-			drain = append(drain, TrafficDrainTarget{Membership: cloneReplicaMembership(membership), Mode: mode})
-		}
-	} else {
-		for _, replicaID := range resolution.retiringReplicaIDs {
-			membership, _ := membershipByID(base, replicaID)
-			drain = append(drain, TrafficDrainTarget{
-				Membership: membership,
-				Mode:       trafficDrainMode(status.Transition.Spec.Plan.Change.Kind),
-			})
+		for _, membership := range subtractMemberships(base.Replicas, resolution.removedMembership) {
+			drain = append(drain, TrafficDrainTarget{Membership: membership, Mode: TrafficDrainModeGraceful})
 		}
 	}
-
-	return TrafficTarget{
-		TransitionID:       status.Transition.Spec.ID,
-		TopologyGeneration: base.Generation,
-		Admitted:           normalizeMemberships(admitted),
-		Drain:              normalizeTrafficDrainTargets(drain),
-	}
-}
-
-func buildCommittedTrafficTarget(
-	status GroupStatus,
-	base MembershipTopology,
-	committed MembershipTopology,
-	resolution planResolution,
-) TrafficTarget {
-	drain := make([]TrafficDrainTarget, 0, len(resolution.retiringReplicaIDs))
-	for _, replicaID := range resolution.retiringReplicaIDs {
-		membership, _ := membershipByID(base, replicaID)
+	for _, membership := range resolution.removedMembership {
 		drain = append(drain, TrafficDrainTarget{
 			Membership: membership,
 			Mode:       trafficDrainMode(status.Transition.Spec.Plan.Change.Kind),
 		})
 	}
-	return TrafficTarget{
+
+	return retainHeldMemberDrains(status, TrafficTarget{
+		TransitionID:       status.Transition.Spec.ID,
+		TopologyGeneration: base.Generation,
+		Admitted:           normalizeMemberships(admitted),
+		Drain:              normalizeTrafficDrainTargets(drain),
+	}, resolution.joiningTargets)
+}
+
+func buildCommittedTrafficTarget(
+	status GroupStatus,
+	committed MembershipTopology,
+	resolution planResolution,
+) TrafficTarget {
+	drain := make([]TrafficDrainTarget, 0, len(resolution.retiringReplicaIDs))
+	for _, membership := range resolution.removedMembership {
+		drain = append(drain, TrafficDrainTarget{
+			Membership: membership,
+			Mode:       trafficDrainMode(status.Transition.Spec.Plan.Change.Kind),
+		})
+	}
+	return retainHeldMemberDrains(status, TrafficTarget{
 		TransitionID:       status.Transition.Spec.ID,
 		TopologyGeneration: committed.Generation,
 		Admitted:           normalizeMemberships(committed.Replicas),
 		Drain:              normalizeTrafficDrainTargets(drain),
+	}, resolution.joiningTargets)
+}
+
+// retainHeldMemberDrains keeps terminal withdrawal evidence requested until the exact allocation is released.
+// Fresh joiners are not previously admitted members, and explicit graceful drains must never be weakened.
+func retainHeldMemberDrains(status GroupStatus, target TrafficTarget, joining []ReplicaTarget) TrafficTarget {
+	covered := cloneReplicaMemberships(target.Admitted)
+	for _, drain := range target.Drain {
+		covered = append(covered, cloneReplicaMembership(drain.Membership))
 	}
+
+	// Current is cleared only after an exact release fence and physical absence have been observed.
+	held := make([]ReplicaMembership, 0, len(status.Registry.Replicas))
+	for _, record := range status.Registry.Replicas {
+		if record.Current == nil || slices.ContainsFunc(joining, func(replica ReplicaTarget) bool {
+			return replica.ReplicaID == record.ReplicaID
+		}) {
+			continue
+		}
+		held = append(held, ReplicaMembership{ReplicaID: record.ReplicaID, Members: slices.Clone(record.Current.Members)})
+	}
+
+	// Every held process outside admission or a requested graceful drain needs repeatable inactivity evidence.
+	drain := slices.Clone(target.Drain)
+	for _, membership := range subtractMemberships(held, covered) {
+		drain = append(drain, TrafficDrainTarget{Membership: membership, Mode: TrafficDrainModeConfirmInactive})
+	}
+	target.Drain = normalizeTrafficDrainTargets(drain)
+	return target
 }
 
 func trafficDrainMode(kind PlanKind) TrafficDrainMode {
@@ -231,11 +251,14 @@ func normalizeTrafficDrainTargets(values []TrafficDrainTarget) []TrafficDrainTar
 	normalized := make([]TrafficDrainTarget, 0, len(values))
 	for _, value := range values {
 		value.Membership = cloneReplicaMembership(value.Membership)
-		value.Membership.NativeMembers = normalizeNativeMembers(value.Membership.NativeMembers)
+		value.Membership.Members = normalizeMemberIncarnations(value.Membership.Members)
 		normalized = append(normalized, value)
 	}
 	slices.SortFunc(normalized, func(left, right TrafficDrainTarget) int {
-		return strings.Compare(string(left.Membership.ReplicaID), string(right.Membership.ReplicaID))
+		if left.Membership.ReplicaID != right.Membership.ReplicaID {
+			return strings.Compare(string(left.Membership.ReplicaID), string(right.Membership.ReplicaID))
+		}
+		return strings.Compare(string(left.Mode), string(right.Mode))
 	})
 	return normalized
 }
@@ -269,10 +292,5 @@ func trafficTargetConverged(target TrafficTarget, observation TrafficObservation
 }
 
 func containsMembership(values []ReplicaMembership, expected ReplicaMembership) bool {
-	for _, value := range values {
-		if sameMembership(value, expected) {
-			return true
-		}
-	}
-	return false
+	return len(subtractMemberships([]ReplicaMembership{expected}, values)) == 0
 }

@@ -38,8 +38,9 @@ func (c *Coordinator) reconcileReplicaReservations(
 			continue
 		}
 		status.Registry.Replicas = append(status.Registry.Replicas, ReplicaRecord{
-			ReplicaID: target.ReplicaID,
-			SlotID:    target.SlotID,
+			ReplicaID:            target.ReplicaID,
+			SlotID:               target.SlotID,
+			DesiredNativeMembers: slices.Clone(target.NativeMembers),
 		})
 		changed = true
 	}
@@ -103,45 +104,34 @@ func (c *Coordinator) reconcileRollbackCapacity(
 }
 
 func validatePinnedCapacity(
-	target CapacityTarget,
+	registry ReplicaRegistry,
 	observation CapacityObservation,
 	committed MembershipTopology,
 ) error {
-	replicasByID := make(map[ReplicaID]CapacityReplicaTarget, len(target.Replicas))
-	for _, replica := range target.Replicas {
-		replicasByID[replica.ReplicaID] = replica
-	}
-
+	// Allocation identity survives process exit, including members removed by a partial survivor reduction.
 	for _, membership := range committed.Replicas {
-		replica, found := replicasByID[membership.ReplicaID]
-		if !found {
+		record, found := registry.Find(membership.ReplicaID)
+		if !found || record.Current == nil {
 			return fmt.Errorf(
-				"%w: committed replica %q is absent from the accepted capacity target",
+				"%w: committed replica %q has no canonical current allocation",
 				ErrRecoveryRequired,
 				membership.ReplicaID,
 			)
 		}
-		if replica.Incarnation == nil {
-			return fmt.Errorf(
-				"%w: committed replica %q retains bootstrap-only capacity intent",
-				ErrRecoveryRequired,
-				replica.ReplicaID,
-			)
-		}
 
-		allocation, found := allocationByID(observation, replica.ReplicaID)
+		allocation, found := allocationByID(observation, membership.ReplicaID)
 		if !found {
 			return fmt.Errorf(
 				"%w: committed replica %q has no physical allocation",
 				ErrRecoveryRequired,
-				replica.ReplicaID,
+				membership.ReplicaID,
 			)
 		}
-		if !sameIncarnation(*replica.Incarnation, allocation.Incarnation) {
+		if !sameIncarnation(*record.Current, allocation.Incarnation) {
 			return fmt.Errorf(
 				"%w: committed replica %q changed physical or runtime incarnation",
 				ErrRecoveryRequired,
-				replica.ReplicaID,
+				membership.ReplicaID,
 			)
 		}
 	}
@@ -219,6 +209,17 @@ func (c *Coordinator) reconcileRetiredCapacity(
 ) (ready bool, persist bool, err error) {
 	if len(resolution.retiringReplicaIDs) == 0 {
 		return true, false, nil
+	}
+	// Releasing a packed allocation requires terminal traffic evidence for every hosted process, including members
+	// masked by an earlier recovery. A smaller committed set is not permission to discard those tombstones.
+	for _, replicaID := range resolution.retiringReplicaIDs {
+		record, found := status.Registry.Find(replicaID)
+		if !found || record.Current == nil {
+			continue
+		}
+		if !containsMembership(status.Traffic.Observed.Drained, ReplicaMembership{ReplicaID: replicaID, Members: record.Current.Members}) {
+			return false, false, nil
+		}
 	}
 
 	releaseFences, err := releaseFencesFor(
@@ -336,7 +337,7 @@ func buildRollbackCapacityTarget(
 				membership.ReplicaID,
 			)
 		}
-		if !membershipMatchesIncarnation(membership, *record.Current) {
+		if !MembershipMatchesIncarnation(membership, *record.Current) {
 			return CapacityTarget{}, fmt.Errorf(
 				"base replica %q changed incarnation before rollback",
 				membership.ReplicaID,
@@ -590,8 +591,8 @@ func joiningReplicaIdentities(
 			return nil, fmt.Errorf("joining replica %q has no frozen physical incarnation", target.ReplicaID)
 		}
 		joining = append(joining, JoiningReplica{
-			ReplicaID:          record.ReplicaID,
-			RuntimeIncarnation: record.Current.RuntimeIncarnation,
+			ReplicaID: record.ReplicaID,
+			Members:   slices.Clone(record.Current.Members),
 		})
 	}
 	slices.SortFunc(joining, func(left, right JoiningReplica) int {
@@ -617,7 +618,7 @@ func releaseFencesFor(
 		if !found {
 			return nil, fmt.Errorf("retiring replica %q has no canonical record", replicaID)
 		}
-		if record.Current != nil && !membershipMatchesIncarnation(membership, *record.Current) {
+		if record.Current != nil && !MembershipMatchesIncarnation(membership, *record.Current) {
 			return nil, fmt.Errorf("retiring replica %q canonical incarnation changed", replicaID)
 		}
 		if record.Current == nil && len(record.History) == 0 {
@@ -671,7 +672,7 @@ func archiveRetiredReplicas(
 			continue
 		}
 		baseMembership, _ := membershipByID(base, replicaID)
-		if !membershipMatchesIncarnation(baseMembership, *registry.Replicas[index].Current) {
+		if !MembershipMatchesIncarnation(baseMembership, *registry.Replicas[index].Current) {
 			return false, fmt.Errorf("retired replica %q canonical incarnation changed before archival", replicaID)
 		}
 		registry.Replicas[index].History = append(
@@ -679,7 +680,7 @@ func archiveRetiredReplicas(
 			ReplicaHistoryEntry{
 				TopologyGeneration: base.Generation,
 				Incarnation:        cloneReplicaIncarnation(*registry.Replicas[index].Current),
-				NativeMembers:      slices.Clone(baseMembership.NativeMembers),
+				NativeMembers:      nativeMemberIDs(baseMembership.Members),
 			},
 		)
 		registry.Replicas[index].Current = nil

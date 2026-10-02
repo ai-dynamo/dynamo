@@ -19,7 +19,6 @@ package enginegroup
 
 import (
 	"encoding/json"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -37,12 +36,13 @@ func TestResolvedPlanVariantsProduceExactIdentitySets(t *testing.T) {
 	excluded := engineReplica(2)
 	excludedIncarnation := replicaIncarnation(2)
 	status.Registry.Replicas = append(status.Registry.Replicas, ReplicaRecord{
-		ReplicaID: excludedIncarnation.ReplicaID,
-		SlotID:    excludedIncarnation.SlotID,
+		DesiredNativeMembers: nativeMemberIDs(excluded.Members),
+		ReplicaID:            excludedIncarnation.ReplicaID,
+		SlotID:               excludedIncarnation.SlotID,
 		History: []ReplicaHistoryEntry{{
 			TopologyGeneration: 1,
 			Incarnation:        cloneReplicaIncarnation(excludedIncarnation),
-			NativeMembers:      slices.Clone(excluded.NativeMembers),
+			NativeMembers:      nativeMemberIDs(excluded.Members),
 		}},
 	})
 
@@ -87,7 +87,7 @@ func TestResolvedPlanVariantsProduceExactIdentitySets(t *testing.T) {
 				VerificationRequirement: VerificationRequirementRequired,
 				Change: ResolvedChange{
 					Kind:              PlanKindReduceToSurvivors,
-					ReduceToSurvivors: &ReduceToSurvivorsChange{Survivors: []ReplicaID{"replica-1"}},
+					ReduceToSurvivors: &ReduceToSurvivorsChange{Survivors: []ReplicaNativeMembership{{ReplicaID: "replica-1", SlotID: "slot-1", NativeMembers: []NativeMemberID{"dp-1"}}}},
 				},
 			},
 			kind:     PlanKindReduceToSurvivors,
@@ -109,7 +109,7 @@ func TestResolvedPlanVariantsProduceExactIdentitySets(t *testing.T) {
 							ReplicaID:     excludedIncarnation.ReplicaID,
 							SlotID:        excludedIncarnation.SlotID,
 							Bootstrap:     BootstrapModeRestoreFixedSlot,
-							NativeMembers: slices.Clone(excluded.NativeMembers),
+							NativeMembers: nativeMemberIDs(excluded.Members),
 						},
 					}}},
 				},
@@ -175,6 +175,16 @@ func TestResolvedPlanRejectsInvalidIdentitySemantics(t *testing.T) {
 		plan      ResolvedPlan
 		wantError string
 	}{
+		{
+			name: "survivor recovery cannot retire the complete world",
+			plan: ResolvedPlan{
+				ID: "empty-survivors", ProfileFingerprint: "profile-v1",
+				ProcessLifecycleOwner: ProcessLifecycleOwnerOrchestrator,
+				TrafficRequirement:    TrafficRequirementKeepServing, VerificationRequirement: VerificationRequirementRequired,
+				Change: ResolvedChange{Kind: PlanKindReduceToSurvivors, ReduceToSurvivors: &ReduceToSurvivorsChange{}},
+			},
+			wantError: "must retain at least one native member",
+		},
 		{
 			name: "growth cannot reuse active identity",
 			plan: growPlan("reuse", ReplicaTarget{

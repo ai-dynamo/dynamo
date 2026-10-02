@@ -94,19 +94,19 @@ func (c *Coordinator) reconcileMaintainedTargets(
 		return ReconcileResult{Status: status, Requeue: true}, nil
 	}
 
+	// Check the canonical pin even when partial recovery never needed a capacity mutation or accepted target.
+	if status.Transition.Outcome != TransitionOutcomeBlocked || membershipCommittedForTransition(status) {
+		if err := validatePinnedCapacity(
+			status.Registry,
+			status.Capacity.Observed,
+			status.Membership.Observed.CommittedTopology,
+		); err != nil {
+			return ReconcileResult{Status: status}, err
+		}
+	}
+
 	acceptedCapacity := status.Capacity.Accepted
 	if acceptedCapacity != nil && !terminalCapacityTargetConverged(*acceptedCapacity, status.Capacity.Observed) {
-		// A committed topology must enter explicit recovery instead of recreating or adopting a new incarnation.
-		if membershipCommittedForTransition(status) {
-			if err := validatePinnedCapacity(
-				*acceptedCapacity,
-				status.Capacity.Observed,
-				status.Membership.Observed.CommittedTopology,
-			); err != nil {
-				return ReconcileResult{Status: status}, err
-			}
-		}
-
 		result, err := c.capacity.Apply(ctx, groupID, *acceptedCapacity)
 		if err != nil {
 			return ReconcileResult{Status: status, Requeue: true}, fmt.Errorf(

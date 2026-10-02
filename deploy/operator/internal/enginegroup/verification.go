@@ -62,8 +62,12 @@ func (c *Coordinator) reconcileServingVerification(
 		return false, false, errors.New("serving verification returned neither proof nor failure")
 	}
 	if result.Failure != nil {
-		if failureErr := validateRejection(result.Failure); failureErr != nil {
+		if failureErr := validateFailure(result.Failure); failureErr != nil {
 			return false, false, fmt.Errorf("invalid serving verification failure: %w", failureErr)
+		}
+		// A transient probe failure is retryable evidence, not a terminal verdict on the committed topology.
+		if result.Failure.Classification == FailureClassificationRetryable {
+			return false, false, &InvocationError{Failure: *result.Failure}
 		}
 		verification.Phase = VerificationPhaseFailed
 		verification.Failure = cloneFailure(result.Failure)

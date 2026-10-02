@@ -72,7 +72,7 @@ func validateGroupStatus(status GroupStatus) error {
 				membership.ReplicaID,
 			)
 		}
-		if !membershipMatchesIncarnation(membership, *record.Current) {
+		if !MembershipMatchesIncarnation(membership, *record.Current) {
 			return fmt.Errorf(
 				"current member %q differs from its canonical incarnation",
 				membership.ReplicaID,
@@ -237,6 +237,9 @@ func validateMembershipTarget(controlRevision int64, target *MembershipTarget) e
 }
 
 func validateMembershipObservation(observation MembershipObservation, target *MembershipTarget) error {
+	if err := validateMembershipIdentitySet(observation.UnavailableMembers); err != nil {
+		return fmt.Errorf("validate unavailable member evidence: %w", err)
+	}
 	if err := validateTopology(observation.CommittedTopology); err != nil {
 		return fmt.Errorf("validate authoritative committed topology: %w", err)
 	}
@@ -462,21 +465,15 @@ func validateTrafficTarget(controlRevision int64, target *TrafficTarget) error {
 		return fmt.Errorf("validate desired admitted membership: %w", err)
 	}
 	draining := make([]ReplicaMembership, 0, len(target.Drain))
-	seenDrains := make(map[ReplicaID]struct{}, len(target.Drain))
 	for _, drained := range target.Drain {
 		if drained.Mode != TrafficDrainModeGraceful && drained.Mode != TrafficDrainModeConfirmInactive {
 			return fmt.Errorf("replica %q has invalid traffic drain mode %q", drained.Membership.ReplicaID, drained.Mode)
 		}
-		if _, duplicate := seenDrains[drained.Membership.ReplicaID]; duplicate {
-			return fmt.Errorf("replica %q appears more than once in desired drain state", drained.Membership.ReplicaID)
-		}
-		seenDrains[drained.Membership.ReplicaID] = struct{}{}
 		draining = append(draining, drained.Membership)
-		if containsMembership(target.Admitted, drained.Membership) {
+		if remaining := subtractMemberships([]ReplicaMembership{drained.Membership}, target.Admitted); len(remaining) == 0 || len(remaining[0].Members) != len(drained.Membership.Members) {
 			return fmt.Errorf(
-				"traffic target both admits and drains replica %q incarnation %q",
+				"traffic target both admits and drains replica %q",
 				drained.Membership.ReplicaID,
-				drained.Membership.RuntimeIncarnation,
 			)
 		}
 	}
@@ -771,6 +768,9 @@ func validateJoiningReplicas(
 	joining []JoiningReplica,
 	requireCurrentRegistry bool,
 ) error {
+	if err := validateMembershipIdentitySet(joining); err != nil {
+		return fmt.Errorf("invalid joining process identities: %w", err)
+	}
 	if len(joining) != len(resolution.joiningTargets) {
 		return errors.New("membership joining replica count does not match the plan")
 	}
@@ -780,7 +780,7 @@ func validateJoiningReplicas(
 	}
 	seen := make(map[ReplicaID]struct{}, len(joining))
 	for _, replica := range joining {
-		if replica.ReplicaID == "" || replica.RuntimeIncarnation == "" {
+		if replica.ReplicaID == "" || len(replica.Members) == 0 {
 			return errors.New("membership joining replica has an incomplete identity")
 		}
 		if _, expected := targets[replica.ReplicaID]; !expected {
@@ -791,7 +791,7 @@ func validateJoiningReplicas(
 		}
 		if requireCurrentRegistry {
 			record, found := registry.Find(replica.ReplicaID)
-			if !found || record.Current == nil || record.Current.RuntimeIncarnation != replica.RuntimeIncarnation {
+			if !found || record.Current == nil || !MembershipMatchesIncarnation(replica, *record.Current) {
 				return fmt.Errorf("membership joining replica %q differs from the canonical registry", replica.ReplicaID)
 			}
 		}

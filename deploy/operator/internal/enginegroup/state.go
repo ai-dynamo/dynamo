@@ -29,11 +29,12 @@ import (
 
 func cloneReplicaIncarnation(value ReplicaIncarnation) ReplicaIncarnation {
 	value.CapacityRefs = slices.Clone(value.CapacityRefs)
+	value.Members = slices.Clone(value.Members)
 	return value
 }
 
 func cloneReplicaMembership(value ReplicaMembership) ReplicaMembership {
-	value.NativeMembers = slices.Clone(value.NativeMembers)
+	value.Members = slices.Clone(value.Members)
 	return value
 }
 
@@ -71,7 +72,7 @@ func cloneResolvedPlan(value ResolvedPlan) ResolvedPlan {
 	}
 	if change.ReduceToSurvivors != nil {
 		value.Change.ReduceToSurvivors = &ReduceToSurvivorsChange{
-			Survivors: slices.Clone(change.ReduceToSurvivors.Survivors),
+			Survivors: normalizeNativeMemberships(change.ReduceToSurvivors.Survivors),
 		}
 	}
 	if change.Restore != nil {
@@ -113,7 +114,7 @@ func normalizeResolvedPlan(value ResolvedPlan) ResolvedPlan {
 		}
 	case PlanKindReduceToSurvivors:
 		if value.Change.ReduceToSurvivors != nil {
-			value.Change.ReduceToSurvivors.Survivors = normalizeReplicaIDs(
+			value.Change.ReduceToSurvivors.Survivors = normalizeNativeMemberships(
 				value.Change.ReduceToSurvivors.Survivors,
 			)
 		}
@@ -153,11 +154,7 @@ func canonicalPlanDigest(plan ResolvedPlan) (string, error) {
 }
 
 func normalizeJoiningReplicas(values []JoiningReplica) []JoiningReplica {
-	normalized := slices.Clone(values)
-	slices.SortFunc(normalized, func(left, right JoiningReplica) int {
-		return strings.Compare(string(left.ReplicaID), string(right.ReplicaID))
-	})
-	return normalized
+	return normalizeMemberships(values)
 }
 
 func cloneMembershipTarget(value *MembershipTarget) *MembershipTarget {
@@ -167,7 +164,7 @@ func cloneMembershipTarget(value *MembershipTarget) *MembershipTarget {
 	cloned := *value
 	cloned.BaseTopology = cloneTopology(value.BaseTopology)
 	cloned.Plan = cloneResolvedPlan(value.Plan)
-	cloned.Joining = slices.Clone(value.Joining)
+	cloned.Joining = cloneReplicaMemberships(value.Joining)
 	return &cloned
 }
 
@@ -206,6 +203,7 @@ func cloneMembershipTransitionObservation(
 }
 
 func cloneMembershipObservation(value MembershipObservation) MembershipObservation {
+	value.UnavailableMembers = cloneReplicaMemberships(value.UnavailableMembers)
 	value.CommittedTopology = cloneTopology(value.CommittedTopology)
 	value.Transition = cloneMembershipTransitionObservation(value.Transition)
 	return value
@@ -233,6 +231,7 @@ func sameFailure(left, right *Failure) bool {
 }
 
 func cloneReplicaRecord(value ReplicaRecord) ReplicaRecord {
+	value.DesiredNativeMembers = slices.Clone(value.DesiredNativeMembers)
 	if value.Current != nil {
 		current := cloneReplicaIncarnation(*value.Current)
 		value.Current = &current
@@ -422,20 +421,78 @@ func normalizeNativeMembers(values []NativeMemberID) []NativeMemberID {
 	return normalized
 }
 
+func normalizeMemberIncarnations(values []NativeMemberIncarnation) []NativeMemberIncarnation {
+	values = slices.Clone(values)
+	slices.SortFunc(values, func(left, right NativeMemberIncarnation) int {
+		if left.ID != right.ID {
+			return strings.Compare(string(left.ID), string(right.ID))
+		}
+		return strings.Compare(string(left.RuntimeIncarnation), string(right.RuntimeIncarnation))
+	})
+	return values
+}
+
+func sameMemberIncarnations(left, right []NativeMemberIncarnation) bool {
+	return slices.Equal(normalizeMemberIncarnations(left), normalizeMemberIncarnations(right))
+}
+
+func sameRuntimeSet(left, right []NativeMemberIncarnation) bool {
+	leftIDs := make([]RuntimeIncarnationID, 0, len(left))
+	rightIDs := make([]RuntimeIncarnationID, 0, len(right))
+	for _, member := range left {
+		leftIDs = append(leftIDs, member.RuntimeIncarnation)
+	}
+	for _, member := range right {
+		rightIDs = append(rightIDs, member.RuntimeIncarnation)
+	}
+	slices.Sort(leftIDs)
+	slices.Sort(rightIDs)
+	return slices.Equal(leftIDs, rightIDs)
+}
+
+func nativeMemberIDs(members []NativeMemberIncarnation) []NativeMemberID {
+	ids := make([]NativeMemberID, 0, len(members))
+	for _, member := range members {
+		ids = append(ids, member.ID)
+	}
+	return normalizeNativeMembers(ids)
+}
+
+func normalizeNativeMemberships(values []ReplicaNativeMembership) []ReplicaNativeMembership {
+	values = slices.Clone(values)
+	for index := range values {
+		values[index].NativeMembers = normalizeNativeMembers(values[index].NativeMembers)
+	}
+	slices.SortFunc(values, func(left, right ReplicaNativeMembership) int {
+		return strings.Compare(string(left.ReplicaID), string(right.ReplicaID))
+	})
+	return values
+}
+
 func normalizeIncarnation(value ReplicaIncarnation) ReplicaIncarnation {
 	value.CapacityRefs = normalizeCapacityRefs(value.CapacityRefs)
+	value.Members = normalizeMemberIncarnations(value.Members)
 	return value
 }
 
 func normalizeMemberships(values []ReplicaMembership) []ReplicaMembership {
 	normalized := cloneReplicaMemberships(values)
 	for index := range normalized {
-		normalized[index].NativeMembers = normalizeNativeMembers(normalized[index].NativeMembers)
+		normalized[index].Members = normalizeMemberIncarnations(normalized[index].Members)
 	}
 	slices.SortFunc(normalized, func(left, right ReplicaMembership) int {
 		return strings.Compare(string(left.ReplicaID), string(right.ReplicaID))
 	})
-	return normalized
+	merged := make([]ReplicaMembership, 0, len(normalized))
+	for _, value := range normalized {
+		last := len(merged) - 1
+		if last >= 0 && merged[last].ReplicaID == value.ReplicaID {
+			merged[last].Members = slices.Compact(normalizeMemberIncarnations(append(merged[last].Members, value.Members...)))
+		} else {
+			merged = append(merged, value)
+		}
+	}
+	return merged
 }
 
 func normalizeReplicaIDs(values []ReplicaID) []ReplicaID {
@@ -453,7 +510,7 @@ func sameCapacityRefs(left, right []CapacityRef) bool {
 func sameIncarnation(left, right ReplicaIncarnation) bool {
 	return left.ReplicaID == right.ReplicaID &&
 		left.SlotID == right.SlotID &&
-		left.RuntimeIncarnation == right.RuntimeIncarnation &&
+		sameRuntimeSet(left.Members, right.Members) &&
 		sameCapacityRefs(left.CapacityRefs, right.CapacityRefs)
 }
 
@@ -462,15 +519,58 @@ func SameIncarnation(left, right ReplicaIncarnation) bool {
 	return sameIncarnation(left, right)
 }
 
-func membershipMatchesIncarnation(membership ReplicaMembership, incarnation ReplicaIncarnation) bool {
-	return membership.ReplicaID == incarnation.ReplicaID &&
-		membership.RuntimeIncarnation == incarnation.RuntimeIncarnation
+// MembershipMatchesIncarnation checks that every active process belongs to this exact physical allocation.
+func MembershipMatchesIncarnation(membership ReplicaMembership, incarnation ReplicaIncarnation) bool {
+	if membership.ReplicaID != incarnation.ReplicaID {
+		return false
+	}
+	// Native IDs may be remapped explicitly; physical provenance is bound to the independent process lifetimes.
+	for _, member := range membership.Members {
+		if !slices.ContainsFunc(incarnation.Members, func(hosted NativeMemberIncarnation) bool {
+			return hosted.RuntimeIncarnation == member.RuntimeIncarnation
+		}) {
+			return false
+		}
+	}
+	return true
 }
 
 func sameMembership(left, right ReplicaMembership) bool {
 	return left.ReplicaID == right.ReplicaID &&
-		left.RuntimeIncarnation == right.RuntimeIncarnation &&
-		slices.Equal(normalizeNativeMembers(left.NativeMembers), normalizeNativeMembers(right.NativeMembers))
+		sameMemberIncarnations(left.Members, right.Members)
+}
+
+func subtractMemberships(values, excluded []ReplicaMembership) []ReplicaMembership {
+	remaining := make([]ReplicaMembership, 0, len(values))
+	for _, value := range values {
+		members := make([]NativeMemberIncarnation, 0, len(value.Members))
+		for _, member := range value.Members {
+			present := false
+			for _, exclusion := range excluded {
+				if exclusion.ReplicaID == value.ReplicaID && slices.Contains(exclusion.Members, member) {
+					present = true
+					break
+				}
+			}
+			if !present {
+				members = append(members, member)
+			}
+		}
+		if len(members) > 0 {
+			remaining = append(remaining, ReplicaMembership{ReplicaID: value.ReplicaID, Members: members})
+		}
+	}
+	return normalizeMemberships(remaining)
+}
+
+func membershipsForReplicaIDs(topology MembershipTopology, ids []ReplicaID) []ReplicaMembership {
+	values := make([]ReplicaMembership, 0, len(ids))
+	for _, id := range ids {
+		if membership, found := membershipByID(topology, id); found {
+			values = append(values, membership)
+		}
+	}
+	return normalizeMemberships(values)
 }
 
 func sameMemberships(left, right []ReplicaMembership) bool {
@@ -553,14 +653,9 @@ func TopologyRuntimeDigest(topology MembershipTopology) string {
 	var input strings.Builder
 	_, _ = fmt.Fprintf(&input, "generation=%d;", topology.Generation)
 	for _, membership := range memberships {
-		_, _ = fmt.Fprintf(
-			&input,
-			"replica=%s;runtime=%s;",
-			membership.ReplicaID,
-			membership.RuntimeIncarnation,
-		)
-		for _, nativeMember := range normalizeNativeMembers(membership.NativeMembers) {
-			_, _ = fmt.Fprintf(&input, "native=%s;", nativeMember)
+		_, _ = fmt.Fprintf(&input, "replica=%s;", membership.ReplicaID)
+		for _, member := range normalizeMemberIncarnations(membership.Members) {
+			_, _ = fmt.Fprintf(&input, "native=%s;runtime=%s;", member.ID, member.RuntimeIncarnation)
 		}
 	}
 

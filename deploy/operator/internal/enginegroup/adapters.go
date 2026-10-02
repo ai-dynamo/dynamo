@@ -173,6 +173,8 @@ type MembershipTransitionObservation struct {
 
 // MembershipObservation reports current engine topology independently from one correlated transition result.
 type MembershipObservation struct {
+	// UnavailableMembers is engine-authoritative non-serving evidence, independently of Pod readiness.
+	UnavailableMembers    []ReplicaMembership
 	CommittedTopology     MembershipTopology
 	RequestedTransitionID string
 	Transition            *MembershipTransitionObservation
@@ -195,6 +197,10 @@ type VerificationResult struct {
 // CapacityAdapter converges physical capacity to revisioned absolute targets.
 type CapacityAdapter interface {
 	// Observe returns stable allocation identities, exact Pod UIDs, availability, and durable release fences.
+	// Incarnation.Members is allocation identity metadata, not a live-process inventory: an exited member's last
+	// incarnation remains present until the allocation is released. Exit changes health/availability and engine
+	// membership observations; a different process incarnation identifies a restart. Lost identity authority must
+	// return an error rather than silently omit an exited member from a retained allocation.
 	Observe(ctx context.Context, groupID GroupID) (CapacityObservation, error)
 	// Apply converges to target without deleting capacity absent from an exact UID-bound release fence.
 	// Revisions are group-global and monotonic. Repeating an equal revision and payload is idempotent; an equal revision
@@ -208,7 +214,8 @@ type CapacityAdapter interface {
 // MembershipAdapter converges membership to one desired level while owning the serialized compare-and-apply protocol.
 type MembershipAdapter interface {
 	// ValidatePlan authoritatively checks complete resolved semantics before capacity or traffic prework. It is
-	// side-effect-free and returns evidence bound to the normalized plan and current adapter capabilities.
+	// side-effect-free and returns evidence bound to the normalized plan and current adapter capabilities. It enforces
+	// profile bounds, including the minimum safe serving membership; only terminal Retire may reach zero.
 	ValidatePlan(
 		ctx context.Context,
 		groupID GroupID,

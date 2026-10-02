@@ -63,7 +63,7 @@ func TestCoordinatorGrowthOrdersCapacityCommitVerificationAndAdmission(t *testin
 	if joiningCapacity.Bootstrap == nil ||
 		joiningCapacity.Bootstrap.Mode != BootstrapModeJoin ||
 		joiningCapacity.Bootstrap.BaseTopologyGeneration != 1 ||
-		!slices.Equal(joiningCapacity.Bootstrap.NativeMembers, joining.NativeMembers) {
+		!slices.Equal(joiningCapacity.Bootstrap.NativeMembers, nativeMemberIDs(joining.Members)) {
 		t.Fatalf("joining bootstrap lacks resolved topology and native identity: %#v", joiningCapacity.Bootstrap)
 	}
 	pinnedCapacity := capacityTarget.Replicas[len(capacityTarget.Replicas)-1]
@@ -161,7 +161,7 @@ func TestCoordinatorShrinkOrdersDrainCommitReleaseVerificationAndAdmission(t *te
 		t.Fatalf("retired replica history is not canonical: %#v", record)
 	}
 	if !sameIncarnation(record.History[0].Incarnation, replicaIncarnation(1)) ||
-		!slices.Equal(record.History[0].NativeMembers, base.Replicas[1].NativeMembers) {
+		!slices.Equal(record.History[0].NativeMembers, nativeMemberIDs(base.Replicas[1].Members)) {
 		t.Fatalf("retired replica lost historical native membership: %#v", record.History)
 	}
 
@@ -283,7 +283,7 @@ func TestCoordinatorRequiresRecoveryForCommittedCapacityIncarnationDrift(t *test
 				if !found {
 					t.Fatal("joining allocation is absent before replacement")
 				}
-				allocation.Incarnation.RuntimeIncarnation = testReplacementRuntime
+				allocation.Incarnation.Members[0].RuntimeIncarnation = testReplacementRuntime
 				allocation.Incarnation.CapacityRefs[0].UID = testReplacementPodUID
 				for index := range scenario.capacity.observation.Allocations {
 					if scenario.capacity.observation.Allocations[index].Incarnation.ReplicaID == joining.ReplicaID {
@@ -961,7 +961,7 @@ func TestCoordinatorFailsClosedOnInvalidCommittedMembership(t *testing.T) {
 			cloneReplicaMembership(joining),
 		),
 	}
-	invalid.Replicas[0].NativeMembers = []NativeMemberID{"unexpected-remap"}
+	invalid.Replicas[0].Members[0].ID = "unexpected-remap"
 	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, invalid)
 	scenario.runUntil("reject invalid committed topology", func(s *coordinatorScenario) bool {
 		return s.status.Transition != nil && s.status.Transition.Outcome == TransitionOutcomeBlocked
@@ -1057,7 +1057,7 @@ func TestCoordinatorRejectsStaleExactReleaseFence(t *testing.T) {
 
 	t.Log("Replace the selected Pod after authorization but before the workload manager applies it")
 	replacement := replicaIncarnation(1)
-	replacement.RuntimeIncarnation = testReplacementRuntime
+	replacement.Members[0].RuntimeIncarnation = testReplacementRuntime
 	replacement.CapacityRefs[0].UID = testReplacementPodUID
 	for index := range scenario.capacity.observation.Allocations {
 		if scenario.capacity.observation.Allocations[index].Incarnation.ReplicaID == retiringReplicaID {

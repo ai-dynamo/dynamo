@@ -169,29 +169,52 @@ func (a *testTrafficAdapter) Apply(
 	a.observation.AppliedRevision = target.ControlRevision
 	a.observation.Admitted = cloneReplicaMemberships(target.Admitted)
 	a.observation.Draining = nil
+
+	// Keep evidence only while the accepted absolute target requests it, exposing missing retention in the coordinator.
+	previousDrained := a.observation.Drained
+	a.observation.Drained = nil
 	for _, drain := range target.Drain {
+		for _, previous := range previousDrained {
+			if previous.ReplicaID != drain.Membership.ReplicaID {
+				continue
+			}
+			retained := ReplicaMembership{ReplicaID: previous.ReplicaID}
+			for _, member := range previous.Members {
+				if slices.Contains(drain.Membership.Members, member) {
+					retained.Members = append(retained.Members, member)
+				}
+			}
+			if len(retained.Members) != 0 {
+				a.observation.Drained = append(a.observation.Drained, retained)
+			}
+		}
+	}
+	a.observation.Drained = normalizeMemberships(a.observation.Drained)
+
+	// Completed requested drains stay terminal; only missing evidence needs a new graceful/inactive confirmation.
+	for _, drain := range target.Drain {
+		if containsMembership(a.observation.Drained, drain.Membership) {
+			continue
+		}
 		complete := a.autoDrain
 		if drain.Mode == TrafficDrainModeConfirmInactive {
 			complete = a.confirmInactive
 		}
 		if complete {
-			if !containsMembership(a.observation.Drained, drain.Membership) {
-				a.observation.Drained = append(
-					a.observation.Drained,
-					cloneReplicaMembership(drain.Membership),
-				)
-			}
+			a.observation.Drained = append(a.observation.Drained, cloneReplicaMembership(drain.Membership))
 			continue
 		}
 		if drain.Mode == TrafficDrainModeGraceful {
 			a.observation.Draining = append(a.observation.Draining, cloneReplicaMembership(drain.Membership))
 		}
 	}
+	a.observation.Drained = normalizeMemberships(a.observation.Drained)
 	a.lastTarget = cloneTrafficTarget(&target)
 	return ApplyResult{}, nil
 }
 
 type testMembershipAdapter struct {
+	unavailable           []ReplicaMembership
 	topology              MembershipTopology
 	transitions           map[string]MembershipTransitionObservation
 	targets               map[string]MembershipTarget
@@ -246,6 +269,7 @@ func (a *testMembershipAdapter) Observe(
 	transitionID string,
 ) (MembershipObservation, error) {
 	observation := MembershipObservation{
+		UnavailableMembers:    cloneReplicaMemberships(a.unavailable),
 		CommittedTopology:     cloneTopology(a.topology),
 		RequestedTransitionID: transitionID,
 	}
@@ -434,17 +458,16 @@ func engineTopology(generation int64, replicaCount int) MembershipTopology {
 func engineReplica(index int) ReplicaMembership {
 	incarnation := replicaIncarnation(index)
 	return ReplicaMembership{
-		ReplicaID:          incarnation.ReplicaID,
-		RuntimeIncarnation: incarnation.RuntimeIncarnation,
-		NativeMembers:      []NativeMemberID{NativeMemberID(fmt.Sprintf("dp-%d", index))},
+		ReplicaID: incarnation.ReplicaID,
+		Members:   slices.Clone(incarnation.Members),
 	}
 }
 
 func replicaIncarnation(index int) ReplicaIncarnation {
 	return ReplicaIncarnation{
-		ReplicaID:          ReplicaID(fmt.Sprintf("replica-%d", index)),
-		SlotID:             CapacitySlotID(fmt.Sprintf("slot-%d", index)),
-		RuntimeIncarnation: RuntimeIncarnationID(fmt.Sprintf("runtime-%d-v1", index)),
+		ReplicaID: ReplicaID(fmt.Sprintf("replica-%d", index)),
+		SlotID:    CapacitySlotID(fmt.Sprintf("slot-%d", index)),
+		Members:   []NativeMemberIncarnation{{ID: NativeMemberID(fmt.Sprintf("dp-%d", index)), RuntimeIncarnation: RuntimeIncarnationID(fmt.Sprintf("runtime-%d-v1", index))}},
 		CapacityRefs: []CapacityRef{{
 			Name: fmt.Sprintf("worker-%d", index),
 			UID:  PodUID(fmt.Sprintf("pod-uid-%d-v1", index)),
@@ -466,9 +489,9 @@ func capacityForTopology(topology MembershipTopology) CapacityObservation {
 func physicalIncarnationForMembership(membership ReplicaMembership) ReplicaIncarnation {
 	suffix := strings.TrimPrefix(string(membership.ReplicaID), "replica-")
 	return ReplicaIncarnation{
-		ReplicaID:          membership.ReplicaID,
-		SlotID:             CapacitySlotID("slot-" + suffix),
-		RuntimeIncarnation: membership.RuntimeIncarnation,
+		ReplicaID: membership.ReplicaID,
+		SlotID:    CapacitySlotID("slot-" + suffix),
+		Members:   slices.Clone(membership.Members),
 		CapacityRefs: []CapacityRef{{
 			Name: "worker-" + suffix,
 			UID:  PodUID("pod-uid-" + suffix + "-v1"),
@@ -543,7 +566,7 @@ func sameJoiningReplicas(left, right []JoiningReplica) bool {
 	slices.SortFunc(right, func(a, b JoiningReplica) int {
 		return strings.Compare(string(a.ReplicaID), string(b.ReplicaID))
 	})
-	return slices.Equal(left, right)
+	return sameMemberships(left, right)
 }
 
 func eventIndex(events []string, prefix string) int {

@@ -272,6 +272,24 @@ func (c *Coordinator) recordCommittedMembership(
 	if alreadyCurrent {
 		return true, false, nil
 	}
+	// Build the registry candidate before publishing history, so missing allocation evidence cannot partially commit.
+	registry := cloneRegistry(status.Registry)
+	remapped := nativeMembershipByID(resolution.remappedMembership)
+	for _, membership := range observation.ResultTopology.Replicas {
+		index, found := registryRecordIndex(registry, membership.ReplicaID)
+		if !found || registry.Replicas[index].Current == nil {
+			return false, false, fmt.Errorf("committed replica %q has no canonical current allocation", membership.ReplicaID)
+		}
+		record := &registry.Replicas[index]
+		if mapping, found := remapped[membership.ReplicaID]; found {
+			// Only explicit remapping changes an existing desired assignment; survivor recovery never does.
+			record.DesiredNativeMembers = slices.Clone(mapping.NativeMembers)
+			record.Current.Members = slices.Clone(membership.Members)
+		} else if len(record.DesiredNativeMembers) == 0 {
+			record.DesiredNativeMembers = nativeMemberIDs(membership.Members)
+		}
+	}
+	status.Registry = registry
 	status.Topologies = history
 	status.Transition.UpdatedAt = c.now()
 	return false, true, nil
@@ -357,14 +375,15 @@ func validateCommittedTopology(
 		plannedJoining[target.ReplicaID] = joiningNativeMembers(resolution, target)
 	}
 	remappedByID := nativeMembershipByID(resolution.remappedMembership)
+	survivors := MembershipTopology{Replicas: resolution.survivorMembership}
 	for _, membership := range committed.Replicas {
 		replicaID := membership.ReplicaID
 		if joiningReplica, found := joiningByID[replicaID]; found {
-			if membership.RuntimeIncarnation != joiningReplica.RuntimeIncarnation {
+			if !sameMembership(membership, joiningReplica) {
 				return fmt.Errorf("joining replica %q committed another runtime incarnation", replicaID)
 			}
 			if planned := plannedJoining[replicaID]; len(planned) > 0 &&
-				!slices.Equal(normalizeNativeMembers(planned), normalizeNativeMembers(membership.NativeMembers)) {
+				!slices.Equal(normalizeNativeMembers(planned), nativeMemberIDs(membership.Members)) {
 				return fmt.Errorf("joining replica %q committed another native membership", replicaID)
 			}
 			continue
@@ -374,22 +393,26 @@ func validateCommittedTopology(
 		if !retained {
 			return fmt.Errorf("committed replica %q is neither retained nor joining", replicaID)
 		}
-		if baseMembership.RuntimeIncarnation != membership.RuntimeIncarnation {
-			return fmt.Errorf("retained replica %q changed physical incarnation", replicaID)
+		if resolution.kind == PlanKindReduceToSurvivors {
+			expected, _ := membershipByID(survivors, replicaID)
+			if !sameMembership(expected, membership) {
+				return fmt.Errorf("survivor replica %q changed member identities", replicaID)
+			}
+			continue
 		}
 		if remapped, remap := remappedByID[replicaID]; remap {
 			if !slices.Equal(
 				normalizeNativeMembers(remapped.NativeMembers),
-				normalizeNativeMembers(membership.NativeMembers),
+				nativeMemberIDs(membership.Members),
 			) {
 				return fmt.Errorf("remapped replica %q committed another native membership", replicaID)
 			}
+			if !sameRuntimeSet(baseMembership.Members, membership.Members) {
+				return fmt.Errorf("remapped replica %q changed process incarnations", replicaID)
+			}
 			continue
 		}
-		if !slices.Equal(
-			normalizeNativeMembers(baseMembership.NativeMembers),
-			normalizeNativeMembers(membership.NativeMembers),
-		) {
+		if !sameMembership(baseMembership, membership) {
 			return fmt.Errorf("retained replica %q changed native membership", replicaID)
 		}
 	}

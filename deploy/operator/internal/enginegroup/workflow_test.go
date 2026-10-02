@@ -252,16 +252,17 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 	excluded := engineReplica(1)
 	excludedIncarnation := replicaIncarnation(1)
 	scenario.status.Registry.Replicas = append(scenario.status.Registry.Replicas, ReplicaRecord{
-		ReplicaID: excluded.ReplicaID,
-		SlotID:    excludedIncarnation.SlotID,
+		DesiredNativeMembers: nativeMemberIDs(excluded.Members),
+		ReplicaID:            excluded.ReplicaID,
+		SlotID:               excludedIncarnation.SlotID,
 		History: []ReplicaHistoryEntry{{
 			TopologyGeneration: 1,
 			Incarnation:        cloneReplicaIncarnation(excludedIncarnation),
-			NativeMembers:      slices.Clone(excluded.NativeMembers),
+			NativeMembers:      nativeMemberIDs(excluded.Members),
 		}},
 	})
 	replacement := cloneReplicaIncarnation(excludedIncarnation)
-	replacement.RuntimeIncarnation = testReplacementRuntime
+	replacement.Members[0].RuntimeIncarnation = testReplacementRuntime
 	replacement.CapacityRefs[0].UID = testReplacementPodUID
 	scenario.capacity.planned[excluded.ReplicaID] = replacement
 	plan := ResolvedPlan{
@@ -277,7 +278,7 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 					ReplicaID:     excluded.ReplicaID,
 					SlotID:        excludedIncarnation.SlotID,
 					Bootstrap:     BootstrapModeRestoreFixedSlot,
-					NativeMembers: slices.Clone(excluded.NativeMembers),
+					NativeMembers: nativeMemberIDs(excluded.Members),
 				},
 			}}},
 		},
@@ -289,7 +290,7 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 		return s.membership.applyCalls == 1
 	})
 	committedReplica := cloneReplicaMembership(excluded)
-	committedReplica.RuntimeIncarnation = replacement.RuntimeIncarnation
+	committedReplica.Members = slices.Clone(replacement.Members)
 	committed := MembershipTopology{
 		Generation: 3,
 		Replicas: append(
@@ -309,7 +310,7 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 	}
 	if len(record.History) != 1 ||
 		!sameIncarnation(record.History[0].Incarnation, excludedIncarnation) ||
-		!slices.Equal(record.History[0].NativeMembers, excluded.NativeMembers) {
+		!slices.Equal(record.History[0].NativeMembers, nativeMemberIDs(excluded.Members)) {
 		t.Fatalf("restoration lost excluded membership history: %#v", record.History)
 	}
 }
@@ -327,7 +328,7 @@ func TestCoordinatorRequiresTerminalTrafficEvidenceForFailedMember(t *testing.T)
 		VerificationRequirement: VerificationRequirementRequired,
 		Change: ResolvedChange{
 			Kind:              PlanKindReduceToSurvivors,
-			ReduceToSurvivors: &ReduceToSurvivorsChange{Survivors: []ReplicaID{"replica-0"}},
+			ReduceToSurvivors: &ReduceToSurvivorsChange{Survivors: []ReplicaNativeMembership{{ReplicaID: "replica-0", SlotID: "slot-0", NativeMembers: []NativeMemberID{"dp-0"}}}},
 		},
 	}
 	scenario.desired = &plan
@@ -396,8 +397,8 @@ func TestCoordinatorRemapsNativeMembersWithoutChangingPhysicalIdentity(t *testin
 	})
 	committed := cloneTopology(base)
 	committed.Generation = 2
-	committed.Replicas[0].NativeMembers = []NativeMemberID{"remapped-0"}
-	committed.Replicas[1].NativeMembers = []NativeMemberID{"remapped-1"}
+	committed.Replicas[0].Members[0].ID = "remapped-0"
+	committed.Replicas[1].Members[0].ID = "remapped-1"
 	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 	scenario.runUntil("finish remap", func(s *coordinatorScenario) bool {
 		return s.status.Transition.Outcome == TransitionOutcomeCompleted

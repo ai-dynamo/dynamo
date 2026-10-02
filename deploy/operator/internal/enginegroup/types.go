@@ -45,24 +45,27 @@ type CapacityRef struct {
 
 // ReplicaIncarnation binds one logical replica and stable slot to concrete physical and runtime capacity.
 type ReplicaIncarnation struct {
-	ReplicaID          ReplicaID
-	SlotID             CapacitySlotID
+	ReplicaID    ReplicaID
+	SlotID       CapacitySlotID
+	CapacityRefs []CapacityRef
+	// Members binds each hosted native member to its independent process lifetime.
+	Members []NativeMemberIncarnation
+}
+
+// NativeMemberIncarnation identifies one native member and one concrete process lifetime.
+type NativeMemberIncarnation struct {
+	ID                 NativeMemberID
 	RuntimeIncarnation RuntimeIncarnationID
-	CapacityRefs       []CapacityRef
 }
 
 // ReplicaMembership is the engine-owned logical, runtime, and native-member identity of one active replica.
 type ReplicaMembership struct {
-	ReplicaID          ReplicaID
-	RuntimeIncarnation RuntimeIncarnationID
-	NativeMembers      []NativeMemberID
+	ReplicaID ReplicaID
+	Members   []NativeMemberIncarnation
 }
 
-// JoiningReplica identifies one concrete engine process that may join membership.
-type JoiningReplica struct {
-	ReplicaID          ReplicaID
-	RuntimeIncarnation RuntimeIncarnationID
-}
+// JoiningReplica identifies the exact native processes joining one allocation.
+type JoiningReplica = ReplicaMembership
 
 // ReplicaNativeMembership describes an exact stable logical-to-native membership mapping.
 type ReplicaNativeMembership struct {
@@ -86,7 +89,7 @@ func (t MembershipTopology) ReplicaCount() int32 {
 func (t MembershipTopology) NativeMemberCount() int32 {
 	var count int32
 	for _, replica := range t.Replicas {
-		count += int32(len(replica.NativeMembers))
+		count += int32(len(replica.Members))
 	}
 	return count
 }
@@ -172,7 +175,7 @@ type RetireChange struct {
 
 // ReduceToSurvivorsChange requests removal of every base member not present in Survivors.
 type ReduceToSurvivorsChange struct {
-	Survivors []ReplicaID
+	Survivors []ReplicaNativeMembership
 }
 
 // RestoreChange restores the named stable logical and native-member identities.
@@ -217,8 +220,10 @@ type ReplicaHistoryEntry struct {
 type ReplicaRecord struct {
 	ReplicaID ReplicaID
 	SlotID    CapacitySlotID
-	Current   *ReplicaIncarnation
-	History   []ReplicaHistoryEntry
+	// DesiredNativeMembers survives partial failures and physical replacement.
+	DesiredNativeMembers []NativeMemberID
+	Current              *ReplicaIncarnation
+	History              []ReplicaHistoryEntry
 }
 
 // ReplicaRegistry is the single authoritative home for logical-replica-to-slot bindings.
@@ -255,6 +260,27 @@ type Failure struct {
 	Reason         string
 	Message        string
 }
+
+// InvocationError classifies an adapter invocation failure without asserting that its effects were rejected.
+// Even a terminal invocation error cannot replace observation of an ambiguous membership transaction.
+type InvocationError struct {
+	Failure Failure
+	Err     error
+}
+
+func (e *InvocationError) Error() string {
+	message := e.Failure.Reason
+	if e.Failure.Message != "" {
+		message += ": " + e.Failure.Message
+	}
+	if e.Err != nil {
+		message += ": " + e.Err.Error()
+	}
+	return message
+}
+
+// Unwrap preserves transport and cancellation errors for errors.Is and errors.As.
+func (e *InvocationError) Unwrap() error { return e.Err }
 
 // VerificationPhase is the independent state of serving verification.
 type VerificationPhase string
