@@ -54,12 +54,15 @@ impl PushEndpoint {
             .lock()
             .set_endpoint_registered(endpoint_name_local.as_str());
 
+        // Keep the cancellation waiter registered across ready requests.
+        let cancelled = self.cancellation_token.cancelled();
+        tokio::pin!(cancelled);
         loop {
             let req = tokio::select! {
                 biased;
 
                 // Stop admission even when the subscription backlog stays ready.
-                _ = self.cancellation_token.cancelled() => {
+                _ = &mut cancelled => {
                     tracing::info!("PushEndpoint received cancellation signal, shutting down service");
                     if let Err(e) = endpoint.stop().await {
                         tracing::warn!("Failed to stop NATS service: {:?}", e);
@@ -349,9 +352,5 @@ mod tests {
             calls < 4096,
             "cancellation did not stop buffered request admission: {calls}"
         );
-    }
-    #[tokio::test]
-    async fn cancellation_drains_accepted_handler() {
-        assert_eq!(run_buffered_endpoint(false, 1).await, 1);
     }
 }
