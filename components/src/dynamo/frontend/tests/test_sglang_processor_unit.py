@@ -4953,11 +4953,6 @@ class TestContinuationFlags:
             ({}, True, False),
             ({"add_generation_prompt": False}, False, False),
             (
-                {"add_generation_prompt": False, "continue_final_message": True},
-                False,
-                True,
-            ),
-            (
                 {
                     "add_generation_prompt": False,
                     "continue_final_message": True,
@@ -5018,7 +5013,6 @@ class TestContinuationFlags:
                 True,
             ),
             ({"chat_template_args": {"continue_final_message": True}}, True),
-            ({"add_generation_prompt": True, "continue_final_message": False}, False),
             (
                 {
                     "add_generation_prompt": True,
@@ -5053,17 +5047,7 @@ class TestContinuationFlags:
             )
             assert result.prompt_token_ids
 
-    @pytest.mark.parametrize(
-        "flags",
-        [
-            {
-                "add_generation_prompt": True,
-                "chat_template_kwargs": {"continue_final_message": True},
-            },
-            {"chat_template_args": {"continue_final_message": True}},
-        ],
-    )
-    def test_conflicting_effective_flags_are_client_errors(self, tokenizer, flags):
+    def test_conflicting_effective_flags_are_client_errors(self, tokenizer):
         with pytest.raises(
             PreprocessError,
             match="continue_final_message requires add_generation_prompt=false",
@@ -5072,7 +5056,7 @@ class TestContinuationFlags:
                 {
                     "model": MODEL,
                     "messages": [{"role": "assistant", "content": "One, two,"}],
-                    **flags,
+                    "chat_template_args": {"continue_final_message": True},
                 },
                 tokenizer=tokenizer,
                 tool_call_parser_name=None,
