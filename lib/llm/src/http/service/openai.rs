@@ -42,7 +42,7 @@ use super::{
     disconnect::{
         ConnectionHandle, StreamErrorSignal, create_connection_monitor,
         monitor_for_disconnects_with_activity_and_error_signal,
-        monitor_for_disconnects_with_error_signal,
+        monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -4438,7 +4438,7 @@ async fn responses(
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects_with_error_signal(
+        let stream = monitor_for_responses_disconnects(
             full_stream,
             ctx,
             inflight_guard,
