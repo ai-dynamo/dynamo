@@ -9,12 +9,12 @@ use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, LLMEngineOutput, PreprocessedRequest,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
-use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use futures::{StreamExt, TryStreamExt, future::BoxFuture, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 use tokio_util::{
-    codec::{FramedRead, LinesCodec},
+    codec::{FramedRead, LinesCodec, LinesCodecError},
     io::StreamReader,
     sync::CancellationToken,
 };
@@ -133,6 +133,46 @@ pub(crate) fn request(
 pub(crate) struct NativeHttp {
     client: reqwest::Client,
     endpoint: HttpEndpoint,
+    abort_timeout: Duration,
+}
+
+// Closing the SSE connection does not reliably stop SGLang scheduler work.
+struct AbortGuard<'a> {
+    native_http: &'a NativeHttp,
+    request_id: Option<String>,
+    runtime: Option<tokio::runtime::Handle>,
+    opening: Option<BoxFuture<'static, Result<Response, DynamoError>>>,
+    stream: BoxStream<'static, Result<String, LinesCodecError>>,
+}
+
+impl Drop for AbortGuard<'_> {
+    fn drop(&mut self) {
+        let Some(request_id) = self.request_id.take() else {
+            return;
+        };
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        let native_http = self.native_http.clone();
+        let opening = self.opening.take();
+        let stream = std::mem::replace(&mut self.stream, Box::pin(futures::stream::empty()));
+        runtime.spawn(async move {
+            let result = native_http
+                .client
+                .post(native_http.endpoint.with_path("/abort_request"))
+                .timeout(native_http.abort_timeout)
+                .json(&serde_json::json!({"rid": request_id, "abort_all": false}))
+                .send()
+                .await
+                .and_then(Response::error_for_status);
+            // Disconnecting first removes the request state needed by SGLang's abort handler.
+            drop(opening);
+            drop(stream);
+            if let Err(error) = result {
+                tracing::debug!(%request_id, %error, "failed to abort SGLang native HTTP request");
+            }
+        });
+    }
 }
 
 impl NativeHttp {
@@ -173,7 +213,11 @@ impl NativeHttp {
             .map_err(|error| {
                 client::invalid_arg(format!("could not configure SGLang HTTP client: {error}"))
             })?;
-        Ok(Some(Self { client, endpoint }))
+        Ok(Some(Self {
+            client,
+            endpoint,
+            abort_timeout: connect_timeout,
+        }))
     }
 
     pub(crate) async fn await_ready(
@@ -216,12 +260,12 @@ impl NativeHttp {
         }
     }
 
-    async fn open(&self, body: &Value) -> Result<Response, DynamoError> {
+    async fn open(self, body: Value) -> Result<Response, DynamoError> {
         let response = self
             .client
             .post(self.endpoint.with_path("/generate"))
             .header(header::ACCEPT, "text/event-stream")
-            .json(body)
+            .json(&body)
             .send()
             .await
             .map_err(request_error)?;
@@ -246,20 +290,29 @@ impl NativeHttp {
         Box::pin(async_stream::stream! {
             let is_prefill = request.is_prefill;
             let mut prefill_handoff = request.prefill_handoff;
+            let mut abort_guard = AbortGuard {
+                native_http: &self,
+                request_id: Some(ctx.id().to_string()),
+                runtime: tokio::runtime::Handle::try_current().ok(),
+                opening: Some(Box::pin(self.clone().open(request.body))),
+                stream: Box::pin(futures::stream::empty()),
+            };
             tracing::debug!(request_id = %ctx.id(), endpoint = %self.endpoint.with_path("/generate"), "sending native request to SGLang HTTP");
             let opened = tokio::select! {
                 biased;
                 _ = ctx.stopped() => None,
                 _ = cancel.cancelled() => None,
-                response = self.open(&request.body) => Some(response),
+                response = abort_guard.opening.as_mut().unwrap() => Some(response),
             };
             let Some(response) = opened else {
+                drop(abort_guard);
                 yield Err(client::cancelled(format!(
                     "SGLang native request {} was cancelled",
                     ctx.id()
                 )));
                 return;
             };
+            abort_guard.opening = None;
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
@@ -267,6 +320,9 @@ impl NativeHttp {
                     return;
                 }
             };
+            let bytes = response.bytes_stream().map_err(io::Error::other);
+            let reader = StreamReader::new(bytes);
+            abort_guard.stream = Box::pin(FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_EVENT_BYTES)));
             if is_prefill {
                 let Some(handoff) = prefill_handoff.take() else {
                     yield Err(client::protocol_error(
@@ -283,18 +339,16 @@ impl NativeHttp {
                 });
             }
 
-            let bytes = response.bytes_stream().map_err(io::Error::other);
-            let reader = StreamReader::new(bytes);
-            let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_EVENT_BYTES));
             let mut first_output_seen = false;
             loop {
                 let selected = tokio::select! {
                     biased;
                     _ = ctx.stopped() => None,
                     _ = cancel.cancelled() => None,
-                    line = lines.next() => Some(line),
+                    line = abort_guard.stream.next() => Some(line),
                 };
                 let Some(line) = selected else {
+                    drop(abort_guard);
                     yield Err(client::cancelled(format!(
                         "SGLang native request {} was cancelled",
                         ctx.id()
@@ -350,6 +404,7 @@ impl NativeHttp {
                     && let Some(kind @ ("abort" | "error" | "cancelled")) =
                         finish.get("type").and_then(Value::as_str)
                 {
+                    abort_guard.request_id = None;
                     yield Err(protocol::terminal_failure(kind, finish));
                     return;
                 }
@@ -364,6 +419,9 @@ impl NativeHttp {
                         continue;
                     }
                     output.engine_data = None;
+                }
+                if terminal {
+                    abort_guard.request_id = None;
                 }
                 yield Ok(output);
                 if terminal {
@@ -491,6 +549,7 @@ mod tests {
         NativeHttp {
             client: reqwest::Client::new(),
             endpoint: HttpEndpoint::from_grpc(&grpc, port).unwrap(),
+            abort_timeout: Duration::from_secs(1),
         }
     }
 

@@ -394,13 +394,33 @@ def run_core_import_smoke(venv_python: Path) -> None:
 import importlib.metadata as metadata
 
 import dynamo.runtime as runtime
-from dynamo._core import __version__
+import dynamo.sglang.sidecar as sglang_sidecar
+import dynamo.vllm.sidecar as vllm_sidecar
+from dynamo._core import __version__, backend
 
 assert runtime
 assert __version__[0].isdigit()
 assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
+assert callable(sglang_sidecar.main)
+assert callable(vllm_sidecar.main)
+assert callable(backend._run_sglang_sidecar)
+assert callable(backend._run_vllm_sidecar)
 """
     run([str(venv_python), "-c", code])
+    for framework in ("vllm", "sglang"):
+        command = [str(venv_python), "-m", f"dynamo.{framework}.sidecar"]
+        help_result = run([*command, "--help"], capture_output=True, timeout=30)
+        assert f"Usage: dynamo-{framework}-sidecar" in help_result.stdout
+        assert "--grpc-endpoint" in help_result.stdout
+        invalid = subprocess.run(
+            [*command, "--sidecar-smoke-invalid"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert invalid.returncode == 2, invalid.stdout + invalid.stderr
+        assert "unexpected argument '--sidecar-smoke-invalid'" in invalid.stderr
 
 
 def run_ais_core_import_smoke(venv_python: Path) -> None:

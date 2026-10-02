@@ -242,6 +242,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "sidecar_native: direct sidecar integration against a real native engine; "
+        "requires the native test artifact",
+    )
+    config.addinivalue_line(
+        "markers",
         "framework_with_efa: marks deployment tests that require an EFA-capable "
         "cluster and an -efa image",
     )

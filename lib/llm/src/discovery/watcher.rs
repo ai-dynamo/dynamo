@@ -335,7 +335,7 @@ impl ModelWatcher {
         self.tokenizer_fallback_enabled = enabled;
     }
 
-    pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
+    pub fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
         self.generate_engine_capabilities = capabilities;
     }
     /// Compatibility wrapper for callers that enable the vLLM Generate route.

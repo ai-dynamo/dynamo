@@ -4,6 +4,7 @@
 use dynamo_backend_common::testing::mock_context;
 use dynamo_backend_common::{
     BackendError, DynamoError, FinishReason, GenerateContext, LLMEngine, LLMEngineOutput,
+    PreprocessedRequest,
 };
 use dynamo_sidecar_testkit::assert::{failure, terminal};
 use dynamo_sidecar_testkit::bounded;
@@ -13,10 +14,12 @@ use dynamo_sidecar_testkit::control::{
 };
 use dynamo_sidecar_testkit::fixtures::{Outputs, collect, request};
 use futures::{StreamExt, poll, stream::BoxStream};
+use serde_json::{Value, json};
 
 #[allow(dead_code)]
 mod support;
 
+use support::sglang::{self as sglang_fixture, http};
 use support::vllm as vllm_fixture;
 use support::{FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture};
 
@@ -210,7 +213,7 @@ async fn cancellation<F: SidecarFixture>() {
     assert!(!handle.reached(Event::Received));
     fixture.scheduler_idle().await;
 
-    {
+    for cancellation in [Cancellation::Explicit, Cancellation::ConsumerDrop] {
         let ctx = mock_context();
         let handle = control.request(
             ctx.id(),
@@ -219,11 +222,10 @@ async fn cancellation<F: SidecarFixture>() {
                 ..Default::default()
             },
         );
-        let opening = engine.generate(
+        let mut opening = Box::pin(engine.generate(
             request("mocker-model", vec![11, 22, 33], 3),
             GenerateContext::new(ctx.clone(), None),
-        );
-        tokio::pin!(opening);
+        ));
         let outputs = match F::GENERATE_OPENING {
             GenerateOpening::WaitsForHeaders => {
                 tokio::select! {
@@ -231,26 +233,45 @@ async fn cancellation<F: SidecarFixture>() {
                     _ = &mut opening => panic!("generate returned before native headers"),
                 }
                 assert!(poll!(&mut opening).is_pending());
-                ctx.stop_generating();
-                bounded("cancel pending opening", async {
-                    opening.await.unwrap().collect::<Outputs>().await
-                })
-                .await
+                match cancellation {
+                    Cancellation::Explicit => {
+                        ctx.stop_generating();
+                        Some(
+                            bounded("cancel pending opening", async {
+                                opening.await.unwrap().collect::<Outputs>().await
+                            })
+                            .await,
+                        )
+                    }
+                    Cancellation::ConsumerDrop => {
+                        drop(opening);
+                        None
+                    }
+                }
             }
             GenerateOpening::OnStreamPoll => {
                 let stream = bounded("lazy generation opening", opening).await.unwrap();
                 assert!(!handle.reached(Event::Received));
-                let outputs = stream.collect::<Outputs>();
-                tokio::pin!(outputs);
+                let mut outputs = Box::pin(stream.collect::<Outputs>());
                 tokio::select! {
                     _ = bounded("lazy native opening", handle.wait(Event::Received)) => {}
                     _ = &mut outputs => panic!("generation finished before cancellation"),
                 }
-                ctx.stop_generating();
-                bounded("cancel lazy opening", outputs).await
+                match cancellation {
+                    Cancellation::Explicit => {
+                        ctx.stop_generating();
+                        Some(bounded("cancel lazy opening", outputs).await)
+                    }
+                    Cancellation::ConsumerDrop => {
+                        drop(outputs);
+                        None
+                    }
+                }
             }
         };
-        terminal(outputs, &[], 3, FinishReason::Cancelled);
+        if let Some(outputs) = outputs {
+            terminal(outputs, &[], 3, FinishReason::Cancelled);
+        }
         bounded("opening drop", handle.wait(Event::Dropped)).await;
         fixture.scheduler_idle().await;
     }
@@ -429,6 +450,55 @@ async fn active_work<F: WireFixture>(cancellation: Cancellation) {
     finish(&mut fixture, &engine).await;
 }
 
+async fn cancellation_burst<F: WireFixture>() {
+    let control = Controller::<F::Protocol>::default();
+    let mut fixture = F::start(
+        control.clone(),
+        FixtureConfig {
+            speedup_ratio: 0.1,
+            connections: 2,
+            ..Default::default()
+        },
+    )
+    .await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let requests = futures::future::join_all((0..8).map(|_| async {
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), after_token_responses(1, StreamAction::Continue));
+        let mut stream = engine
+            .generate(
+                request("mocker-model", vec![11, 22, 33], 1_024),
+                GenerateContext::new(ctx.clone(), None),
+            )
+            .await
+            .unwrap();
+        let outputs = checkpoint_outputs(&mut stream, &handle).await;
+        (ctx, handle, stream, outputs)
+    }))
+    .await;
+    assert_eq!(fixture.active_request_count(), requests.len());
+    fixture.scheduler_active().await;
+    futures::future::join_all(requests.into_iter().enumerate().map(
+        |(index, (ctx, handle, stream, mut outputs))| async move {
+            let tokens = handle.tokens();
+            if index % 2 == 0 {
+                ctx.stop_generating();
+                outputs.extend(stream.collect::<Outputs>().await);
+                terminal(outputs, &tokens, 3, FinishReason::Cancelled);
+            } else {
+                drop(stream);
+            }
+            handle.wait(Event::Dropped).await;
+            assert_eq!(handle.tokens(), tokens);
+        },
+    ))
+    .await;
+    fixture.scheduler_idle().await;
+    healthy(&fixture, &engine, &control).await;
+    finish(&mut fixture, &engine).await;
+}
+
 async fn teardown_with_live_clients<F: WireFixture>() -> (Outputs, Vec<u32>) {
     let control = Controller::<F::Protocol>::default();
     let mut fixture = F::start(
@@ -505,6 +575,15 @@ macro_rules! enroll_baseline {
                 bounded(
                     "consumer drop and recovery",
                     active_work::<$fixture>(Cancellation::ConsumerDrop),
+                )
+                .await;
+            }
+
+            #[tokio::test]
+            async fn cancellation_burst_reuses_connection_pool() {
+                bounded(
+                    "cancellation burst and recovery",
+                    cancellation_burst::<$fixture>(),
                 )
                 .await;
             }
@@ -717,4 +796,231 @@ async fn sglang_malformed_terminal_fails_then_recovers() {
         finish(&mut fixture, &engine).await;
     })
     .await;
+}
+
+fn http_request() -> PreprocessedRequest {
+    let mut req = request("mocker-model", vec![11, 22, 33], 2);
+    req.extra_args = Some(json!({"sglang_tito": {
+        "sampling_params": {"max_new_tokens": 2, "custom_sampling": [0.5, null]},
+        "future_field": {"opaque": [true, "unchanged"]}
+    }}));
+    req
+}
+
+fn assert_http_outputs(outputs: Outputs, request_id: &str) {
+    let outputs: Vec<_> = outputs.into_iter().collect::<Result<_, _>>().unwrap();
+    let expected = http::responses(request_id);
+    assert_eq!(outputs.len(), expected.len());
+    for (output, expected) in outputs.iter().zip(expected) {
+        assert_eq!(
+            output.engine_data,
+            Some(json!({"sglang_response": expected}))
+        );
+        assert!(output.token_ids.is_empty());
+    }
+    assert!(outputs[0].finish_reason.is_none());
+    assert_eq!(outputs[1].finish_reason, Some(FinishReason::Stop));
+}
+
+#[tokio::test]
+async fn sglang_http_discovery_dispatch_and_opaque_payload() {
+    let control = Controller::<sglang_fixture::Adapter>::default();
+    let mut fixture =
+        sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+    let http_control = Controller::<http::Adapter>::default();
+    let mut http = http::Fixture::start(http_control.clone(), "200 OK").await;
+    fixture.override_discovery(
+        Value::Null,
+        vec![json!({
+            "port": http.port(), "incremental_streaming_output": true
+        })],
+    );
+    let engine = fixture.engine().await;
+    let metadata = bounded("HTTP discovery", engine.start(0)).await.unwrap();
+    assert_eq!(
+        metadata.runtime_data.get("sglang_generate"),
+        Some(&json!(true))
+    );
+
+    let mut req = http_request();
+    sglang_fixture::Fixture::configure_request(&mut req);
+    req.routing.as_mut().unwrap().priority = Some(7);
+    let mut expected = req.extra_args.as_ref().unwrap()["sglang_tito"].clone();
+    req.extra_args.as_mut().unwrap()["sglang_tito"]["input_ids"] = json!([999]);
+    req.extra_args.as_mut().unwrap()["sglang_tito"]["rid"] = json!("stale");
+    req.extra_args.as_mut().unwrap()["sglang_tito"]["bootstrap_host"] = json!("stale");
+    let ctx = mock_context();
+    let id = ctx.id().to_string();
+    expected["input_ids"] = json!(req.token_ids);
+    expected["rid"] = json!(id);
+    expected["stream"] = json!(true);
+    expected["priority"] = json!(7);
+    expected["routed_dp_rank"] = json!(3);
+    expected["lora_path"] = json!("test-adapter");
+    let native = http_control.request(&id, RequestPlan::default());
+    let grpc = control.request(&id, RequestPlan::default());
+    let (first_token, first_token_seen) = tokio::sync::watch::channel(false);
+    let outputs = collect(&engine, req, GenerateContext::new(ctx, Some(first_token))).await;
+    assert_http_outputs(outputs, &id);
+    assert!(*first_token_seen.borrow());
+    assert_eq!(native.native_request(), Some(expected));
+    assert!(!grpc.reached(Event::Received));
+    bounded("HTTP completion", native.wait(Event::Dropped)).await;
+    healthy(&fixture, &engine, &control).await;
+    assert!(http.aborted_requests().is_empty());
+    finish(&mut fixture, &engine).await;
+    http.shutdown().await;
+}
+
+#[tokio::test]
+async fn sglang_http_unavailable_preserves_grpc() {
+    let http_control = Controller::<http::Adapter>::default();
+    let mut http = http::Fixture::start(http_control.clone(), "503 Service Unavailable").await;
+    for server_info in [
+        json!({}),
+        json!({"port": http.port(), "incremental_streaming_output": true}),
+    ] {
+        let control = Controller::<sglang_fixture::Adapter>::default();
+        let mut fixture =
+            sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        fixture.override_discovery(Value::Null, vec![server_info]);
+        let engine = fixture.engine().await;
+        let metadata = bounded("unavailable HTTP discovery", engine.start(0))
+            .await
+            .unwrap();
+        assert!(!metadata.runtime_data.contains_key("sglang_generate"));
+        let ctx = mock_context();
+        let native = http_control.request(ctx.id(), RequestPlan::default());
+        let grpc = control.request(ctx.id(), RequestPlan::default());
+        let error = failure(
+            collect(&engine, http_request(), GenerateContext::new(ctx, None)).await,
+            &[],
+            BackendError::InvalidArgument,
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("no ready incremental HTTP endpoint")
+        );
+        assert!(!native.reached(Event::Received));
+        assert!(!grpc.reached(Event::Received));
+        healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
+    }
+    http.shutdown().await;
+}
+
+async fn http_checkpoint(
+    stream: &mut BoxStream<'static, Result<LLMEngineOutput, DynamoError>>,
+    handle: &RequestHandle<http::Adapter>,
+) -> Outputs {
+    let output = bounded("HTTP first response", stream.next()).await.unwrap();
+    assert!(output.as_ref().unwrap().finish_reason.is_none());
+    bounded("HTTP checkpoint", handle.wait(Event::Checkpoint)).await;
+    let native = handle.native_request().unwrap();
+    assert_eq!(
+        output.as_ref().unwrap().engine_data,
+        Some(json!({"sglang_response": http::responses(native["rid"].as_str().unwrap())[0]}))
+    );
+    assert!(poll!(stream.next()).is_pending());
+    vec![output]
+}
+
+#[tokio::test]
+async fn sglang_http_cancellation_and_drop_isolate_requests() {
+    http_cancellation_and_drop_isolate_requests(after_token_responses(1, StreamAction::Continue))
+        .await;
+}
+
+#[tokio::test]
+async fn sglang_http_cancellation_and_drop_before_headers_isolate_requests() {
+    http_cancellation_and_drop_isolate_requests(RequestPlan {
+        open: OpenAction::Hold,
+        ..Default::default()
+    })
+    .await;
+}
+
+async fn http_cancellation_and_drop_isolate_requests(plan: RequestPlan) {
+    let control = Controller::<sglang_fixture::Adapter>::default();
+    let mut fixture =
+        sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+    let http_control = Controller::<http::Adapter>::default();
+    let mut http = http::Fixture::start(http_control.clone(), "200 OK").await;
+    fixture.override_discovery(
+        Value::Null,
+        vec![json!({
+            "port": http.port(), "incremental_streaming_output": true
+        })],
+    );
+    let engine = fixture.engine().await;
+    bounded("HTTP discovery", engine.start(0)).await.unwrap();
+    let mut aborted = Vec::new();
+    for cancellation in [Cancellation::Explicit, Cancellation::ConsumerDrop] {
+        let ctx_a = mock_context();
+        let handle_a = http_control.request(ctx_a.id(), plan);
+        let mut stream_a = engine
+            .generate(http_request(), GenerateContext::new(ctx_a.clone(), None))
+            .await
+            .unwrap();
+        let mut outputs_a = if matches!(plan.open, OpenAction::Hold) {
+            tokio::select! {
+                _ = bounded("HTTP request accepted before headers", handle_a.wait(Event::Received)) => {}
+                output = stream_a.next() => panic!("response arrived before headers: {output:?}"),
+            }
+            assert!(poll!(stream_a.next()).is_pending());
+            Vec::new()
+        } else {
+            http_checkpoint(&mut stream_a, &handle_a).await
+        };
+        let tokens_a = handle_a.tokens();
+        let ctx_b = mock_context();
+        let id_b = ctx_b.id().to_string();
+        let handle_b =
+            http_control.request(&id_b, after_token_responses(1, StreamAction::Continue));
+        let mut stream_b = engine
+            .generate(http_request(), GenerateContext::new(ctx_b, None))
+            .await
+            .unwrap();
+        let mut outputs_b = http_checkpoint(&mut stream_b, &handle_b).await;
+        healthy(&fixture, &engine, &control).await;
+
+        match cancellation {
+            Cancellation::Explicit => {
+                ctx_a.stop_generating();
+                outputs_a.push(bounded("HTTP cancellation", stream_a.next()).await.unwrap());
+                failure(outputs_a, &[], BackendError::Cancelled);
+                http.wait_aborted(ctx_a.id()).await;
+                drop(stream_a);
+            }
+            Cancellation::ConsumerDrop => drop(stream_a),
+        }
+        bounded("HTTP transport released", handle_a.wait(Event::Dropped)).await;
+        http.wait_aborted(ctx_a.id()).await;
+        aborted.push(ctx_a.id().to_string());
+        assert_eq!(http.aborted_requests(), aborted);
+        assert_eq!(handle_a.tokens(), tokens_a);
+        assert!(!handle_b.reached(Event::Dropped));
+        assert!(poll!(stream_b.next()).is_pending());
+        handle_b.release();
+        outputs_b.push(
+            bounded("HTTP survivor terminal", stream_b.next())
+                .await
+                .unwrap(),
+        );
+        drop(stream_b);
+        assert_http_outputs(outputs_b, &id_b);
+        bounded("HTTP survivor released", handle_b.wait(Event::Dropped)).await;
+
+        let ctx = mock_context();
+        let id = ctx.id().to_string();
+        assert_http_outputs(
+            collect(&engine, http_request(), GenerateContext::new(ctx, None)).await,
+            &id,
+        );
+        healthy(&fixture, &engine, &control).await;
+        assert_eq!(http.aborted_requests(), aborted);
+    }
+    finish(&mut fixture, &engine).await;
+    http.shutdown().await;
 }

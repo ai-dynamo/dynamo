@@ -29,8 +29,12 @@ use super::{
     fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
+#[path = "sglang_http.rs"]
+pub mod http;
+
 pub struct Fixture {
     config: FixtureConfig,
+    control: Controller<Adapter>,
     service: SglangMockerService,
     pub(crate) server: TestServer,
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
@@ -71,12 +75,12 @@ impl Fixture {
     }
 }
 
-impl SidecarFixture for Fixture {
-    type Engine = SglangSidecarEngine;
-    type Protocol = Adapter;
-    const GENERATE_OPENING: GenerateOpening = GenerateOpening::OnStreamPoll;
-
-    async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
+impl Fixture {
+    async fn start_at(
+        control: Controller<Adapter>,
+        config: FixtureConfig,
+        address: std::net::SocketAddr,
+    ) -> Self {
         let mut args = fast_engine_args(EngineType::Sglang);
         args.speedup_ratio = config.speedup_ratio;
         let service = SglangMockerService::new(
@@ -100,14 +104,14 @@ impl SidecarFixture for Fixture {
         let (health_tx, health_calls) = watch::channel(0);
         let controlled = ControlledService {
             inner: service.clone(),
-            control,
+            control: control.clone(),
             scripted: scripted.clone(),
             model_info: model_info.clone(),
             server_info: server_info.clone(),
             health: health_rx,
             health_calls: health_tx,
         };
-        let server = TestServer::start(move |listener, shutdown| async move {
+        let server = TestServer::start_at(address, move |listener, shutdown| async move {
             tonic::transport::Server::builder()
                 .add_service(SglangServiceServer::new(controlled))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
@@ -120,6 +124,7 @@ impl SidecarFixture for Fixture {
         .unwrap();
         Self {
             config,
+            control,
             service,
             server,
             scripted,
@@ -128,6 +133,16 @@ impl SidecarFixture for Fixture {
             health,
             health_calls,
         }
+    }
+}
+
+impl SidecarFixture for Fixture {
+    type Engine = SglangSidecarEngine;
+    type Protocol = Adapter;
+    const GENERATE_OPENING: GenerateOpening = GenerateOpening::OnStreamPoll;
+
+    async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
+        Self::start_at(control, config, "127.0.0.1:0".parse().unwrap()).await
     }
 
     async fn engine(&self) -> Self::Engine {
@@ -494,6 +509,35 @@ impl Protocol for Adapter {
 }
 
 impl ProcessFixture for Fixture {
+    fn native_traceparent(request: &pb::GenerateRequest) -> Option<&str> {
+        Some(&request.trace_headers["traceparent"])
+    }
+
+    fn assert_text(actual: &str, tokens: &[u32]) {
+        let expected: Vec<_> = tokens.iter().map(|token| format!("token{token}")).collect();
+        assert_eq!(actual.split_whitespace().collect::<Vec<_>>(), expected);
+    }
+
+    async fn restart(&mut self) {
+        let address = self
+            .server
+            .endpoint()
+            .strip_prefix("http://")
+            .unwrap()
+            .parse()
+            .unwrap();
+        self.shutdown().await;
+        *self = Self::start_at(self.control.clone(), self.config.clone(), address).await;
+    }
+
+    fn native_prompt(request: &pb::GenerateRequest) -> Vec<u32> {
+        request
+            .input_ids
+            .iter()
+            .map(|&token| u32::try_from(token).unwrap())
+            .collect()
+    }
+
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }
