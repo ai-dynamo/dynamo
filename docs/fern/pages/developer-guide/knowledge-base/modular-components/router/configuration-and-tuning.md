@@ -160,6 +160,8 @@ worker_selection:
 
 Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
 
+The optional `seed` parameter, a non-negative integer with no flag equivalent, makes selection reproducible. Each policy instance then draws its equal-cost tie-breaks and temperature samples from its own random stream seeded with that value, over candidates ordered by worker ID and data-parallel rank, so repeated runs on the same inputs, such as offline replays, pick the same workers. Without `seed`, the policy keeps its unseeded behavior. Leave it unset for live serving: router replicas configured with the same seed make the same tie-break choices.
+
 > [!WARNING]
 > The flags below and their environment variables are deprecated for removal in v1.7. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.
 
