@@ -3,11 +3,20 @@
 
 import asyncio
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from dynamo.llm import LLMUnaryClient, with_engine_data
+from dynamo.llm import (
+    LLMUnaryClient,
+    ModelInput,
+    ModelType,
+    UnaryChatModel,
+    WorkerType,
+    with_engine_data,
+)
 
 pytestmark = [
     pytest.mark.parallel,
@@ -16,6 +25,53 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.core,
 ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "public_name, template, expected_name, expected_template",
+    [
+        (None, None, "vision-app", None),
+        ("public-vision", Path("chat.jinja"), "public-vision", "chat.jinja"),
+    ],
+)
+async def test_unary_chat_model_registers_and_serves_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    public_name: str | None,
+    template: Path | None,
+    expected_name: str,
+    expected_template: str | None,
+) -> None:
+    endpoint = Mock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+    register = AsyncMock()
+    context = object()
+    responses: list[Any] = []
+
+    async def serve_endpoint(generate: Any) -> None:
+        responses.extend(
+            [value async for value in generate({"token_ids": [1]}, context=context)]
+        )
+
+    endpoint.serve_endpoint = AsyncMock(side_effect=serve_endpoint)
+    monkeypatch.setattr("dynamo.llm._unary.register_model", register)
+
+    async def handler(request: Any, *, context: Any) -> Any:
+        return {"request": request, "context": context}
+
+    model = UnaryChatModel("Qwen/model", "vision-app", public_name, template)
+    await model.serve(runtime, handler)
+
+    runtime.endpoint.assert_called_once_with("vision-app.app.generate")
+    args, kwargs = register.await_args
+    assert args == (ModelInput.Tokens, ModelType.Chat, endpoint, "Qwen/model")
+    assert kwargs["model_name"] == expected_name
+    assert kwargs["custom_template_path"] == expected_template
+    assert kwargs["worker_type"] == WorkerType.Aggregated
+    assert kwargs["ignore_weights"] is True
+    endpoint.serve_endpoint.assert_awaited_once()
+    assert responses == [{"request": {"token_ids": [1]}, "context": context}]
 
 
 def test_with_engine_data_preserves_completion_and_existing_values() -> None:
