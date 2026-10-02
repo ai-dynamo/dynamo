@@ -26,7 +26,7 @@ use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_co
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
-    DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
+    DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name, ready_container_names,
 };
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -938,7 +938,7 @@ fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
 /// which is why the container arm is gated at all.
 ///
 /// Not fixed here: under container discovery this still trusts every `Ready`
-/// container to be a Dynamo worker, matching `extract_ready_containers` in
+/// container to be a Dynamo worker, matching `ready_container_names` in
 /// `lib/runtime`. A pod carrying a Ready non-worker sidecar would contribute an
 /// id for it. Nothing in the Pod distinguishes the two — the port name this
 /// file keys on is the generic `"http"` — so filtering here would risk dropping
@@ -956,13 +956,10 @@ fn pod_worker_ids(
     let named = !pod_name.is_empty();
     let pod_id = (named && !container_discovery).then(|| hash_pod_name(pod_name));
     let container_ids = (container_discovery && named)
-        .then_some(pod.status.as_ref())
-        .flatten()
-        .and_then(|s| s.container_statuses.as_ref())
+        .then(|| ready_container_names(pod))
         .into_iter()
         .flatten()
-        .filter(|cs| cs.ready)
-        .map(move |cs| hash_container_name(pod_name, &cs.name));
+        .map(move |name| hash_container_name(pod_name, name));
     pod_id.into_iter().chain(container_ids)
 }
 
@@ -2172,6 +2169,47 @@ mod tests {
             assert!(ids.contains(&hash_container_name("worker-0", sidecar)));
         }
         assert_eq!(ids.len(), 3);
+    }
+
+    /// Native sidecars count under container discovery, plain init containers do not.
+    #[test]
+    fn pod_worker_ids_includes_native_sidecars_under_container_discovery() {
+        use k8s_openapi::api::core::v1::{Container, ContainerStatus};
+
+        let mut pod = pod_mode_worker_pod();
+        pod.spec
+            .as_mut()
+            .expect("fixture has a spec")
+            .init_containers = Some(vec![
+            Container {
+                name: "runtime".to_string(),
+                restart_policy: Some("Always".to_string()),
+                ..Default::default()
+            },
+            Container {
+                name: "setup".to_string(),
+                ..Default::default()
+            },
+        ]);
+        pod.status
+            .as_mut()
+            .expect("fixture has a status")
+            .init_container_statuses = Some(
+            ["runtime", "setup"]
+                .iter()
+                .map(|name| ContainerStatus {
+                    name: name.to_string(),
+                    ready: true,
+                    ..Default::default()
+                })
+                .collect(),
+        );
+
+        let ids: HashSet<u64> = pod_worker_ids(&pod, true).collect();
+
+        assert!(ids.contains(&hash_container_name("worker-0", "runtime")));
+        assert!(!ids.contains(&hash_container_name("worker-0", "setup")));
+        assert_eq!(ids.len(), 4);
     }
 
     /// Under container discovery a worker registers under its *container*
