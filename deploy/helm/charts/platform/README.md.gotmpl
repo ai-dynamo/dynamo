@@ -52,13 +52,13 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ##### Operator Namespace Discovery Isolation
 
-**Change:** The operator sets `DYN_NAMESPACE_PREFIX_STRICT=true` for frontend and EPP components resolving to runtime 1.6.0 or later. Discovery accepts the component's base namespace, its eight-character lowercase hexadecimal worker generations, and the `legacy` migration generation. It excludes unrelated namespaces such as `default-foo-bar` from a frontend scoped to `default-foo`.
+**Change:** The operator enables strict namespace-prefix matching for frontend and EPP components using runtime 1.6.0 or later. For example, a frontend scoped to `default-foo` excludes `default-foo-bar` and its workers.
 
-**Affected:** Operator-managed frontend and EPP components upgrading to a runtime image containing the 1.6.0 strict-prefix implementation.
+**Affected:** Operator-managed frontend and EPP components.
 
-**Action:** Upgrade the runtime image along with the operator and keep `runtimeVersionOverride` aligned with the image. If upgrading the runtime while retaining an older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly. Manually configured namespace prefixes retain literal prefix matching unless strict mode is enabled.
+**Action:** Use runtime images containing this fix. For custom images, set `runtimeVersionOverride` when the image tag does not identify the Dynamo runtime version. If retaining a compatible older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly on frontend and EPP components.
 
-**Existing deployments:** An operator-only upgrade preserves the rendered defaults of components resolving to older or unknown runtimes. Moving a component to runtime 1.6.0 or later adds the strict-mode environment variable and rolls that component. An operator-only upgrade does not fix isolation for older images.
+**Existing deployments:** An operator-only upgrade does not fix isolation for older runtime images. With an updated operator, upgrading a component to a supported runtime enables strict matching and rolls that component. Manual namespace prefixes retain literal matching unless strict mode is enabled.
 
 ### v1.5.0
 
