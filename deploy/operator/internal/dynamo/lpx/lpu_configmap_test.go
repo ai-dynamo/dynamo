@@ -41,9 +41,7 @@ func TestLPXRuntimeConfigNamesMatchPodIdentity(t *testing.T) {
 			decode, decodeHash, err := renderRuntimeConfigMap(root+"-decode", data)
 			require.NoError(t, err)
 
-			t.Log("Resolve the same LPU table from Pod identity and preserve each role suffix")
-			require.Equal(t, LPUConfigMapHash(lpu), lpuHash)
-			require.Equal(t, LPUConfigMapHash(decode), decodeHash)
+			t.Log("Name each table from its content hash and preserve each role suffix")
 			require.Equal(t, root+"-lpu-"+lpuHash[:16], lpu.Name)
 			require.Equal(t, root+"-decode-"+decodeHash[:16], decode.Name)
 			require.Empty(t, validation.IsDNS1123Subdomain(lpu.Name))
@@ -52,60 +50,23 @@ func TestLPXRuntimeConfigNamesMatchPodIdentity(t *testing.T) {
 	}
 }
 
-func TestLPURuntimeBuildRef(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Define runtime build-reference selection contracts")
-	tests := []struct {
-		name     string
-		snapshot string
-		runtime  string
-		want     string
-	}{
-		{name: "relative runtime", snapshot: "file:///snapshot", runtime: "model-build", want: "file:///models/model-build"},
-		{name: "cleaned runtime", snapshot: "file:///snapshot", runtime: " a/../b ", want: "file:///models/b"},
-		{name: "GCS snapshot", snapshot: "gs://bucket/snapshot", runtime: "model-build", want: "gs://bucket/snapshot"},
-		{name: "malformed snapshot", snapshot: "%", runtime: "model-build", want: "%"},
-		{name: "empty runtime", snapshot: "file:///snapshot", want: "file:///snapshot"},
-		{name: "malformed runtime", snapshot: "file:///snapshot", runtime: "%", want: "file:///snapshot"},
-		{name: "runtime URL", snapshot: "file:///snapshot", runtime: "gs://bucket/build", want: "file:///snapshot"},
-		{name: "absolute runtime", snapshot: "file:///snapshot", runtime: "/model-build", want: "file:///snapshot"},
-		{name: "dot runtime", snapshot: "file:///snapshot", runtime: ".", want: "file:///snapshot"},
-		{name: "parent runtime", snapshot: "file:///snapshot", runtime: "..", want: "file:///snapshot"},
-		{name: "escaping runtime", snapshot: "file:///snapshot", runtime: "a/../../b", want: "file:///snapshot"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Select the runtime build reference")
-			got := lpuRuntimeBuildRef(&ModelProjection{
-				runtimeBuildRef: test.runtime,
-				configuredBuild: Build{Path: test.snapshot},
-			}, "/models")
-
-			t.Log("Preserve valid remapping and every fallback byte exactly")
-			require.Equal(t, test.want, got)
-		})
-	}
-}
-
 func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Construct an XT Single projection with two physical runtime partitions")
-	projection := &ModelProjection{
-		model:    "default",
+	projection := &Model{name: "default", component: &component{
 		pipeline: PipelineSingle,
 		configuredBuild: Build{
-			Family: BuildFamilyXT,
-			Partitions: []BuildPartition{
-				{SourcePartitionID: 7, PartPath: "part-7", Topology: Topology{ChipCount: 16, Raw: "topology-7"}},
-				{SourcePartitionID: 9, PartPath: "part-9", Topology: Topology{ChipCount: 8, Raw: "topology-9"}},
+			family: xtFamily,
+			partitions: []buildPartition{
+				{sourcePartitionID: 7, partPath: "part-7", numChips: 16, devicesPerNode: 8},
+				{sourcePartitionID: 9, partPath: "part-9", numChips: 8, devicesPerNode: 8},
 			},
 		},
-	}
+	}}
 
-	t.Log("Project only the five columns consumed by the XT Single runtime")
-	data := resolvedPartitionData([]*ModelProjection{projection})
+	t.Log("Project the four placement and artifact columns for the XT Single runtime")
+	data := resolvedPartitionData([]*Model{projection})
 
 	t.Log("Verify omitted model columns never enter the final map and retained bytes remain exact")
 	require.Equal(t, map[string]string{
@@ -113,7 +74,6 @@ func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testin
 		"partition_ids":          "7\n9",
 		"partition_node_offsets": "0\n2",
 		"partition_paths":        "part-7\npart-9",
-		"topologies":             "topology-7\ntopology-9",
 	}, data)
 }
 

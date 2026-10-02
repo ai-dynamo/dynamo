@@ -25,11 +25,11 @@ func Components(dgd *dynamov1beta1.DynamoGraphDeployment) []*dynamov1beta1.Dynam
 	return components
 }
 
-// ComponentGroups returns workload membership keyed by conductor component name.
+// componentGroups returns workload membership keyed by conductor component name.
 // Each conductor owns a group. Admission permits an agent-only component only
 // when it shares the graph's sole conductor. Member names are sorted.
 // dgd must be non-nil and have passed admission; it is not mutated.
-func ComponentGroups(dgd *dynamov1beta1.DynamoGraphDeployment) map[string][]string {
+func componentGroups(dgd *dynamov1beta1.DynamoGraphDeployment) map[string][]string {
 	components := Components(dgd)
 	groups := make(map[string][]string)
 

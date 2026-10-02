@@ -351,16 +351,13 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantSchemaErr: `spec.components[0].roles[1]: Duplicate value: map[string]interface {}{"name":"agent"}`,
 		},
 		{
-			name: "LPX reserves materialized agent container names",
+			name: "LPX allows role names in sidecars and init containers",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				role := &dgd.Spec.Components[0].Roles[0]
-				role.PodTemplate.Spec.Containers = append(role.PodTemplate.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
-				role.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "agent", Image: "setup"}}
+				for _, role := range dgd.Spec.Components[0].Roles {
+					role.PodTemplate.Spec.Containers = append(role.PodTemplate.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
+					role.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
+				}
 			}),
-			wantWebhookErrs: []string{
-				`spec.components[0].roles[0].podTemplate.spec.containers[1].name: Forbidden: LPX reserves "agent" for the materialized role container`,
-				`spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: LPX reserves "agent" for the materialized role container`,
-			},
 		},
 		{
 			name: "LPX rejects a missing conductor role on CREATE despite a conductor-named sidecar",
@@ -382,7 +379,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "LPX defers explicit conductor name checks until build mode is known",
+			name: "LPX allows a conductor sidecar named conductor",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Roles[1].PodTemplate = component.Roles[0].PodTemplate.DeepCopy()

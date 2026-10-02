@@ -8,93 +8,70 @@ package lpx
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
 
-const (
-	v3CompilerEnvelopeSchema = "dynamo.lpx.v3-capnp/v1"
-	v3ProjectionVersion      = "v3-hx-capnp/v1"
-	v3LPUDevice              = "lpu"
-	v3HXLogicalDeviceCount   = 16
-)
-
-func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
-	runtimeBuild := *intent.BuildSnapshot.build
-	manifestPartitions := runtimeBuild.Partitions
-	selectedPropSyncChains := runtimeBuild.SelectedPropSyncChains
-
-	ioFPGACount, ioFanoutFactor := runtimeBuild.IOFPGACount, runtimeBuild.IOFanoutFactor
-
-	// Selected chains are represented by the allocation metadata and connectors below.
-	runtimeBuild.SelectedPropSyncChains = nil
-
-	allocationMetadata, connectors, err := projectV3PropSync(manifestPartitions, selectedPropSyncChains, intent.Pipeline)
+// projectV3Component derives the HX component shared by every model and writes
+// its model-independent digest fields.
+func projectV3Component(source *Build, pipeline Pipeline, fields digestTranscript) (*component, error) {
+	configured := *source
+	allocationMetadata, connectors, err := projectV3PropSync(configured.partitions, configured.selectedPropSyncChains, pipeline)
 	if err != nil {
 		return nil, err
 	}
-
-	// Initialize independent model hashes after validating the shared component geometry.
-	transcripts := newModelProjectionTranscripts(intent, v3ProjectionVersion)
-	for index := range transcripts {
-		transcripts[index].field("v3-envelope-schema", []byte(v3CompilerEnvelopeSchema))
-	}
+	// Selected chains are represented by the allocation metadata and connectors.
+	configured.selectedPropSyncChains = nil
 
 	// Count runtime endpoints while binding ordered partitions into projection identity.
+	// Manifest validation guarantees numChips/devicesPerNode equals the HX extent's node count.
+	partitionRequests := make([]lpxv1alpha1.PartitionRequest, len(configured.partitions))
+	fields.field("v3-envelope-schema", []byte("dynamo.lpx.v3-capnp/v1"))
 	agentReplicas := 0
-	for index, partition := range manifestPartitions {
-		agentReplicas += int(partition.HXExtent[1] * partition.HXExtent[2] * partition.HXExtent[3])
-		for modelIndex := range transcripts {
-			transcripts[modelIndex].intField("ordered-compiler-id-index", int64(index))
-			transcripts[modelIndex].uint32Field("ordered-compiler-id", uint32(partition.SourcePartitionID))
-		}
+	for index, partition := range configured.partitions {
+		extent := slices.Clone(partition.hxExtent)
+		partitionRequests[index] = newPartitionRequest(index, partition)
+		partitionRequests[index].Extent = &extent
+		agentReplicas += partition.effectiveNodeCount()
+		fields.intField("ordered-compiler-id-index", int64(index))
+		fields.uint32Field("ordered-compiler-id", uint32(partition.sourcePartitionID))
 	}
+	fields.field("allocation-metadata", allocationMetadata)
+	// Bind the Cyborg runtime contract into hybrid projection identity.
+	bindHybridRuntimeIO(fields, pipeline, configured.ioFPGACount, configured.ioFanoutFactor)
 
-	// Publish distinct logical identities backed by the component's immutable configuration.
-	for index := range transcripts {
-		transcript := &transcripts[index]
-		transcript.field("allocation-metadata", allocationMetadata)
-		// Bind the Cyborg runtime contract into hybrid projection identity.
-		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
-
-		dst = append(dst, &ModelProjection{
-			digest:                 transcript.sum(),
-			compilerSnapshotDigest: intent.BuildSnapshot.contentID,
-			runtimeBuildRef:        intent.RuntimeBuildRef,
-			model:                  intent.Models[index],
-			pipeline:               intent.Pipeline,
-			configuredBuild:        runtimeBuild,
-			allocationMetadata:     allocationMetadata,
-			partitions:             manifestPartitions,
-			connectors:             connectors,
-			agentReplicas:          agentReplicas,
-		})
-	}
-	return dst, nil
+	return &component{
+		configuredBuild:    configured,
+		allocationMetadata: allocationMetadata,
+		partitionRequests:  partitionRequests,
+		connectors:         connectors,
+		agentReplicas:      agentReplicas,
+	}, nil
 }
 
 func projectV3PropSync(
-	partitions []BuildPartition,
+	partitions []buildPartition,
 	chains [][]int,
 	pipeline Pipeline,
 ) (json.RawMessage, []lpxv1alpha1.PropSyncConnectorRequest, error) {
-	edgePositions, err := validateSelectedPropSyncGraph(partitions, chains, "selected V3 prop-sync chain", false)
+	edgePositions, err := validateSelectedPropSyncGraph(partitions, chains, "selected V3 prop-sync chain")
 	if err != nil {
 		return nil, nil, err
 	}
-	if pipeline != PipelineLPX && len(edgePositions) != len(partitions)-1 {
+	if pipeline != PipelineHybrid && len(edgePositions) != len(partitions)-1 {
 		return nil, nil, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
 	}
 
-	// Project each physical partition into the V3 allocation metadata envelope.
+	// Project each physical partition into the HX allocation metadata envelope.
 	partitionInfo := make(map[string]any, len(partitions)+1)
 	partitionInfo["num_partitions"] = len(partitions)
 	for _, partition := range partitions {
-		compilerID := uint32(partition.SourcePartitionID)
+		compilerID := uint32(partition.sourcePartitionID)
 		partitionInfo[strconv.FormatUint(uint64(compilerID), 10)] = map[string]any{
-			"device":     v3LPUDevice,
-			"allocation": partition.HXExtent,
+			"device":     "lpu",
+			"allocation": partition.hxExtent,
 		}
 	}
 
@@ -103,11 +80,11 @@ func projectV3PropSync(
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, 0, len(edgePositions))
 	for _, fromPosition := range edgePositions {
 		source := partitions[fromPosition]
-		destinationID := partitions[fromPosition+1].SourcePartitionID
-		endpointCount := source.HXExtent[1] * source.HXExtent[2] * source.HXExtent[3]
-		logicalConnections := make([]lpxv1alpha1.HxLogicalConnection, v3HXLogicalDeviceCount)
-		connections := make([][2]int64, v3HXLogicalDeviceCount)
-		sourceOffset := source.HXExtent[0]*endpointCount - v3HXLogicalDeviceCount
+		destinationID := partitions[fromPosition+1].sourcePartitionID
+		logicalConnections := make([]lpxv1alpha1.HxLogicalConnection, source.devicesPerNode)
+		connections := make([][2]int64, source.devicesPerNode)
+		// Connections leave from the source partition's final node.
+		sourceOffset := int64(source.numChips - source.devicesPerNode)
 		for logicalDevice := range logicalConnections {
 			from := sourceOffset + int64(logicalDevice)
 			logicalConnections[logicalDevice] = lpxv1alpha1.HxLogicalConnection{
@@ -118,7 +95,7 @@ func projectV3PropSync(
 		}
 		acceptableLaneMultiplicities := []int64{4, 2, 1}
 		propSyncPairs = append(propSyncPairs, map[string]any{
-			"source_partition":    source.SourcePartitionID,
+			"source_partition":    source.sourcePartitionID,
 			"dest_partition":      destinationID,
 			"connections":         connections,
 			"num_supported_lanes": acceptableLaneMultiplicities,

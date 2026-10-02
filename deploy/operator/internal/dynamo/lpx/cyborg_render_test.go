@@ -6,73 +6,13 @@
 package lpx
 
 import (
-	"strings"
 	"testing"
 
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/utils/ptr"
 )
-
-func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Project a hybrid workload at the combined name limit and maximum scheduling replica count")
-	fixture := newV3CompilerFixture()
-	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	projection := projectRenderFixture(t, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
-	projection.stage = testRenderComponentName
-	projection.configuredBuild.IOFPGACount = 1
-	projection.configuredBuild.IOFanoutFactor = 1
-	workload := &Workload{
-		modelProjections:     []*ModelProjection{projection},
-		scalingGroupReplicas: 2496,
-	}
-	pcsName := strings.Repeat("a", 28) // target + target-cond consume the remaining Grove budget.
-	plan, err := workload.PlanNodeLocalMaterialization(pcsName)
-	require.NoError(t, err)
-	plan, err = plan.WithGroup("target")
-	require.NoError(t, err)
-
-	t.Log("Validate actual GPU widths rather than assuming the largest int32 pod index")
-	for _, test := range []struct {
-		name      string
-		replicas  int32
-		wantError bool
-	}{
-		{name: "one GPU per engine", replicas: 1},
-		{name: "hostname at DNS limit", replicas: 100_000_000},
-		{name: "hostname over DNS limit", replicas: 100_000_001, wantError: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Render the GPU width beneath the same readable PCS name")
-			pcs := renderTestPCS(true)
-			pcs.Name = pcsName
-			cyborg := namedClique(t, pcs, "cond")
-			cyborg.Name, cyborg.Spec.RoleName = plan.CyborgTemplate, plan.CyborgTemplate
-			cyborg.Spec.Replicas = test.replicas
-			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
-			_, err := RenderNodeLocal(workload, plan, RenderInput{
-				Cyborg: cyborg,
-				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
-			})
-			if test.wantError {
-				require.ErrorContains(t, err, "materialized Cyborg Pod hostname")
-				require.ErrorContains(t, err, "must be no more than 63 characters")
-				return
-			}
-			require.NoError(t, err)
-			hostname := materializedPodHostname(plan.ForReplica(plan.Replicas-1).CyborgClique, int(test.replicas)-1)
-			require.Empty(t, validation.IsDNS1123Label(hostname))
-			if test.replicas > 1 {
-				require.Len(t, hostname, validation.DNS1123LabelMaxLength)
-			}
-		})
-	}
-}
 
 func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Parallel()
@@ -81,33 +21,25 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
 	fixture.numLPUNodes = 1
-	fixture.partitions[0].topology = "URSA_V2_1__Q8__8C__G_106__KP_FEC__GHZ_1_0__NO_FPGA"
 	fixture.partitions[0].numChips = 8
 	fixture.partitions[0].devicesPerNode = 8
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
-	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
-	build.IOFPGACount = 2
-	build.IOFanoutFactor = 2
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"},
-		BuildSnapshot:   normalized,
-		RuntimeBuildRef: "model-build",
-	})
+	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+	build := normalized
+	build.compilationMode = compilationModeHybrid
+	build.ioFPGACount = 2
+	build.ioFanoutFactor = 2
+	projectionBatch, err := projectComponent(testRenderComponentName, "model-build", normalized, PipelineHybrid, []string{"default"})
 	require.NoError(t, err)
 	projection := projectionBatch[0]
 
 	t.Log("Render the Cyborg runtime contract")
-	pcs := renderTestPCS(true)
-	decode := namedClique(t, pcs, "cond")
-	decode.Spec.Replicas = 4
-	decode.Spec.MinAvailable = ptr.To[int32](4)
-	decode.Spec.PodSpec.ResourceClaims = nil
-	decode.Spec.PodSpec.Containers[0].Resources.Limits = corev1.ResourceList{
+	decode := renderTestCyborgTemplate()
+	decode.Spec.ResourceClaims = nil
+	decode.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
 		corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
 	}
-	decode.Spec.PodSpec.Containers[0].Command = []string{"/custom-cyborg", "--wrapper-option"}
-	decode.Spec.PodSpec.Containers[0].Args = []string{"argument with spaces", "literal $HOME", ""}
+	decode.Spec.Containers[0].Command = []string{"/custom-cyborg", "--wrapper-option"}
+	decode.Spec.Containers[0].Args = []string{"argument with spaces", "literal $HOME", ""}
 	authoredEnv := []corev1.EnvVar{
 		{Name: "RDMA_PORT", Value: "12345"},
 		{Name: "CYBORG_BATCH_SIZE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
@@ -118,17 +50,15 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 		{Name: "TOKENIZER_DIR", Value: "$(GBUILD_MANIFEST_PATH)/../tokenizer"},
 		{Name: "TOTAL_REPLICAS", Value: "9"},
 	}
-	decode.Spec.PodSpec.Containers[0].Env = authoredEnv
+	decode.Spec.Containers[0].Env = authoredEnv
 
 	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
-	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
-	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].SubPath = "cyborg"
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].ReadOnly = true
-	input := RenderInput{
-		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
-	}
-	rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
+	decode.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
+	decode.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
+	decode.Spec.Containers[0].VolumeMounts[1].SubPath = "cyborg"
+	decode.Spec.Containers[0].VolumeMounts[1].ReadOnly = true
+	rendered, err := renderSelectedForTest(renderTestPCS(), []*Model{projection},
+		map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}, decode, 4)
 	require.NoError(t, err)
 	cyborg := namedClique(t, rendered, "cond")
 
@@ -145,20 +75,18 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	require.Equal(t, []string{"argument with spaces", "literal $HOME", ""}, cyborg.Spec.PodSpec.Containers[0].Args)
 
 	t.Log("Preserve an image-owned entrypoint")
-	imageEntrypointPCS := renderTestPCS(true)
-	imageEntrypointCyborg := namedClique(t, imageEntrypointPCS, "cond")
-	imageEntrypointCyborg.Spec.Replicas = 4
-	imageEntrypointCyborg.Spec.MinAvailable = ptr.To[int32](4)
-	imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args = []string{"serve"}
-	imageEntrypointEnv := append([]corev1.EnvVar{manifestEnv}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
+	imageEntrypoint := renderTestCyborgTemplate()
+	imageEntrypoint.Spec.Containers[0].Args = []string{"serve"}
+	imageEntrypointEnv := append([]corev1.EnvVar{manifestEnv}, imageEntrypoint.Spec.Containers[0].Env...)
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
-	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
-	_, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
+	rendered, err = renderSelectedForTest(renderTestPCS(), []*Model{projection},
+		map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}, imageEntrypoint, 4)
 	require.NoError(t, err)
-	require.Nil(t, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Command)
-	require.Equal(t, []string{"serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args)
-	require.Equal(t, imageEntrypointEnv, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env)
+	imageEntrypointCyborg := namedClique(t, rendered, "cond").Spec.PodSpec.Containers[0]
+	require.Nil(t, imageEntrypointCyborg.Command)
+	require.Equal(t, []string{"serve"}, imageEntrypointCyborg.Args)
+	require.Equal(t, imageEntrypointEnv, imageEntrypointCyborg.Env)
 
 	t.Log("Reject invalid Cyborg runtime bindings")
 
@@ -175,15 +103,11 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Reject incompatible runtime bindings during rendering")
-			pcs := renderTestPCS(true)
-			cyborg := namedClique(t, pcs, "cond")
-			cyborg.Spec.Replicas = test.replicas
-			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
-			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
-			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
-			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
-			})
+			cyborg := renderTestCyborgTemplate()
+			cyborg.Spec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
+			cyborg.Spec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
+			_, err := renderSelectedForTest(renderTestPCS(), []*Model{projection},
+				map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}, cyborg, test.replicas)
 			require.ErrorContains(t, err, test.wantError)
 		})
 	}

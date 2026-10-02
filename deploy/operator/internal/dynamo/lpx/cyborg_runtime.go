@@ -15,25 +15,24 @@ import (
 
 const gbuildManifestPathEnv = "GBUILD_MANIFEST_PATH"
 
-// MinimumCyborgReplicas returns one complete client group for a resolved hybrid workload.
-func (w *Workload) MinimumCyborgReplicas() (int32, error) {
-	build := &w.modelProjections[0].configuredBuild
-	replicas := int64(build.IOFPGACount) * int64(build.IOFanoutFactor)
+// minimumCyborgReplicas returns one complete client group for a hybrid build.
+func minimumCyborgReplicas(b *Build) (int32, error) {
+	replicas := int64(b.ioFPGACount) * int64(b.ioFanoutFactor)
 	if replicas > math.MaxInt32 {
 		return 0, fmt.Errorf("minimum Cyborg replicas %d exceeds the PodClique replica limit %d", replicas, math.MaxInt32)
 	}
 	return int32(replicas), nil
 }
 
-// ValidateCyborgReplicas ensures that the specified Cyborg replicas are in a valid configuration.
+// ValidateCyborgReplicas checks that an externally managed Cyborg width forms
+// complete client groups. The workload is hybrid.
 func (w *Workload) ValidateCyborgReplicas(replicas int32) error {
-	build := &w.modelProjections[0].configuredBuild
-	return validateCyborgReplicas(build, replicas)
+	return validateCyborgReplicas(&w.models[0].component.configuredBuild, replicas)
 }
 
 // applyCyborgManifestPath projects an authoritative manifest location into one Cyborg container.
-func applyCyborgManifestPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string) error {
-	buildRoot, err := buildRuntimePath(lpuRuntimeBuildRef(projection, modelStoragePath), modelStoragePath)
+func applyCyborgManifestPath(container *corev1.Container, projection *Model, modelStoragePath string) error {
+	buildRoot, err := buildRuntimePath(projection.component.configuredBuild.path, projection.component.runtimeBuildRef, modelStoragePath)
 	if err != nil {
 		return fmt.Errorf("resolve GBuild manifest path: %w", err)
 	}
@@ -56,8 +55,8 @@ func applyCyborgManifestPath(container *corev1.Container, projection *ModelProje
 // validateCyborgReplicas requires a nonnil normalized build and validates its Cyborg replica domain.
 func validateCyborgReplicas(build *Build, replicas int32) error {
 	// Require every physical endpoint and client-owned transaction in this replica domain.
-	ioFPGACount := build.IOFPGACount
-	ioFanoutFactor := build.IOFanoutFactor
+	ioFPGACount := build.ioFPGACount
+	ioFanoutFactor := build.ioFanoutFactor
 	if replicas%ioFPGACount != 0 {
 		return fmt.Errorf("decode service Cyborg replicas %d must be divisible by ioFpgaCount %d", replicas, ioFPGACount)
 	}

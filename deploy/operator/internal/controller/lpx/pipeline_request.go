@@ -56,39 +56,38 @@ func resolvePipelineRequests(
 	deployment *v1alpha1.LPXGraphDeployment,
 	currentRequests map[string]*lpxv1alpha1.LPUPipelineRequest,
 	workload *lpx.Workload,
-	plan *lpx.MaterializationPlan,
+	replicas int32,
+	grouped bool,
 ) (map[string]*lpxv1alpha1.LPUPipelineRequest, []*lpxv1alpha1.LPUPipelineRequest, bool) {
 	// The reconcile boundary already validated the DGD owner; rendering uses that identity.
 	dgdOwner := metav1.GetControllerOf(deployment)
 
 	// Only multiple workloads need a group identity; sole workloads retain existing LPR names.
 	groupName := ""
-	if plan.ResourcePrefix != plan.PodCliqueSetName {
-		groupName = workload.ServingComponentName()
+	if grouped {
+		groupName = workload.Name()
 	}
 
-	// Model projections are already ordered (default, or draft0..draft7 then target).
-	projections := workload.ModelProjections()
-	requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(projections)*int(plan.Replicas))
+	// Models are already ordered (default, or draft0..draft7 then target).
+	models := workload.Models()
+	requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(models)*int(replicas))
 	var missing []*lpxv1alpha1.LPUPipelineRequest
 
-	for replica := range plan.Replicas {
-		replicaPlan := plan.ForReplica(replica)
-
-		for index, projection := range projections {
-			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, projection.Model(), replica)
+	for replica := range replicas {
+		for _, model := range models {
+			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, model.Name(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
 					Annotations: map[string]string{
 						lpx.DeploymentNameAnnotation:                 deployment.Name,
-						pipelineRequestModelAnnotation:               projection.Model(),
-						lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
-						lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
+						pipelineRequestModelAnnotation:               model.Name(),
+						lpx.WorkloadDigestAnnotation:                 model.Digest().String(),
+						lpxv1alpha1.CompilerSnapshotDigestAnnotation: model.CompilerSnapshotDigest(),
 					},
 				},
-				Spec: projection.RequestSpec(replicaPlan, replicaPlan.Agents[index].CliqueName),
+				Spec: workload.RequestSpec(model, replica),
 			}
 
 			if currentRequest, exists := currentRequests[request.Name]; exists {

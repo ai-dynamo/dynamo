@@ -44,26 +44,19 @@ data:
     part-1
     part-0
     part-1
-  topologies: |-
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-specdecode
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+  name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
   namespace: test
 ---
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:fe5d2c6233c5e2cfd2a8e56111f83bcab181e182411904083db72c6893ef4505
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:cc276b875cabeb8dcd6e66a3ad156102646ba5d315b443f8848f5e5b87c8b6a7
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: node-local-v2-specdecode
@@ -76,9 +69,9 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:0d06b39bcb17ce3d6ed500ab51251a7bd13b5bd99b68e261743aa68c66242ca2
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:dc519ed94aaea3a53cd51192f407ac9494ae070c518c20e9fdbbfde333138830
+        nvidia.com/extra-resources-hash: 62b617784a6494e7d029e945901f57b06b313149514395965d049fa339d34c8c
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ca8a265dc6611edc06a7bb351c5ad8323073a36ab30c551da13d7e0c1b6edacd
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:6b75dde65518668d52038d026db0b03aaf8bb2c02753d3ce9af6f2bcc97fd155
         scheduling.lpu.nvidia.com/model: draft0
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
@@ -136,7 +129,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 3
               initialDelaySeconds: 10
@@ -148,6 +141,7 @@ spec:
             resources:
               limits:
                 hugepages-2Mi: 4Gi
+                lpu.nvidia.com/devices: "1"
                 lpu.nvidia.com/lpu: "8"
               requests:
                 cpu: "62"
@@ -207,15 +201,15 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+              name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
             name: config
         replicas: 4
         roleName: agt0
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:0d06b39bcb17ce3d6ed500ab51251a7bd13b5bd99b68e261743aa68c66242ca2
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:33862d120438d3ab2ce12733089d7f0a1e14f52327fcc541f8d56bee6667817d
+        nvidia.com/extra-resources-hash: 62b617784a6494e7d029e945901f57b06b313149514395965d049fa339d34c8c
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ca8a265dc6611edc06a7bb351c5ad8323073a36ab30c551da13d7e0c1b6edacd
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:dbc62fb60e573020e1e7700f1b93c10874b2aa519f343f5c1f7784d399b580f8
         scheduling.lpu.nvidia.com/model: draft1
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
@@ -273,7 +267,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 3
               initialDelaySeconds: 10
@@ -285,6 +279,7 @@ spec:
             resources:
               limits:
                 hugepages-2Mi: 4Gi
+                lpu.nvidia.com/devices: "1"
                 lpu.nvidia.com/lpu: "8"
               requests:
                 cpu: "62"
@@ -344,15 +339,15 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+              name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
             name: config
         replicas: 4
         roleName: agt1
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:0d06b39bcb17ce3d6ed500ab51251a7bd13b5bd99b68e261743aa68c66242ca2
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:b03f1aba25f64c3237d39e3a46cd9eebc4d976925c7dd8b66ed4a5cd165812e9
+        nvidia.com/extra-resources-hash: 62b617784a6494e7d029e945901f57b06b313149514395965d049fa339d34c8c
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ca8a265dc6611edc06a7bb351c5ad8323073a36ab30c551da13d7e0c1b6edacd
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:79d5674270db0181a9068ac1b40ff3a4c0ed17be93261df0fdbba3e0696c976d
         scheduling.lpu.nvidia.com/model: target
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
@@ -410,7 +405,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 3
               initialDelaySeconds: 10
@@ -422,6 +417,7 @@ spec:
             resources:
               limits:
                 hugepages-2Mi: 4Gi
+                lpu.nvidia.com/devices: "1"
                 lpu.nvidia.com/lpu: "8"
               requests:
                 cpu: "62"
@@ -481,14 +477,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+              name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
             name: config
         replicas: 4
         roleName: agt2
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a7d3fcf1b942178317a07b74ed6a218154c464e6c32ab6685465c65ffa808349
+        nvidia.com/extra-resources-hash: 62b617784a6494e7d029e945901f57b06b313149514395965d049fa339d34c8c
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:caa205dedc57580f90205655651ed227c6178ae631e176b73075e2d217168c57
         scheduling.lpu.nvidia.com/role: conductor
       labels:
         lpx.nvidia.com/serving: "true"
@@ -598,7 +594,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-runtime:test
-            name: conductor
+            name: main
             readinessProbe:
               failureThreshold: 3
               httpGet:
@@ -657,7 +653,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+              name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
             name: config
         replicas: 1
         roleName: cond
@@ -670,7 +666,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a7d3fcf1b942178317a07b74ed6a218154c464e6c32ab6685465c65ffa808349
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:caa205dedc57580f90205655651ed227c6178ae631e176b73075e2d217168c57
       cliqueNames:
       - cond
       - agt0

@@ -10,6 +10,6 @@ type Pipeline string
 
 const (
 	PipelineSingle     Pipeline = "single"
-	PipelineLPX        Pipeline = "lpx"
+	PipelineHybrid     Pipeline = "hybrid"
 	PipelineSpecDecode Pipeline = "specDecode"
 )

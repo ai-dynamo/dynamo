@@ -8,19 +8,19 @@ package lpx
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/utils/ptr"
 )
 
@@ -78,42 +78,39 @@ func TestRegistryBuildURL(t *testing.T) {
 	}
 }
 
-func TestLocalModelRegistrySnapshot_DanglingGbuildCapnpSymlinkFailsClosed(t *testing.T) {
+func TestAcquireLocalBuildSnapshotRejectsUnreadableManifest(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Create a dangling symlink for the required binary manifest")
-	registryDir := t.TempDir()
-	buildDir := filepath.Join(registryDir, "build-id")
-	require.NoError(t, os.MkdirAll(buildDir, 0o700))
-	require.NoError(t, os.Symlink("missing-manifest.v2.capnp.bin", filepath.Join(buildDir, gbuildManifestV2CapnpFile)))
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, manifestPath string)
+	}{
+		{name: "missing", setup: func(*testing.T, string) {}},
+		{name: "dangling symlink", setup: func(t *testing.T, manifestPath string) {
+			require.NoError(t, os.Symlink("missing-manifest.v2.capnp.bin", manifestPath))
+		}},
+		{name: "directory", setup: func(t *testing.T, manifestPath string) {
+			require.NoError(t, os.Mkdir(manifestPath, 0o755))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	t.Log("Normalize the local registry build")
-	registry, err := NewModelRegistry(registryDir, nil)
-	require.NoError(t, err)
-	_, err = normalizeRegistryFixtureBuild(t.Context(), registry, "build-id")
+			t.Log("Create a registry build whose manifest cannot be read as a regular file")
+			registryDir := t.TempDir()
+			buildDir := filepath.Join(registryDir, "build-id")
+			require.NoError(t, os.MkdirAll(buildDir, 0o700))
+			test.setup(t, filepath.Join(buildDir, gbuildManifestV2CapnpFile))
+			registry, err := NewModelRegistry(registryDir, nil)
+			require.NoError(t, err)
 
-	t.Log("Fail closed while preserving the missing manifest identity")
-	require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
-}
-
-func TestLocalModelRegistrySnapshot_ReportsMetadataDirectories(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Create a directory where compiler metadata must be a regular file")
-	registryDir := t.TempDir()
-	buildDir := filepath.Join(registryDir, "build-id")
-	require.NoError(t, os.MkdirAll(buildDir, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildManifestJSONFile), []byte(`{}`), 0o600))
-	require.NoError(t, os.Mkdir(filepath.Join(buildDir, gbuildManifestV2CapnpFile), 0o755))
-
-	t.Log("Normalize the invalid local registry build")
-	registry, err := NewModelRegistry(registryDir, nil)
-	require.NoError(t, err)
-	_, err = normalizeRegistryFixtureBuild(t.Context(), registry, "build-id")
-
-	t.Log("Report the invalid metadata path")
-	require.Error(t, err)
-	require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
+			t.Log("Fail closed as an acquisition error that names the manifest")
+			snapshot, err := registry.AcquireBuild(t.Context(), "build-id")
+			require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
+			require.NotErrorIs(t, err, errInvalidBuildManifest)
+			require.Nil(t, snapshot)
+		})
+	}
 }
 
 func TestAcquireLocalBuildSnapshotCancellation(t *testing.T) {
@@ -139,7 +136,7 @@ func TestAcquireLocalBuildSnapshotCancellation(t *testing.T) {
 
 			t.Log("Reject the acquisition without returning a snapshot")
 			registry := &defaultModelRegistry{}
-			snapshot, err := registry.AcquireBuildSnapshot(ctx, buildDir)
+			snapshot, err := registry.AcquireBuild(ctx, buildDir)
 			require.ErrorIs(t, err, tt.wantErr)
 			require.Nil(t, snapshot)
 		})
@@ -154,7 +151,7 @@ func TestAcquireLocalBuildSnapshotRejectsFIFOManifest(t *testing.T) {
 		t.Log("Reject the FIFO manifest while the acquisition context is still active")
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		snapshot, err := (&defaultModelRegistry{}).AcquireBuildSnapshot(ctx, buildDir)
+		snapshot, err := (&defaultModelRegistry{}).AcquireBuild(ctx, buildDir)
 		require.ErrorContains(t, err, "not a regular file")
 		require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
 		require.Nil(t, snapshot)
@@ -176,133 +173,6 @@ func TestAcquireLocalBuildSnapshotRejectsFIFOManifest(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, ctx.Err(), "FIFO manifest acquisition blocked past its deadline: %s", output)
 	require.NoError(t, err, "%s", output)
-}
-
-func TestLocalBuildFilePathsBudget(t *testing.T) {
-	t.Parallel()
-
-	for _, tt := range []struct {
-		name        string
-		directories []string
-		files       []string
-		maxBytes    int
-		wantErr     bool
-	}{
-		{name: "empty"},
-		{name: "files exact", files: []string{"a", "b"}, maxBytes: 2},
-		{name: "files over", files: []string{"a", "b"}, maxBytes: 1, wantErr: true},
-		{name: "nested exact", directories: []string{"d"}, files: []string{"d/f"}, maxBytes: 4},
-		{name: "nested over", directories: []string{"d"}, files: []string{"d/f"}, maxBytes: 3, wantErr: true},
-		{name: "directories exact", directories: []string{"a", "b"}, maxBytes: 2},
-		{name: "directories over", directories: []string{"a", "b"}, maxBytes: 1, wantErr: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Create the selected tree of files and empty directories")
-			root := t.TempDir()
-			for _, directory := range tt.directories {
-				require.NoError(t, os.MkdirAll(filepath.Join(root, directory), 0o700))
-			}
-			for _, file := range tt.files {
-				require.NoError(t, os.WriteFile(filepath.Join(root, file), nil, 0o600))
-			}
-
-			t.Log("Charge every visited relative path and never return a truncated inventory")
-			paths, err := localBuildFilePaths(t.Context(), root, tt.maxBytes)
-			if tt.wantErr {
-				require.ErrorContains(t, err, "path limit")
-				require.Nil(t, paths)
-				return
-			}
-			require.NoError(t, err)
-			require.ElementsMatch(t, tt.files, paths)
-		})
-	}
-}
-
-type cancelAfterChecksContext struct {
-	context.Context
-	cancel    context.CancelFunc
-	remaining int
-}
-
-func (ctx *cancelAfterChecksContext) Err() error {
-	// Cancel the real context deterministically at the selected cooperative check.
-	ctx.remaining--
-	if ctx.remaining == 0 {
-		ctx.cancel()
-	}
-	return ctx.Context.Err()
-}
-
-func TestLocalBuildFilePathsBatchesAndCancellation(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Create more files than fit in one directory batch")
-	root := t.TempDir()
-	files := make([]string, 300)
-	for index := range files {
-		files[index] = fmt.Sprintf("%03d", index)
-		require.NoError(t, os.WriteFile(filepath.Join(root, files[index]), nil, 0o600))
-	}
-
-	t.Log("Read all batches at the exact aggregate path limit")
-	paths, err := localBuildFilePaths(t.Context(), root, 3*len(files))
-	require.NoError(t, err)
-	require.ElementsMatch(t, files, paths)
-
-	t.Log("Cancel after traversal has passed the first batch without relying on a timer")
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	walkCtx := &cancelAfterChecksContext{Context: ctx, cancel: cancel, remaining: 5}
-	paths, err = localBuildFilePaths(walkCtx, root, 3*len(files))
-	require.ErrorIs(t, err, context.Canceled)
-	require.Nil(t, paths)
-}
-
-func TestLocalBuildFilePathsSymlinks(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Create a symlinked root with a file, a child directory link and a dangling link")
-	parent := t.TempDir()
-	root := filepath.Join(parent, "build")
-	require.NoError(t, os.Mkdir(root, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "file"), nil, 0o600))
-	require.NoError(t, os.Symlink(".", filepath.Join(root, "loop")))
-	require.NoError(t, os.Symlink("missing", filepath.Join(root, "dangling")))
-	rootLink := filepath.Join(parent, "linked-build")
-	require.NoError(t, os.Symlink(root, rootLink))
-
-	t.Log("Resolve only the root link and inventory child links without following them")
-	paths, err := localBuildFilePaths(t.Context(), rootLink, maxBuildSnapshotMetadataBytes)
-	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"file", "loop", "dangling"}, paths)
-}
-
-func TestLocalBuildFilePathsRejectsNonDirectoryRoot(t *testing.T) {
-	t.Parallel()
-
-	for _, name := range []string{"file", "fifo"} {
-		t.Run(name, func(t *testing.T) {
-			t.Log("Create a non-directory build root")
-			root := filepath.Join(t.TempDir(), name)
-			if name == "fifo" {
-				require.NoError(t, syscall.Mkfifo(root, 0o600))
-
-				t.Log("Keep both FIFO ends open so a missing root check fails without hanging the test")
-				fifo, err := os.OpenFile(root, os.O_RDWR|syscall.O_NONBLOCK, 0)
-				require.NoError(t, err)
-				t.Cleanup(func() { require.NoError(t, fifo.Close()) })
-			} else {
-				require.NoError(t, os.WriteFile(root, nil, 0o600))
-			}
-
-			t.Log("Reject the root before opening it for directory reads")
-			paths, err := localBuildFilePaths(t.Context(), root, maxBuildSnapshotMetadataBytes)
-			require.ErrorContains(t, err, "build root ")
-			require.ErrorContains(t, err, "not a directory")
-			require.Nil(t, paths)
-		})
-	}
 }
 
 func TestReadBuildFileBoundsLocalFileAtAcquisition(t *testing.T) {
@@ -351,217 +221,150 @@ func TestReadBuildFileBoundsGCSAccumulatedChunks(t *testing.T) {
 	require.ErrorContains(t, err, "larger than 4 bytes")
 
 	t.Log("Release the rejected metadata stream without canceling the caller")
-	require.ErrorIs(t, client.filesContext.Err(), context.Canceled)
+	require.ErrorIs(t, client.metadataContexts[0].Err(), context.Canceled)
 	require.NoError(t, t.Context().Err())
 }
 
-func TestGCSModelRegistrySnapshot_RequiresModelExpressClient(t *testing.T) {
+func TestGCSBuildSnapshotReadFailures(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Construct a GCS registry without a Model Express client")
-	registry, err := NewModelRegistry("gs://bucket/registry", nil)
-	if err != nil {
-		t.Fatalf("NewModelRegistry() error = %v", err)
-	}
-
-	t.Log("Attempt to normalize a remote build")
-	_, err = normalizeRegistryFixtureBuild(context.Background(), registry, "model/build")
-	if err == nil {
-		t.Fatal("snapshot normalization error = nil, want error")
-	}
-
-	t.Log("Require Model Express for GCS registry reads")
-	if !strings.Contains(err.Error(), "Model Express client is required for GCS model registry reads") {
-		t.Fatalf("snapshot normalization error = %v, want Model Express required error", err)
-	}
-}
-
-func TestGCSModelRegistrySnapshot_StreamFailures(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Define Model Express RPC and chunk-stream failures")
+	t.Log("Define Model Express availability, RPC, and chunk-stream failures")
 	rpcErr := errors.New("rpc unavailable")
-	recvErr := errors.New("stream interrupted")
+	notFoundErr := status.Error(codes.NotFound, "manifest missing")
+	unavailableErr := status.Error(codes.Unavailable, "temporary object-store failure")
+	chunk := func(path, data string, offset, size uint64, last bool) []*modelpb.FileChunk {
+		return []*modelpb.FileChunk{{RelativePath: path, Data: []byte(data), Offset: offset, TotalSize: size, IsLastChunk: last}}
+	}
 
-	tests := []struct {
+	for _, test := range []struct {
 		name            string
-		filesErr        error
-		recvErr         error
-		chunkPath       string
-		chunkData       string
-		chunkOffset     uint64
-		chunkSize       uint64
-		lastChunk       bool
+		client          *fakeModelServiceClient
 		wantErr         error
 		wantErrContains string
 	}{
 		{
-			name:     "stream rpc error",
-			filesErr: rpcErr,
-			wantErr:  rpcErr,
+			name:            "missing Model Express client",
+			wantErrContains: "Model Express client is required for GCS model registry reads",
 		},
 		{
-			name:    "receive error",
-			recvErr: recvErr,
-			wantErr: recvErr,
+			name:    "stream rpc error",
+			client:  &fakeModelServiceClient{filesErr: rpcErr},
+			wantErr: rpcErr,
+		},
+		{
+			name:    "not found",
+			client:  &fakeModelServiceClient{fileStreams: []*fakeModelFileStream{{err: notFoundErr}}},
+			wantErr: notFoundErr,
+		},
+		{
+			name:    "unavailable",
+			client:  &fakeModelServiceClient{fileStreams: []*fakeModelFileStream{{err: unavailableErr}}},
+			wantErr: unavailableErr,
 		},
 		{
 			name:            "empty stream",
+			client:          &fakeModelServiceClient{fileStreams: []*fakeModelFileStream{{}}},
 			wantErrContains: "returned no chunks",
 		},
 		{
-			name: "unexpected relative path", chunkPath: "other.json", chunkData: "{}", chunkSize: 2, lastChunk: true,
+			name:            "unexpected relative path",
+			client:          &fakeModelServiceClient{fileStreams: []*fakeModelFileStream{{chunks: chunk("other.json", "{}", 0, 2, true)}}},
 			wantErrContains: `unexpected file "other.json"`,
 		},
 		{
-			name: "out of order chunk", chunkPath: gbuildManifestV2CapnpFile, chunkData: "{}",
-			chunkOffset: 1, chunkSize: 2, lastChunk: true,
+			name:            "out of order chunk",
+			client:          &fakeModelServiceClient{fileStreams: []*fakeModelFileStream{{chunks: chunk(gbuildManifestV2CapnpFile, "{}", 1, 2, true)}}},
 			wantErrContains: "out-of-order chunk",
 		},
 		{
-			name: "missing final chunk", chunkPath: gbuildManifestV2CapnpFile, chunkData: `{"topologies":[]}`,
+			name:            "missing final chunk",
+			client:          &fakeModelServiceClient{fileStreams: []*fakeModelFileStream{{chunks: chunk(gbuildManifestV2CapnpFile, "{}", 0, 0, false)}}},
 			wantErrContains: "ended before final chunk",
 		},
 		{
-			name: "final size mismatch", chunkPath: gbuildManifestV2CapnpFile, chunkData: "{}",
-			chunkSize: 3, lastChunk: true,
+			name:            "final size mismatch",
+			client:          &fakeModelServiceClient{fileStreams: []*fakeModelFileStream{{chunks: chunk(gbuildManifestV2CapnpFile, "{}", 0, 3, true)}}},
 			wantErrContains: "incomplete",
 		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			t.Log("Construct the selected Model Express stream failure")
-			client := &fakeModelServiceClient{filesErr: tt.filesErr}
-			if tt.filesErr == nil {
-				stream := &fakeModelFileStream{err: tt.recvErr}
-				if tt.chunkPath != "" {
-					stream.chunks = []*modelpb.FileChunk{{
-						RelativePath: tt.chunkPath, Data: []byte(tt.chunkData), Offset: tt.chunkOffset,
-						TotalSize: tt.chunkSize, IsLastChunk: tt.lastChunk,
-					}}
-				}
-				client.fileStreams = []*fakeModelFileStream{stream}
+			t.Log("Acquire the manifest through the selected failing Model Express client")
+			var client modelpb.ModelServiceClient
+			if test.client != nil {
+				client = test.client
 			}
-			client.list = &modelpb.ModelFileList{
-				Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}},
-			}
-
 			registry, err := NewModelRegistry("gs://bucket/registry", client)
-			if err != nil {
-				t.Fatalf("NewModelRegistry() error = %v", err)
-			}
-
-			t.Log("Normalize through the selected failing stream")
-			_, err = normalizeRegistryFixtureBuild(context.Background(), registry, "model/build")
-			if err == nil {
-				t.Fatal("snapshot normalization error = nil, want error")
-			}
-
-			t.Log("Preserve the selected transport or protocol failure")
-			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
-				t.Fatalf("snapshot normalization error = %v, want %v", err, tt.wantErr)
-			}
-			if tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
-				t.Fatalf("snapshot normalization error = %v, want substring %q", err, tt.wantErrContains)
-			}
-		})
-	}
-}
-
-func TestDefinitiveBuildMemberAbsenceIncludesLocalENOTDIR(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Classify local ENOTDIR as definitive build-member absence")
-	err := &os.PathError{Op: "open", Path: "/build/manifest.v2.capnp.bin", Err: syscall.ENOTDIR}
-	require.True(t, isDefinitiveBuildMemberAbsence(err))
-
-	t.Log("Keep transient read failures outside definitive absence")
-	require.False(t, isDefinitiveBuildMemberAbsence(errors.New("temporary read failure")))
-}
-
-func TestRegistryEnsureDownloadedSkipsLocalBuilds(t *testing.T) {
-	t.Log("Construct a registry without Model Express")
-	registry, err := NewModelRegistry("", nil)
-	require.NoError(t, err)
-
-	t.Log("Accept an already-local build")
-	ready, err := registry.EnsureDownloaded(context.Background(), mustParseURL(t, "file:///models/build"))
-	require.NoError(t, err)
-	require.True(t, ready)
-}
-
-func TestRegistryEnsureDownloadedReturnsFirstStatus(t *testing.T) {
-	t.Log("Define terminal and in-progress first Model Express statuses")
-	tests := []struct {
-		name    string
-		status  modelpb.ModelStatus
-		message string
-	}{
-		{name: "downloaded", status: modelpb.ModelStatus_DOWNLOADED},
-		{name: "downloading", status: modelpb.ModelStatus_DOWNLOADING},
-		{name: "error", status: modelpb.ModelStatus_ERROR, message: "download failed"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Construct the selected first-status Model Express stream")
-			client := &fakeModelServiceClient{
-				stream: &fakeModelDownloadStream{
-					update: &modelpb.ModelStatusUpdate{
-						Status:  tt.status,
-						Message: ptr.To(tt.message),
-					},
-				},
-			}
-			registry := &defaultModelRegistry{mxClient: client}
-			buildURL := mustParseURL(t, "gs://bucket/models/build")
-
-			t.Log("Classify the first Model Express download status")
-			ready, err := registry.EnsureDownloaded(context.Background(), buildURL)
-			require.NotNil(t, client.request)
-			require.Equal(t, buildURL.String(), client.request.ModelName)
-			require.Equal(t, modelpb.ModelProvider_GCS, client.request.Provider)
-			if tt.status == modelpb.ModelStatus_ERROR {
-				require.ErrorContains(t, err, tt.message)
-				require.False(t, ready)
-				return
-			}
 			require.NoError(t, err)
-			require.Equal(t, tt.status == modelpb.ModelStatus_DOWNLOADED, ready)
+			snapshot, err := registry.AcquireBuild(t.Context(), "model/build")
+
+			t.Log("Preserve the transport or protocol failure separately from invalid compiler input")
+			require.Error(t, err)
+			require.Nil(t, snapshot)
+			require.NotErrorIs(t, err, errInvalidBuildManifest)
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+			}
+			if test.wantErrContains != "" {
+				require.ErrorContains(t, err, test.wantErrContains)
+			}
+			if test.client != nil {
+				require.Empty(t, test.client.listRequests)
+				require.Len(t, test.client.filesRequests, 1)
+			}
 		})
 	}
 }
 
-func TestRegistryEnsureDownloadedPropagatesTransportFailures(t *testing.T) {
-	for _, scenario := range []struct {
-		name string
-		rpc  bool
-		err  error
+func TestRegistryEnsureDownloaded(t *testing.T) {
+	t.Log("Define local, first-status, and transport outcomes")
+	rpcErr := errors.New("rpc unavailable")
+	recvErr := errors.New("stream interrupted")
+	statusStream := func(status modelpb.ModelStatus, message string) *fakeModelServiceClient {
+		return &fakeModelServiceClient{stream: &fakeModelDownloadStream{
+			update: &modelpb.ModelStatusUpdate{Status: status, Message: ptr.To(message)},
+		}}
+	}
+	for _, test := range []struct {
+		name      string
+		buildURL  string
+		client    *fakeModelServiceClient
+		wantReady bool
+		wantErr   error
+		wantMsg   string
 	}{
-		{name: "RPC failure", rpc: true, err: errors.New("rpc unavailable")},
-		{name: "receive failure", err: errors.New("stream interrupted")},
-		{name: "empty stream", err: io.EOF},
+		{name: "local build", buildURL: "file:///models/build", wantReady: true},
+		{name: "unsupported scheme", buildURL: "https://models/build", wantMsg: `unsupported build download scheme "https"`},
+		{name: "missing Model Express client", buildURL: "gs://bucket/models/build", wantMsg: "Model Express client is required"},
+		{name: "downloaded", client: statusStream(modelpb.ModelStatus_DOWNLOADED, ""), wantReady: true},
+		{name: "downloading", client: statusStream(modelpb.ModelStatus_DOWNLOADING, "")},
+		{name: "error", client: statusStream(modelpb.ModelStatus_ERROR, "download failed"), wantMsg: "download failed"},
+		{name: "RPC failure", client: &fakeModelServiceClient{err: rpcErr}, wantErr: rpcErr},
+		{name: "receive failure", client: &fakeModelServiceClient{stream: &fakeModelDownloadStream{err: recvErr}}, wantErr: recvErr},
+		{name: "empty stream", client: &fakeModelServiceClient{stream: &fakeModelDownloadStream{err: io.EOF}}, wantMsg: "returned no status"},
 	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			t.Log("Construct the selected transport failure")
-			client := &fakeModelServiceClient{stream: &fakeModelDownloadStream{err: scenario.err}}
-			if scenario.rpc {
-				client.err = scenario.err
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Classify readiness from the selected build location and Model Express stream")
+			buildURL := mustParseURL(t, defaultTestString(test.buildURL, "gs://bucket/models/build"))
+			registry := &defaultModelRegistry{}
+			if test.client != nil {
+				registry.mxClient = test.client
 			}
-			registry := &defaultModelRegistry{mxClient: client}
-
-			t.Log("Reject the failed or empty stream before classifying readiness")
-			ready, err := registry.EnsureDownloaded(t.Context(), mustParseURL(t, "gs://bucket/models/build"))
-			if scenario.err == io.EOF {
-				require.ErrorContains(t, err, "returned no status")
-			} else {
-				require.ErrorIs(t, err, scenario.err)
+			ready, err := registry.EnsureDownloaded(t.Context(), buildURL)
+			require.Equal(t, test.wantReady, ready)
+			switch {
+			case test.wantErr != nil:
+				require.ErrorIs(t, err, test.wantErr)
+			case test.wantMsg != "":
+				require.ErrorContains(t, err, test.wantMsg)
+			default:
+				require.NoError(t, err)
 			}
-			require.False(t, ready)
+			if test.client != nil {
+				require.Equal(t, buildURL.String(), test.client.request.ModelName)
+				require.Equal(t, modelpb.ModelProvider_GCS, test.client.request.Provider)
+			}
 		})
 	}
 }

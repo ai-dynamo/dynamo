@@ -10,6 +10,7 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
@@ -179,14 +180,14 @@ func scalePodCliqueScalingGroup(ctx context.Context, cl client.Client, pcsg *gro
 	return true, nil
 }
 
-// scalePodCliques scales the named template's clique in every replica of the
-// non-nil pcsg. Call only for explicitly managed capacity.
+// scaleConductorPodCliques scales the workload's conductor clique in every replica
+// of its non-nil pcsg. Call only for explicitly managed capacity.
 // The provided PCLQs remain unchanged; the returned bool reports whether they were updated.
-func scalePodCliques(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, pclqs map[string]*grovev1alpha1.PodClique, templateName string, replicas int32) (bool, error) {
+func scaleConductorPodCliques(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, pclqs map[string]*grovev1alpha1.PodClique, workload *lpx.Workload, replicas int32) (bool, error) {
 	var changed bool
 
 	for index := range pcsg.Spec.Replicas {
-		name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, templateName)
+		name := workload.ConductorCliqueName(index)
 		pclq := pclqs[name]
 		if pclq == nil || pclq.Spec.Replicas == replicas {
 			continue

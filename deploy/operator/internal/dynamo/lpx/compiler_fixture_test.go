@@ -8,6 +8,7 @@ package lpx
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,22 +22,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	otherFixtureValue  = "other"
-	v2TestBuildName    = "v2-test-build"
-	v3HXTopologyFamily = "16x8x2x3"
-	v3OpaqueTopology   = "opaque-v3-topology"
-)
+const v2TestBuildName = "v2-test-build"
 
-type unreachableBuildSnapshotSource struct{}
+type staticModelRegistry map[string]*Build
 
-func (unreachableBuildSnapshotSource) AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error) {
-	return nil, fmt.Errorf("unexpected build snapshot acquisition")
+func (staticModelRegistry) BuildURL(id string) (*url.URL, error) {
+	return nil, fmt.Errorf("unexpected build URL lookup for %q", id)
 }
 
-type staticBuildSnapshotSource map[string]*BuildSnapshot
+func (staticModelRegistry) EnsureDownloaded(_ context.Context, buildURL url.URL) (bool, error) {
+	return false, fmt.Errorf("unexpected build download for %q", buildURL.String())
+}
 
-func (source staticBuildSnapshotSource) AcquireBuildSnapshot(_ context.Context, buildID string) (*BuildSnapshot, error) {
+func (source staticModelRegistry) AcquireBuild(_ context.Context, buildID string) (*Build, error) {
 	snapshot := source[buildID]
 	if snapshot == nil {
 		return nil, fmt.Errorf("unknown test build %q", buildID)
@@ -75,31 +73,41 @@ func testLPXPodTemplate(image string) *corev1.PodTemplateSpec {
 	}
 }
 
-func acquireTestSnapshot(t *testing.T, buildDir string) *BuildSnapshot {
+func acquireTestSnapshot(t *testing.T, buildDir string) *Build {
 	t.Helper()
 	registry, err := NewModelRegistry("", nil)
 	require.NoError(t, err)
-	snapshot, err := registry.AcquireBuildSnapshot(t.Context(), buildDir)
+	snapshot, err := registry.AcquireBuild(t.Context(), buildDir)
 	require.NoError(t, err)
 	return snapshot
 }
 
-func normalizeTestSnapshot(t *testing.T, snapshot *BuildSnapshot) NormalizedBuildSnapshot {
+// resolveTestWorkload resolves the fixture's sole workload inside PodCliqueSet "test-pcs".
+func resolveTestWorkload(t *testing.T, dgd *v1beta1.DynamoGraphDeployment, registry ModelRegistry) (*Workload, error) {
 	t.Helper()
-	normalized, err := normalizeBuildSnapshot(snapshot)
-	require.NoError(t, err)
-	return normalized
+	workloads, err := ResolveWorkloads(t.Context(), dgd, "test-pcs", registry)
+	if err != nil {
+		return nil, err
+	}
+	require.Len(t, workloads, 1)
+	return workloads[0], nil
 }
 
-func projectTestBuild(t *testing.T, snapshot NormalizedBuildSnapshot, pipeline Pipeline) *ModelProjection {
+// newTestWorkload names models as a sole workload inside PodCliqueSet pcsName.
+func newTestWorkload(t *testing.T, models []*Model, replicas int32, pcsName string) *Workload {
 	t.Helper()
+	workload := &Workload{name: models[len(models)-1].component.name, models: models, scalingGroupReplicas: replicas, minAvailable: 1}
+	require.NoError(t, workload.nameResources(pcsName, ""))
+	return workload
+}
 
-	t.Log("Project the caller-owned normalized build for the selected pipeline")
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: pipeline, Models: []string{"default"}, BuildSnapshot: snapshot,
-	})
+// projectTestModel projects the snapshot's default model for pipeline from the
+// "model-build" registry reference.
+func projectTestModel(t *testing.T, snapshot *Build, pipeline Pipeline) *Model {
+	t.Helper()
+	models, err := projectComponent(testRenderComponentName, "model-build", snapshot, pipeline, []string{"default"})
 	require.NoError(t, err)
-	return projectionBatch[0]
+	return models[0]
 }
 
 func writeV2CompilerFixture(t *testing.T) string {
@@ -108,14 +116,13 @@ func writeV2CompilerFixture(t *testing.T) string {
 }
 
 func newV2CompilerFixture() testV3CapnpFixture {
-	topology := "URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA"
 	fixture := newV3CompilerFixture()
 	fixture.buildDirectoryName = v2TestBuildName
 	fixture.numLPUNodes = 4
 	fixture.selectedPropSyncChains = [][]uint32{{7, 8}}
 	fixture.partitions = []testV3CapnpPartition{
-		{id: 7, deviceType: manifestcapnp.DeviceType_lpu, topology: topology, numChips: 16, devicesPerNode: 8},
-		{id: 8, deviceType: manifestcapnp.DeviceType_lpu, topology: topology, numChips: 16, devicesPerNode: 8},
+		{id: 7, deviceType: manifestcapnp.DeviceType_lpu, numChips: 16, devicesPerNode: 8},
+		{id: 8, deviceType: manifestcapnp.DeviceType_lpu, numChips: 16, devicesPerNode: 8},
 	}
 	return fixture
 }
@@ -139,7 +146,6 @@ type testV3CapnpFixture struct {
 type testV3CapnpPartition struct {
 	id             uint32
 	deviceType     manifestcapnp.DeviceType
-	topology       string
 	numChips       uint32
 	devicesPerNode uint32
 	topologyFamily string
@@ -155,7 +161,6 @@ func newV3CompilerFixture() testV3CapnpFixture {
 		partitions: []testV3CapnpPartition{{
 			id:             1,
 			deviceType:     manifestcapnp.DeviceType_lpu,
-			topology:       v3OpaqueTopology,
 			numChips:       16,
 			devicesPerNode: 16,
 		}},
@@ -250,7 +255,6 @@ func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3Capnp
 			detail, err := partition.Detail().NewLpu()
 			require.NoError(t, err)
 			require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", fixturePartition.id)))
-			require.NoError(t, detail.SetTopology(fixturePartition.topology))
 			detail.SetNumChips(fixturePartition.numChips)
 			detail.SetDevicesPerNode(fixturePartition.devicesPerNode)
 			if fixturePartition.topologyFamily != "" || fixturePartition.partitionShape != nil {

@@ -20,8 +20,8 @@ import (
 )
 
 // EvaluateLPXGroveReadiness evaluates every observed role and replica of one component group.
-// source is non-nil and admitted; groupName and componentNames identify one entry
-// from ComponentGroups. pcs and pcsg may be nil while materializing. The caller
+// source is non-nil and admitted; groupName and componentNames identify one
+// resolved LPX workload. pcs and pcsg may be nil while materializing. The caller
 // verifies ownership and deletion state before passing pclqs.
 // Missing cliques are pending. Inputs remain read-only.
 func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphDeployment, groupName string, componentNames []string, pcs *grovev1alpha1.PodCliqueSet, pcsg *grovev1alpha1.PodCliqueScalingGroup, pclqs map[string]*grovev1alpha1.PodClique) GroveReadiness {

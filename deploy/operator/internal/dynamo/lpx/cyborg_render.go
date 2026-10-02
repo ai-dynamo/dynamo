@@ -7,12 +7,12 @@ package lpx
 
 import (
 	"fmt"
-	"slices"
+
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -21,10 +21,9 @@ import (
 // whose conductor resources were validated during workload selection.
 func configureHybridCyborg(
 	cyborg *grovev1alpha1.PodCliqueTemplateSpec,
-	projection *ModelProjection,
+	projection *Model,
 	workloadDigest string,
 	modelStoragePath string,
-	agentTemplateNames []string,
 	cyborgConfigMap *corev1.ConfigMap,
 	cyborgConfigHash string,
 ) error {
@@ -38,7 +37,7 @@ func configureHybridCyborg(
 	if cyborgStoragePath != modelStoragePath {
 		return fmt.Errorf("selected Cyborg podTemplate conflicts with model storage mount %q", modelStoragePath)
 	}
-	if err := validateCyborgReplicas(&projection.configuredBuild, cyborg.Spec.Replicas); err != nil {
+	if err := validateCyborgReplicas(&projection.component.configuredBuild, cyborg.Spec.Replicas); err != nil {
 		return err
 	}
 	if err := applyCyborgManifestPath(container, projection, modelStoragePath); err != nil {
@@ -56,6 +55,5 @@ func configureHybridCyborg(
 		}
 		cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
 	}
-	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
 }

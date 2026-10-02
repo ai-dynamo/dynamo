@@ -14,149 +14,125 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
 
-const v2ProjectionVersion = "v2-xt-node-local/v1"
-
-//nolint:gocyclo // V2 projection validates one complete transformation.
-func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
-	configured := *intent.BuildSnapshot.build
-	usesResolvedRuntime := intent.Pipeline == PipelineSingle ||
-		intent.Pipeline == PipelineSpecDecode
-	ioFPGACount, ioFanoutFactor := configured.IOFPGACount, configured.IOFanoutFactor
-	connectorBuild := intent.BuildSnapshot.build
+// projectV2Component derives the XT component shared by every model and writes
+// its model-independent digest fields.
+func projectV2Component(source *Build, pipeline Pipeline, fields digestTranscript) (*component, error) {
+	configured := *source
 
 	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
-	if usesResolvedRuntime {
+	if pipeline != PipelineHybrid {
 		if err := configured.consumeRuntimeSelectedPropSyncChain(); err != nil {
-			return nil, fmt.Errorf("resolving configured V2 build: %w", err)
+			return nil, fmt.Errorf("resolving configured XT build: %w", err)
 		}
 
 		// Omit host-only embeddings by retaining a view of the immutable source partitions.
-		if configured.SupportsCPUEmbeddings && configured.StandaloneTokenEmbeddings &&
-			len(configured.Partitions) > 1 && configured.Partitions[0].SourcePartitionID == 0 {
-			configured.Partitions = configured.Partitions[1:]
+		if configured.supportsCPUEmbeddings && configured.standaloneTokenEmbeddings &&
+			len(configured.partitions) > 1 && configured.partitions[0].sourcePartitionID == 0 {
+			configured.partitions = configured.partitions[1:]
 		}
 	}
 
-	allocationMetadata := json.RawMessage(`{}`)
-
-	// Bind the V2 workload and runtime contract into projection identity before partition validation.
-	transcripts := newModelProjectionTranscripts(intent, v2ProjectionVersion)
-	for index := range transcripts {
-		transcript := &transcripts[index]
-		transcript.field("input-embeddings-on-gpu", []byte{1})
-		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
-	}
+	// Bind the XT workload and runtime contract into projection identity before partition validation.
+	fields.field("input-embeddings-on-gpu", []byte{1})
+	bindHybridRuntimeIO(fields, pipeline, configured.ioFPGACount, configured.ioFanoutFactor)
 
 	// Bind validated physical partitions into projection identity while counting runtime endpoints.
-	partitions := configured.Partitions
+	partitions := configured.partitions
+	partitionRequests := make([]lpxv1alpha1.PartitionRequest, len(partitions))
 	agentReplicas := 0
 	for index, partition := range partitions {
-		compilerID := uint32(partition.SourcePartitionID)
-		shape, endpoints, shapeErr := xtShape(partition.Topology.ChipCount)
-		if shapeErr != nil {
-			return nil, fmt.Errorf("V2 compiler partition %d: %w", compilerID, shapeErr)
+		compilerID := uint32(partition.sourcePartitionID)
+		shape, err := xtShape(partition)
+		if err != nil {
+			return nil, fmt.Errorf("V2 compiler partition %d: %w", compilerID, err)
 		}
-		agentReplicas += int(endpoints)
-		for modelIndex := range transcripts {
-			transcripts[modelIndex].uint32Field("compiler-partition-id", compilerID)
-			transcripts[modelIndex].uint32Field("model-partition-id", uint32(index))
-			transcripts[modelIndex].intField("endpoint-count", endpoints)
-			transcripts[modelIndex].field("xt-shape", []byte(shape))
-		}
+		endpoints := partition.effectiveNodeCount()
+		agentReplicas += endpoints
+		fields.uint32Field("compiler-partition-id", compilerID)
+		fields.uint32Field("model-partition-id", uint32(index))
+		fields.intField("endpoint-count", int64(endpoints))
+		fields.field("xt-shape", []byte(shape))
+		partitionRequests[index] = newPartitionRequest(index, partition)
+		partitionRequests[index].XtShape = &shape
 	}
-	connectors, err := v2Connectors(connectorBuild, partitions)
+	connectors, err := v2Connectors(source, partitions)
 	if err != nil {
 		return nil, err
 	}
 	// Preserve physical scheduler partitions while collapsing selected chains only in LPU runtime state.
-	if intent.Pipeline == PipelineLPX && len(configured.SelectedPropSyncChains) != 0 {
-		runtimeChainByRoot := make(map[int][]int, len(connectorBuild.SelectedPropSyncChains))
-		for _, chain := range connectorBuild.SelectedPropSyncChains {
+	if pipeline == PipelineHybrid && len(configured.selectedPropSyncChains) != 0 {
+		runtimeChainByRoot := make(map[int][]int, len(configured.selectedPropSyncChains))
+		for _, chain := range configured.selectedPropSyncChains {
 			runtimeChainByRoot[chain[0]] = chain
 		}
-		collapsed := make([]BuildPartition, 0, len(partitions))
+		collapsed := make([]buildPartition, 0, len(partitions))
 		for partitionIndex := 0; partitionIndex < len(partitions); {
 			partition := partitions[partitionIndex]
-			chain, selected := runtimeChainByRoot[partition.SourcePartitionID]
+			chain, selected := runtimeChainByRoot[partition.sourcePartitionID]
 			if !selected {
 				collapsed = append(collapsed, partition)
 				partitionIndex++
 				continue
 			}
 			chainEnd := partitionIndex + len(chain)
-			chainPartition, collapseErr := collapseSelectedPropSyncChain(
-				chain,
-				partitions[partitionIndex:chainEnd],
-			)
-			if collapseErr != nil {
-				return nil, fmt.Errorf("configuring V2 LPU runtime partitions: %w", collapseErr)
-			}
-			collapsed = append(collapsed, chainPartition)
+			collapsed = append(collapsed, collapseSelectedPropSyncChain(partitions[partitionIndex:chainEnd]))
 			partitionIndex = chainEnd
 		}
-		configured.Partitions = collapsed
-		configured.SelectedPropSyncChains = nil
+		configured.partitions = collapsed
+		configured.selectedPropSyncChains = nil
 	}
 
-	// Encode shared connectors once without changing any model's digest field order.
 	for _, connector := range connectors {
 		encoded, _ := json.Marshal(connector)
-		for index := range transcripts {
-			transcripts[index].field("connector", encoded)
-		}
+		fields.field("connector", encoded)
 	}
+	allocationMetadata := json.RawMessage(`{}`)
+	fields.field("allocation-metadata", allocationMetadata)
 
-	// Publish distinct logical identities backed by the component's immutable configuration.
-	for index := range transcripts {
-		transcript := &transcripts[index]
-		transcript.field("allocation-metadata", allocationMetadata)
-
-		dst = append(dst, &ModelProjection{
-			digest:                 transcript.sum(),
-			compilerSnapshotDigest: intent.BuildSnapshot.contentID,
-			runtimeBuildRef:        intent.RuntimeBuildRef,
-			model:                  intent.Models[index],
-			pipeline:               intent.Pipeline,
-			configuredBuild:        configured,
-			allocationMetadata:     allocationMetadata,
-			partitions:             partitions,
-			connectors:             connectors,
-			agentReplicas:          agentReplicas,
-		})
-	}
-	return dst, nil
+	return &component{
+		configuredBuild:    configured,
+		allocationMetadata: allocationMetadata,
+		partitionRequests:  partitionRequests,
+		connectors:         connectors,
+		agentReplicas:      agentReplicas,
+	}, nil
 }
 
-func xtShape(chipCount int) (lpxv1alpha1.Xt8888PartitionShape, int64, error) {
+func xtShape(partition buildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {
+	// XT8888 scheduler shapes require eight physical devices per host.
+	if partition.devicesPerNode != 8 {
+		return "", fmt.Errorf("devicesPerNode %d, want 8 for XT8888 scheduler shapes", partition.devicesPerNode)
+	}
+
 	// Reserve one whole physical host for compiler partitions that use fewer than eight chips.
+	chipCount := partition.numChips
 	if chipCount > 0 && chipCount < 8 {
-		return lpxv1alpha1.Xt8888PartitionShapeC8, 1, nil
+		return lpxv1alpha1.Xt8888PartitionShapeC8, nil
 	}
 
 	// Reject partial and unregistered whole-host shapes before deriving their LPX names.
 	if chipCount < 8 || chipCount%8 != 0 || (chipCount > 64 && chipCount != 96 && chipCount != 128) {
-		return "", 0, fmt.Errorf("chip count %d is not a registered XT8888 partition shape", chipCount)
+		return "", fmt.Errorf("chip count %d is not a registered XT8888 partition shape", chipCount)
 	}
-	return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chipCount)), int64(chipCount / 8), nil
+	return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chipCount)), nil
 }
 
 // v2Connectors requires a normalized nonnil build and a nonempty contiguous
 // interval of its physical partitions. Runtime chain collapse happens afterward.
 func v2Connectors(
 	build *Build,
-	partitions []BuildPartition,
+	partitions []buildPartition,
 ) ([]lpxv1alpha1.PropSyncConnectorRequest, error) {
 	// Only compiler-selected relationships impose placement constraints.
-	if len(build.SelectedPropSyncChains) == 0 {
+	if len(build.selectedPropSyncChains) == 0 {
 		return []lpxv1alpha1.PropSyncConnectorRequest{}, nil
 	}
 
 	// Validate explicit chains before ordering their scheduler edges.
 	edgePositions, err := validateSelectedPropSyncGraph(
-		build.Partitions,
-		build.SelectedPropSyncChains,
+		build.partitions,
+		build.selectedPropSyncChains,
 		"selected prop-sync chain",
-		true,
 	)
 	if err != nil {
 		return nil, err
@@ -166,8 +142,8 @@ func v2Connectors(
 	slices.Sort(edgePositions)
 
 	// Rebase selected physical edges into the retained partition interval.
-	start := sort.Search(len(build.Partitions), func(index int) bool {
-		return build.Partitions[index].SourcePartitionID >= partitions[0].SourcePartitionID
+	start := sort.Search(len(build.partitions), func(index int) bool {
+		return build.partitions[index].sourcePartitionID >= partitions[0].sourcePartitionID
 	})
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, 0, len(edgePositions))
 	for _, position := range edgePositions {
