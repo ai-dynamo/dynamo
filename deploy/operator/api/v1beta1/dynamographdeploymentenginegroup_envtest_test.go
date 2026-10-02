@@ -207,6 +207,10 @@ func TestDynamoGraphDeploymentEngineGroupAPIServerContract(t *testing.T) {
 			status: DynamoGraphDeploymentEngineGroupStatus{ObservedGeneration: -1},
 		},
 		{
+			name:   "negative desired assignment generation",
+			status: DynamoGraphDeploymentEngineGroupStatus{DesiredAssignmentGeneration: -1},
+		},
+		{
 			name:   "negative desired native-member count",
 			status: DynamoGraphDeploymentEngineGroupStatus{DesiredNativeMemberCount: -1},
 		},
