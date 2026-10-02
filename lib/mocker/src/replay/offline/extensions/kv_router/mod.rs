@@ -989,9 +989,6 @@ impl OfflineReplayRouter {
     pub(crate) fn on_topology_changed(&mut self, now_ms: f64) -> Result<RouterEffects> {
         let clock = self.affinity_clock(now_ms)?;
         let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
-        if self.workers_with_configs.is_empty() {
-            return Ok(RouterEffects::default());
-        }
         let decay_now = self.decay_now(now_ms);
         Ok(RouterEffects {
             admissions: self.drain_pending(decay_now)?,
@@ -1253,6 +1250,11 @@ impl OfflineReplayRouter {
     }
 
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
+        // Keep queued requests and affinity retries intact while no worker is
+        // available; the next topology update resumes normal queue admission.
+        if self.workers_with_configs.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut admissions = Vec::new();
         if let Some(affinity) = &mut self.affinity {
             let workers_changed = std::mem::take(&mut affinity.workers_changed);

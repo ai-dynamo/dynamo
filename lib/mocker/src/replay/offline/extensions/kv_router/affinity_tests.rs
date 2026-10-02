@@ -529,6 +529,25 @@ policy_classes:
 #[test]
 fn removed_affinity_worker_retries_queue_admission_and_waiters() {
     let mut policy = placement(Some(RouterQueuePolicy::Wspt));
+    let profile = RouterPolicyConfig::from_yaml(
+        r#"
+default_policy_family: limited
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: limited
+    policy_family: limited
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 8
+    request_queue_limit_per_worker: 1
+"#,
+    )
+    .unwrap()
+    .resolve_profile(None, None, RouterQueuePolicy::Wspt);
+    policy.router.pending = PolicyQueue::new(profile.clone());
+    policy.router.profile = profile;
     immediate(place(&mut policy, 1, "conversation", 0.0));
     commit(&mut policy, 1, 0.0);
     for id in 2..=3 {
@@ -547,14 +566,18 @@ fn removed_affinity_worker_retries_queue_admission_and_waiters() {
             .is_empty()
     );
     assert_eq!(policy.router.pending_count(), 2);
+    assert!(complete(&mut policy, 1, 1.0).is_empty());
+    assert_eq!(policy.router.pending_count(), 2);
+    assert!(advance(&mut policy, 1.0).is_empty());
+    assert_eq!(policy.router.pending_count(), 2);
     policy.router.add_worker(1).unwrap();
-    let released = policy.router.on_topology_changed(0.0).unwrap().admissions;
+    let released = policy.router.on_topology_changed(1.0).unwrap().admissions;
     assert_eq!(released.len(), 1);
     let first = released[0].uuid;
     assert!(released[0].worker_idx >= 2);
-    commit(&mut policy, first.as_u128(), 0.0);
-    assert!(advance(&mut policy, 0.0).is_empty());
-    let released = complete(&mut policy, first.as_u128(), 0.0);
+    commit(&mut policy, first.as_u128(), 1.0);
+    assert!(advance(&mut policy, 1.0).is_empty());
+    let released = complete(&mut policy, first.as_u128(), 1.0);
     assert_eq!(released.len(), 1);
     assert_ne!(released[0].request_id, first);
     assert!(released[0].scheduler_id >= 2);
