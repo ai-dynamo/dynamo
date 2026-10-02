@@ -319,9 +319,19 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
 func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) {
 	// Size from Command too only when Command is the python interpreter: that is the one
-	// Command form the injectors below extend, by appending to Args. They cannot rewrite a
-	// shell script or wrapper held in Command, so that launch is sized from Args alone and a
-	// multinode launch it manages itself is left intact.
+	// Command form the injectors below extend, by appending to Args. Any other Command (a
+	// shell script or a wrapper) is sized from Args alone and left untouched, because it
+	// may run its own multinode launch, for example:
+	//
+	//	sh -c 'if [ "$LWS_WORKER_INDEX" = 0 ]; then
+	//	         ray start --head --port=6379 &&
+	//	         exec python3 -m dynamo.vllm --tensor-parallel-size 16 --distributed-executor-backend ray
+	//	       else exec ray start --address=$LWS_LEADER_ADDRESS:6379 --block; fi'
+	//
+	// Reading TP 16 from that script would send it down the Ray path below, which puts a
+	// second "ray start --head --port=6379" in front of the script's own. The script's head
+	// then fails because the port is taken, so vLLM never starts, and the worker's command
+	// is replaced. An elastic-EP script of the same kind would be rewritten on every backend.
 	commandLine := getExpandedArgs(container)
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		commandLine = getExpandedCommandLine(container)
