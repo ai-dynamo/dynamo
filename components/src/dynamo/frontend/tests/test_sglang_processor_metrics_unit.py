@@ -124,6 +124,14 @@ def _install_sglang_stubs(install_module):
     _install_module(install_module, "sglang.srt.parser")
     _install_module(
         install_module,
+        "sglang.srt.parser.inkling_tokenizer",
+        CONTENT_TEXT="<|content_text|>",
+        CONTENT_INVOKE_TOOL_JSON="<|content_invoke_tool_json|>",
+        CONTENT_INVOKE_TOOL_TEXT="<|content_invoke_tool_text|>",
+        CONTENT_MODEL_END_SAMPLING="<|content_model_end_sampling|>",
+    )
+    _install_module(
+        install_module,
         "sglang.srt.parser.conversation",
         chat_template_exists=lambda *_args, **_kwargs: False,
     )
@@ -138,6 +146,7 @@ def _install_sglang_stubs(install_module):
         "sglang.srt.parser.reasoning_parser",
         ReasoningParser=_ReasoningParser,
         KimiK3Detector=_KimiK3Detector,
+        InklingDetector=type("InklingDetector", (), {}),
     )
     _install_module(install_module, "sglang.srt.utils")
     _install_module(

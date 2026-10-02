@@ -23,11 +23,21 @@ from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.kimik3_format import RESPONSE_CLOSE, RESPONSE_OPEN
 from sglang.srt.function_call.utils import get_json_schema_constraint
+from sglang.srt.parser.inkling_tokenizer import (
+    CONTENT_INVOKE_TOOL_JSON,
+    CONTENT_INVOKE_TOOL_TEXT,
+    CONTENT_MODEL_END_SAMPLING,
+    CONTENT_TEXT,
+)
 from sglang.srt.parser.jinja_template_utils import (
     detect_jinja_template_content_format,
     process_content_for_template_format,
 )
-from sglang.srt.parser.reasoning_parser import KimiK3Detector, ReasoningParser
+from sglang.srt.parser.reasoning_parser import (
+    InklingDetector,
+    KimiK3Detector,
+    ReasoningParser,
+)
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
@@ -1037,28 +1047,11 @@ def _find_subsequence(haystack: list[int], needle: list[int], start: int = 0) ->
 
 
 class _ReasoningTokenCounter:
-    """Counts generated tokens that belong to reasoning blocks.
+    """Count original token IDs using deterministic segments and a shadow parser.
 
-    The generated ids are cut into segments just past each closing marker
-    (e.g. `</think>` or `<|end|>`), found by token id. Each completed segment
-    is decoded and fed, whole, to a shadow copy of the request's reasoning
-    parser, taken before the live parser saw any output. A segment the shadow
-    reads as reasoning counts in full, markers included, which is also how
-    SGLang's scheduler counts. When the shadow reads a segment as both
-    reasoning and content, counting starts at the opening marker, found by
-    token id, or covers the whole segment when there is none. A segment still
-    open when generation ends is classified the same way. Detector-defined
-    tool/text/action/response starts also split segments; their tokens belong
-    to normal output and are excluded when the parser leaves reasoning.
-
-    Both the cut points and what the shadow is fed depend only on the token
-    sequence, so the count is the same however the tokens were batched into
-    chunks. It follows the parser's split, the one clients see in
-    `reasoning_content`. Closing markers must be generated as the ids they
-    encode to, as special tokens are; otherwise the output is one segment.
-
-    If the shadow parser raises, the count is withdrawn (`total` becomes
-    None) rather than guessed, and the response itself is unaffected.
+    Reasoning delimiters count; normal-output transitions do not. A parser
+    failure or an unmapped mixed segment withdraws usage instead of guessing.
+    Segmentation requires model control markers to retain their encoded IDs.
     """
 
     def __init__(
@@ -1076,23 +1069,34 @@ class _ReasoningTokenCounter:
         self._start_marker_ids = start_marker_ids
         self._end_markers: dict[int, list[tuple[str, list[int]]]] = {}
         self._max_marker_width = 1
-        for attribute in (
-            "think_end_token",
-            "tool_start_token",
-            "_tool_start_token",
-            "_tool_end_token",
-            "TEXT_START_TOKEN",
-            "ACTION_START_TOKEN",
-            "RESPONSE_OPEN",
-            "RESPONSE_CLOSE",
-        ):
-            ids = (
-                end_marker_ids
-                if attribute == "think_end_token"
-                else _reasoning_marker_ids(tokenizer, reasoning_parser, attribute)
+        detector = reasoning_parser.detector
+        boundaries = [
+            (getattr(detector, attribute, None), kind)
+            for attribute, kind in (
+                ("tool_start_token", "tool"),
+                ("_tool_start_token", "tool"),
+                ("_tool_end_token", "close"),
+                ("TEXT_START_TOKEN", "normal"),
+                ("ACTION_START_TOKEN", "normal"),
             )
+        ]
+        if isinstance(detector, KimiK3Detector):
+            boundaries += [(RESPONSE_OPEN, "normal"), (RESPONSE_CLOSE, "close")]
+        if isinstance(detector, InklingDetector):
+            boundaries += [
+                (CONTENT_TEXT, "normal"),
+                (CONTENT_INVOKE_TOOL_JSON, "normal"),
+                (CONTENT_INVOKE_TOOL_TEXT, "normal"),
+                (CONTENT_MODEL_END_SAMPLING, "close"),
+            ]
+        encoded = [(end_marker_ids, "close")] + [
+            (list(tokenizer.encode(marker, add_special_tokens=False)), kind)
+            for marker, kind in boundaries
+            if isinstance(marker, str) and marker
+        ]
+        for ids, kind in encoded:
             if ids:
-                self._end_markers.setdefault(ids[0], []).append((attribute, ids))
+                self._end_markers.setdefault(ids[0], []).append((kind, ids))
                 self._max_marker_width = max(self._max_marker_width, len(ids))
         self._pending_ids: list[int] = []
         # Pending ids before this offset hold no closing marker.
@@ -1156,20 +1160,20 @@ class _ReasoningTokenCounter:
             if normal_text and self._start_marker_ids
             else -1
         )
-        count = len(segment)
-        if opening >= 0:
-            count -= opening - len(self._start_marker_ids)
-        if end_attribute in (
-            "TEXT_START_TOKEN",
-            "ACTION_START_TOKEN",
-            "RESPONSE_OPEN",
-        ) or (
-            end_attribute in ("tool_start_token", "_tool_start_token") and normal_text
-        ):
-            # A tool marker may be literal reasoning (e.g. a detector requiring
-            # it at line start). Exclude it only when the parser passes it on.
-            count -= marker_width
-        self.total += count
+        start = opening - len(self._start_marker_ids) if opening >= 0 else 0
+        excluded = (
+            marker_width
+            if end_attribute == "normal" or (end_attribute == "tool" and normal_text)
+            else 0
+        )
+        if normal_text:
+            normal_ids = segment[:start] + (segment[-excluded:] if excluded else [])
+            if normal_text not in self._tokenizer.decode(
+                normal_ids, skip_special_tokens=False
+            ):
+                self.total = None
+                return
+        self.total += len(segment) - start - excluded
 
 
 def _reasoning_marker_ids(
@@ -1177,12 +1181,6 @@ def _reasoning_marker_ids(
 ) -> list[int]:
     detector = getattr(reasoning_parser, "detector", None)
     marker = getattr(detector, attribute, None)
-    if isinstance(detector, KimiK3Detector):
-        # Kimi declares response boundaries at module scope, not on the detector.
-        if attribute == "RESPONSE_OPEN":
-            marker = RESPONSE_OPEN
-        elif attribute == "RESPONSE_CLOSE":
-            marker = RESPONSE_CLOSE
     encode = getattr(tokenizer, "encode", None)
     if not isinstance(marker, str) or not marker or not callable(encode):
         return []

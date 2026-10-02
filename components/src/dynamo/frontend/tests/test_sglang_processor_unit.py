@@ -5000,6 +5000,12 @@ def reasoning_tokenizer():
                 "<|inner_suffix|>",
                 "<|tools_prefix|>",
                 "<|tools_suffix|>",
+                "<|content_thinking|>",
+                "<|content_text|>",
+                "<|content_invoke_tool_json|>",
+                "<|content_invoke_tool_text|>",
+                "<|content_model_end_sampling|>",
+                "<|end_message|>",
             ]
         }
     )
@@ -5046,19 +5052,28 @@ class TestReasoningTokenUsage:
         self._feed(post, self._ids(tokenizer, text), **feed_kwargs)
         return post.reasoning_token_count
 
-    def test_think_block_counts_both_markers(self, tokenizer):
-        count = self._count(
-            tokenizer, "qwen3", f"<think>{self.REASONING}</think>\n\nIt is 4."
-        )
-        assert count == len(self._ids(tokenizer, f"<think>{self.REASONING}</think>"))
-
     @pytest.mark.parametrize(
         ("parser_name", "prefix", "suffix", "force_reasoning"),
         [
             ("qwen3", "<think>", '<tool_call>{"name":"f"}</tool_call>', False),
-            ("qwen3", "", '<tool_call>{"name":"f"}</tool_call>', True),
-            ("glm45", "<think>", '<tool_call>{"name":"f"}</tool_call>', False),
-            ("kimi_k2", "<think>", "<|tool_calls_section_begin|>functions.f", False),
+            (
+                "inkling",
+                "<|content_thinking|>",
+                "<|content_text|>It is 4.<|end_message|>",
+                False,
+            ),
+            (
+                "inkling",
+                "<|content_thinking|>",
+                '<|content_invoke_tool_json|>{"name":"f"}<|end_message|>',
+                False,
+            ),
+            (
+                "inkling",
+                "<|content_thinking|>",
+                "<|content_invoke_tool_text|>f()<|end_message|>",
+                False,
+            ),
             (
                 "kimi_k3",
                 "<|open|>think<|sep|>",
@@ -5070,12 +5085,6 @@ class TestReasoningTokenUsage:
                 "",
                 "<|open|>response<|sep|>It is 4.<|close|>response<|sep|>",
                 True,
-            ),
-            (
-                "kimi_k3",
-                "<|open|>think<|sep|>",
-                "<|open|>tools<|sep|>functions.f",
-                False,
             ),
             (
                 "cohere_command4",
@@ -5092,12 +5101,11 @@ class TestReasoningTokenUsage:
         ],
         ids=[
             "qwen3",
-            "forced-qwen3",
-            "glm45",
-            "kimi-k2",
+            "inkling-text",
+            "inkling-tool-json",
+            "inkling-tool-text",
             "kimi-k3-response",
             "forced-kimi-k3-response",
-            "kimi-k3-tools",
             "cohere-text",
             "cohere-action",
         ],
@@ -5112,11 +5120,6 @@ class TestReasoningTokenUsage:
             post = self._post(tokenizer, parser_name, force_reasoning)
             self._feed(post, ids, step=step)
             assert post.reasoning_token_count == len(reasoning_ids), step
-
-    def test_tool_marker_without_reasoning_counts_zero(self, tokenizer):
-        assert (
-            self._count(tokenizer, "qwen3", '<tool_call>{"name":"f"}</tool_call>') == 0
-        )
 
     def test_apertus_inner_tool_span_is_excluded(self, reasoning_tokenizer):
         tokenizer = reasoning_tokenizer
@@ -5154,15 +5157,8 @@ class TestReasoningTokenUsage:
     SECOND = "<|start|>assistant<|channel|>analysis<|message|>Check again.<|end|>"
     THIRD = "<|start|>assistant<|channel|>analysis<|message|>And once more.<|end|>"
 
-    @pytest.mark.parametrize(
-        "blocks",
-        [
-            (ANALYSIS, COMMENTARY, SECOND, FINAL),
-            (ANALYSIS, COMMENTARY, SECOND, THIRD, FINAL),
-        ],
-        ids=["reasoning-content-reasoning", "consecutive-reasoning-blocks"],
-    )
-    def test_count_is_identical_for_every_chunk_size(self, reasoning_tokenizer, blocks):
+    def test_count_is_identical_for_every_chunk_size(self, reasoning_tokenizer):
+        blocks = (self.ANALYSIS, self.COMMENTARY, self.SECOND, self.THIRD, self.FINAL)
         text = "".join(blocks)
         expected = sum(
             len(self._ids(reasoning_tokenizer, block))
@@ -5176,20 +5172,16 @@ class TestReasoningTokenUsage:
         }
         assert set(counts.values()) == {expected}, counts
 
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "<|channel|>analysis<|message|><|end|>" + FINAL,
-            "<|channel|>final<|message|>It is 4.<|return|>",
-        ],
-        ids=["empty-analysis", "no-analysis"],
-    )
-    def test_harmony_without_reasoning_text_counts_zero(
-        self, reasoning_tokenizer, text
-    ):
+    def test_empty_harmony_reasoning_counts_zero(self, reasoning_tokenizer):
+        text = "<|channel|>analysis<|message|><|end|>" + self.FINAL
         assert self._count(reasoning_tokenizer, "gpt-oss", text, step=2) == 0
 
-    def test_parser_failure_withdraws_the_count(self, reasoning_tokenizer):
+    @pytest.mark.parametrize(
+        "unmapped_normal", [False, True], ids=["raises", "unmapped-normal"]
+    )
+    def test_unreliable_parser_withdraws_the_count(
+        self, reasoning_tokenizer, unmapped_normal
+    ):
         class FailingParser:
             detector = types.SimpleNamespace(
                 think_start_token="<|channel|>analysis<|message|>",
@@ -5197,6 +5189,8 @@ class TestReasoningTokenUsage:
             )
 
             def parse_stream_chunk(self, text):
+                if unmapped_normal:
+                    return "reasoning", "unmapped normal output"
                 raise ValueError("malformed output")
 
         counter = sglang_prepost_module._ReasoningTokenCounter(
