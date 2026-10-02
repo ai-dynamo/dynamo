@@ -54,12 +54,13 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
-use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
+    ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
+use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -753,10 +754,9 @@ pub struct MmImageEntry {
 }
 
 /// One replacement tracked in both the worker-visible and canonical routing
-/// token spaces. vLLM includes MM metadata on every block intersecting a
-/// feature span, including timestamp/delimiter-only boundary blocks. Those
-/// blocks need the worker token form plus `block_mm_infos`; blocks with an
-/// exact placeholder/object mapping use the canonical pad-value form.
+/// token spaces. Blocks with an exact placeholder/object mapping use the
+/// canonical pad-value form. For a timestamp/delimiter-only boundary block,
+/// the worker contract determines whether the hash also includes MM metadata.
 #[cfg(feature = "mm-routing")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackedMmRoutingReplacement {
@@ -1020,10 +1020,9 @@ fn append_mm_routing_replacement_with_fill(
 /// normalizer block by block.
 ///
 /// Most blocks use canonical pad-value tokens. If a feature-span boundary
-/// does not contain an exact ordered placeholder/object mapping, vLLM keeps
-/// the worker tokens and hashes the block's MM metadata instead. Reproducing
-/// that fallback here keeps both sides identical without discarding the media
-/// identity carried by an ambiguous boundary block.
+/// does not contain an exact ordered placeholder/object mapping, the worker's
+/// KV-event identity contract determines whether to keep those canonical
+/// tokens or fall back to worker tokens plus MM metadata.
 #[cfg(feature = "mm-routing")]
 fn apply_tracked_mm_replacements(
     routing_prepend_bos: Option<TokenIdType>,
@@ -1032,6 +1031,7 @@ fn apply_tracked_mm_replacements(
     block_size: usize,
     image_token_id: Option<TokenIdType>,
     video_token_id: Option<TokenIdType>,
+    kv_event_mm_identity: mm_routing::KvEventMmIdentity,
 ) -> Result<(
     Vec<TokenIdType>,
     usize,
@@ -1149,6 +1149,11 @@ fn apply_tracked_mm_replacements(
                     normalized == routing_block,
                     "frontend MM replacement differs from KV-event normalization"
                 );
+            }
+            None if kv_event_mm_identity == mm_routing::KvEventMmIdentity::PadValueTokens => {
+                // SGLang has already replaced every placeholder with the
+                // canonical media pad before publishing this KV-event block.
+                // The request-side routing block is therefore complete as-is.
             }
             None => {
                 routing_block.copy_from_slice(worker_block);
@@ -1381,6 +1386,22 @@ fn parse_embedding_add_special_tokens(value: &str) -> Option<bool> {
     parse_bool_opt(value)
 }
 
+/// Run CPU-bound preprocessing off the async runtime. On the multi-thread runtime
+/// `block_in_place` hands this worker to the blocking pool, so the I/O tasks that
+/// share the runtime keep draining sockets while a long conversation renders;
+/// under load a synchronous render here can leave request bodies unread for
+/// tens of seconds. Falls back to inline on the current-thread runtime, where
+/// `block_in_place` is not available.
+///
+/// Tokenization already does this via `spawn_blocking` (see `encode_with_timing`);
+/// the template render was the remaining synchronous step on the request path.
+fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 fn embedding_add_special_tokens_env() -> Result<Option<bool>> {
     match std::env::var(EMBEDDING_ADD_SPECIAL_TOKENS_ENV) {
         Ok(value) => match parse_embedding_add_special_tokens(&value) {
@@ -1481,7 +1502,8 @@ fn attach_request_context_metadata(
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
-/// All other trait methods delegate to the inner request.
+/// Other trait methods delegate to the inner request, except typed_messages:
+/// rendering must use the transformed messages rather than the original slice.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
@@ -1515,10 +1537,6 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
             );
         }
         minijinja::value::Value::from_serialize(&json)
-    }
-
-    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
-        self.inner.typed_messages()
     }
 
     fn tools(&self) -> Option<minijinja::value::Value> {
@@ -1707,6 +1725,40 @@ pub struct OpenAIPreprocessor {
 }
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+
+#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+fn resolve_qwen_video_processor_contract(
+    runtime_config: &ModelRuntimeConfig,
+) -> Result<Option<mm_routing::QwenVideoProcessorContract>> {
+    let vllm_contract = runtime_config
+        .get_engine_specific::<mm_routing::VllmQwenVideoProcessorContract>(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        )
+        .with_context(|| {
+            format!(
+                "invalid Qwen video processor runtime metadata under {VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY}"
+            )
+        })?
+        .map(mm_routing::QwenVideoProcessorContract::try_from)
+        .transpose()?;
+    let sglang_contract = runtime_config
+        .get_engine_specific::<mm_routing::SglangQwenVideoProcessorContract>(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        )
+        .with_context(|| {
+            format!(
+                "invalid Qwen video processor runtime metadata under {SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY}"
+            )
+        })?
+        .map(mm_routing::QwenVideoProcessorContract::try_from)
+        .transpose()?;
+
+    anyhow::ensure!(
+        vllm_contract.is_none() || sglang_contract.is_none(),
+        "multiple Qwen video processor contracts were published"
+    );
+    Ok(vllm_contract.or(sglang_contract))
+}
 
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
@@ -2559,16 +2611,12 @@ impl OpenAIPreprocessor {
 
         #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
         let video_routing_processor = {
-            let qwen_contract = match runtime_config
-                .get_engine_specific::<mm_routing::QwenVideoProcessorContract>(
-                    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-                ) {
-                Ok(target) => target,
+            let qwen_contract = match resolve_qwen_video_processor_contract(&runtime_config) {
+                Ok(contract) => contract,
                 Err(error) => {
                     tracing::warn!(
                         target: "mm_routing",
                         %error,
-                        key = VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                         "invalid Qwen video processor runtime metadata; exact video routing disabled"
                     );
                     None
@@ -2802,7 +2850,7 @@ impl OpenAIPreprocessor {
         let template_start = Instant::now();
         let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
-            self.apply_template(request)
+            off_runtime(|| self.apply_template(request))
                 .with_context(|| "Failed to apply prompt template")?
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
@@ -3197,6 +3245,20 @@ impl OpenAIPreprocessor {
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
         let continue_final = request.get_continue_final_message() == Some(true);
+        if continue_final
+            && self
+                .formatter
+                .media_message_order(request)
+                .is_some_and(|order| {
+                    order
+                        .last()
+                        .is_some_and(|&source| source != order.len() - 1)
+                })
+        {
+            return Err(invalid_argument_error(
+                "Cannot continue the final message because the prompt formatter moves it before other messages",
+            ));
+        }
         let formatted_prompt = if self.normalize_tool_call_args || continue_final {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
@@ -4151,6 +4213,15 @@ impl OpenAIPreprocessor {
             // the frontend-tokenized prompt.
             let routing_bos =
                 routing_bos_to_prepend(self.routing_prepend_bos, image_counter_required);
+            #[cfg(feature = "media-ffmpeg")]
+            let kv_event_mm_identity = self
+                .video_routing_processor
+                .as_ref()
+                .map_or(mm_routing::KvEventMmIdentity::MmMetadata, |processor| {
+                    processor.kv_event_mm_identity()
+                });
+            #[cfg(not(feature = "media-ffmpeg"))]
+            let kv_event_mm_identity = mm_routing::KvEventMmIdentity::MmMetadata;
             match apply_tracked_mm_replacements(
                 routing_bos,
                 &replacements,
@@ -4158,6 +4229,7 @@ impl OpenAIPreprocessor {
                 block_size,
                 image_token_id,
                 video_token_id,
+                kv_event_mm_identity,
             ) {
                 Ok(expanded) => expanded,
                 Err(error) => {
@@ -5896,16 +5968,34 @@ impl OpenAIPreprocessor {
                     let state = recovery.entry(choice.index).or_default();
                     if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47") {
                         let desired_content = &state.input_text[..marker_start];
+                        // An EOS inside a tool call is incomplete even if the engine reports stop.
+                        let dropped_call_reported_as_length = choice.finish_reason
+                            == Some(dynamo_protocols::types::FinishReason::Stop)
+                            && choice.delta.tool_calls.is_none()
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some();
+                        if dropped_call_reported_as_length {
+                            tracing::warn!(
+                                choice_index = choice.index,
+                                why = "dropped_native_tool_call_reported_as_length",
+                                dropped_bytes = state.input_text.len() - desired_content.len(),
+                                "glm47 streaming: reporting length instead of stop for a tool call dropped at end of stream"
+                            );
+                            choice.finish_reason =
+                                Some(dynamo_protocols::types::FinishReason::Length);
+                        }
                         if choice.finish_reason
                             == Some(dynamo_protocols::types::FinishReason::Length)
                             && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
                         {
-                            tracing::warn!(
-                                choice_index = choice.index,
-                                why = "truncated_native_tool_call_suppressed",
-                                suppressed_bytes = state.input_text.len() - desired_content.len(),
-                                "glm47 streaming: suppressing incomplete native tool output on length finish"
-                            );
+                            // Count EOS drops separately from max_tokens truncation.
+                            if !dropped_call_reported_as_length {
+                                tracing::warn!(
+                                    choice_index = choice.index,
+                                    why = "truncated_native_tool_call_suppressed",
+                                    suppressed_bytes = state.input_text.len() - desired_content.len(),
+                                    "glm47 streaming: suppressing incomplete native tool output on length finish"
+                                );
+                            }
                             let replacement = desired_content
                                 .strip_prefix(&state.emitted_text)
                                 .unwrap_or_default();
@@ -7677,6 +7767,68 @@ mod extra_args_media_copy_tests {
     }
 
     #[tokio::test]
+    async fn continue_final_message_rejects_reordered_tool_results() {
+        use crate::engines::ValidateRequest;
+        use dynamo_renderer::deepseek::v41::DeepSeekV41Formatter;
+
+        let mut preprocessor = test_preprocessor();
+        preprocessor.formatter = Arc::new(DeepSeekV41Formatter);
+        let image = inline_data_url();
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"alias", "continue_final_message":true, "add_generation_prompt":false,
+            "reasoning_effort":"none", "messages":[
+                {"role":"assistant","tool_calls":[
+                    {"id":"a","type":"function","function":{"name":"image","arguments":"{}"}},
+                    {"id":"b","type":"function","function":{"name":"image","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"b","content":[
+                    {"type":"image_url","image_url":{"url":image}}, {"type":"text","text":"Result B"}
+                ]},
+                {"role":"tool","tool_call_id":"a","content":[
+                    {"type":"image_url","image_url":{"url":image}}, {"type":"text","text":"Result A"}
+                ]}
+            ]
+        })).unwrap();
+        ValidateRequest::validate(&request).unwrap();
+        let error = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Cannot continue the final message"),
+            "{error:#}"
+        );
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::InvalidArgument
+        );
+
+        request.inner.messages.swap(1, 2);
+        let ordered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(ordered.as_str().matches("<｜deepseek_image｜>").count(), 2);
+        assert!(ordered.as_str().ends_with("Result B"));
+
+        request.inner.messages.swap(1, 2);
+        request.inner.messages.push(
+            serde_json::from_value(serde_json::json!({
+                "role":"assistant","content":"Answer:"
+            }))
+            .unwrap(),
+        );
+        let assistant = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(
+            assistant.as_str().matches("<｜deepseek_image｜>").count(),
+            2
+        );
+        assert!(assistant.as_str().ends_with("Answer:"));
+
+        request.inner.messages.pop();
+        request.common.continue_final_message = Some(false);
+        let ordinary = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(ordinary.as_str().matches("<｜deepseek_image｜>").count(), 2);
+    }
+
+    #[tokio::test]
     async fn extra_args_messages_omit_inline_data_when_multi_modal_data_present() {
         let preprocessor = test_preprocessor();
         let data_url = inline_data_url();
@@ -7742,9 +7894,7 @@ mod extra_args_media_copy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::extensions::{
-        AGENT_CONTEXT_CONTEXT_KEY, AgentCompaction, AgentContext,
-    };
+    use crate::protocols::common::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext};
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{
@@ -8111,8 +8261,9 @@ mod tests {
         chunk
     }
 
-    async fn apply_glm47_streaming_length(
+    async fn apply_glm47_streaming_with_terminal(
         chunks: &[&str],
+        terminal: FinishReason,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
         let chunks: Vec<String> = chunks.iter().map(|chunk| (*chunk).to_string()).collect();
         let chunk_count = chunks.len();
@@ -8123,14 +8274,40 @@ mod tests {
             false,
             false,
             stream::iter(chunks.into_iter().enumerate().map(move |(index, content)| {
-                glm47_stream_chunk(
-                    &content,
-                    (index + 1 == chunk_count).then_some(FinishReason::Length),
-                )
+                glm47_stream_chunk(&content, (index + 1 == chunk_count).then_some(terminal))
             })),
         )
         .collect()
         .await
+    }
+
+    async fn apply_glm47_streaming_length(
+        chunks: &[&str],
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        apply_glm47_streaming_with_terminal(chunks, FinishReason::Length).await
+    }
+
+    fn has_finish_reason(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        reason: FinishReason,
+    ) -> bool {
+        output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .any(|choice| choice.finish_reason == Some(reason))
+    }
+
+    fn emitted_tool_call_count(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> usize {
+        output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .map(|tool_calls| tool_calls.len())
+            .sum()
     }
 
     fn stream_content(output: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> String {
@@ -8199,6 +8376,83 @@ mod tests {
             let output = apply_glm47_streaming_length(&[&input[..split], &input[split..]]).await;
             assert_glm47_streaming_length_output(&output, "I can help. ", split);
         }
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_after_bare_tool_call_marker_reports_length() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["I'll check. ", "<tool_call>"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(stream_content(&output), "I'll check. ");
+        assert!(has_finish_reason(&output, FinishReason::Length));
+        assert!(!has_finish_reason(&output, FinishReason::Stop));
+        assert_eq!(emitted_tool_call_count(&output), 0);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_after_partial_function_name_reports_length() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["I'll check. <tool_call>ipy"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(stream_content(&output), "I'll check. ");
+        assert!(has_finish_reason(&output, FinishReason::Length));
+        assert!(!has_finish_reason(&output, FinishReason::Stop));
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_after_partial_arguments_reports_length_without_markup() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["<tool_call>get_weather<arg_key>city</arg_key><arg_value>Par"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert!(stream_content(&output).is_empty());
+        assert!(has_finish_reason(&output, FinishReason::Length));
+        assert!(!has_finish_reason(&output, FinishReason::Stop));
+        assert_eq!(emitted_tool_call_count(&output), 0);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_without_marker_keeps_stop() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["Done. ", "The worker exited normally."],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(stream_content(&output), "Done. The worker exited normally.");
+        assert!(has_finish_reason(&output, FinishReason::Stop));
+        assert!(!has_finish_reason(&output, FinishReason::Length));
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_with_quoted_marker_keeps_stop() {
+        let content = r#"The literal "<tool_call>" marker is part of the explanation."#;
+        let output = apply_glm47_streaming_with_terminal(&[content], FinishReason::Stop).await;
+
+        assert!(has_finish_reason(&output, FinishReason::Stop));
+        assert!(!has_finish_reason(&output, FinishReason::Length));
+        assert_eq!(emitted_tool_call_count(&output), 0);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_complete_call_on_stop_keeps_tool_calls() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(emitted_tool_call_count(&output), 1);
+        assert!(has_finish_reason(&output, FinishReason::ToolCalls));
+        assert!(!has_finish_reason(&output, FinishReason::Length));
     }
 
     /// A prose-only answer never completes a call, so nothing drains the recovery
@@ -10685,15 +10939,16 @@ mod tests {
     }
 
     #[test]
-    fn attach_agent_context_forwards_compaction() {
+    fn attach_agent_context_forwards_opaque_headers() {
         let agent_context = AgentContext {
             session_id: "codex-thread".to_string(),
             parent_session_id: None,
             session_final: None,
-            compaction: Some(AgentCompaction {
-                trigger: Some("manual".to_string()),
-                ..Default::default()
-            }),
+            agent_headers: std::collections::BTreeMap::from([(
+                "x-claude-code-future".into(),
+                vec!["unknown".into(), "second".into()],
+            )])
+            .into(),
             input_trigger: None,
         };
         let mut context = PipelineContext::new(());
@@ -10705,9 +10960,15 @@ mod tests {
         assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
         let wire = serde_json::to_value(&request).unwrap();
         assert_eq!(
-            wire["agent_context"]["compaction"]["trigger"],
-            serde_json::json!("manual")
+            wire["agent_context"]["agent_headers"]["x-claude-code-future"],
+            serde_json::json!(["unknown", "second"])
         );
+        let restored: AgentContext = serde_json::from_value(wire["agent_context"].clone()).unwrap();
+        assert_eq!(restored, agent_context);
+        assert!(std::sync::Arc::ptr_eq(
+            &request.agent_context.as_ref().unwrap().agent_headers,
+            &agent_context.agent_headers
+        ));
     }
 
     #[test]
@@ -10720,7 +10981,7 @@ mod tests {
             session_id: "agent-session".to_string(),
             parent_session_id: Some("agent-parent".to_string()),
             session_final: None,
-            compaction: None,
+            agent_headers: Default::default(),
             input_trigger: None,
         };
         let mut context = PipelineContext::new(());
@@ -11134,6 +11395,51 @@ mod tests {
             "continue_final_message": true
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn normalized_args_request_preserves_render_transformations() {
+        use crate::preprocessor::prompt::CONTINUE_FINAL_MESSAGE_TAG;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "assistant", "content": "prefix", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"query\":\"hello\"}"}
+            }]}]
+        }))
+        .unwrap();
+        let normalized = NormalizedArgsRequest {
+            inner: &request,
+            normalize_tool_call_args: true,
+            continue_final_message: true,
+        };
+        assert!(request.typed_messages().is_some());
+        assert!(normalized.typed_messages().is_none());
+
+        let messages = serde_json::to_value(normalized.messages()).unwrap();
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"],
+            serde_json::json!({"query": "hello"})
+        );
+        assert_eq!(
+            messages[0]["content"],
+            format!("prefix{CONTINUE_FINAL_MESSAGE_TAG}")
+        );
+        // Keep string arguments in the template so only the adapter can perform
+        // this conversion; the renderer's own argument normalization is bypassed.
+        let formatter = test_prompt_formatter(
+            "{% for m in messages %}{% for call in m.tool_calls %}{% if call.function.arguments is string %}RAW{% else %}{{ call.function.arguments.query }}{% endif %}{% endfor %}{{ m.content }}{% endfor %}",
+        );
+        let rendered = formatter.render_prompt(&normalized).unwrap();
+        assert_eq!(
+            rendered.as_str(),
+            format!("helloprefix{CONTINUE_FINAL_MESSAGE_TAG}")
+        );
+        assert_eq!(
+            apply_continue_final_message(rendered).unwrap().as_str(),
+            "helloprefix"
+        );
     }
 
     fn render_with_continue_final_message(
@@ -12451,6 +12757,48 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    #[test]
+    fn dual_qwen_video_contracts_disable_exact_routing() {
+        let mut runtime_config = ModelRuntimeConfig::default();
+        runtime_config
+            .set_engine_specific(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                serde_json::json!({
+                    "placeholder_target": "bare_video_token",
+                    "resize_mode": "legacy_ceil"
+                }),
+            )
+            .unwrap();
+        runtime_config
+            .set_engine_specific(
+                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                serde_json::json!({
+                    "placeholder_target": "bare_video_token",
+                    "resize_mode": "legacy_ceil",
+                    "runless_boundary_hash": "tokens_only",
+                    "sglang_preprocess": {
+                        "image_factor": 28,
+                        "video_min_pixels": 100352,
+                        "video_max_pixels": 602112,
+                        "video_total_pixels": 90316800,
+                        "frame_factor": 2,
+                        "fps": 2.0,
+                        "min_frames": 4,
+                        "max_frames": 768
+                    }
+                }),
+            )
+            .unwrap();
+
+        let error = resolve_qwen_video_processor_contract(&runtime_config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("multiple Qwen video processor contracts")
+        );
+    }
+
     #[cfg(feature = "mm-routing")]
     #[test]
     fn exif_transposed_dimensions_match_vllm_image_loading() {
@@ -12571,6 +12919,7 @@ mod tests {
             4,
             Some(99),
             Some(video_token_id),
+            mm_routing::KvEventMmIdentity::MmMetadata,
         )
         .unwrap();
 
@@ -12579,6 +12928,67 @@ mod tests {
         assert_eq!(&tokens[4..], &[6, video_pad, video_pad, 2]);
         assert_eq!(infos[0].as_ref().unwrap().mm_objects[0].mm_hash, mm_hash);
         assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_video_boundary_matches_token_only_worker_contract() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let video_token_id = 100;
+        let mm_hash = 41;
+        let video_pad = pad_value_for_mm_hash(mm_hash);
+        let replacement = TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![9],
+            worker_tokens: vec![3, 4, 5, 6, video_token_id, video_token_id],
+            routing_tokens: vec![3, 4, 5, 6, video_pad, video_pad],
+        };
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[1, 9, 2],
+            4,
+            Some(99),
+            Some(video_token_id),
+            mm_routing::KvEventMmIdentity::PadValueTokens,
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 8);
+        assert_eq!(&tokens[..4], &[1, 3, 4, 5]);
+        assert_eq!(&tokens[4..], &[6, video_pad, video_pad, 2]);
+        assert!(infos.iter().all(Option::is_none));
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_token_only_worker_still_validates_normalizable_blocks() {
+        let video_token_id = 100;
+        let replacement = TrackedMmRoutingReplacement {
+            mm_hash: 41,
+            target_tokens: vec![9],
+            worker_tokens: vec![video_token_id, video_token_id],
+            routing_tokens: vec![1, 2],
+        };
+
+        let error = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[9],
+            4,
+            Some(99),
+            Some(video_token_id),
+            mm_routing::KvEventMmIdentity::PadValueTokens,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("frontend MM replacement differs from KV-event normalization")
+        );
     }
 
     #[cfg(feature = "mm-routing")]
@@ -12621,6 +13031,7 @@ mod tests {
             4,
             Some(image_token_id),
             Some(video_token_id),
+            mm_routing::KvEventMmIdentity::MmMetadata,
         )
         .unwrap();
 
@@ -12646,6 +13057,50 @@ mod tests {
             [image_hash, video_hash]
         );
         assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_mixed_token_only_boundary_preserves_canonical_pads() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let image_token_id = 99;
+        let video_token_id = 100;
+        let image_hash = 41;
+        let video_hash = 42;
+        let image_pad = pad_value_for_mm_hash(image_hash);
+        let video_pad = pad_value_for_mm_hash(video_hash);
+        let replacements = [
+            TrackedMmRoutingReplacement {
+                mm_hash: image_hash,
+                target_tokens: vec![image_token_id],
+                worker_tokens: vec![image_token_id; 14],
+                routing_tokens: vec![image_pad; 14],
+            },
+            TrackedMmRoutingReplacement {
+                mm_hash: video_hash,
+                target_tokens: vec![video_token_id],
+                worker_tokens: vec![7, 8, video_token_id, video_token_id],
+                routing_tokens: vec![7, 8, video_pad, video_pad],
+            },
+        ];
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &replacements,
+            &[image_token_id, video_token_id],
+            16,
+            Some(image_token_id),
+            Some(video_token_id),
+            mm_routing::KvEventMmIdentity::PadValueTokens,
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 18);
+        assert_eq!(&tokens[..14], &[image_pad; 14]);
+        assert_eq!(&tokens[14..18], &[7, 8, video_pad, video_pad]);
+        assert!(tokens[18..].iter().all(|token| *token == 0));
+        assert!(infos.iter().all(Option::is_none));
     }
 
     #[cfg(feature = "mm-routing")]
@@ -12677,6 +13132,7 @@ mod tests {
             16,
             Some(image_token_id),
             Some(video_token_id),
+            mm_routing::KvEventMmIdentity::MmMetadata,
         )
         .unwrap();
 
@@ -12719,6 +13175,7 @@ mod tests {
                     4,
                     Some(10),
                     Some(20),
+                    mm_routing::KvEventMmIdentity::MmMetadata,
                 )
                 .is_err(),
                 "invalid target sequence {token_ids:?} must fail closed"
@@ -12740,8 +13197,16 @@ mod tests {
             routing_tokens: vec![100, 19, pad, pad, 20, 101, 19, pad, 20],
         };
 
-        let (tokens, prompt_len, block_infos) =
-            apply_tracked_mm_replacements(None, &[replacement], &[7], 4, Some(18), None).unwrap();
+        let (tokens, prompt_len, block_infos) = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[7],
+            4,
+            Some(18),
+            None,
+            mm_routing::KvEventMmIdentity::MmMetadata,
+        )
+        .unwrap();
 
         assert_eq!(prompt_len, 9);
         assert_eq!(tokens, [100, 19, pad, pad, 20, 101, 19, pad, 20, 0, 0, 0]);

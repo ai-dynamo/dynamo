@@ -135,36 +135,37 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1beta1 role PodTemplates require component-specific support",
+			name: "v1beta1 complete role PodTemplates are admitted for standalone components",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
-					{
-						Name: nvidiacomv1beta1.ComponentRoleLeader,
-						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
-						}}}},
-					},
-					{Name: nvidiacomv1beta1.ComponentRoleWorker},
-				}
+				setBetaExplicitMultinodeRoleTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
 			}),
-			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
 		},
 		{
-			name: "v1alpha1 role PodTemplates require component-specific support",
+			name: "v1alpha1 complete role PodTemplates convert for standalone components",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
-				dcd.Spec.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
-					{
-						Name: nvidiacomv1alpha1.ComponentRoleLeader,
-						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
-						}}}},
-					},
-					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
-				}
+				setAlphaExplicitMultinodeRoleTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
 			}),
-			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
+			name: "standalone v1alpha1 canonical lpx component is rejected",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = "lpx"
+				dcd.Spec.LPX = &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"}
+				dcd.Spec.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{{Name: nvidiacomv1alpha1.ComponentRoleLeader}}
+			}),
+			wantCELErr:   "spec: Invalid value: standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment",
+			wantWarnings: []string{`unknown field "spec.lpx"`},
+		},
+		{
+			name: "standalone canonical lpx component is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeLPX
+				dcd.Spec.PodTemplate = nil
+				dcd.Spec.LPX = &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"}
+				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLeader}}
+			}),
+			wantCELErr:   "spec: Invalid value: standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment",
+			wantWarnings: []string{`unknown field "spec.lpx"`},
 		},
 		{
 			name: "v1beta1 main image is required when pod template is absent on create",
@@ -701,6 +702,32 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					ExtraClientContainers: []string{"gms-loader"},
 				},
 			}),
+		},
+		{
+			name: "v1alpha1 checkpoint identity rejects lpu backend",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "lpu",
+					},
+				}
+			}),
+			wantSchemaErr: `spec.checkpoint.identity.backendFramework: Unsupported value: "lpu": supported values: "vllm", "sglang", "trtllm"`,
+		},
+		{
+			name: "v1beta1 checkpoint identity rejects lpu backend",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Identity: &nvidiacomv1beta1.DynamoCheckpointIdentity{
+							Model:            "model",
+							BackendFramework: "lpu",
+						},
+					},
+				}
+			}),
+			wantSchemaErr: `spec.experimental.checkpoint.identity.backendFramework: Unsupported value: "lpu": supported values: "vllm", "sglang", "trtllm"`,
 		},
 		{
 			name: "checkpoint target container name is validated by the source schema",
@@ -1817,7 +1844,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				oldObject:          tt.oldDeployment,
 				gates:              gates,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
-				withoutTopology:    true,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
 				wantWebhookErrors:  tt.wantWebhookErrs,
