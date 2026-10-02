@@ -773,21 +773,18 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     # including its text-only readiness probe, so publish under that
                     # name instead of the example's default "remote-custom-encoder".
                     "DYN_SERVED_MODEL_NAME": "Qwen/Qwen2.5-1.5B-Instruct",
+                    "DYN_SERVICE_NAME": "remote-custom-encoder",
                     "DYN_GENERATOR_GPU": "0",
-                    "DYN_ENCODER_CLASS": (
-                        "examples.custom_encoder.hitchhikers_vision_encoder."
-                        "HitchhikersVisionEncoder"
-                    ),
                     "PYTHONPATH": str(WORKSPACE_DIR),
                 },
                 tests=[
-                    MmCase(payload=make_remote_custom_encoder_payload()),
                     # A turn with no media must still be served: the orchestrator
                     # forwards it to the generator instead of requiring an image.
                     MmCase(
                         suffix="text_only",
                         payload=make_remote_custom_encoder_text_only_payload(),
                     ),
+                    MmCase(payload=make_remote_custom_encoder_payload()),
                 ],
             ),
         },
