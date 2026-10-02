@@ -48,9 +48,7 @@ class UnaryChatModel:
     public_model_name: str | None = None
     chat_template: Path | None = None
 
-    async def serve(
-        self, runtime: DistributedRuntime, handler: _UnaryHandler
-    ) -> None:
+    async def serve(self, runtime: DistributedRuntime, handler: _UnaryHandler) -> None:
         """Register the model and serve its handler until shutdown."""
 
         endpoint = runtime.endpoint(f"{self.service_name}.app.generate")
