@@ -93,7 +93,7 @@ kvbm-logical = { path = "lib/kvbm-logical", version = "1.6.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.6.0" }
 
 # velo
-velo = { git = "https://github.com/ai-dynamo/velo", rev = "bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48", default-features = false }
+velo = { version = "0.18.0", default-features = false }
 
 # External dependencies
 anyhow = { version = "1" }
