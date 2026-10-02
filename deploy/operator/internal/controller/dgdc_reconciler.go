@@ -444,16 +444,25 @@ func (r *DynamoGraphDeploymentCandidateReconciler) SetupWithManager(mgr ctrl.Man
 		For(&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 		Watches(
 			&corev1.ConfigMap{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				name, ok := strings.CutPrefix(obj.GetName(), ConfigMapOutputPrefix)
-				if !ok || name == "" {
-					return nil
-				}
-				return []reconcile.Request{{NamespacedName: types.NamespacedName{
-					Name:      name,
-					Namespace: obj.GetNamespace(),
-				}}}
-			}),
+			handler.EnqueueRequestsFromMapFunc(mapOutputConfigMapToDGDRRequest),
 		).
 		Complete(r)
+}
+
+// mapOutputConfigMapToDGDRRequest maps a ConfigMap event back to its owning
+// DGDR's NamespacedName via the ConfigMapOutputPrefix naming convention (the
+// same one getOutputConfigMapName uses to build the name in the first
+// place), so no owner-reference wiring on the ConfigMap itself is needed.
+// A ConfigMap whose name doesn't carry the prefix isn't one of ours -- nil
+// means "nothing to enqueue", not an error. Extracted as a named, directly
+// testable function rather than inlined in SetupWithManager.
+func mapOutputConfigMapToDGDRRequest(_ context.Context, obj client.Object) []reconcile.Request {
+	name, ok := strings.CutPrefix(obj.GetName(), ConfigMapOutputPrefix)
+	if !ok || name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Name:      name,
+		Namespace: obj.GetNamespace(),
+	}}}
 }
