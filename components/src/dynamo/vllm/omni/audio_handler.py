@@ -7,9 +7,11 @@ Extracted from omni_handler.py to keep modality-specific logic separate.
 OmniHandler holds an instance as ``self.audio`` (composition).
 """
 
+import io
 import logging
 from typing import Any, Dict, Union
 
+import soundfile as sf
 from transformers import AutoTokenizer
 from vllm_omni.inputs.data import OmniTextPrompt
 
@@ -83,6 +85,7 @@ class AudioGenerationHandler:
         self.audex = AudexRequestAdapter(config, engine_client)
 
         # Cache TTS capabilities from model config at init.
+        self._tts_model_variant: str | None = self._load_tts_model_variant()
         self._tts_supported_speakers: set = self._load_supported_speakers()
         self._tts_supported_languages: set = self._load_supported_languages()
         if self._tts_supported_speakers:
@@ -99,6 +102,22 @@ class AudioGenerationHandler:
             )
 
     # -- TTS capability loading from model config -----------------------------
+
+    def _load_tts_model_variant(self) -> str | None:
+        """Read the supported task from Qwen3-TTS checkpoint metadata."""
+        model_config = self.engine_client.model_config
+        if model_config is None:  # Diffusion-only pipelines have no LLM config.
+            return None
+        hf_config = model_config.hf_config
+        # Other audio model configurations do not define tts_model_type.
+        configured_variant = getattr(hf_config, "tts_model_type", None)
+        if not isinstance(configured_variant, str):
+            return None
+        return {
+            "customvoice": "CustomVoice",
+            "voicedesign": "VoiceDesign",
+            "base": "Base",
+        }.get(configured_variant.replace("_", "").lower())
 
     def _load_supported_speakers(self) -> set:
         """Load supported speakers from model config (case-insensitive).
@@ -334,6 +353,13 @@ class AudioGenerationHandler:
                 f"Supported: {', '.join(sorted(_ALLOWED_TASK_TYPES))}"
             )
 
+        if self._tts_model_variant is not None and task_type != self._tts_model_variant:
+            raise ValueError(
+                f"Qwen3-TTS {self._tts_model_variant} checkpoint does not support "
+                f"task_type='{task_type}'. Use task_type='{self._tts_model_variant}' "
+                f"or load the matching {task_type} checkpoint."
+            )
+
         if req.language is not None:
             supported_langs = self._tts_supported_languages or {
                 lang.lower() for lang in _TTS_LANGUAGES_FALLBACK
@@ -375,12 +401,8 @@ class AudioGenerationHandler:
 
         validate_audio_max_new_tokens(req.max_new_tokens, self.config)
 
-    async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple:
+    async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple[list, int]:
         """Download or decode reference audio for voice cloning (Base task)."""
-        import io
-
-        import soundfile as sf
-
         if ref_audio_str.startswith(("http://", "https://")):
             import ipaddress
             import socket
@@ -456,7 +478,9 @@ class AudioGenerationHandler:
                 f"ref_audio is not readable audio ({len(audio_bytes)} bytes): "
                 "unrecognised format"
             ) from exc
-        return wav_data, int(sr)
+        # Nested ndarrays become descriptors in EngineCore's untyped metadata;
+        # plain lists preserve the waveform across its serialization boundary.
+        return wav_data.tolist(), int(sr)
 
     def _estimate_tts_prompt_len(self, tts_params: Dict[str, Any]) -> int:
         """Estimate Qwen3-TTS prompt length using its tokenizer.

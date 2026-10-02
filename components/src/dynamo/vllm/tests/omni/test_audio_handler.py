@@ -4,12 +4,23 @@
 """Unit tests for AudioGenerationHandler."""
 
 import asyncio
+import base64
+import io
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 try:
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+    from vllm_omni.engine import AdditionalInformationPayload
+    from vllm_omni.engine.serialization import (
+        deserialize_additional_information,
+        serialize_additional_information,
+    )
+
     from dynamo.common.protocols.audio_protocol import (
         AudioNvExt,
         NvCreateAudioSpeechRequest,
@@ -46,7 +57,7 @@ pytestmark = [
 ]
 
 
-def _make_audio_handler(**config_overrides):
+def _make_audio_handler(*, hf_config=None, **config_overrides):
     """Create an AudioGenerationHandler with mocked dependencies."""
     config = MagicMock()
     config.model = "test-tts-model"
@@ -60,7 +71,9 @@ def _make_audio_handler(**config_overrides):
         setattr(config, k, v)
 
     engine_client = MagicMock()
-    engine_client.model_config.hf_config = MagicMock(spec=[])
+    engine_client.model_config.hf_config = (
+        hf_config if hf_config is not None else MagicMock(spec=[])
+    )
 
     handler = AudioGenerationHandler(
         config=config,
@@ -159,6 +172,70 @@ class TestValidateTtsRequest:
         handler._validate_tts_request(req)  # Should not raise
 
 
+class TestTtsCheckpointCompatibility:
+    @pytest.mark.parametrize(
+        "configured_variant, supported_task",
+        [
+            ("custom_voice", "CustomVoice"),
+            ("voice_design", "VoiceDesign"),
+            ("base", "Base"),
+            ("CustomVoice", "CustomVoice"),
+        ],
+    )
+    @pytest.mark.parametrize("task_type", [None, "CustomVoice", "VoiceDesign", "Base"])
+    def test_checkpoint_task_compatibility(
+        self, configured_variant, supported_task, task_type
+    ):
+        # Metadata must work even when the local model path has no variant name.
+        handler = _make_audio_handler(
+            hf_config=SimpleNamespace(tts_model_type=configured_variant)
+        )
+        req = NvCreateAudioSpeechRequest(
+            input="hello",
+            task_type=task_type,
+            instructions="cheerful",
+            ref_audio="data:audio/wav;base64,AAAA" if task_type == "Base" else None,
+        )
+        effective_task = task_type or "CustomVoice"
+        if effective_task == supported_task:
+            handler._validate_tts_request(req)
+        else:
+            with pytest.raises(
+                ValueError,
+                match=f"{supported_task} checkpoint does not support task_type='{effective_task}'",
+            ):
+                handler._validate_tts_request(req)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stream_audio", [False, True])
+    async def test_rejection_preserves_supported_requests(
+        self, monkeypatch, stream_audio
+    ):
+        handler = _make_audio_handler(
+            hf_config=SimpleNamespace(tts_model_type="custom_voice")
+        )
+        handler.engine_client.stage_list = [SimpleNamespace(model_stage="qwen3_tts")]
+        resolve_audio = AsyncMock()
+        monkeypatch.setattr(handler, "_resolve_ref_audio", resolve_audio)
+        monkeypatch.setattr(handler, "_estimate_tts_prompt_len", lambda params: 19)
+        nvext = AudioNvExt(frontend_accepts_audio_chunks=stream_audio)
+        incompatible = NvCreateAudioSpeechRequest(
+            input="hello",
+            task_type="Base",
+            ref_audio="https://example.com/reference.wav",
+            nvext=nvext,
+        )
+        with pytest.raises(ValueError, match="CustomVoice checkpoint"):
+            await handler.build_engine_inputs(incompatible)
+        resolve_audio.assert_not_awaited()
+
+        inputs = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hello", voice="vivian", nvext=nvext)
+        )
+        assert inputs.prompt["additional_information"]["task_type"] == ["CustomVoice"]
+        assert inputs.stream_audio is stream_audio
+
+
 class TestIsTtsModel:
     """Tests for _is_tts_model detection."""
 
@@ -248,6 +325,19 @@ def test_tts_prompt_len_propagates_estimator_errors(monkeypatch):
 
 class TestEngineInputsFromAudio:
     """Tests for build_engine_inputs."""
+
+    @pytest.mark.asyncio
+    async def test_diffusion_only_engine_has_no_model_config(self):
+        handler = AudioGenerationHandler(
+            config=SimpleNamespace(),
+            engine_client=SimpleNamespace(model_config=None),
+            media_output_fs=None,
+            media_output_http_url=None,
+        )
+        inputs = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hi")
+        )
+        assert inputs.prompt["prompt"] == "hi"
 
     @pytest.mark.asyncio
     async def test_generic_path_for_non_tts(self):
@@ -615,11 +705,6 @@ class TestResolveRefAudio:
 
     @staticmethod
     def _wav_bytes(samples=1600, rate=16000):
-        import io
-
-        import numpy as np
-        import soundfile as sf
-
         buf = io.BytesIO()
         # Random content so the base64 payload really contains '+' and '/'.
         rng = np.random.default_rng(0)
@@ -630,8 +715,6 @@ class TestResolveRefAudio:
 
     @staticmethod
     def _data_uri(payload: bytes) -> str:
-        import base64
-
         return "data:audio/wav;base64," + base64.b64encode(payload).decode()
 
     def test_decodes_a_valid_data_uri(self):
@@ -639,6 +722,32 @@ class TestResolveRefAudio:
         wav = self._wav_bytes()
         data, rate = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
         assert len(data) == 1600 and rate == 16000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("samples", [32, 1600])
+    async def test_reference_waveform_survives_engine_transport(
+        self, monkeypatch, samples
+    ):
+        # Exercise both inline and out-of-band ndarray sizes in vLLM's codec.
+        handler = _make_audio_handler(hf_config=SimpleNamespace(tts_model_type="base"))
+        monkeypatch.setattr(handler, "_estimate_tts_prompt_len", lambda params: 19)
+        wav = self._wav_bytes(samples=samples)
+        expected, expected_rate = sf.read(io.BytesIO(wav), dtype="float32")
+        inputs = await handler._engine_inputs_tts(
+            NvCreateAudioSpeechRequest(
+                input="hello", task_type="Base", ref_audio=self._data_uri(wav)
+            ),
+            stream_audio=False,
+        )
+        payload = serialize_additional_information(
+            inputs.prompt["additional_information"]
+        )
+        received = MsgpackDecoder(AdditionalInformationPayload).decode(
+            MsgpackEncoder().encode(payload)
+        )
+        waveform, rate = deserialize_additional_information(received)["ref_audio"][0]
+        assert rate == expected_rate
+        np.testing.assert_array_equal(waveform, expected)
 
     def test_decodes_a_percent_encoded_payload(self):
         # A data URI that travelled through a URL has '+' and '/' escaped.
