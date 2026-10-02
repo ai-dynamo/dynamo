@@ -111,15 +111,19 @@ impl StreamErrorSignal {
         self.0.failure.get().map(|failure| &failure.error_type)
     }
 
+    pub(super) fn error_type(&self) -> Option<ErrorType> {
+        self.get().cloned()
+    }
+
     pub(super) fn mark_terminal_event_emitted(&self) {
         self.0.terminal_event_emitted.store(true, Ordering::Release);
     }
 
-    fn terminal_event_emitted(&self) -> bool {
+    pub(super) fn terminal_event_emitted(&self) -> bool {
         self.0.terminal_event_emitted.load(Ordering::Acquire)
     }
 
-    fn semantic_error(&self) -> Option<&DynamoError> {
+    pub(super) fn semantic_error(&self) -> Option<&DynamoError> {
         self.0
             .failure
             .get()
@@ -570,7 +574,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
     inflight_guard.mark_error(ErrorType::Cancelled);
     let mut stream_handle = SignaledConnectionHandle::new(stream_handle, error_signal.clone());
-    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal);
+    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal.clone());
 
     async_stream::try_stream! {
         tokio::pin!(stream);
@@ -606,7 +610,15 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                 Some(error) => openai_semantic_stream_error(error),
                                 None => (fallback_error_type, fallback_error_body),
                             };
+                            let error_type = error_signal
+                                .as_ref()
+                                .and_then(StreamErrorSignal::get)
+                                .cloned()
+                                .unwrap_or(error_type);
                             inflight_guard.mark_error(error_type.clone());
+                            if let Some(error_signal) = &error_signal {
+                                error_signal.set(error_type.clone());
+                            }
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
@@ -701,6 +713,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                     }
                 } => {
                     inflight_guard.mark_error(ErrorType::ResponseTimeout);
+                    if let Some(error_signal) = &error_signal {
+                        error_signal.set(ErrorType::ResponseTimeout);
+                    }
                     stream_handle.disarm();
                     tracing::warn!(
                         request_id = %inflight_guard.request_id(),
@@ -1556,6 +1571,49 @@ mod tests {
         let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("python_consumer_drop", &body, backend_detail);
+    }
+
+    #[tokio::test]
+    async fn typed_producer_error_overrides_generic_stream_error_classification() {
+        let model = "typed-timeout-model";
+        let (metrics, guard, ctx, handle) = setup_test(model, "req-typed-timeout");
+        let error_signal = StreamErrorSignal::default();
+        error_signal.set(ErrorType::ResponseTimeout);
+        let stream = simulate_mid_stream_error(0, "request-plane response timeout");
+        let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
+            stream,
+            ctx,
+            guard,
+            handle,
+            None,
+            openai_stream_error,
+            StreamMonitorOptions {
+                error_signal: Some(error_signal),
+                ..Default::default()
+            },
+        );
+
+        let _body = collect_sse_body(monitored).await;
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::ResponseTimeout,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            0
+        );
     }
 
     /// A backend error carrying sensitive internals (file paths, panic text,
