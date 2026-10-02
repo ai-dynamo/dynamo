@@ -16,7 +16,9 @@ from gpu_memory_service.kv_recovery.types import (
     RecoveryResult,
 )
 
-logger = logging.getLogger(__name__)
+# EngineCore is a spawned vLLM process: its configured logger hierarchy is
+# vllm.*, while the Python root logger can still default to WARNING.
+logger = logging.getLogger("vllm.gms_kv_recovery")
 
 
 class VllmKVRecoveryAdapter:
