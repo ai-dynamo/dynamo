@@ -238,18 +238,15 @@ def patch_failover_extend_warmup_for_gms() -> None:
         if was_warmed or getattr(mr, "_gms_failover_extend_warmed_up", False):
             return result
 
+        from gpu_memory_service.integrations.sglang.gms_unified_cache import _standby
         from gpu_memory_service.integrations.sglang.kv_identity import shared_kv_enabled
 
-        failover_shadow = any(
-            os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
-            for name in (
-                "DYN_GMS_FAILOVER_SHADOW_MODE",
-                "GMS_KV_DIRECTORY_STANDBY",
-            )
-        )
+        # Failover mode is enabled for both primary and shadow. Only the
+        # sleeping standby needs this extra EXTEND warmup before takeover;
+        # the active writer will exercise EXTEND through normal requests.
         if not (
             shared_kv_enabled()
-            and failover_shadow
+            and _standby() is True
             and getattr(mr, "device", None) == "cuda"
         ):
             return result

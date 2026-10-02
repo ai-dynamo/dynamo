@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Type
+from typing import TYPE_CHECKING
 
 try:
     from sglang.srt.arg_groups.overrides import declare_late_resolution
@@ -43,7 +43,14 @@ def configure_shared_failover_env() -> None:
     )
 
 
-def setup_gms(server_args) -> Type["GMSModelLoader"]:
+def _is_failover_standby() -> bool:
+    shadow = os.environ.get("DYN_GMS_FAILOVER_SHADOW_MODE", "").strip().lower()
+    return shadow in {"1", "true", "yes", "on"} and os.environ.get(
+        "ENGINE_ID", "0"
+    ) != os.environ.get("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+
+
+def setup_gms(server_args) -> type[GMSModelLoader]:
     """Setup GPU Memory Service for SGLang.
 
     Validates config and returns the GMSModelLoader class.
@@ -100,15 +107,24 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
     )
 
     _gms_lock_mode = get_gms_lock_mode(extra)
+    if _is_failover_standby() and extra.get("gms_read_only") is not False:
+        # Like vLLM's non-primary engines: a standby that starts alongside its
+        # primary must not race it for the weight RW lock. Each TP rank decides
+        # independently, so mixed RW winners across ranks deadlock the load.
+        from gpu_memory_service.common.locks import RequestedLockType
+
+        _gms_lock_mode = RequestedLockType.RO
+        logger.info("[GMS] failover standby imports weights read-only")
     _gms_ro_connect_timeout_ms = get_gms_ro_connect_timeout_ms(extra)
 
     from gpu_memory_service.integrations.sglang import (
         install_gms_unified_cache,
-        install_kv_leases,
         install_vmm_ipc_kv,
     )
 
     install_vmm_ipc_kv.install_lazy()
+    from gpu_memory_service.integrations.sglang import install_kv_leases
+
     install_kv_leases.install()
     install_gms_unified_cache.configure(server_args)
 

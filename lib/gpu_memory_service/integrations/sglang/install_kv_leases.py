@@ -21,6 +21,7 @@ from gpu_memory_service.integrations.common.kv_lease_client import (
 from gpu_memory_service.integrations.common.process_lifecycle import (
     arm_parent_death_signal,
 )
+from gpu_memory_service.integrations.sglang import writer_lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -254,7 +255,9 @@ def hidden_recoverable_tokens(allocator) -> int:
     return (hidden_count + standby_count) * int(getattr(allocator, "page_size", 1))
 
 
-def activate_hidden_recovery_capacity(allocator, required_tokens: int) -> int:
+def activate_hidden_recovery_capacity(
+    allocator, required_tokens: int, *, max_batch_pages: int | None = None
+) -> int:
     """Make a bounded batch of predecessor pages natively writable.
 
     A promoted SGLang process initially keeps exact-generation predecessor KV
@@ -285,6 +288,8 @@ def activate_hidden_recovery_capacity(allocator, required_tokens: int) -> int:
     required_pages = (int(required_tokens) + page_size - 1) // page_size
     total_pages = int(getattr(allocator, "size", 0)) // page_size
     batch_pages = min(len(hidden), max(required_pages, max(1, total_pages // 4)))
+    if max_batch_pages is not None:
+        batch_pages = min(batch_pages, max(required_pages, int(max_batch_pages)))
     eligible = sorted(int(page) for page in hidden)
     lease_map = st["leases_by_page"]
     retained = st["retained_pages"]
@@ -333,6 +338,28 @@ def activate_hidden_recovery_capacity(allocator, required_tokens: int) -> int:
         raise
 
     if not victims:
+        # A reclaimed FREE page has no directory victim to retire. Do not
+        # strand it outside native free_pages, or exhaust the recovery tail
+        # while asynchronous phase two can still make it available later.
+        if not st.get("reclaimed_free_exhausted") and cohort.all_true(
+            "recovery-capacity:reclaimed", writer_lifecycle.gms_reclaim_ready()
+        ):
+            successors = _reserve_reclaimed_hidden_pages(
+                st, cohort, eligible, batch_pages
+            )
+            if len(successors) < batch_pages:
+                # Every window was probed. Phase two runs once per boot, so the
+                # remaining hidden pages cannot become FREE later; stop paying
+                # for this TP probe on every native shortfall.
+                st["reclaimed_free_exhausted"] = True
+            if successors:
+                return _publish_hidden_recovery_pages(allocator, st, successors)
+        elif not st.get("reclaimed_free_exhausted") and not cohort.all_true(
+            "recovery-capacity:settled",
+            writer_lifecycle.gms_reclaim_ready()
+            or writer_lifecycle.gms_reclaim_refused(),
+        ):
+            return 0
         # A page can remain temporarily unretirable while its directory entry
         # is claimed or ACTIVE. Retrying this RPC and its TP agreement from
         # every subsequent native eviction permanently taxes the recovered
@@ -359,37 +386,130 @@ def activate_hidden_recovery_capacity(allocator, required_tokens: int) -> int:
             raise RuntimeError("GMS recovery-capacity adoption failed")
         return successors
 
-    cpu_free = st.get("cpu_free_pages")
-    if not isinstance(cpu_free, deque):
-        raise RuntimeError("SGLang CPU free-page mirror is unavailable")
     successors = cohort.run("recovery-capacity:adopt", adopt_victims)
-    pages = [int(lease.block_id) for lease in successors]
-    page_tensor = torch.tensor(
-        pages, dtype=allocator.free_pages.dtype, device=allocator.free_pages.device
-    )
-    if torch.isin(page_tensor, allocator.get_all_free_pages()).any().item():
-        raise RuntimeError("GMS recovery capacity overlaps native-free pages")
-    allocator.free_pages = torch.cat((allocator.free_pages, page_tensor))
-    cpu_free.extend(pages)
-    _record_leases(st, successors)
-    active = st.get("active_free_pages")
-    if isinstance(active, set):
-        active.update(pages)
-    st["active_prefix_valid"] = False
-    hidden.difference_update(pages)
-    retained.difference_update(pages)
+    activated = _publish_hidden_recovery_pages(allocator, st, successors)
     candidates = getattr(allocator, "_gms_recovery_candidates", None)
     if isinstance(candidates, set):
         candidates.difference_update(
             bytes(victim["content_hash"]) for victim in local_victims
         )
+    return activated
+
+
+def _reserve_reclaimed_hidden_pages(st, cohort, eligible, count) -> list[KVLease]:
+    """Reserve only FREE pages and withdraw asymmetric rank-local successes."""
+    client = st["client"]
+    cohort.agree("recovery-capacity:free-candidates", (eligible, count))
+    held: list[KVLease] = []
+    # Probe identical bounded ID windows, not each rank's first available IDs:
+    # disjoint early successes must not hide a later common FREE subset.
+    for offset in range(0, len(eligible), count):
+        window = eligible[offset : offset + count]
+        acquired = []
+        previous_count = len(held)
+
+        def reserve():
+            acquired.extend(
+                client.acquire(
+                    len(window),
+                    preferred_blocks=window,
+                    allow_partial=True,
+                    strict_preferred=True,
+                )
+            )
+            held.extend(acquired)
+            ids = [lease.block_id for lease in acquired]
+            if (
+                len(ids) != len(set(ids))
+                or len(ids) > len(window)
+                or any(
+                    page not in window
+                    or page in st["leases_by_page"]
+                    or page in st["retained_pages"]
+                    for page in ids
+                )
+            ):
+                raise RuntimeError("invalid reclaimed SGLang page reservation")
+            return ids
+
+        try:
+            _local, common = cohort.run_intersection(
+                "recovery-capacity:reserve-free", reserve
+            )
+        except Exception:
+            cohort.run("recovery-capacity:rollback-free", lambda: client.release(held))
+            raise
+        selected = set(common[: count - previous_count])
+        withdrawn = [lease for lease in acquired if lease.block_id not in selected]
+        try:
+            cohort.run(
+                "recovery-capacity:withdraw-free", lambda: client.release(withdrawn)
+            )
+        except Exception:
+            # Stale-generation releases are ignored, so releasing every held
+            # lease also covers a partially completed withdrawal.
+            cohort.run("recovery-capacity:rollback-free", lambda: client.release(held))
+            raise
+        by_page = {lease.block_id: lease for lease in acquired}
+        held[previous_count:] = [by_page[page] for page in common if page in selected]
+        if len(held) == count:
+            break
+    return held
+
+
+def _publish_hidden_recovery_pages(allocator, st, successors) -> int:
+    """Publish agreed leased pages to native and CPU free lists together."""
+    cohort = allocator._gms_tp_consistency
+    cpu_free = st.get("cpu_free_pages")
+    pages = [int(lease.block_id) for lease in successors]
+
+    def prepare_native_free():
+        if not isinstance(cpu_free, deque):
+            raise RuntimeError("SGLang CPU free-page mirror is unavailable")
+        page_tensor = torch.tensor(
+            pages, dtype=allocator.free_pages.dtype, device=allocator.free_pages.device
+        )
+        if torch.isin(page_tensor, allocator.get_all_free_pages()).any().item():
+            raise RuntimeError("GMS recovery capacity overlaps native-free pages")
+        return torch.cat((allocator.free_pages, page_tensor))
+
+    try:
+        allocator.free_pages = cohort.run(
+            "recovery-capacity:publish", prepare_native_free
+        )
+    except Exception:
+        # Pages stay hidden; returning them to FREE lets a later probe retry.
+        cohort.run(
+            "recovery-capacity:publish-rollback",
+            lambda: st["client"].release(successors),
+        )
+        raise
+    cpu_free.extend(pages)
+    _record_leases(st, successors)
+    # Takeover can begin with only a handful of FREE pages. Do not keep its
+    # tiny bootstrap window forever after retiring a large agreed batch:
+    # doing so forces TP activation/parking on almost every decode step.
+    # Grow only within the configured ceiling and the same quarter-capacity
+    # bound used at attach; page activation still uses the agreed lease path.
+    st["active_window_pages"] = max(
+        int(st.get("active_window_pages", 1)),
+        min(_steady_active_window_pages(), max(1, len(cpu_free) // 4)),
+    )
+    active = st.get("active_free_pages")
+    if isinstance(active, set):
+        active.update(pages)
+    st["active_prefix_valid"] = False
+    hidden = st["exclusive_hidden_pages"]
+    hidden.difference_update(pages)
+    st["retained_pages"].difference_update(pages)
     logger.info(
         "[GMS-KVLease] SGLang activated recovery capacity pages=%d "
-        "remaining_candidates=%d",
+        "remaining_candidates=%d active_window_pages=%d",
         len(pages),
         len(hidden),
+        st["active_window_pages"],
     )
-    return len(pages) * page_size
+    return len(pages) * int(allocator.page_size)
 
 
 def _agree_native_capacity(self, operation: str, required: int, available: int) -> None:
@@ -876,6 +996,65 @@ def _demote_exact_retained_pages(self, pages: list[int]) -> None:
     cohort = getattr(self, "_gms_tp_consistency", None)
     if directory is None or not directory.authoritative or cohort is None:
         raise RuntimeError("cannot retire sealed SGLang pages without writer authority")
+    reverse = getattr(self, "_gms_local_hashes_by_page", None)
+    if (
+        isinstance(reverse, dict)
+        and getattr(directory, "async_publish_enabled", False)
+        and isinstance(getattr(self, "_gms_engine_id", None), str)
+        and all(reverse.get(page) for page in targets)
+    ):
+        # The lease generation, not the directory row, is the read authority.
+        # An active read pin makes adopt fail; after adopt, any stale directory
+        # row names the old generation and cannot be adopted by another reader.
+        # This avoids a synchronous daemon selection RPC on every native LRU
+        # free while retaining ordered, generation-conditional invalidation.
+        old = [lease_map[page] for page in targets]
+        tombstones = [
+            {
+                "content_hash": bytes(content_hash),
+                "engine_id": self._gms_engine_id,
+                "slot_ids": [page],
+                "generations": [old_lease.generation],
+                "tier": "hbm",
+                "sealed": False,
+            }
+            for page, old_lease in zip(targets, old)
+            for content_hash in sorted(reverse[page])
+        ]
+
+        def demote_local():
+            successors = st["client"].adopt(old)
+            if [lease.block_id for lease in successors] != targets:
+                raise RuntimeError("GMS local sealed-page demotion failed")
+            if directory.publish_deferred(tombstones) != len(tombstones):
+                raise RuntimeError("incomplete GMS sealed-page invalidation")
+            return successors, targets
+
+        try:
+            # The current writer's native tree already decides which pages to
+            # evict. Its rank-local lease generation makes stale directory
+            # rows unreadable, and recovery accepts only a common TP prefix.
+            # Keep the vote for a recovered shadow: independently retiring an
+            # inherited candidate could diverge the per-rank fast-lookup set.
+            candidates = getattr(self, "_gms_recovery_candidates", None)
+            if st.get("exclusive_steady_state") and not candidates:
+                successors, _targets = demote_local()
+            else:
+                successors = cohort.run_agreed("free:demote-sealed-local", demote_local)
+        except Exception:
+            # A peer may have advanced its lease before the TP vote failed.
+            # Never resume native allocation from potentially stale mirrors.
+            st["retirement_failed"] = True
+            raise
+        for lease in successors:
+            lease_map[int(lease.block_id)] = lease
+            retained.discard(int(lease.block_id))
+        candidates = getattr(self, "_gms_recovery_candidates", None)
+        if isinstance(candidates, set):
+            candidates.difference_update(
+                bytes(item["content_hash"]) for item in tombstones
+            )
+        return
     local_victims: list[dict] = []
 
     try:
@@ -1198,8 +1377,16 @@ def _ensure_steady_active_window(self, required_pages: int, operation: str) -> N
     shared-state operation until it crosses a window boundary.
     """
     st = _state(self)
-    if st is None or required_pages <= 0:
+    if st is None:
         return
+    if st.get("retirement_failed"):
+        raise RuntimeError("SGLang sealed-page retirement failed; allocation is fenced")
+    if required_pages <= 0:
+        return
+    if st.get("deferred_native_release"):
+        raise RuntimeError(
+            "SGLang cannot allocate KV before evicted SEALED pages are retired"
+        )
     active = st.get("active_free_pages")
     if (
         st.get("active_prefix_valid", False)
@@ -1267,6 +1454,59 @@ def _publish_steady_native_free(
     if placement != "prepend":
         st["active_prefix_valid"] = False
     _trim_steady_active_window(self, operation)
+
+
+def begin_batched_sealed_eviction(allocator) -> bool:
+    """Defer free-page publication until one native eviction call completes."""
+    st = _state(allocator)
+    if st is None or not st.get("exclusive_steady_state", False):
+        return False
+    if st.get("retirement_failed"):
+        raise RuntimeError("SGLang sealed-page retirement failed; eviction is fenced")
+    if st.get("deferred_native_release") is not None:
+        raise RuntimeError("nested SGLang SEALED-page eviction")
+    st["deferred_native_release"] = []
+    return True
+
+
+def finish_batched_sealed_eviction(allocator) -> None:
+    """Retire all native frees before exposing them to a subsequent allocation."""
+    st = _state(allocator)
+    if st is None:
+        return
+    groups = st.get("deferred_native_release")
+    if not isinstance(groups, list):
+        return
+    if not groups:
+        st["deferred_native_release"] = None
+        return
+    pages = [page for group in groups for page in group]
+    if len(pages) != len(set(pages)):
+        raise RuntimeError("SGLang evicted the same SEALED page twice in one batch")
+    _demote_exact_retained_pages(allocator, pages)
+    _forget_local_page_mappings(allocator, pages)
+    cpu_free = st.get("cpu_free_pages")
+    if isinstance(cpu_free, (list, deque)):
+        if allocator.need_sort:
+            cpu_staged = st.get("cpu_staged_pages")
+            if isinstance(cpu_staged, list):
+                cpu_staged.extend(pages)
+            native_order = pages
+        else:
+            native_order = [page for group in reversed(groups) for page in group]
+            if isinstance(cpu_free, deque):
+                cpu_free.extendleft(reversed(native_order))
+            else:
+                cpu_free[:0] = native_order
+    else:
+        native_order = pages
+    _publish_steady_native_free(
+        allocator,
+        native_order,
+        "paged_free:batch",
+        placement="staged" if allocator.need_sort else "prepend",
+    )
+    st["deferred_native_release"] = None
 
 
 def _consume_tp_reservation(self, count: int) -> list[KVLease] | None:
@@ -2015,6 +2255,11 @@ def _gms_paged_release_page_ids(self, *page_ids):
             ]
             if isinstance(hinted, list):
                 hinted.clear()
+        deferred = st.get("deferred_native_release")
+        if isinstance(deferred, list):
+            result = orig_paged_release_page_ids(self, *page_ids)
+            deferred.append(pages)
+            return result
         _demote_exact_retained_pages(self, pages)
         result = orig_paged_release_page_ids(self, *page_ids)
         _forget_local_page_mappings(self, pages)

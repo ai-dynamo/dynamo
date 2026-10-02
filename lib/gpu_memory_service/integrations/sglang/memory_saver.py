@@ -185,7 +185,17 @@ class GMSMemorySaverImpl:
         self.ro_connect_timeout_ms = ro_connect_timeout_ms
         self._active_region_depth = 0
         self._pending_write_model: torch.nn.Module | None = None
-        requested_mode = mode or RequestedLockType.RW_OR_RO
+        if mode is None:
+            # setup_gms() runs only in the launcher; spawned schedulers resolve
+            # the standby rule here so a standby never races for the RW lock.
+            from gpu_memory_service.integrations.sglang import _is_failover_standby
+
+            mode = (
+                RequestedLockType.RO
+                if _is_failover_standby()
+                else RequestedLockType.RW_OR_RO
+            )
+        requested_mode = mode
         self.allocators = {
             "weights": get_or_create_gms_client_memory_manager(
                 get_socket_path(device_index, "weights"),

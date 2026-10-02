@@ -82,13 +82,15 @@ def _validate(ctx) -> None:
 
 def _factory(ctx):
     _validate(ctx)
-    from gpu_memory_service.integrations.sglang.gms_unified_cache import (
-        make_gms_unified_cache_class,
-    )
     from sglang.srt.mem_cache.unified_cache.components import ComponentType
 
     ctx.params.tree_components = (ComponentType.FULL,)
-    return make_gms_unified_cache_class()(ctx.params)
+    from gpu_memory_service.integrations.sglang.gms_unified_cache import (
+        make_gms_unified_cache_class,
+    )
+
+    cache_class = make_gms_unified_cache_class()
+    return cache_class(ctx.params)
 
 
 def install() -> bool:

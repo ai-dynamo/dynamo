@@ -18,6 +18,17 @@ def _disable_failover(monkeypatch, engine: str) -> None:
     monkeypatch.setenv("DYN_VLLM_GMS_SHADOW_MODE", "0")
 
 
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+def test_removed_whole_pool_mode_is_rejected_at_startup(monkeypatch, engine):
+    from gpu_memory_service.integrations.sglang import kv_identity as sglang_identity
+    from gpu_memory_service.integrations.vllm import kv_identity as vllm_identity
+
+    identity = vllm_identity if engine == "vllm" else sglang_identity
+    monkeypatch.setenv(f"GMS_{engine.upper()}_KV_RECOVERY_MODE", "whole_pool")
+    with pytest.raises(ValueError, match="only the lease-backed"):
+        identity.failover_hooks_required()
+
+
 def test_vllm_authoritative_startup_rejects_missing_live_hook(monkeypatch):
     from gpu_memory_service.integrations.vllm import (
         install_kv_leases,
@@ -115,6 +126,7 @@ def test_sglang_strict_install_is_idempotent_when_live_hooks_exist(monkeypatch):
     )
 
     monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "authoritative")
+    monkeypatch.setenv("GMS_SGLANG_KV_RECOVERY_MODE", "granular")
     calls = []
     monkeypatch.setattr(install_vmm_ipc_kv, "install_lazy", lambda: calls.append("vmm"))
     monkeypatch.setattr(
@@ -134,6 +146,21 @@ def test_sglang_strict_install_is_idempotent_when_live_hooks_exist(monkeypatch):
     startup.install_and_verify_kv_failover_hooks()
     startup.install_and_verify_kv_failover_hooks()
     assert calls == ["vmm", "leases", "cache"] * 2
+
+
+def test_sglang_spawned_loader_installs_lease_allocator(monkeypatch):
+    from gpu_memory_service.integrations.sglang import install_kv_leases, model_loader
+
+    calls = []
+    monkeypatch.setattr(
+        install_kv_leases,
+        "install",
+        lambda: calls.append("leases"),
+    )
+
+    model_loader._install_kv_allocator_hooks()
+
+    assert calls == ["leases"]
 
 
 def test_sglang_weights_only_mode_tolerates_optional_hook_failure(monkeypatch):

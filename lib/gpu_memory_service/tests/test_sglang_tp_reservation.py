@@ -108,6 +108,68 @@ def _reserve(allocator):
     return hooks._reserve_pages(allocator, [1], local_free=4, operation="test")
 
 
+def test_native_eviction_retires_sealed_frees_once_before_reuse(monkeypatch):
+    allocator = SimpleNamespace(need_sort=False)
+    state = {
+        "exclusive_steady_state": True,
+        "cpu_release_pages": [],
+        "cpu_free_pages": deque([9]),
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    native, retired, published = [], [], []
+    monkeypatch.setattr(
+        hooks,
+        "orig_paged_release_page_ids",
+        lambda _allocator, *groups: native.append(groups),
+    )
+    monkeypatch.setattr(
+        hooks,
+        "_demote_exact_retained_pages",
+        lambda _allocator, pages: retired.append(pages),
+    )
+    monkeypatch.setattr(hooks, "_forget_local_page_mappings", lambda *_: None)
+    monkeypatch.setattr(
+        hooks,
+        "_publish_steady_native_free",
+        lambda _allocator, pages, *_args, **_kwargs: published.append(pages),
+    )
+
+    assert hooks.begin_batched_sealed_eviction(allocator)
+    hooks._gms_paged_release_page_ids(allocator, torch.tensor([3, 4]))
+    hooks._gms_paged_release_page_ids(allocator, torch.tensor([5]))
+    assert len(native) == 2
+    assert retired == []
+    with pytest.raises(RuntimeError, match="before evicted SEALED pages"):
+        hooks._ensure_steady_active_window(allocator, 1, "test")
+
+    hooks.finish_batched_sealed_eviction(allocator)
+    assert retired == [[3, 4, 5]]
+    assert published == [[5, 3, 4]]
+    assert list(state["cpu_free_pages"]) == [5, 3, 4, 9]
+    assert state["deferred_native_release"] is None
+
+
+def test_batched_sealed_eviction_failure_keeps_pages_unavailable(monkeypatch):
+    allocator = SimpleNamespace(need_sort=False)
+    state = {
+        "exclusive_steady_state": True,
+        "cpu_free_pages": deque([9]),
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    def fail_retirement(*_args):
+        raise RuntimeError("directory unavailable")
+
+    monkeypatch.setattr(hooks, "_demote_exact_retained_pages", fail_retirement)
+    assert hooks.begin_batched_sealed_eviction(allocator)
+    state["deferred_native_release"].append([3, 4])
+    with pytest.raises(RuntimeError, match="directory unavailable"):
+        hooks.finish_batched_sealed_eviction(allocator)
+    assert state["deferred_native_release"] == [[3, 4]]
+    with pytest.raises(RuntimeError, match="before evicted SEALED pages"):
+        hooks._ensure_steady_active_window(allocator, 1, "test")
+
+
 @pytest.mark.parametrize("retained_ranks", [1, 2])
 def test_window_refill_skips_retained_native_free_prefix(monkeypatch, retained_ranks):
     rings = [_Ring(0), _Ring(7)]
@@ -806,7 +868,12 @@ def test_exclusive_adoption_can_consume_hidden_recoverable_page(monkeypatch):
     assert hooks.hidden_recoverable_tokens(allocator) == 2
 
 
-def test_pressure_activates_hidden_recovery_capacity_in_bounded_batch(monkeypatch):
+@pytest.mark.parametrize("initial_pages", [[1, 3], list(range(100, 114))])
+@pytest.mark.parametrize("window_limit", [1, 4096])
+def test_pressure_activates_hidden_recovery_capacity_in_bounded_batch(
+    monkeypatch, initial_pages, window_limit
+):
+    monkeypatch.setenv("GMS_SGLANG_ACTIVE_LEASE_WINDOW_PAGES", str(window_limit))
     victims = [
         {
             "content_hash": bytes([page]) * 32,
@@ -830,9 +897,9 @@ def test_pressure_activates_hidden_recovery_capacity_in_bounded_batch(monkeypatc
 
     allocator = SimpleNamespace(
         page_size=2,
-        size=16,
-        free_pages=torch.tensor([1, 3]),
-        get_all_free_pages=lambda: torch.tensor([1, 3]),
+        size=max(16, 2 * (len(initial_pages) + 4)),
+        free_pages=torch.tensor(initial_pages),
+        get_all_free_pages=lambda: torch.tensor(initial_pages),
         _gms_kv_directory=Directory(),
         _gms_tp_consistency=TPConsistency(),
         _gms_recovery_candidates={item["content_hash"] for item in victims},
@@ -842,23 +909,60 @@ def test_pressure_activates_hidden_recovery_capacity_in_bounded_batch(monkeypatc
         "leases_by_page": {},
         "retained_pages": set(),
         "exclusive_steady_state": True,
-        "cpu_free_pages": deque([1, 3]),
+        "cpu_free_pages": deque(initial_pages),
+        "active_window_pages": 1,
         "exclusive_hidden_pages": {2, 4, 5, 6},
     }
     monkeypatch.setitem(hooks._STATE, id(allocator), state)
     monkeypatch.setattr(hooks, "torch", torch)
 
-    activated = hooks.activate_hidden_recovery_capacity(allocator, 2)
+    activated = hooks.activate_hidden_recovery_capacity(allocator, 2, max_batch_pages=2)
 
     assert activated == 4
-    assert allocator.free_pages.tolist() == [1, 3, 2, 4]
-    assert list(state["cpu_free_pages"]) == [1, 3, 2, 4]
+    assert allocator.free_pages.tolist() == initial_pages + [2, 4]
+    assert list(state["cpu_free_pages"]) == initial_pages + [2, 4]
+    assert state["active_window_pages"] == min(
+        window_limit, max(1, (len(initial_pages) + 2) // 4)
+    )
     assert state["exclusive_hidden_pages"] == {5, 6}
     assert state["leases_by_page"] == {2: KVLease(2, 13), 4: KVLease(4, 15)}
     assert allocator._gms_recovery_candidates == set()
 
 
+def test_recovery_bootstrap_caps_retirement_batch(monkeypatch):
+    selections = []
+
+    class Directory:
+        authoritative = True
+
+        def ensure_hbm_capacity(self, count, *, eligible_slot_ids=None):
+            selections.append((count, eligible_slot_ids))
+            return []
+
+    allocator = SimpleNamespace(
+        page_size=2,
+        size=64,
+        _gms_kv_directory=Directory(),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "exclusive_steady_state": True,
+        "exclusive_hidden_pages": set(range(1, 17)),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "client": SimpleNamespace(),
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    assert hooks.activate_hidden_recovery_capacity(allocator, 2, max_batch_pages=2) == 0
+    assert selections == [(2, list(range(1, 17)))]
+    assert state["exclusive_hidden_pages"] == set(range(1, 17))
+
+
 def test_pressure_stops_retrying_single_unretirable_recovery_page(monkeypatch):
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_ready", lambda: True)
     calls = []
 
     class Directory:
@@ -877,7 +981,9 @@ def test_pressure_stops_retrying_single_unretirable_recovery_page(monkeypatch):
         _gms_recovery_candidates={b"h" * 32},
     )
     state = {
-        "client": SimpleNamespace(),
+        "client": SimpleNamespace(
+            acquire=lambda *_args, **_kwargs: [], release=lambda _leases: None
+        ),
         "leases_by_page": {},
         "retained_pages": set(),
         "exclusive_steady_state": True,
@@ -892,6 +998,273 @@ def test_pressure_stops_retrying_single_unretirable_recovery_page(monkeypatch):
     assert state["recovery_capacity_exhausted"] is True
     assert state["exclusive_hidden_pages"] == {4}
     assert allocator._gms_recovery_candidates == set()
+
+
+def test_pressure_admits_reclaimed_free_pages_without_directory_victims(monkeypatch):
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_ready", lambda: True)
+    monkeypatch.setattr(hooks, "torch", torch)
+    leases = [KVLease(2, 8), KVLease(4, 11)]
+
+    def acquire(count, **kwargs):
+        assert count == 2
+        assert kwargs == {
+            "preferred_blocks": [2, 4],
+            "allow_partial": True,
+            "strict_preferred": True,
+        }
+        return leases
+
+    allocator = SimpleNamespace(
+        page_size=2,
+        size=16,
+        free_pages=torch.tensor([1, 3]),
+        get_all_free_pages=lambda: torch.tensor([1, 3]),
+        _gms_kv_directory=SimpleNamespace(
+            authoritative=True, ensure_hbm_capacity=lambda *_a, **_k: []
+        ),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(acquire=acquire, release=lambda values: None),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "exclusive_steady_state": True,
+        "exclusive_hidden_pages": {2, 4},
+        "cpu_free_pages": deque([1, 3]),
+        "active_free_pages": {1},
+        "active_window_pages": 1,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    assert hooks.activate_hidden_recovery_capacity(allocator, 2) == 4
+    assert allocator.free_pages.tolist() == [1, 3, 2, 4]
+    assert list(state["cpu_free_pages"]) == [1, 3, 2, 4]
+    assert state["leases_by_page"] == {lease.block_id: lease for lease in leases}
+    assert state["exclusive_hidden_pages"] == set()
+
+
+def test_pressure_does_not_exhaust_quarantined_tail_before_reclaim(monkeypatch):
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_ready", lambda: False)
+    allocator = SimpleNamespace(
+        page_size=2,
+        size=16,
+        _gms_kv_directory=SimpleNamespace(
+            authoritative=True, ensure_hbm_capacity=lambda *_a, **_k: []
+        ),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "exclusive_steady_state": True,
+        "exclusive_hidden_pages": {4},
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    assert hooks.activate_hidden_recovery_capacity(allocator, 2) == 0
+    assert not state.get("recovery_capacity_exhausted", False)
+
+
+def test_refused_reclaim_lets_quarantined_tail_exhaust(monkeypatch):
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_ready", lambda: False)
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_refused", lambda: True)
+    allocator = SimpleNamespace(
+        page_size=2,
+        size=16,
+        _gms_kv_directory=SimpleNamespace(
+            authoritative=True, ensure_hbm_capacity=lambda *_a, **_k: []
+        ),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "exclusive_steady_state": True,
+        "exclusive_hidden_pages": {4},
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    assert hooks.activate_hidden_recovery_capacity(allocator, 2) == 0
+    assert state["recovery_capacity_exhausted"] is True
+
+
+def test_short_reclaimed_free_probe_is_not_repeated(monkeypatch):
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    monkeypatch.setattr(writer_lifecycle, "gms_reclaim_ready", lambda: True)
+    monkeypatch.setattr(hooks, "torch", torch)
+    windows = []
+
+    def acquire(_count, *, preferred_blocks, **_kwargs):
+        windows.append(list(preferred_blocks))
+        return [KVLease(2, 8)] if 2 in preferred_blocks else []
+
+    allocator = SimpleNamespace(
+        page_size=2,
+        size=16,
+        free_pages=torch.tensor([1]),
+        get_all_free_pages=lambda: torch.tensor([1]),
+        _gms_kv_directory=SimpleNamespace(
+            authoritative=True, ensure_hbm_capacity=lambda *_a, **_k: []
+        ),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(acquire=acquire, release=lambda _values: None),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "exclusive_steady_state": True,
+        "exclusive_hidden_pages": {2, 4, 6},
+        "cpu_free_pages": deque([1]),
+        "active_free_pages": set(),
+        "active_window_pages": 1,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    assert hooks.activate_hidden_recovery_capacity(allocator, 2) == 2
+    assert windows == [[2, 4], [6]]
+    assert state["reclaimed_free_exhausted"] is True
+    assert hooks.activate_hidden_recovery_capacity(allocator, 2) == 0
+    assert windows == [[2, 4], [6]]
+
+
+def test_failed_withdrawal_releases_every_held_reservation():
+    released = []
+
+    def release(values):
+        released.append(list(values))
+        if len(released) == 1:
+            raise RuntimeError("ring unavailable")
+
+    held = [KVLease(2, 8), KVLease(4, 9)]
+    state = {
+        "client": SimpleNamespace(
+            acquire=lambda *_args, **_kwargs: list(held), release=release
+        ),
+        "leases_by_page": {},
+        "retained_pages": set(),
+    }
+    with pytest.raises(RuntimeError, match="ring unavailable"):
+        hooks._reserve_reclaimed_hidden_pages(state, TPConsistency(), [2, 4], 2)
+    assert released == [[], held]
+
+
+def test_failed_publication_releases_reserved_successors(monkeypatch):
+    monkeypatch.setattr(hooks, "torch", torch)
+    released = []
+    successors = [KVLease(3, 5)]
+    allocator = SimpleNamespace(
+        page_size=2,
+        free_pages=torch.tensor([3]),
+        get_all_free_pages=lambda: torch.tensor([3]),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(release=released.extend),
+        "cpu_free_pages": deque([3]),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "exclusive_hidden_pages": {3},
+    }
+    with pytest.raises(RuntimeError, match="overlaps native-free"):
+        hooks._publish_hidden_recovery_pages(allocator, state, successors)
+    assert released == successors
+    assert allocator.free_pages.tolist() == [3]
+    assert state["exclusive_hidden_pages"] == {3}
+
+
+@pytest.mark.parametrize("fail_rank", [None, 1])
+def test_reclaimed_reservations_intersect_or_rollback_all_ranks(fail_rank):
+    votes = _Votes()
+    released = [[], []]
+    states = []
+    cohorts = []
+    for rank in range(2):
+
+        def acquire(_count, rank=rank, **_kwargs):
+            if rank == fail_rank:
+                raise RuntimeError("ring unavailable")
+            return ([KVLease(2, 8)] if rank == 0 else []) + [KVLease(4, 11 + rank)]
+
+        client = SimpleNamespace(
+            acquire=acquire,
+            release=lambda values, rank=rank: released[rank].extend(values),
+        )
+        states.append({"client": client, "leases_by_page": {}, "retained_pages": set()})
+        cohort = TPConsistency(world_size=2)
+        cohort._gather = lambda value, rank=rank: votes.gather(rank, value)
+        cohorts.append(cohort)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                hooks._reserve_reclaimed_hidden_pages,
+                states[rank],
+                cohorts[rank],
+                [2, 4],
+                2,
+            )
+            for rank in range(2)
+        ]
+        if fail_rank is None:
+            assert [
+                [lease.block_id for lease in future.result()] for future in futures
+            ] == [[4], [4]]
+            assert released == [[KVLease(2, 8)], []]
+        else:
+            for future in futures:
+                with pytest.raises(RuntimeError, match="operation failed"):
+                    future.result()
+            assert released == [[KVLease(2, 8), KVLease(4, 11)], []]
+
+
+def test_reclaimed_reservations_find_common_pages_after_disjoint_windows():
+    votes = _Votes()
+    released = [[], []]
+    states = []
+    cohorts = []
+    for rank, available in enumerate([{1, 5, 6}, {3, 5, 6}]):
+
+        def acquire(
+            _count, preferred_blocks, available=available, rank=rank, **_kwargs
+        ):
+            return [
+                KVLease(page, page + rank + 10)
+                for page in preferred_blocks
+                if page in available
+            ]
+
+        states.append(
+            {
+                "client": SimpleNamespace(
+                    acquire=acquire,
+                    release=lambda values, rank=rank: released[rank].extend(values),
+                ),
+                "leases_by_page": {},
+                "retained_pages": set(),
+            }
+        )
+        cohort = TPConsistency(world_size=2)
+        cohort._gather = lambda value, rank=rank: votes.gather(rank, value)
+        cohorts.append(cohort)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                hooks._reserve_reclaimed_hidden_pages,
+                states[rank],
+                cohorts[rank],
+                list(range(1, 7)),
+                2,
+            )
+            for rank in range(2)
+        ]
+        assert [
+            [lease.block_id for lease in future.result()] for future in futures
+        ] == [[5, 6], [5, 6]]
+    assert released == [[KVLease(1, 11)], [KVLease(3, 14)]]
 
 
 def test_exclusive_release_demotes_before_native_free(monkeypatch):
@@ -1031,6 +1404,158 @@ def test_exact_sealed_demotion_accepts_canonical_hash_order(monkeypatch):
     assert state["retained_pages"] == set()
     assert state["leases_by_page"] == {2: KVLease(2, 8), 3: KVLease(3, 8)}
     assert allocator._gms_recovery_candidates == set()
+
+
+def test_exact_sealed_demotion_queues_conditional_invalidation(monkeypatch):
+    published = []
+
+    class Directory:
+        authoritative = True
+        async_publish_enabled = True
+
+        def ensure_hbm_capacity(self, *_args, **_kwargs):
+            raise AssertionError("exact local demotion must not select via RPC")
+
+        def publish_deferred(self, items):
+            published.extend(items)
+            return len(items)
+
+    def adopt(leases):
+        assert leases == [KVLease(2, 7), KVLease(3, 11)]
+        return [KVLease(lease.block_id, lease.generation + 1) for lease in leases]
+
+    first_hash = b"a" * 32
+    second_hash = b"b" * 32
+    allocator = SimpleNamespace(
+        _gms_kv_directory=Directory(),
+        _gms_engine_id="engine-0",
+        _gms_tp_consistency=TPConsistency(),
+        _gms_local_hashes_by_page={2: {first_hash}, 3: {second_hash}},
+        _gms_recovery_candidates={first_hash, second_hash},
+    )
+    state = {
+        "client": SimpleNamespace(adopt=adopt),
+        "leases_by_page": {2: KVLease(2, 7), 3: KVLease(3, 11)},
+        "retained_pages": {2, 3},
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    hooks._demote_exact_retained_pages(allocator, [3, 2])
+
+    assert published == [
+        {
+            "content_hash": first_hash,
+            "engine_id": "engine-0",
+            "slot_ids": [2],
+            "generations": [7],
+            "tier": "hbm",
+            "sealed": False,
+        },
+        {
+            "content_hash": second_hash,
+            "engine_id": "engine-0",
+            "slot_ids": [3],
+            "generations": [11],
+            "tier": "hbm",
+            "sealed": False,
+        },
+    ]
+    assert state["retained_pages"] == set()
+    assert state["leases_by_page"] == {2: KVLease(2, 8), 3: KVLease(3, 12)}
+    assert allocator._gms_recovery_candidates == set()
+
+
+def test_exact_local_demotion_refuses_active_read_pin(monkeypatch):
+    class Directory:
+        authoritative = True
+        async_publish_enabled = True
+
+        def publish_deferred(self, _items):
+            raise AssertionError("cannot invalidate a read-pinned page")
+
+    allocator = SimpleNamespace(
+        _gms_kv_directory=Directory(),
+        _gms_engine_id="engine-0",
+        _gms_tp_consistency=TPConsistency(),
+        _gms_local_hashes_by_page={2: {b"a" * 32}},
+    )
+    state = {
+        "client": SimpleNamespace(adopt=lambda _leases: []),
+        "leases_by_page": {2: KVLease(2, 7)},
+        "retained_pages": {2},
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    with pytest.raises(RuntimeError, match="free:demote-sealed-local"):
+        hooks._demote_exact_retained_pages(allocator, [2])
+    assert state["retained_pages"] == {2}
+    assert state["leases_by_page"] == {2: KVLease(2, 7)}
+    assert state["retirement_failed"] is True
+
+
+def test_steady_writer_demotes_without_a_tp_vote(monkeypatch):
+    class Directory:
+        authoritative = True
+        async_publish_enabled = True
+
+        def publish_deferred(self, items):
+            assert len(items) == 1
+            return len(items)
+
+    allocator = SimpleNamespace(
+        _gms_kv_directory=Directory(),
+        _gms_engine_id="engine-0",
+        _gms_tp_consistency=SimpleNamespace(
+            run_agreed=lambda *_args: pytest.fail("steady eviction entered TP vote")
+        ),
+        _gms_local_hashes_by_page={2: {b"a" * 32}},
+        _gms_recovery_candidates=set(),
+    )
+    state = {
+        "client": SimpleNamespace(adopt=lambda _old: [KVLease(2, 8)]),
+        "leases_by_page": {2: KVLease(2, 7)},
+        "retained_pages": {2},
+        "exclusive_steady_state": True,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    hooks._demote_exact_retained_pages(allocator, [2])
+
+    assert state["leases_by_page"] == {2: KVLease(2, 8)}
+    assert state["retained_pages"] == set()
+
+
+def test_failed_local_invalidation_fences_future_allocations(monkeypatch):
+    class Directory:
+        authoritative = True
+        async_publish_enabled = True
+
+        def publish_deferred(self, _items):
+            raise RuntimeError("queue unavailable")
+
+    allocator = SimpleNamespace(
+        _gms_kv_directory=Directory(),
+        _gms_engine_id="engine-0",
+        _gms_tp_consistency=TPConsistency(),
+        _gms_local_hashes_by_page={2: {b"a" * 32}},
+    )
+    state = {
+        "client": SimpleNamespace(
+            adopt=lambda leases: [KVLease(2, leases[0].generation + 1)]
+        ),
+        "leases_by_page": {2: KVLease(2, 7)},
+        "retained_pages": {2},
+        "exclusive_steady_state": True,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        hooks._demote_exact_retained_pages(allocator, [2])
+    assert state["retirement_failed"] is True
+    with pytest.raises(RuntimeError, match="allocation is fenced"):
+        hooks._ensure_steady_active_window(allocator, 1, "test")
+    with pytest.raises(RuntimeError, match="eviction is fenced"):
+        hooks.begin_batched_sealed_eviction(allocator)
 
 
 def test_steady_state_demotes_cold_recovery_batch_without_releasing_pages(
