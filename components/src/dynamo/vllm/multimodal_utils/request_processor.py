@@ -27,6 +27,7 @@ from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     UUID_ONLY_VARIANT_KEY,
     ImageLoader,
+    image_cache_scope_from_request,
 )
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlReceiver,
@@ -552,6 +553,7 @@ class VllmMultimodalRequestProcessor:
                             request_id,
                             model=self.model,
                             context=context,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                     )
 
@@ -560,7 +562,9 @@ class VllmMultimodalRequestProcessor:
             if image_key not in vllm_mm_data and image_items:
                 with _nvtx.annotate("mm_backend:image_download", color="green"):
                     images = await self.image_loader.load_image_batch(
-                        image_items, preserve_uuid_slots=True
+                        image_items,
+                        cache_scope=image_cache_scope_from_request(request),
+                        preserve_uuid_slots=True,
                     )
                 if images:
                     if self.use_unified_vision_chunk:

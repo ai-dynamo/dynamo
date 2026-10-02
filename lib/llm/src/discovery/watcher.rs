@@ -29,12 +29,10 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
-    kv_router::{
-        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, SelectionPolicySource,
-    },
+    kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
     local_model::runtime_config::{
-        TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY, TokenizerBackend,
+        VLLM_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -414,16 +412,19 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
-        validate_policy_worker_role(card, &self.plugins.selection_policy())?;
+        validate_policy_worker_role(card, &self.plugins)?;
 
         // Prepare without exact video routing unless the cohort agreed on a contract.
-        if spec.video_contract.is_none()
-            && card
-                .runtime_config
-                .runtime_data
-                .remove(VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY)
-                .is_some()
-        {
+        let mut removed_video_contract = false;
+        if spec.video_contract.is_none() {
+            for key in [
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            ] {
+                removed_video_contract |= card.runtime_config.runtime_data.remove(key).is_some();
+            }
+        }
+        if removed_video_contract {
             tracing::warn!(
                 target: "mm_routing",
                 model_name = card.name(),
@@ -1367,13 +1368,9 @@ fn effective_router_config<'a>(
 /// decode or aggregated, so it requires an explicit `worker_type`.
 fn validate_policy_worker_role(
     card: &ModelDeploymentCard,
-    policy: &SelectionPolicySource,
+    plugins: &RouterPluginBuilder,
 ) -> anyhow::Result<()> {
-    if matches!(
-        policy,
-        SelectionPolicySource::Factory(_) | SelectionPolicySource::Prepared(_)
-    ) && card.worker_type.is_none()
-    {
+    if plugins.has_custom_worker_selection() && card.worker_type.is_none() {
         anyhow::bail!(
             "custom worker-selection policies require model cards with an explicit worker_type"
         );
@@ -1395,13 +1392,21 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
 
 /// Hashes the published Qwen video prompt-expansion contract.
 pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
-    let mut contract = card
-        .runtime_config
-        .runtime_data
-        .get(VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY)?
-        .clone();
-    canonicalize_json(&mut contract);
-    Some(blake3::hash(contract.to_string().as_bytes()).to_string())
+    let mut contracts = serde_json::Map::new();
+    for key in [
+        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    ] {
+        if let Some(contract) = card.runtime_config.runtime_data.get(key) {
+            contracts.insert(key.to_string(), contract.clone());
+        }
+    }
+    if contracts.is_empty() {
+        return None;
+    }
+    let mut contracts = serde_json::Value::Object(contracts);
+    canonicalize_json(&mut contracts);
+    Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
 }
 
 fn canonicalize_json(value: &mut serde_json::Value) {
@@ -1452,6 +1457,43 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn qwen_video_contract_digest_is_canonical_and_engine_specific() {
+        fn card_with_contract(key: &str, contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert(key.to_string(), contract);
+            card
+        }
+
+        let absent = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(qwen_video_contract_digest(&absent), None);
+
+        let vllm = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+        );
+        let reordered_vllm = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"resize_mode": "round_ties_even", "placeholder_target": "bare_video_token"}),
+        );
+        let sglang = card_with_contract(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+        );
+
+        assert_eq!(
+            qwen_video_contract_digest(&vllm),
+            qwen_video_contract_digest(&reordered_vllm)
+        );
+        assert_ne!(
+            qwen_video_contract_digest(&vllm),
+            qwen_video_contract_digest(&sglang),
+            "engine-specific contracts must not share a cohort fingerprint"
+        );
+    }
 
     #[tokio::test]
     async fn retired_worker_set_prevents_late_prefill_from_retained_chat_pipeline() {
@@ -2139,7 +2181,7 @@ request_classifier:
             }
         });
         let selectors = Arc::new(parking_lot::Mutex::new(Vec::new()));
-        let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
+        let mut registry = dynamo_custom_policy_builtin::default_registry();
         registry
             .register_request_classifier("test", Arc::new(move |_| Ok(factory.clone())))
             .unwrap();
@@ -2152,7 +2194,7 @@ request_classifier:
                         let selectors = selectors.clone();
                         Ok(Arc::new(move |config, role, partition| {
                             selectors.lock().push((role, partition.into_owned()));
-                            dynamo_kv_router::WorkerSelectionPolicy::default(
+                            dynamo_custom_policy_builtin::default_policy(
                                 config.clone(),
                                 role.default_selector_label(),
                             )
@@ -2960,17 +3002,25 @@ request_classifier:
     }
 
     #[test]
-    fn custom_selector_requires_explicit_worker_type() {
-        let registry = SelectionPolicySource::Registry;
-        let factory = SelectionPolicySource::Factory(Arc::new(|_, _, _| {
-            unreachable!("role validation never constructs the policy")
-        }));
+    fn only_explicit_policies_require_typed_model_cards() {
+        let unresolved = RouterPluginBuilder::default();
+        let resolved = dynamo_custom_policy_builtin::default_registry()
+            .resolve_plugins(&dynamo_kv_router::KvRouterConfig::default())
+            .unwrap();
+        assert!(resolved.worker_selection().is_some());
+        let builtin = RouterPluginBuilder::new(resolved);
+        let custom = RouterPluginBuilder::new(
+            dynamo_kv_router::plugins::RouterPlugins::default().with_worker_selection(Arc::new(
+                |_, _, _| unreachable!("role validation never constructs the policy"),
+            )),
+        );
         let mut card = ModelDeploymentCard::with_name_only("model");
-        assert!(validate_policy_worker_role(&card, &registry).is_ok());
-        assert!(validate_policy_worker_role(&card, &factory).is_err());
+        assert!(validate_policy_worker_role(&card, &unresolved).is_ok());
+        assert!(validate_policy_worker_role(&card, &builtin).is_ok());
+        assert!(validate_policy_worker_role(&card, &custom).is_err());
 
         card.worker_type = Some(WorkerType::Decode);
-        assert!(validate_policy_worker_role(&card, &factory).is_ok());
+        assert!(validate_policy_worker_role(&card, &custom).is_ok());
     }
 
     #[test]

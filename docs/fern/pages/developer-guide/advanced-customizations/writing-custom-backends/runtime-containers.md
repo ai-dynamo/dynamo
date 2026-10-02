@@ -72,7 +72,7 @@ ENTRYPOINT ["my-backend"]
 ## Declare the Runtime Version for Kubernetes
 
 When you deploy a custom image with a `DynamoGraphDeployment` (DGD) or standalone
-`DynamoComponentDeployment` (DCD), admission determines the Dynamo runtime compatibility version
+`DynamoComponentDeployment` (DCD), admission determines the Dynamo runtime version
 from the component's main-container image tag. The tag itself must be a semantic version. Tags such
 as `1.5.0`, `v1.5.0`, and `1.5.0-cuda13` can provide the version. Set
 `runtimeVersionOverride` when the image is tagless, digest-only, uses a tag such as `latest`,
