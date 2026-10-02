@@ -266,6 +266,17 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 {% endif %}
 
+# nic_sampler is an unused amd64 Nsight Compute EFA helper built with Go 1.23.4
+# (GO-2025-3563, GO-2026-4337, CVE-2026-27143). The runtime only links nsys.
+RUN set -eux; \
+    if [ -d /opt/nvidia/nsight-compute ]; then \
+        find /opt/nvidia/nsight-compute -path '*/plugins/efa_metrics/nic_sampler' -type f -delete; \
+        if find /opt/nvidia/nsight-compute -path '*/plugins/efa_metrics/nic_sampler' -print -quit | grep -q .; then \
+            echo "ERROR: nic_sampler remains in the SGLang image" >&2; \
+            exit 1; \
+        fi; \
+    fi
+
 # Keep this guard at the end of the populated runtime stage so later COPY/RUN
 # steps cannot silently reintroduce a codec. The extra AAC library names cover
 # common non-FFmpeg implementations even though the current Syft baseline did
