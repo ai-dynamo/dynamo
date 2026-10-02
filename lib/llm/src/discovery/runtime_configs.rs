@@ -20,6 +20,7 @@ use dynamo_kv_router::protocols::WorkerId;
 /// Type alias for the runtime config watch receiver.
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;
 
+/// Watch base model cards and keep valid runtime configs until removal or cancellation.
 // `lifecycle` bounds this task directly rather than leaving it to notice its
 // receiver is gone. That receiver-drop signal only reaches this task via a
 // failed `tx.send`, and `tx.send` is only attempted when a discovery event
@@ -120,13 +121,12 @@ fn base_runtime_config_watch(
     rx
 }
 
-/// The single predicate deciding which workers a router may route to.
+/// Join endpoint availability with base runtime configs for the router's candidate set.
 ///
-/// Returns the admitted workers — present in both the endpoint's availability set and the
-/// base model runtime configs — and, separately, the instance ids that were available but
-/// carried no base runtime config. The excluded half exists because a worker dropped here
-/// leaves no trace of its own: the failure surfaces later, in another crate, as
-/// `KvSchedulerError::NoEndpoints`, with nothing naming which side of this join was empty.
+/// Returns configs for available workers and the ids of available workers missing a
+/// base config. The caller reports those ids when the exclusion set changes.
+/// This join does not check request-specific eligibility, such as required taints.
+/// An empty exclusion set does not guarantee that a request can be routed.
 fn join_available_instances_with_configs(
     instances: &HashSet<WorkerId>,
     configs: &HashMap<WorkerId, ModelRuntimeConfig>,
@@ -242,6 +242,7 @@ mod tests {
     use super::*;
     use dynamo_runtime::discovery::{DiscoveryInstance, ModelCardInstanceId, ModelTaintsUpdate};
 
+    /// Build a discovery event payload for a base card or a named model variant.
     fn model_instance(
         instance_id: u64,
         model_suffix: Option<&str>,
@@ -257,9 +258,7 @@ mod tests {
         }
     }
 
-    /// A worker registered on the endpoint but with no base model runtime config is
-    /// silently absent from the routable set, and the request that later fails carries no
-    /// hint of which of the two discovery sources was missing it. It must be reported.
+    /// Keep available workers with base configs and report those missing a base config.
     #[test]
     fn available_instances_without_a_runtime_config_are_reported_as_excluded() {
         let instances = HashSet::from([7, 8]);
@@ -273,8 +272,7 @@ mod tests {
 
     /// The reported deployment's worker shape: no `--kv_events_config`, so the card
     /// advertises `kv_event_publishing_enabled: Some(false)` and no `router_config`.
-    /// KV-event capability must never gate admission — such a worker is routable and
-    /// simply scores zero KV overlap.
+    /// This join must include the worker even when KV-event publishing is disabled.
     #[test]
     fn a_worker_that_publishes_no_kv_events_is_still_admitted() {
         let mut card = ModelDeploymentCard::default();
