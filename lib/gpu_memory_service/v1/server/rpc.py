@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging
 import os
 import select
-import signal
 import socket
 import socketserver
 import threading
@@ -485,14 +484,22 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
                 isinstance(request, HandshakeRequest) and request.process_fence
             )
             if expects_fence:
-                if request.lock_type is not RequestedLockType.RW or process_fd < 0:
-                    raise RuntimeError(
-                        "writer process fence requires an RW handshake and pidfd"
+                # Engines can run as root while GMS runs as the image user in
+                # another PID namespace. Polling a received pidfd needs no
+                # signal permission; pidfd_send_signal(0) incorrectly does.
+                if (
+                    request.lock_type is not RequestedLockType.RW
+                    or process_fd < 0
+                    or os.readlink(f"/proc/self/fd/{process_fd}")
+                    != "anon_inode:[pidfd]"
+                ):
+                    send_message(
+                        self.request,
+                        ErrorResponse(
+                            "writer process fence requires an RW handshake and pidfd"
+                        ),
                     )
-                try:
-                    signal.pidfd_send_signal(process_fd, 0)
-                except ProcessLookupError:
-                    pass  # A just-exited writer still supplied a valid pidfd.
+                    return
             elif process_fd >= 0:
                 raise RuntimeError("unexpected client file descriptor")
             if isinstance(request, CHECKPOINT_CONTROL_TYPES):

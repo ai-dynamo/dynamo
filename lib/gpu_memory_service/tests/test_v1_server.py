@@ -23,6 +23,7 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.v1.client.session import _GMSClientSession
 from gpu_memory_service.v1.protocol import (
     AllocateRequest,
+    ErrorResponse,
     HandshakeRequest,
     HandshakeResponse,
     receive_message,
@@ -133,6 +134,29 @@ def test_weights_cannot_enable_retention(tmp_path, serve):
     finally:
         writer.close()
     assert not vmm.server_handles
+
+
+@pytest.mark.parametrize("descriptor", ["pidfd", "pipe"])
+def test_writer_fence_requires_a_process_descriptor(tmp_path, serve, descriptor):
+    path = str(tmp_path / "kv.sock")
+    serve(path, FakeVMM(granularity=64), allow_retention=True)
+    fds = (os.pidfd_open(os.getpid()),) if descriptor == "pidfd" else os.pipe()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(path)
+            send_message(
+                client, HandshakeRequest(RequestedLockType.RW, None, True), fds[0]
+            )
+            response, received_fd = receive_message(client)
+            assert received_fd < 0
+            if descriptor == "pidfd":
+                assert isinstance(response, HandshakeResponse)
+            else:
+                assert isinstance(response, ErrorResponse)
+                assert "pidfd" in response.message
+    finally:
+        for fd in fds:
+            os.close(fd)
 
 
 def _connect_in_thread(path: str, lock_type: RequestedLockType):
