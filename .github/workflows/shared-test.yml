@@ -350,6 +350,9 @@ jobs:
           container_workspace: ${{ inputs.container_workspace }}
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.
           pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
+          # The parallel partition can contain every eligible GPU test.
+          # Keep all other stages strict about an unexpectedly empty selection.
+          allow_no_tests: ${{ inputs.run_gpu_parallel_tests && 'true' || 'false' }}
           test_suite_name: ${{ inputs.test_suite_name }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
