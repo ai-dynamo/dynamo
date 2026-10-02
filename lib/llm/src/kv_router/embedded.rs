@@ -34,6 +34,7 @@ use dynamo_kv_router::services::selection::{
     WorkerRequest,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;

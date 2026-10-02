@@ -60,7 +60,7 @@ impl CarrierFeedTransport for ZmqFeedTransport {
         if config.feed_endpoint.is_empty() {
             anyhow::bail!("hub advertised an empty carrier feed endpoint");
         }
-        let mut socket = create_sub_socket_topics(&[CARRIER_FEED_TOPIC])
+        let socket = create_sub_socket_topics(&[CARRIER_FEED_TOPIC])
             .context("create carrier feed subscriber")?;
         socket.connect(&config.feed_endpoint).with_context(|| {
             format!(
