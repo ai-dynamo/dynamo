@@ -456,9 +456,10 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::watch;
     use tokio_util::sync::CancellationToken;
+    use tracing_subscriber::prelude::*;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, request, response_error,
+        NativeHttp, NativeRequest, authentication_error, output, request, response_error,
         response_has_output,
     };
     use crate::client::Discovery;
@@ -538,10 +539,296 @@ mod tests {
         .unwrap();
         assert_eq!(native.body["routed_dp_rank"], 3);
         assert_eq!(native.body["sampling_params"]["max_new_tokens"], 1);
+        assert_eq!(native.body["sampling_params"]["n"], 1);
         assert!(
             native.body["sampling_params"]
                 .get("min_new_tokens")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn native_request_preserves_engine_fields_and_overrides_routing_fields() {
+        let mut canonical = canonical_request();
+        let payload = json!({
+            "input_ids": [99], "rid": "stale", "stream": false,
+            "priority": 99, "routed_dp_rank": 99, "lora_path": "old-adapter",
+            "bootstrap_host": "stale", "bootstrap_port": 1, "bootstrap_room": 2,
+            "sampling_params": {"temperature": 0.7, "seed": 42, "max_new_tokens": 9},
+            "image_data": ["opaque-image"], "custom_engine_option": {"enabled": true}
+        });
+        canonical.extra_args = Some(json!({"sglang_tito": payload}));
+        canonical.routing = Some(RoutingHints {
+            priority: Some(-5),
+            dp_rank: Some(2),
+            lora_name: Some("selected-adapter".to_string()),
+            ..Default::default()
+        });
+
+        let native = request(
+            &canonical,
+            "actual-rid",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(native.body["input_ids"], json!([1, 2, 3]));
+        assert_eq!(native.body["rid"], "actual-rid");
+        assert_eq!(native.body["stream"], true);
+        assert_eq!(native.body["priority"], -5);
+        assert_eq!(native.body["routed_dp_rank"], 2);
+        assert_eq!(native.body["lora_path"], "selected-adapter");
+        for key in ["sampling_params", "image_data", "custom_engine_option"] {
+            assert_eq!(native.body[key], payload[key], "{key}");
+        }
+        for key in ["bootstrap_host", "bootstrap_port", "bootstrap_room"] {
+            assert!(native.body.get(key).is_none(), "{key}");
+        }
+        assert!(!native.is_prefill);
+        assert!(native.prefill_handoff.is_none());
+        assert_eq!(canonical.extra_args.unwrap()["sglang_tito"], payload);
+
+        canonical = canonical_request();
+        canonical.extra_args = Some(json!({"sglang_tito": payload}));
+        let native = request(
+            &canonical,
+            "rid",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(native.body.get("priority").is_none());
+        assert!(native.body.get("routed_dp_rank").is_none());
+        assert_eq!(native.body["lora_path"], "old-adapter");
+    }
+
+    #[test]
+    fn native_envelope_is_optional_and_requires_an_object_with_token_input() {
+        let mut canonical = canonical_request();
+        assert!(
+            request(
+                &canonical,
+                "rid",
+                DisaggregationMode::Aggregated,
+                None,
+                None
+            )
+            .unwrap()
+            .is_none()
+        );
+        for payload in [json!(null), json!([]), json!("invalid")] {
+            canonical.extra_args = Some(json!({"sglang_tito": payload}));
+            let error = request(
+                &canonical,
+                "rid",
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::InvalidArgument)
+            );
+        }
+        canonical.extra_args = Some(json!({"sglang_tito": {}}));
+        canonical.token_ids = Vec::new().into();
+        let error = request(
+            &canonical,
+            "rid",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn native_prefill_normalizes_sampling_and_attaches_the_same_handoff() {
+        let mut canonical = canonical_request();
+        for payload in [json!({}), json!({"sampling_params": null})] {
+            canonical.extra_args = Some(json!({"sglang_tito": payload}));
+            let native = request(
+                &canonical,
+                "rid",
+                DisaggregationMode::Prefill,
+                Some("prefill"),
+                Some(5000),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                native.body["sampling_params"],
+                json!({"n": 1, "max_new_tokens": 1})
+            );
+            assert!(native.is_prefill);
+            let handoff = native.prefill_handoff.unwrap();
+            assert_eq!(handoff["bootstrap_host"], "prefill");
+            assert_eq!(handoff["bootstrap_port"], 5000);
+            assert!(handoff["bootstrap_room"].as_u64().unwrap() <= i64::MAX as u64);
+            for key in ["bootstrap_host", "bootstrap_port", "bootstrap_room"] {
+                assert_eq!(native.body[key], handoff[key], "{key}");
+            }
+        }
+        canonical.extra_args = Some(json!({"sglang_tito": {"sampling_params": []}}));
+        let error = request(
+            &canonical,
+            "rid",
+            DisaggregationMode::Prefill,
+            Some("prefill"),
+            Some(5000),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn both_native_request_paths_forward_the_current_trace_context() {
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(dynamo_runtime::logging::DistributedTraceIdLayer),
+        );
+        let mut canonical = canonical_request();
+        canonical.extra_args = Some(json!({"sglang_tito": {}}));
+        let grpc = crate::protocol::build_generate_request(
+            &canonical,
+            "rid",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        let http = request(
+            &canonical,
+            "rid",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(grpc.trace_headers.is_empty());
+        assert!(http.body.get("external_trace_header").is_none());
+
+        let span = tracing::info_span!(
+            "request",
+            trace_id = "11111111111111111111111111111111",
+            span_id = "2222222222222222",
+            trace_flags = "00",
+            tracestate = "vendor=value",
+            x_request_id = "external-request",
+            request_id = "dynamo-request",
+        );
+        let _entered = span.enter();
+        canonical.extra_args = Some(json!({"sglang_tito": {
+            "external_trace_header": {"traceparent": "stale"}
+        }}));
+        let expected = json!({
+            "traceparent": "00-11111111111111111111111111111111-2222222222222222-00",
+            "tracestate": "vendor=value",
+            "x-request-id": "external-request",
+            "request-id": "dynamo-request",
+        });
+        let grpc = crate::protocol::build_generate_request(
+            &canonical,
+            "rid",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        let http = request(
+            &canonical,
+            "rid",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(serde_json::to_value(grpc.trace_headers).unwrap(), expected);
+        assert_eq!(http.body["external_trace_header"], expected);
+    }
+
+    #[test]
+    fn native_output_preserves_the_envelope_and_marks_terminals() {
+        let chunk = json!({"output_ids": [10], "meta_info": {"finish_reason": null}});
+        let (converted, is_terminal) = output(chunk.clone(), &mut None);
+        assert!(!is_terminal);
+        assert_eq!(
+            converted.engine_data,
+            Some(json!({"sglang_response": chunk}))
+        );
+        assert!(converted.finish_reason.is_none());
+        assert!(converted.disaggregated_params.is_none());
+
+        let terminal = json!({"meta_info": {"finish_reason": {"type": "length"}}});
+        let (converted, is_terminal) = output(terminal.clone(), &mut None);
+        assert!(is_terminal);
+        assert_eq!(
+            converted.engine_data,
+            Some(json!({"sglang_response": terminal}))
+        );
+        assert_eq!(converted.finish_reason, Some(FinishReason::Stop));
+        assert!(converted.disaggregated_params.is_none());
+
+        let failure = json!({"error": {"message": "rejected"}});
+        let (converted, is_terminal) = output(failure.clone(), &mut None);
+        assert!(is_terminal);
+        assert_eq!(
+            converted.finish_reason,
+            Some(FinishReason::Error("rejected".to_string()))
+        );
+        assert_eq!(
+            converted.engine_data,
+            Some(json!({"sglang_response": failure}))
+        );
+    }
+
+    #[test]
+    fn native_http_discovery_checks_port_and_preserves_endpoint_host() {
+        let grpc = GrpcEndpoint::parse("http://engine.example:30001", "test").unwrap();
+        assert!(
+            NativeHttp::discover(&grpc, &discovery(json!({})), Duration::from_secs(1))
+                .unwrap()
+                .is_none()
+        );
+        for port in [json!(0), json!(65536), json!(-1), json!("bad"), json!(null)] {
+            let error = NativeHttp::discover(
+                &grpc,
+                &discovery(json!({"port": port, "incremental_streaming_output": true})),
+                Duration::from_secs(1),
+            )
+            .err()
+            .unwrap();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+        }
+        let native = NativeHttp::discover(
+            &grpc,
+            &discovery(json!({"port": "30000", "incremental_streaming_output": true})),
+            Duration::from_secs(1),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            native.endpoint.with_path("/generate").as_str(),
+            "http://engine.example:30000/generate"
         );
     }
 

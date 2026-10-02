@@ -45,7 +45,7 @@ use dynamo_runtime::metrics::{
     tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -926,9 +926,7 @@ impl HttpService {
                      Use run()/spawn() (which bind internally) when enable_tls is set."
                 ));
             }
-            let addr: SocketAddr = address
-                .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
+            let addr = listen_socket_addr(&self.host, self.port)?;
             let cert_path = self
                 .tls_cert_path
                 .as_ref()
@@ -1007,9 +1005,7 @@ impl HttpService {
             let listener = match listener {
                 Some(l) => l,
                 None => {
-                    let addr: SocketAddr = address
-                        .parse()
-                        .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
+                    let addr = listen_socket_addr(&self.host, self.port)?;
                     bind_listener(addr).map_err(|e| {
                         tracing::error!(
                             protocol = %protocol,
@@ -1075,11 +1071,11 @@ impl HttpService {
         let Some(rl_router) = self.rl_router.clone() else {
             return Ok(());
         };
-        let rl_addr = format!("{}:{}", self.host, self.rl_port);
+        let rl_addr = listen_socket_addr(&self.host, self.rl_port)?;
         // Bind eagerly and fail fast: when RL discovery is enabled, a bind failure
         // should abort service startup rather than silently leave RL discovery
         // unavailable while the main HTTP service keeps running.
-        let listener = tokio::net::TcpListener::bind(&rl_addr).await.map_err(|e| {
+        let listener = tokio::net::TcpListener::bind(rl_addr).await.map_err(|e| {
             tracing::error!(
                 address = %rl_addr,
                 error = %e,
@@ -1153,6 +1149,20 @@ fn parse_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
 
 fn listen_backlog() -> u32 {
     parse_listen_backlog(std::env::var(env_llm::DYN_HTTP_LISTEN_BACKLOG))
+}
+
+/// Build the listen address from an IP literal host. IPv6 brackets are optional,
+/// so `::` and `[::]` are equivalent.
+fn listen_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
+    let literal = host.trim();
+    let literal = literal
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(literal);
+    let ip: IpAddr = literal
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid address '{host}:{port}': {e}"))?;
+    Ok(SocketAddr::new(ip, port))
 }
 
 /// `tokio::net::TcpListener::bind` listens with a backlog of 128. A few thousand
@@ -2772,6 +2782,30 @@ mod tests {
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (_server_side, peer) = listener.accept().await.unwrap();
         assert_eq!(peer, client.local_addr().unwrap());
+    }
+
+    #[test]
+    fn test_listen_socket_addr_accepts_ip_literals() {
+        for (host, expected) in [
+            ("0.0.0.0", "0.0.0.0:8000"),
+            ("127.0.0.1", "127.0.0.1:8000"),
+            ("::", "[::]:8000"),
+            ("[::]", "[::]:8000"),
+            (" [::1] ", "[::1]:8000"),
+        ] {
+            assert_eq!(
+                listen_socket_addr(host, 8000).unwrap(),
+                expected.parse::<SocketAddr>().unwrap(),
+                "{host}"
+            );
+        }
+        for host in ["localhost", "[::", "::1]", ""] {
+            let error = listen_socket_addr(host, 8000).unwrap_err().to_string();
+            assert!(
+                error.starts_with(&format!("Invalid address '{host}:8000'")),
+                "{host}: {error}"
+            );
+        }
     }
 
     #[test]
