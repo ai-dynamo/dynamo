@@ -97,10 +97,6 @@ spec:
               value: /tmp/hf_modules
             - name: NCCL_GRAPH_MIXING_SUPPORT
               value: "0"
-            # Avoid sending a local EAGLE3 canary through every attention-DP rank.
-            # Endpoint registration still gates worker readiness after engine init.
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
             # KV transfer (UCX zcopy on; no staging buffer required)
             - name: TRTLLM_TRY_ZCOPY_FOR_KVCACHE_TRANSFER
               value: "1"
@@ -264,7 +260,8 @@ data:
     max_seq_len: 200000
     tensor_parallel_size: 4
     moe_expert_parallel_size: 4
-    enable_attention_dp: true
+    # EAGLE3 currently allocates the same request slot twice with attention DP.
+    enable_attention_dp: false
     pipeline_parallel_size: 1
     print_iter_log: true
     stream_interval: 100
