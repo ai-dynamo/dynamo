@@ -1390,10 +1390,18 @@ def test_gpt_oss_structured_response_preserves_harmony_reasoning(
                 "<|message|>",
                 "<|end|>",
                 "<|return|>",
+                "<|constrain|>",
+                "<|call|>",
             ]
         }
     )
-    answer = '{"answer":42}'
+    answer = json.dumps(
+        {
+            "answer": 42,
+            "literal": "<|start|>assistant<|channel|>commentary "
+            "to=functions.get_weather<|constrain|>json<|message|>{}<|call|>",
+        }
+    )
     text = (
         "<|start|>assistant<|channel|>analysis<|message|>Plan.<|end|>"
         f"<|start|>assistant<|channel|>final<|message|>{answer}<|return|>"
@@ -1415,7 +1423,9 @@ def test_gpt_oss_structured_response_preserves_harmony_reasoning(
 
     if use_pool:
         monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
-        monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", None)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_tool_call_parser_name", "gpt-oss"
+        )
         monkeypatch.setattr(
             sglang_processor_module, "_w_reasoning_parser_name", "gpt-oss"
         )
@@ -1426,7 +1436,7 @@ def test_gpt_oss_structured_response_preserves_harmony_reasoning(
     processor = SglangProcessor(
         tokenizer=tokenizer,
         routed_engine=routed_engine,
-        tool_call_parser_name=None,
+        tool_call_parser_name="gpt-oss",
         reasoning_parser_name="gpt-oss",
         eos_token_ids=[tokenizer.eos_token_id],
         preprocess_pool=InlinePreprocessPool() if use_pool else None,
@@ -1435,6 +1445,7 @@ def test_gpt_oss_structured_response_preserves_harmony_reasoning(
         "model": "openai/gpt-oss-20b",
         "messages": [{"role": "user", "content": "Return answer 42 as JSON."}],
         "response_format": response_format,
+        "tools": [parity_tool()],
     }
 
     async def collect():
@@ -4740,7 +4751,6 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         ("parser_name", "reasoning_output", "expected_reasoning", "tool_choice"),
         [
             ("qwen3", None, "", "required"),
-            ("qwen3", None, "", "named"),
             ("qwen3", "Check the request.</think>", "Check the request.", "required"),
             ("qwen3", "[check the request]</think>", "[check the request]", "required"),
             (

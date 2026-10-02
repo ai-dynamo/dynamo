@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
-from sglang.srt.parser.reasoning_parser import GptOssDetector
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
@@ -223,17 +222,10 @@ def _runtime_config_parser_name(
     return value if isinstance(value, str) and value else None
 
 
-def _guided_json_is_content(
-    preproc: dict[str, Any], reasoning_parser: ReasoningParser | None
-) -> bool:
-    # GPT-OSS uses Harmony channels even without the reasoning gate.
+def _guided_json_is_content(preproc: dict[str, Any]) -> bool:
     return (
         "json" in (preproc["sampling_options"]["guided_decoding"] or {})
         and not preproc["require_reasoning"]
-        and not (
-            reasoning_parser is not None
-            and isinstance(reasoning_parser.detector, GptOssDetector)
-        )
     )
 
 
@@ -656,9 +648,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=pre.named_zero_arg_tool,
-            guided_json_is_content=_guided_json_is_content(
-                dynamo_preproc, pre.reasoning_parser
-            ),
+            guided_json_is_content=_guided_json_is_content(dynamo_preproc),
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
@@ -724,7 +714,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=preproc_result.named_zero_arg_tool,
             guided_json_is_content=_guided_json_is_content(
-                preproc_result.dynamo_preproc, reasoning_parser
+                preproc_result.dynamo_preproc
             ),
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
