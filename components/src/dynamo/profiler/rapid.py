@@ -19,18 +19,18 @@ import logging
 
 import pandas as pd
 import yaml
-from aiconfigurator.cli.main import _execute_tasks, build_default_tasks
-from aiconfigurator.generator.api import generate_backend_artifacts
-from aiconfigurator.generator.module_bridge import task_config_to_generator_config
-from aiconfigurator.generator.naive import build_naive_generator_params
-from aiconfigurator.sdk.task_v2 import Task
+from aisimulate.generator.api import generate_backend_artifacts
+from aisimulate.generator.module_bridge import task_config_to_generator_config
+from aisimulate.generator.naive import build_naive_generator_params
+from aisimulate.legacy_cli.main import _execute_tasks, build_default_tasks
+from aisimulate.sdk.task_v2 import Task
 
 from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 from dynamo.profiler.utils.model_cache_paths import model_cache_path_in_pvc
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
-    needs_mocker_aic_perf_model,
+    needs_mocker_ais_perf_model,
     needs_profile_data,
     resolve_model_path,
 )
@@ -336,7 +336,7 @@ def _run_default_sim(
     # File-based interpolation and rapid mocker AIC specs both require separate
     # prefill/decode picks. If AIC picked an aggregated config, override to the
     # best available disaggregated alternative for the downstream consumer.
-    requires_disagg = needs_profile_data(dgdr) or needs_mocker_aic_perf_model(dgdr)
+    requires_disagg = needs_profile_data(dgdr) or needs_mocker_ais_perf_model(dgdr)
     if chosen == "agg" and requires_disagg:
         disagg_key = next(
             (k for k in best_configs if "disagg" in k and not best_configs[k].empty),
