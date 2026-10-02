@@ -10,7 +10,41 @@ SPDX-License-Identifier: Apache-2.0
 | Status | Draft |
 | Scope | `/v1/chat/completions` (primary) and `/v1/completions` (compatibility), internal request protocol, and backend adapters |
 | Compatibility window | Current Dynamo release plus the two previous releases |
-| Last updated | 2026-10-01 |
+| Last updated | 2026-10-02 |
+
+**Table of contents**
+
+<!-- Regenerate with: uvx --from md-toc md_toc -p -s 6 github -l 2 lib/llm/docs/frontend-protocol-framework-compatibility.md -->
+<!--TOC-->
+
+- [Summary](#summary)
+- [Context](#context)
+- [How frontend compatibility works today](#how-frontend-compatibility-works-today)
+- [Compatibility targets and endpoint scope](#compatibility-targets-and-endpoint-scope)
+- [Goals](#goals)
+- [Protocol documentation deliverables](#protocol-documentation-deliverables)
+- [Upstream protocol drift detection and triage](#upstream-protocol-drift-detection-and-triage)
+- [Non-goals](#non-goals)
+- [Design principles](#design-principles)
+- [Field placement policy](#field-placement-policy)
+- [What `nvext.extra_fields` means](#what-nvextextra_fields-means)
+- [Proposed architecture](#proposed-architecture)
+- [Detailed case: PR #13957 (`prompt_logprobs`)](#detailed-case-pr-13957-prompt_logprobs)
+- [Error model](#error-model)
+- [Versioning and mixed deployments](#versioning-and-mixed-deployments)
+- [Observability](#observability)
+- [Test strategy](#test-strategy)
+- [Definition of done](#definition-of-done)
+- [Implementation plan](#implementation-plan)
+- [Alternatives considered](#alternatives-considered)
+- [Open questions](#open-questions)
+- [Appendix A: observed compatibility incidents](#appendix-a-observed-compatibility-incidents)
+- [Appendix B: `nvext` placement consensus and recommendation](#appendix-b-nvext-placement-consensus-and-recommendation)
+- [Appendix C: Field placement, semantic ownership, and transport](#appendix-c-field-placement-semantic-ownership-and-transport)
+- [Appendix D: Current frontend compatibility mechanism](#appendix-d-current-frontend-compatibility-mechanism)
+- [References](#references)
+
+<!--TOC-->
 
 ## Summary
 
