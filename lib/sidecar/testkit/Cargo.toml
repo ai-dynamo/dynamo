@@ -12,6 +12,13 @@ repository.workspace = true
 description = "CPU-only test infrastructure for Dynamo sidecars"
 publish = false
 
+[features]
+native-tests = []
+
+[[test]]
+name = "native_engine"
+required-features = ["native-tests"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -31,7 +38,13 @@ tonic = { workspace = true }
 tonic-v14 = { workspace = true }
 tonic-health-v14 = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true }
 dynamo-runtime = { workspace = true }
+dynamo-kv-router = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }
 tempfile = { workspace = true }
 tokio-util = { workspace = true }

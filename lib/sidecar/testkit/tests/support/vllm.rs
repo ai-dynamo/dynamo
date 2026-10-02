@@ -30,14 +30,23 @@ use super::{
     fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
+#[path = "vllm_kv.rs"]
+mod kv;
+
 pub struct Fixture {
     config: FixtureConfig,
+    control: Controller<Adapter>,
     pub service: VllmMockerService,
     pub server: TestServer,
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+    kv_sources: Arc<Mutex<Option<Vec<pb::KvEventSource>>>>,
 }
 
 impl Fixture {
+    pub fn override_kv_sources(&self, sources: Vec<pb::KvEventSource>) {
+        *self.kv_sources.lock().unwrap() = Some(sources);
+    }
+
     pub fn respond(&self, request_id: &str, responses: Vec<pb::GenerateResponse>) {
         assert!(
             self.scripted
@@ -49,12 +58,12 @@ impl Fixture {
     }
 }
 
-impl SidecarFixture for Fixture {
-    type Engine = VllmSidecarEngine;
-    type Protocol = Adapter;
-    const GENERATE_OPENING: GenerateOpening = GenerateOpening::WaitsForHeaders;
-
-    async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
+impl Fixture {
+    async fn start_at(
+        control: Controller<Adapter>,
+        config: FixtureConfig,
+        address: std::net::SocketAddr,
+    ) -> Self {
         let mut args = fast_engine_args(EngineType::Vllm);
         args.speedup_ratio = config.speedup_ratio;
         let service = VllmMockerService::new(
@@ -74,18 +83,22 @@ impl SidecarFixture for Fixture {
         let scripted = Arc::new(Mutex::new(HashMap::new()));
         let controlled = ControlledService {
             inner: service.clone(),
-            control,
+            control: control.clone(),
             scripted: scripted.clone(),
         };
-        let control_service = service.clone();
+        let kv_sources = Arc::new(Mutex::new(None));
+        let control_service = kv::DiscoveryControl {
+            inner: service.clone(),
+            sources: kv_sources.clone(),
+        };
         let (health, health_service) = tonic_health::server::health_reporter();
         health
-            .set_serving::<ControlServer<VllmMockerService>>()
+            .set_serving::<ControlServer<kv::DiscoveryControl>>()
             .await;
         health
             .set_serving::<InferenceServer<ControlledService>>()
             .await;
-        let server = TestServer::start(move |listener, shutdown| async move {
+        let server = TestServer::start_at(address, move |listener, shutdown| async move {
             tonic::transport::Server::builder()
                 .add_service(InferenceServer::new(controlled))
                 .add_service(ControlServer::new(control_service))
@@ -100,10 +113,22 @@ impl SidecarFixture for Fixture {
         .unwrap();
         Self {
             config,
+            control,
             service,
             server,
             scripted,
+            kv_sources,
         }
+    }
+}
+
+impl SidecarFixture for Fixture {
+    type Engine = VllmSidecarEngine;
+    type Protocol = Adapter;
+    const GENERATE_OPENING: GenerateOpening = GenerateOpening::WaitsForHeaders;
+
+    async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
+        Self::start_at(control, config, "127.0.0.1:0".parse().unwrap()).await
     }
 
     async fn engine(&self) -> Self::Engine {
@@ -389,6 +414,37 @@ impl Protocol for Adapter {
 }
 
 impl ProcessFixture for Fixture {
+    fn native_traceparent(_request: &pb::GenerateRequest) -> Option<&str> {
+        None
+    }
+
+    fn assert_text(actual: &str, tokens: &[u32]) {
+        let expected: String = tokens
+            .iter()
+            .map(|token| format!("<token:{token}>"))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    async fn restart(&mut self) {
+        let address = self
+            .server
+            .endpoint()
+            .strip_prefix("http://")
+            .unwrap()
+            .parse()
+            .unwrap();
+        self.shutdown().await;
+        *self = Self::start_at(self.control.clone(), self.config.clone(), address).await;
+    }
+
+    fn native_prompt(request: &pb::GenerateRequest) -> Vec<u32> {
+        match request.prompt.as_ref().unwrap() {
+            pb::generate_request::Prompt::TokenIds(tokens) => tokens.ids.clone(),
+            _ => panic!("expected tokenized native request"),
+        }
+    }
+
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }

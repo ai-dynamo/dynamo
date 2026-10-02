@@ -15,8 +15,8 @@ use dynamo_sidecar_testkit::{
     assert::{failure, terminal},
     bounded,
     control::{
-        Controller, Event, OpenAction, RequestHandle, RequestPlan, StreamAction, StreamFault,
-        StreamPoint,
+        Controller, Event, OpenAction, Protocol, RequestHandle, RequestPlan, StreamAction,
+        StreamFault, StreamPoint,
     },
 };
 use futures::StreamExt;
@@ -27,7 +27,7 @@ mod process;
 #[allow(dead_code)]
 mod support;
 
-use process::{Environment, Gate, outputs};
+use process::{Environment, Frontend, Gate, outputs};
 use support::{FixtureConfig, HandoffFixture, ProcessFixture, SidecarFixture, sglang, vllm};
 
 async fn healthy<F: ProcessFixture>(
@@ -93,6 +93,8 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
     assert!(card.prompt_formatter.is_some());
     F::assert_registration(card);
     healthy::<F>(&env, &router, &control, "registered").await;
+    assert_system_routes(card).await;
+    child.assert_json_logs(None);
 
     let rejected = control.request("unsupported", RequestPlan::default());
     let mut request = env.request("unsupported", 3);
@@ -399,66 +401,68 @@ async fn worker_cancel_and_consumer_drop_release_only_the_target<F: ProcessFixtu
 }
 
 #[tokio::test]
-async fn vllm_sigterm_withdraws_worker_and_releases_active_native_request() {
+async fn vllm_shutdown_signals_withdraw_worker_and_release_active_native_request() {
     tokio::time::timeout(
         Duration::from_secs(60),
-        sigterm_withdraws_worker_and_releases_active_native_request::<vllm::Fixture>(),
+        shutdown_signals_withdraw_worker_and_release_active_native_request::<vllm::Fixture>(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");
 }
 
-async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessFixture>() {
-    let env = Environment::new().await;
-    let control = Controller::default();
-    let mut peer = F::start(
-        control.clone(),
-        FixtureConfig {
-            model: env.model.clone(),
-            speedup_ratio: 0.1,
-            ..Default::default()
-        },
-    )
-    .await;
-    let mut child = env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated);
-    let router = env.ready("backend").await;
-    let handle = control.request("shutdown-active", hold_after_token());
-    let mut stream = router
-        .generate(env.request("shutdown-active", 10_000))
-        .await
-        .unwrap();
-    bounded("shutdown first token", stream.next())
-        .await
-        .unwrap()
-        .into_data()
-        .unwrap()
-        .unwrap();
-    bounded("shutdown native checkpoint", handle.wait(Event::Checkpoint)).await;
-    peer.scheduler_active().await;
-    child.signal(libc::SIGTERM);
-    env.withdrawn("backend", &router).await;
-    assert!(child.is_running(), "withdrawal must precede process exit");
-    assert!(
-        !handle.reached(Event::Dropped),
-        "withdrawal must precede engine cleanup"
-    );
-    peer.scheduler_active().await;
-    let tail = outputs(stream).await;
-    assert!(
-        tail.iter()
-            .filter_map(|item| item.as_ref().ok())
-            .all(|item| !matches!(
-                item.finish_reason,
-                Some(FinishReason::Stop | FinishReason::Length)
-            ))
-    );
-    bounded("shutdown remote release", handle.wait(Event::Dropped)).await;
-    peer.scheduler_idle().await;
-    assert!(child.exit().await.success(), "{}", child.logs());
-    let independent = peer.engine().await;
-    independent.start(0).await.unwrap();
-    independent.cleanup().await.unwrap();
-    peer.shutdown().await;
+async fn shutdown_signals_withdraw_worker_and_release_active_native_request<F: ProcessFixture>() {
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        let env = Environment::new().await;
+        let control = Controller::default();
+        let mut peer = F::start(
+            control.clone(),
+            FixtureConfig {
+                model: env.model.clone(),
+                speedup_ratio: 0.1,
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut child = env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated);
+        let router = env.ready("backend").await;
+        let handle = control.request("shutdown-active", hold_after_token());
+        let mut stream = router
+            .generate(env.request("shutdown-active", 10_000))
+            .await
+            .unwrap();
+        bounded("shutdown first token", stream.next())
+            .await
+            .unwrap()
+            .into_data()
+            .unwrap()
+            .unwrap();
+        bounded("shutdown native checkpoint", handle.wait(Event::Checkpoint)).await;
+        peer.scheduler_active().await;
+        child.signal(signal);
+        env.withdrawn("backend", &router).await;
+        assert!(child.is_running(), "withdrawal must precede process exit");
+        assert!(
+            !handle.reached(Event::Dropped),
+            "withdrawal must precede engine cleanup"
+        );
+        peer.scheduler_active().await;
+        let tail = outputs(stream).await;
+        assert!(
+            tail.iter()
+                .filter_map(|item| item.as_ref().ok())
+                .all(|item| !matches!(
+                    item.finish_reason,
+                    Some(FinishReason::Stop | FinishReason::Length)
+                ))
+        );
+        bounded("shutdown remote release", handle.wait(Event::Dropped)).await;
+        peer.scheduler_idle().await;
+        assert!(child.exit().await.success(), "{}", child.logs());
+        let independent = peer.engine().await;
+        independent.start(0).await.unwrap();
+        independent.cleanup().await.unwrap();
+        peer.shutdown().await;
+    }
 }
 
 async fn ready(router: &PrefillRouter) {
@@ -766,10 +770,12 @@ async fn sglang_worker_cancel_and_consumer_drop_release_only_the_target() {
 }
 
 #[tokio::test]
-async fn sglang_sigterm_withdraws_worker_and_releases_active_native_request() {
+async fn sglang_shutdown_signals_withdraw_worker_and_release_active_native_request() {
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        sigterm_withdraws_worker_and_releases_active_native_request::<support::sglang::Fixture>(),
+        shutdown_signals_withdraw_worker_and_release_active_native_request::<
+            support::sglang::Fixture,
+        >(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");
@@ -946,4 +952,470 @@ async fn unhealthy_or_changed_role_never_registers() {
         assert!(child.logs().contains(expected), "{}", child.logs());
         peer.shutdown().await;
     }
+}
+
+async fn engine_restart_recovers_through_the_existing_worker<F: ProcessFixture>() {
+    let env = Environment::new().await;
+    let control = Controller::default();
+    let mut peer = F::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            speedup_ratio: 0.1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    let before = control.request("before-restart", hold_after_token());
+    let mut stream = router
+        .generate(env.request("before-restart", 1000))
+        .await
+        .unwrap();
+    bounded("before restart first token", stream.next())
+        .await
+        .unwrap();
+    bounded(
+        "before restart native checkpoint",
+        before.wait(Event::Checkpoint),
+    )
+    .await;
+    peer.shutdown().await;
+    bounded(
+        "restarted engine releases old request",
+        before.wait(Event::Dropped),
+    )
+    .await;
+    let tail = outputs(stream).await;
+    assert!(
+        tail.iter().any(Result::is_err),
+        "peer loss must terminate with an error"
+    );
+    peer.scheduler_idle().await;
+    peer.restart().await;
+    assert!(
+        child.is_running(),
+        "the sidecar must survive the native peer restart"
+    );
+    healthy::<F>(&env, &router, &control, "after-restart").await;
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    peer.shutdown().await;
+}
+
+async fn http_disconnect_requests<P: Protocol>(
+    control: &Controller<P>,
+    make_request: impl Fn(&str, u32) -> reqwest::RequestBuilder,
+    survivor_tokens: usize,
+    assert_survivor: impl Fn(&str),
+) {
+    for (index, is_opening) in [true, false].into_iter().enumerate() {
+        let id = format!("00000000-0000-4000-8000-{:012}", index * 3 + 1);
+        let other_id = format!("00000000-0000-4000-8000-{:012}", index * 3 + 2);
+        let target = control.request(
+            &id,
+            if is_opening {
+                RequestPlan {
+                    open: OpenAction::Hold,
+                    stream: None,
+                }
+            } else {
+                hold_after_token()
+            },
+        );
+        let request = make_request(&id, 1000);
+        let task = tokio::spawn(async move { request.send().await.unwrap() });
+        bounded(
+            "HTTP target reaches native peer",
+            target.wait(Event::Received),
+        )
+        .await;
+        let other = control.request(&other_id, hold_after_token());
+        let request = make_request(&other_id, survivor_tokens as u32);
+        let other_task = tokio::spawn(async move { request.send().await.unwrap() });
+        bounded(
+            "HTTP survivor native checkpoint",
+            other.wait(Event::Checkpoint),
+        )
+        .await;
+        if is_opening {
+            if task.is_finished() {
+                let response = task.await.unwrap();
+                assert!(response.status().is_success());
+                drop(response);
+            } else {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+        } else {
+            bounded(
+                "HTTP target native checkpoint",
+                target.wait(Event::Checkpoint),
+            )
+            .await;
+            let response = bounded("HTTP streaming headers", task).await.unwrap();
+            assert!(response.status().is_success());
+            let mut stream = response.bytes_stream();
+            bounded("HTTP streaming body", stream.next())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(stream);
+        }
+        bounded(
+            "HTTP disconnect releases native request",
+            target.wait(Event::Dropped),
+        )
+        .await;
+        assert!(
+            !other.reached(Event::Dropped),
+            "disconnect cancelled another HTTP request"
+        );
+        assert_eq!(target.tokens().len(), usize::from(!is_opening));
+        other.release();
+        let response = bounded("HTTP survivor response", other_task).await.unwrap();
+        assert!(response.status().is_success());
+        let text = bounded("HTTP survivor body", response.text())
+            .await
+            .unwrap();
+        assert_survivor(&text);
+        bounded(
+            "HTTP survivor releases native request",
+            other.wait(Event::Dropped),
+        )
+        .await;
+        assert_eq!(other.tokens().len(), survivor_tokens);
+    }
+}
+
+async fn http_disconnect_releases_only_the_target<F: ProcessFixture>() {
+    let env = Environment::new().await;
+    let control = Controller::default();
+    let mut peer = F::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            speedup_ratio: 0.1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    let frontend = Frontend::start(&env, 0).await;
+    http_disconnect_requests(
+        &control,
+        |id, max_tokens| frontend.generate(&env.model, id, max_tokens),
+        3,
+        |body| {
+            assert!(body.contains("[DONE]"), "{body}");
+            assert!(!body.contains("\"error\""), "{body}");
+        },
+    )
+    .await;
+    peer.scheduler_idle().await;
+    assert_eq!(frontend.metrics.get_client_disconnect_count(), 2);
+    healthy::<F>(&env, &router, &control, "after-http-disconnect").await;
+    frontend.shutdown().await;
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    peer.shutdown().await;
+}
+
+async fn http_migration_resumes_on_another_sidecar<F: ProcessFixture>() {
+    let env = Environment::new().await;
+    let first_control = Controller::default();
+    let second_control = Controller::default();
+    let config = FixtureConfig {
+        model: env.model.clone(),
+        speedup_ratio: 0.1,
+        ..Default::default()
+    };
+    let mut first_peer = F::start(first_control.clone(), config.clone()).await;
+    let mut first_child = env.spawn::<F>(&first_peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    env.ready("backend").await;
+    let frontend = Frontend::start(&env, 1).await;
+    let id = "00000000-0000-4000-8000-000000000010";
+    let first = first_control.request(id, hold_after_token());
+    let request = frontend.generate(&env.model, id, 4);
+    let task = tokio::spawn(async move { request.send().await.unwrap() });
+    bounded(
+        "first worker migration checkpoint",
+        first.wait(Event::Checkpoint),
+    )
+    .await;
+    let response = bounded("migration HTTP headers", task).await.unwrap();
+    assert!(response.status().is_success());
+    let mut stream = response.bytes_stream();
+    let first_bytes = bounded("migration first HTTP chunk", stream.next())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut second_peer = F::start(second_control.clone(), config).await;
+    let second = second_control.request(id, RequestPlan::default());
+    let mut second_child =
+        env.spawn::<F>(&second_peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    frontend.workers(&env.model, 2).await;
+    first_child.signal(libc::SIGKILL);
+    assert!(!first_child.exit().await.success());
+    let mut chunks = first_bytes.to_vec();
+    bounded("migrated HTTP stream completes", async {
+        while let Some(chunk) = stream.next().await {
+            chunks.extend(chunk.unwrap());
+        }
+    })
+    .await;
+    let body = String::from_utf8(chunks).unwrap();
+    assert!(body.contains("[DONE]"), "{body}");
+    assert!(!body.contains("\"error\""), "{body}");
+    bounded(
+        "second worker accepts migration",
+        second.wait(Event::Received),
+    )
+    .await;
+    let original = F::native_prompt(&first.native_request().unwrap());
+    let mut expected = original;
+    expected.extend(first.tokens());
+    assert_eq!(
+        F::native_prompt(&second.native_request().unwrap()),
+        expected
+    );
+    assert_eq!(first.tokens().len(), 1);
+    assert_eq!(second.tokens().len(), 3);
+    let expected_tokens: Vec<_> = first.tokens().into_iter().chain(second.tokens()).collect();
+    let actual_text: String = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .filter_map(|data| {
+            serde_json::from_str::<Value>(data).unwrap()["choices"][0]["text"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect();
+    F::assert_text(&actual_text, &expected_tokens);
+    assert_eq!(
+        frontend
+            .metrics
+            .get_migration_ongoing_request_count(&env.model),
+        1
+    );
+    bounded(
+        "failed worker native request release",
+        first.wait(Event::Dropped),
+    )
+    .await;
+    first_peer.scheduler_idle().await;
+    second_peer.scheduler_idle().await;
+    frontend.shutdown().await;
+    second_child.shutdown().await;
+    first_peer.shutdown().await;
+    second_peer.shutdown().await;
+}
+
+macro_rules! enroll_process_followup {
+    ($backend:ident, $fixture:ty) => {
+        mod $backend {
+            use super::*;
+
+            #[tokio::test]
+            async fn chat_templates_reach_native_tokenization() {
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    super::chat_templates_reach_native_tokenization::<$fixture>(),
+                )
+                .await
+                .unwrap();
+            }
+
+            #[tokio::test]
+            async fn engine_restart_recovers_through_the_existing_worker() {
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    super::engine_restart_recovers_through_the_existing_worker::<$fixture>(),
+                )
+                .await
+                .unwrap();
+            }
+
+            #[tokio::test]
+            async fn http_disconnect_releases_only_the_target() {
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    super::http_disconnect_releases_only_the_target::<$fixture>(),
+                )
+                .await
+                .unwrap();
+            }
+
+            #[tokio::test]
+            async fn http_migration_resumes_on_another_sidecar() {
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    super::http_migration_resumes_on_another_sidecar::<$fixture>(),
+                )
+                .await
+                .unwrap();
+            }
+        }
+    };
+}
+
+enroll_process_followup!(vllm_followup, vllm::Fixture);
+enroll_process_followup!(sglang_followup, sglang::Fixture);
+
+async fn assert_system_routes(card: &dynamo_llm::model_card::ModelDeploymentCard) {
+    let file = match card.tokenizer.as_ref().unwrap() {
+        TokenizerKind::HfTokenizerJson(file) | TokenizerKind::TikTokenModel(file) => file,
+    };
+    let metadata_url = file
+        .url()
+        .expect("worker self-hosts its tokenizer metadata");
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for route in ["/health", "/live"] {
+        let response = bounded(
+            "sidecar system probe",
+            client.get(metadata_url.join(route).unwrap()).send(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        if route == "/health" {
+            assert_eq!(
+                response.json::<Value>().await.unwrap(),
+                json!({"status": "ready"})
+            );
+        } else {
+            assert!(response.text().await.unwrap().is_empty());
+        }
+    }
+}
+
+async fn chat_templates_reach_native_tokenization<F: ProcessFixture>() {
+    for is_custom in [false, true] {
+        let env = Environment::new().await;
+        let control = Controller::default();
+        let mut peer = F::start(
+            control.clone(),
+            FixtureConfig {
+                model: env.model.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut child = if is_custom {
+            env.spawn_with_template::<F>(&peer.endpoint())
+        } else {
+            env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5)
+        };
+        env.ready("backend").await;
+        let frontend = Frontend::start(&env, 0).await;
+        let id = "00000000-0000-4000-8000-000000000020";
+        let observed = control.request(id, RequestPlan::default());
+        let response = bounded(
+            "templated chat request",
+            frontend
+                .chat(&env.model, id)
+                .header(
+                    "traceparent",
+                    "00-11111111111111111111111111111111-2222222222222222-01",
+                )
+                .send(),
+        )
+        .await
+        .unwrap();
+        assert!(response.status().is_success());
+        let body = bounded("templated chat response", response.text())
+            .await
+            .unwrap();
+        assert!(body.contains("[DONE]"), "{body}");
+        assert!(!body.contains("\"error\""), "{body}");
+        let expected = if is_custom { vec![2, 1] } else { vec![1] };
+        let native = observed.native_request().unwrap();
+        assert_eq!(F::native_prompt(&native), expected);
+        if let Some(traceparent) = F::native_traceparent(&native) {
+            assert_eq!(
+                traceparent.split('-').nth(1),
+                Some("11111111111111111111111111111111")
+            );
+        }
+        child.assert_json_logs(Some((id, "11111111111111111111111111111111")));
+        assert_eq!(observed.tokens().len(), 2);
+        peer.scheduler_idle().await;
+        frontend.shutdown().await;
+        child.shutdown().await;
+        peer.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn sglang_opaque_http_disconnect_releases_only_the_target() {
+    use dynamo_llm::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+    use support::sglang::http;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let env = Environment::new().await;
+        let control = Controller::default();
+        let mut peer = sglang::Fixture::start(
+            control.clone(),
+            FixtureConfig {
+                model: env.model.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let http_control = Controller::<http::Adapter>::default();
+        let mut http = http::Fixture::start(http_control.clone(), "200 OK").await;
+        peer.override_discovery(
+            Value::Null,
+            vec![json!({"port": http.port(), "incremental_streaming_output": true})],
+        );
+        let mut child =
+            env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+        let router = env.ready("backend").await;
+        let frontend =
+            Frontend::start_with_capabilities(&env, 0, vec![SGLANG_GENERATE_CAPABILITY]).await;
+        http_disconnect_requests(
+            &http_control,
+            |id, max_tokens| {
+                frontend
+                    .client
+                    .post(format!("{}/generate", frontend.url))
+                    .json(&json!({
+                        "rid": id, "input_ids": [11, 22],
+                        "sampling_params": {"max_new_tokens": max_tokens}, "stream": true,
+                    }))
+            },
+            2,
+            |body| {
+                let events: Vec<Value> = body
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .filter(|data| *data != "[DONE]")
+                    .map(|data| serde_json::from_str(data).unwrap())
+                    .collect();
+                assert_eq!(events.len(), 2, "{body}");
+                assert_eq!(events[0]["output_ids"], json!([101]));
+                assert_eq!(events[0]["future_field"], json!({"opaque": [1, null]}));
+                assert_eq!(events[1]["output_ids"], json!([102]));
+                assert_eq!(events[1]["meta_info"]["finish_reason"]["type"], "length");
+            },
+        )
+        .await;
+        assert_eq!(
+            http.aborted_requests(),
+            [
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000004",
+            ],
+        );
+        assert_eq!(frontend.metrics.get_client_disconnect_count(), 2);
+        healthy::<sglang::Fixture>(&env, &router, &control, "grpc-after-http-disconnect").await;
+        frontend.shutdown().await;
+        child.shutdown().await;
+        peer.shutdown().await;
+        http.shutdown().await;
+    })
+    .await
+    .unwrap();
 }
