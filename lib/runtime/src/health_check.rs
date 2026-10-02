@@ -46,6 +46,7 @@ pub struct HealthCheckManager {
 }
 
 impl HealthCheckManager {
+    /// Creates a manager whose tasks stop when runtime endpoint shutdown begins.
     pub fn new(drt: DistributedRuntime, config: HealthCheckConfig) -> Self {
         // Stop health checks at the endpoint-shutdown phase.
         let cancellation_token = drt.child_token();
@@ -430,6 +431,7 @@ mod push_handler_notify_tests {
     }
 
     impl MockStreamingEngine {
+        /// Creates an engine that returns only successful response chunks.
         fn success(num_chunks: usize) -> Arc<Self> {
             Arc::new(Self {
                 num_chunks,
@@ -438,6 +440,7 @@ mod push_handler_notify_tests {
             })
         }
 
+        /// Creates an engine that returns an error for every response chunk.
         fn all_errors(num_chunks: usize) -> Arc<Self> {
             Arc::new(Self {
                 num_chunks,
@@ -446,6 +449,7 @@ mod push_handler_notify_tests {
             })
         }
 
+        /// Creates an engine that returns errors at the specified chunk indices.
         fn with_error_at(num_chunks: usize, error_indices: Vec<usize>) -> Arc<Self> {
             Arc::new(Self {
                 num_chunks,
@@ -454,6 +458,7 @@ mod push_handler_notify_tests {
             })
         }
 
+        /// Shares the request counter so a test can observe canary activity.
         fn call_count(&self) -> Arc<AtomicUsize> {
             self.call_count.clone()
         }
@@ -463,6 +468,7 @@ mod push_handler_notify_tests {
     impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
         for MockStreamingEngine
     {
+        /// Counts the request and streams the configured success and error chunks.
         async fn generate(
             &self,
             input: SingleIn<TestRequest>,
@@ -765,6 +771,7 @@ mod push_handler_notify_tests {
         );
     }
 
+    /// Checks that shutdown releases the manager and stops further canary requests.
     #[tokio::test]
     async fn test_manager_tasks_exit_on_runtime_shutdown() {
         let drt = create_test_drt_async().await;
@@ -813,6 +820,7 @@ mod push_handler_notify_tests {
     struct InFlightGuard(Arc<AtomicUsize>);
 
     impl Drop for InFlightGuard {
+        /// Records that the request future has been dropped.
         fn drop(&mut self) {
             self.0.fetch_sub(1, Ordering::SeqCst);
         }
@@ -822,6 +830,7 @@ mod push_handler_notify_tests {
     impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
         for MockBlockingEngine
     {
+        /// Keeps a request pending until cancellation drops its tracking guard.
         async fn generate(
             &self,
             _input: SingleIn<TestRequest>,
@@ -833,6 +842,7 @@ mod push_handler_notify_tests {
         }
     }
 
+    /// Checks that shutdown drops a pending request before its timeout can expire.
     #[tokio::test]
     async fn test_in_flight_health_check_cancelled_on_runtime_shutdown() {
         let drt = create_test_drt_async().await;

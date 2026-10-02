@@ -174,7 +174,7 @@ jobs:
           SCCACHE_REGION: ${{ vars.AWS_DEFAULT_REGION }}
         shell: bash
         run: |
-          eval $(/workspace/container/use-sccache.sh setup-env)
+          eval "$(/workspace/container/use-sccache.sh setup-env)"
           # The test helper uses in-memory discovery and a real NATS connection.
           nats_dir=$(mktemp -d)
           nats-server -js -a 127.0.0.1 -p 4222 -m 8222 -sd "$nats_dir" &
