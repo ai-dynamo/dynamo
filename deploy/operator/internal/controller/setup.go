@@ -38,11 +38,11 @@ type DynamoGraphDeploymentEngineGroupSetupOptions struct {
 	RuntimeProvider EngineGroupRuntimeProvider
 }
 
-func (o DynamoGraphDeploymentEngineGroupSetupOptions) runtimeProvider() EngineGroupRuntimeProvider {
+func (o DynamoGraphDeploymentEngineGroupSetupOptions) runtimeProvider(mgr ctrl.Manager) EngineGroupRuntimeProvider {
 	if o.RuntimeProvider != nil {
 		return o.RuntimeProvider
 	}
-	return unavailableEngineGroupRuntimeProvider{}
+	return newProductionEngineGroupRuntimeProvider(mgr.GetClient())
 }
 
 type DynamoGraphDeploymentRequestSetupOptions struct {
@@ -128,7 +128,7 @@ func SetupDynamoGraphDeploymentEngineGroup(
 ) error {
 	if err := (&DynamoGraphDeploymentEngineGroupReconciler{
 		Client:          mgr.GetClient(),
-		RuntimeProvider: opts.runtimeProvider(),
+		RuntimeProvider: opts.runtimeProvider(mgr),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentEngineGroup controller: %w", err)
 	}
