@@ -139,6 +139,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 <ParamField path="frontendSidecar" type="string">
   Designates a container in `podTemplate.spec.containers` as the frontend sidecar. The value must match a container `name` in that list; the operator merges its frontend-sidecar defaults (Dynamo env vars, ports, health probes) into that container the same way it merges into `main`. The validation webhook rejects values that match no container.
+
+  Strict namespace-prefix matching uses the sidecar's own image version, independently of the main container and its `runtimeVersionOverride`. If the sidecar image tag does not identify the runtime version, set `DYN_NAMESPACE_PREFIX_STRICT=true` in that container's `env` when its image contains the strict-prefix implementation.
 </ParamField>
 
 <ParamField path="compilationCache" type="CompilationCacheConfig">

@@ -210,6 +210,8 @@ These are injected into all components when the corresponding infrastructure ser
 
 The operator enables strict namespace-prefix matching for frontend and EPP components using runtime 1.6.0 or later. The runtime image must contain this fix. With a compatible older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly on frontend and EPP components. For custom images, set `runtimeVersionOverride` to the image's Dynamo runtime version when the tag does not identify it.
 
+For frontend sidecars, support is determined from the sidecar's own image tag. The component's `runtimeVersionOverride` applies only to its main container. If a sidecar image tag does not identify the runtime version, set `DYN_NAMESPACE_PREFIX_STRICT=true` in that sidecar's environment when its image contains this fix.
+
 Manual namespace prefixes retain literal matching unless strict mode is enabled. Exact frontend `DYN_NAMESPACE` selection and global frontend discovery are unchanged. EPP uses exact `DYN_NAMESPACE` selection when no prefix is provided.
 
 This filter follows the operator's namespace naming contract. A separate deployment whose name ends in an accepted worker-generation suffix can still produce an indistinguishable namespace, so do not use this filter as an authorization boundary.

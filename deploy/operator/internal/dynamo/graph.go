@@ -1980,6 +1980,13 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		if podSpec.Containers[i].Name != sidecarName {
 			continue
 		}
+
+		// The component override describes the main image, not this user-managed sidecar.
+		var resolvedRuntimeVersion *runtimeversion.Version
+		if version, err := runtimeversion.ParseImageVersion(podSpec.Containers[i].Image); err == nil {
+			resolvedRuntimeVersion = &version
+		}
+
 		frontendContext := ComponentContext{
 			numberOfNodes:                  1,
 			ComponentType:                  commonconsts.ComponentTypeFrontend,
@@ -1987,7 +1994,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
 			Discovery:                      parentContext.Discovery,
 			DynamoNamespace:                parentContext.DynamoNamespace,
-			RuntimeVersion:                 parentContext.RuntimeVersion,
+			RuntimeVersion:                 resolvedRuntimeVersion,
 		}
 		frontendDefaults := NewFrontendDefaults()
 		base, err := frontendDefaults.GetBaseContainer(frontendContext)

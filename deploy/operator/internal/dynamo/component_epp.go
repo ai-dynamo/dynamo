@@ -114,7 +114,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 
 	container.Command = []string{}
 
-	// Enable strict discovery only for runtimes that implement the flag.
 	if runtimefeatures.StrictNamespacePrefix.Enabled(context.RuntimeVersion) {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
