@@ -187,6 +187,7 @@ fn make_stream_delta(
         },
         nvext,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     })
 }
 
@@ -954,6 +955,7 @@ fn make_stream_delta_with_reasoning(
         },
         nvext: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     })
 }
 

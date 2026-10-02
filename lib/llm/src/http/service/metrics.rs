@@ -2472,6 +2472,9 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     reasoning_field: ReasoningField,
 ) -> Result<Option<Event>, axum::Error> {
     let mut annotated = annotated.0;
+    if let Some(data) = annotated.data.as_mut() {
+        data.tool_call_completion.clear();
+    }
 
     if let Some(metrics) = annotated
         .data
@@ -3057,6 +3060,7 @@ mod tests {
                 chunk_tokens: 4,
                 ..Default::default()
             }),
+            tool_call_completion: Vec::new(),
         };
         let annotated = crate::types::Annotated::from_data(data);
 
@@ -3837,6 +3841,20 @@ mod tests {
         assert!(annotated.event.is_none());
         assert!(annotated.comment.is_none());
 
+        annotated.data.as_mut().unwrap().tool_call_completion = vec![
+            crate::protocols::openai::chat_completions::ToolCallCompletion {
+                choice_index: 0,
+                tool_index: 0,
+                complete: true,
+            },
+        ];
+        let transported: crate::types::Annotated<NvCreateChatCompletionStreamResponse> =
+            serde_json::from_value(serde_json::to_value(&annotated).unwrap()).unwrap();
+        assert_eq!(
+            transported.data.as_ref().unwrap().tool_call_completion,
+            annotated.data.as_ref().unwrap().tool_call_completion
+        );
+
         let mut http_queue_guard = Some(metrics.clone().create_http_queue_guard(model));
         let result = process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(annotated),
@@ -3857,6 +3875,7 @@ mod tests {
             json.get("llm_metrics").is_none(),
             "typed metrics must be skipped on the SSE wire"
         );
+        assert!(json.get("tool_call_completion").is_none());
 
         drop(collector);
 
@@ -4544,6 +4563,7 @@ mod tests {
                     },
                     nvext: None,
                     llm_metrics: None,
+                    tool_call_completion: Vec::new(),
                 },
             ),
             event: None,

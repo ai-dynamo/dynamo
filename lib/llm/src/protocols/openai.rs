@@ -400,6 +400,9 @@ impl GuidedToolConstraint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParsingOptions {
+    /// Request mode retained so stream and batch use the same native-family eligibility.
+    #[serde(default)]
+    pub tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
@@ -472,6 +475,7 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            tool_choice: None,
             suppress_tool_calls: false,
             guided_tool_constraint: GuidedToolConstraint::None,
             parallel_tool_calls: None,
@@ -508,12 +512,11 @@ impl ParsingOptions {
             let whole_response_decoder = matches!(
                 self.tool_call_parser.as_deref(),
                 Some("harmony" | "kimi_k3" | "kimi-k3")
+            ) || chat_completions::unified_parser::selected_family(
+                self.tool_call_parser.as_deref(),
+                self.reasoning_parser.as_deref(),
             )
-                || chat_completions::unified_parser::selected_batch_family(
-                    self.tool_call_parser.as_deref(),
-                    self.reasoning_parser.as_deref(),
-                )
-                .is_some()
+            .is_some()
                 || chat_completions::tool_parser_v2::unified_family(
                     self.tool_call_parser.as_deref(),
                     self.reasoning_parser.as_deref(),

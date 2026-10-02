@@ -192,6 +192,7 @@ impl DeltaGenerator {
             },
             nvext: None, // Will be populated by router layer if needed
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -216,6 +217,7 @@ impl DeltaGenerator {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
