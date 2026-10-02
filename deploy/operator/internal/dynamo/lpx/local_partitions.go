@@ -78,12 +78,17 @@ func selectRemotePartitions(
 
 // applyLocalPartitionIDs publishes the projection's GPU-local partitions into one
 // Cyborg container. The operator owns the variable: it removes any authored value
-// and sets it only when the projection has local partitions.
+// and sets it when the projection has local partitions. Without local partitions,
+// it sets an empty value only when envFrom sources could otherwise supply one;
+// Cyborg treats an empty value as no selection.
 func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection) {
 	container.Env = slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool {
 		return variable.Name == localPartitionIDsEnv
 	})
 	if len(projection.localPartitionIDs) == 0 {
+		if len(container.EnvFrom) > 0 {
+			container.Env = append(container.Env, corev1.EnvVar{Name: localPartitionIDsEnv})
+		}
 		return
 	}
 

@@ -123,12 +123,18 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		name     string
 		localIDs []int
 		env      []corev1.EnvVar
+		envFrom  []corev1.EnvFromSource
 		wantEnv  []corev1.EnvVar
 	}{
 		{
 			name:    "no local partitions removes authored values",
 			env:     []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
 			wantEnv: []corev1.EnvVar{{Name: "OTHER", Value: "kept"}},
+		},
+		{
+			name:    "no local partitions shadows envFrom sources",
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "authored"}}}},
+			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv}},
 		},
 		{
 			name:     "resolved selection replaces authored values",
@@ -143,7 +149,7 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 			t.Parallel()
 
 			t.Log("Publish the resolved local partitions into the Cyborg container")
-			container := &corev1.Container{Env: test.env}
+			container := &corev1.Container{Env: test.env, EnvFrom: test.envFrom}
 			applyLocalPartitionIDs(container, &ModelProjection{localPartitionIDs: test.localIDs})
 			require.Equal(t, test.wantEnv, container.Env)
 		})
