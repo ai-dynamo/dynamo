@@ -4736,19 +4736,159 @@ mod tests {
         use super::*;
         use crate::http::service::openai::check_for_backend_error;
         use crate::http::service::service_v2::BackendErrorCheck;
+        use crate::preprocessor::OpenAIPreprocessor;
+        use crate::protocols::common::llm_backend::{BackendOutput, FinishReason};
         use crate::protocols::common::metrics::ANNOTATION_PAYLOAD_USAGE;
         use crate::protocols::openai::ParsingOptions;
-        use crate::protocols::openai::chat_completions::NvCreateChatCompletionResponse;
         use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+        use crate::protocols::openai::chat_completions::{
+            NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+        };
         use crate::request_trace::payload_stream::scan_aggregate_with_future;
         use crate::types::Annotated;
+        use dynamo_runtime::engine::AsyncEngineContext;
         use futures::{Stream, StreamExt};
 
         const MODEL: &str = "test-model";
-        const RESPONSE_ID: &str = "test-id";
-        const CREATED: u32 = 1234567890;
+        const REQUEST_ID: &str = "test-id";
         const INPUT_TOKENS: usize = 7;
         const TAIL_CACHED_TOKENS: usize = 2;
+
+        #[derive(Debug)]
+        struct TestContext;
+
+        #[async_trait::async_trait]
+        impl AsyncEngineContext for TestContext {
+            fn id(&self) -> &str {
+                REQUEST_ID
+            }
+            fn stop_generating(&self) {}
+            fn is_stopped(&self) -> bool {
+                false
+            }
+            fn is_killed(&self) -> bool {
+                false
+            }
+            async fn stopped(&self) {}
+            async fn killed(&self) {}
+            fn stop(&self) {}
+            fn kill(&self) {}
+            fn link_child(&self, _: Arc<dyn AsyncEngineContext>) {}
+        }
+
+        fn backend_output(
+            text: &str,
+            token_ids: Vec<u32>,
+            finish_reason: Option<FinishReason>,
+        ) -> BackendOutput {
+            BackendOutput {
+                token_ids,
+                tokens: vec![],
+                text: Some(text.to_string()),
+                cum_log_probs: None,
+                log_probs: None,
+                top_logprobs: None,
+                finish_reason,
+                stop_reason: None,
+                index: Some(0),
+                completion_usage: None,
+                disaggregated_params: None,
+                encoder_result: None,
+                worker_trace_link: None,
+                engine_data: None,
+                routing_data: None,
+                jailed_text: None,
+            }
+        }
+
+        /// A backend that answers "Hello world" in two chunks and reports cached
+        /// prompt tokens on the final one.
+        fn backend_success() -> Vec<Annotated<BackendOutput>> {
+            let mut last = backend_output("world", vec![2, 3], Some(FinishReason::Stop));
+            last.completion_usage = Some(dynamo_protocols::types::CompletionUsage {
+                prompt_tokens: INPUT_TOKENS as u32,
+                completion_tokens: 3,
+                total_tokens: (INPUT_TOKENS + 3) as u32,
+                prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                    cached_tokens: Some(TAIL_CACHED_TOKENS as u32),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            vec![
+                Annotated::from_data(backend_output("Hello ", vec![1], None)),
+                Annotated::from_data(last),
+            ]
+        }
+
+        /// What the frontend hands the non-streaming chat handler: the real
+        /// preprocessor output for `outputs`, with payload capture off or on.
+        /// The two differ in shape (capture on ends with a `payload_usage`
+        /// chunk), which is exactly what the handler chain must not notice.
+        fn preprocessed(
+            capture: bool,
+            outputs: Vec<Annotated<BackendOutput>>,
+        ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static
+        {
+            let request = NvCreateChatCompletionRequest {
+                inner: dynamo_protocols::types::CreateChatCompletionRequest {
+                    model: MODEL.to_string(),
+                    messages: vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                            content:
+                                dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                                    "Hello".to_string(),
+                                ),
+                            name: None,
+                        },
+                    )],
+                    ..Default::default()
+                },
+                common: Default::default(),
+                nvext: None,
+                chat_template_args: None,
+                thinking: None,
+                media_io_kwargs: None,
+                return_tokens_as_token_ids: None,
+                unsupported_fields: Default::default(),
+            };
+            // The non-streaming handler forces usage on before preprocessing
+            // (`force_include_usage`), so the client always gets a usage block.
+            let mut request = request;
+            request.inner.stream_options =
+                Some(dynamo_protocols::types::ChatCompletionStreamOptions {
+                    include_usage: true,
+                    continuous_usage_stats: false,
+                });
+            let mut generator = request.response_generator(REQUEST_ID.to_string());
+            generator.update_isl(INPUT_TOKENS as u32);
+            OpenAIPreprocessor::transform_postprocessor_stream(
+                futures::stream::iter(outputs),
+                Box::new(generator),
+                Arc::new(TestContext),
+                capture,
+                false,
+                None,
+                Default::default(),
+            )
+        }
+
+        /// Run `outputs` through the handler chain with capture off, and with
+        /// capture on through the scan; return both registries and results plus
+        /// the capture record future.
+        async fn both_legs(
+            outputs: Vec<Annotated<BackendOutput>>,
+        ) -> (
+            (Registry, Result<NvCreateChatCompletionResponse, Rejected>),
+            (Registry, Result<NvCreateChatCompletionResponse, Rejected>),
+            impl std::future::Future<Output = crate::request_trace::payload_stream::PayloadOutcome>,
+        ) {
+            let plain = observe_and_aggregate(preprocessed(false, outputs.clone())).await;
+            let (captured, future) =
+                scan_aggregate_with_future(Box::pin(preprocessed(true, outputs)));
+            let capture = observe_and_aggregate(captured).await;
+            (plain, capture, future)
+        }
 
         fn chat_chunk(
             content: Option<&str>,
@@ -4774,9 +4914,9 @@ mod tests {
             };
             let response = NvCreateChatCompletionStreamResponse {
                 inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
-                    id: RESPONSE_ID.to_string(),
+                    id: REQUEST_ID.to_string(),
                     choices: vec![choice],
-                    created: CREATED,
+                    created: 0,
                     model: MODEL.to_string(),
                     system_fingerprint: None,
                     object: "chat.completion.chunk".to_string(),
@@ -4807,11 +4947,9 @@ mod tests {
             }
         }
 
-        /// The tail payload capture appends: usage data plus the cumulative
-        /// metrics as a `payload_usage` annotation with `chunk_tokens = 0` and
-        /// the request's `cached_tokens`, which no content chunk carries. The
-        /// tag is set explicitly because `to_annotation` always emits
-        /// `llm_metrics`, which is not the production tag for this chunk.
+        /// The tool-call-jail tail shape: usage data plus cumulative metrics as a
+        /// `payload_usage` annotation. The tag is set explicitly because
+        /// `to_annotation` always emits `llm_metrics`.
         fn payload_usage_tail(
             output_tokens: usize,
         ) -> Annotated<NvCreateChatCompletionStreamResponse> {
@@ -4834,26 +4972,6 @@ mod tests {
             tail.event = Some(ANNOTATION_PAYLOAD_USAGE.to_string());
             tail.comment = annotation.comment;
             tail
-        }
-
-        /// Production stream with payload capture on: a leading data-less
-        /// `llm_metrics` frame (legacy engines; the shape the preflight buffers),
-        /// positive-count content chunks, a finish chunk, then the zero-token
-        /// usage tail.
-        fn production_chunks() -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
-            vec![
-                chunk_metrics(1, 1)
-                    .to_annotation::<NvCreateChatCompletionStreamResponse>()
-                    .unwrap(),
-                chat_chunk(Some("Hello "), None, Some(chunk_metrics(1, 1))),
-                chat_chunk(Some("world"), None, Some(chunk_metrics(2, 3))),
-                chat_chunk(
-                    None,
-                    Some(dynamo_protocols::types::FinishReason::Stop),
-                    None,
-                ),
-                payload_usage_tail(3),
-            ]
         }
 
         /// What the collector wrote, minus durations: TTFT and ITL sums are
@@ -4945,21 +5063,13 @@ mod tests {
             result.expect("production-shaped stream must aggregate")
         }
 
-        fn assert_identity(response: &NvCreateChatCompletionResponse) {
-            assert_eq!(response.inner.id, RESPONSE_ID);
-            assert_eq!(response.inner.model, MODEL);
-            assert_eq!(response.inner.created, CREATED);
-        }
-
-        /// The invariant #11349 is about: same chunks, same collector output,
-        /// same client response, whether capture is on or off.
+        /// The invariant #11349 is about: the same backend output, through the
+        /// real preprocessor with capture off and on, gives the collector the
+        /// same numbers and the client the same response.
         #[tokio::test]
         async fn test_capture_does_not_change_metrics_or_response() {
-            let (plain_registry, plain) =
-                observe_and_aggregate(futures::stream::iter(production_chunks())).await;
-            let (captured, future) =
-                scan_aggregate_with_future(futures::stream::iter(production_chunks()));
-            let (capture_registry, capture) = observe_and_aggregate(captured).await;
+            let ((plain_registry, plain), (capture_registry, capture), future) =
+                both_legs(backend_success()).await;
 
             let signature_plain = signature(&plain_registry);
             assert_eq!(
@@ -4967,22 +5077,25 @@ mod tests {
                 signature_plain,
                 "capture changed the collector output"
             );
-            // Not three agreeing zeros: the real request.
+            // Not agreeing zeros: the real request.
             assert_eq!(
                 signature_plain,
                 MetricSignature {
-                    output_tokens_total: 4,
+                    output_tokens_total: 3,
                     isl: (1, INPUT_TOKENS as u64),
                     osl: (1, 3),
                     cached_tokens: (1, TAIL_CACHED_TOKENS as u64),
                     ttft_samples: 1,
-                    itl_samples: 3,
+                    itl_samples: 2,
                 }
             );
 
-            let (plain, capture) = (ok(plain), ok(capture));
+            let (mut plain, mut capture) = (ok(plain), ok(capture));
+            // `created` is wall-clock per generator; everything else must match.
+            plain.inner.created = 0;
+            capture.inner.created = 0;
             assert_eq!(plain, capture, "capture changed the client response");
-            assert_identity(&plain);
+            assert_eq!(plain.inner.model, MODEL);
             assert_eq!(
                 plain.inner.choices[0].message.content.as_ref().unwrap(),
                 &dynamo_protocols::types::ChatCompletionMessageContent::Text(
@@ -4993,7 +5106,7 @@ mod tests {
             let outcome = future.await;
             assert!(outcome.drop_reason.is_none());
             let record = outcome.response.expect("capture must produce a record");
-            assert_identity(&record);
+            assert_eq!(record.inner.model, MODEL);
             assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
         }
 
@@ -5030,18 +5143,12 @@ mod tests {
         /// and the metrics observed before the error agree.
         #[tokio::test]
         async fn test_capture_surfaces_mid_stream_error_identically() {
-            let chunks = || {
-                vec![
-                    chat_chunk(Some("Hello "), None, Some(chunk_metrics(1, 1))),
-                    Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
-                        "invalid sampling parameter",
-                    ),
-                ]
-            };
-            let (plain_registry, plain) =
-                observe_and_aggregate(futures::stream::iter(chunks())).await;
-            let (captured, future) = scan_aggregate_with_future(futures::stream::iter(chunks()));
-            let (capture_registry, capture) = observe_and_aggregate(captured).await;
+            let outputs = vec![
+                Annotated::from_data(backend_output("Hello ", vec![1], None)),
+                Annotated::<BackendOutput>::from_error("invalid sampling parameter"),
+            ];
+            let ((plain_registry, plain), (capture_registry, capture), future) =
+                both_legs(outputs).await;
 
             assert_eq!(plain.unwrap_err(), Rejected::Aggregation);
             assert_eq!(
@@ -5072,13 +5179,14 @@ mod tests {
         /// both modes.
         #[tokio::test]
         async fn test_capture_rejects_leading_error_identically() {
+            // Legacy engines send a data-less `llm_metrics` frame; the
+            // preprocessor forwards it untouched.
             let frame = || {
                 chunk_metrics(1, 1)
-                    .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                    .to_annotation::<BackendOutput>()
                     .unwrap()
             };
-            let error =
-                || Annotated::<NvCreateChatCompletionStreamResponse>::from_error("backend failed");
+            let error = || Annotated::<BackendOutput>::from_error("backend failed");
             let nothing = MetricSignature {
                 output_tokens_total: 0,
                 isl: (0, 0),
@@ -5095,14 +5203,12 @@ mod tests {
                 ttft_samples: 1,
                 itl_samples: 0,
             };
-            for (chunks, expected) in [
+            for (outputs, expected) in [
                 (vec![error()], nothing),
                 (vec![frame(), error()], one_frame),
             ] {
-                let (plain_registry, plain) =
-                    observe_and_aggregate(futures::stream::iter(chunks.clone())).await;
-                let (captured, future) = scan_aggregate_with_future(futures::stream::iter(chunks));
-                let (capture_registry, capture) = observe_and_aggregate(captured).await;
+                let ((plain_registry, plain), (capture_registry, capture), future) =
+                    both_legs(outputs).await;
 
                 assert_eq!(plain.unwrap_err(), Rejected::Preflight);
                 assert_eq!(capture.unwrap_err(), Rejected::Preflight);
