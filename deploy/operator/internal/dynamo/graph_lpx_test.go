@@ -101,7 +101,7 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "hybrid", Namespace: "test"},
 			}
 			container := test.container.DeepCopy()
-			container.Name, container.Image = "main", "cyborg:test"
+			container.Name, container.Image = commonconsts.MainContainerName, "cyborg:test"
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeDecode, SharedMemorySize: test.sharedMemorySize,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -276,10 +276,10 @@ func TestLPXInputRevision(t *testing.T) {
 			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
 		}},
 		{"agent/image", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "agent:next"}}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers = []corev1.Container{{Name: commonconsts.MainContainerName, Image: "agent:next"}}
 		}},
 		{"conductor/image", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "conductor:next"}}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: commonconsts.MainContainerName, Image: "conductor:next"}}
 		}},
 		{"agent/placement", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeSelector = map[string]string{"lpu": "new"}
@@ -310,10 +310,10 @@ func TestLPXInputRevision(t *testing.T) {
 			d.Spec.Restart = &v1beta1.Restart{ID: "restart-selected"}
 			d.Status.Restart = &v1beta1.RestartStatus{ObservedID: d.Spec.Restart.ID, Phase: v1beta1.RestartPhaseRestarting, InProgress: []string{"decode"}}
 		}},
-		{"ignored/backend", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = "vllm" }},
+		{"ignored/backend", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = string(BackendFrameworkVLLM) }},
 		{"ignored/ordinary-replicas", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Components[0].Replicas = ptr.To(int32(9)) }},
 		{"ignored/ordinary-image", false, func(d *v1beta1.DynamoGraphDeployment) {
-			d.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "prefill:next"}}}}
+			d.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "prefill:next"}}}}
 		}},
 		{"ignored/ordinary-restart", false, func(d *v1beta1.DynamoGraphDeployment) {
 			d.Spec.Restart = &v1beta1.Restart{ID: "restart-ordinary"}
@@ -461,7 +461,7 @@ func TestLPXInputRevisionIgnoresUnrelatedConvertedMetadata(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal(payload, source))
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "epp", ComponentType: v1beta1.ComponentTypeEPP, Replicas: ptr.To(int32(1)),
-		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "epp:before"}}}},
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "epp:before"}}}},
 	})
 	before, err := LPXInputRevision(source, "")
 	require.NoError(t, err)

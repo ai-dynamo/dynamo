@@ -55,7 +55,7 @@ spec:
 </ParamField>
 
 <Note>
-  Each new non-LPX component must supply a `podTemplate.spec.containers` entry named `main` with a non-empty `image`. For an image without a parseable semantic-version tag, set `spec.components[*].runtimeVersionOverride` to the image's Dynamo runtime version. Also set it when the tag identifies a different version, such as the inference engine's version. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`; the DGDR-level field supplies a default when generating components.
+  Each new non-LPX component must supply `spec.components[*].podTemplate.spec.containers[name=main]` with a non-empty `image`. The runtime image is `spec.components[*].podTemplate.spec.initContainers[name=runtime].image` in Dynamo sidecar mode, or `spec.components[*].podTemplate.spec.containers[name=main].image` otherwise. If that image has no parseable semantic-version tag, set `spec.components[*].runtimeVersionOverride` to its Dynamo runtime version. Also set it when the tag identifies a different version, such as the inference engine's version. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`; the DGDR-level field supplies a default when generating components.
 
   LPX components use `roles[].podTemplate` instead and do not require `runtimeVersionOverride`. See [Shared component spec](dynamo-component-deployment.mdx#shared-component-spec).
 </Note>
@@ -65,13 +65,13 @@ spec:
 </ParamField>
 
 <ParamField path="backendFramework" type="string">
-  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker's command and arguments. When set, it must match the detected worker framework. LPX components omit this field.
+  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker's command and arguments. When set, it must match the detected worker framework. LPX components omit this field. Backend-specific defaults apply to `spec.components[*].podTemplate.spec.containers[name=main]`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
 <ParamField path="env" type="[]core/v1.EnvVar">
-  Environment variables prepended to every component's environment. A component-specific `env` entry with the same name takes precedence and may reference values from this list.
+  Environment variables prepended to each component's `main` container environment and, in Dynamo sidecar mode, its `runtime` init container environment. A container-specific `env` entry with the same name takes precedence and may reference values from this list.
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>
 </ParamField>

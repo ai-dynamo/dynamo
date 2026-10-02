@@ -253,6 +253,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
+	allErrs = append(allErrs, dynamo.ValidateDynamoSidecar(spec, fldPath)...)
+
 	if spec.Experimental != nil {
 		allErrs = append(allErrs, v.validateExperimentalSpec(
 			spec.Experimental,

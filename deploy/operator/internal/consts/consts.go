@@ -261,6 +261,7 @@ const (
 
 	DiscoveryBackendKubernetes   = "kubernetes" // label value for KubeLabelDynamoDiscoveryBackend
 	MainContainerName            = "main"
+	RuntimeContainerName         = "runtime"
 	FrontendSidecarContainerName = "sidecar-frontend"
 
 	RestartAnnotation = "nvidia.com/restartAt"
