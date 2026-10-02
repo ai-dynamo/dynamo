@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import logging
 from typing import Any, Protocol
 
 from dynamo.llm import with_engine_data
 from dynamo.vllm.multimodal_utils.custom_encoder.handoff import ExternalEncoderResult
+
+logger = logging.getLogger(__name__)
 
 
 class RequestPreparer(Protocol):
@@ -82,6 +85,10 @@ class ExternalEncoderOrchestrator:
                     "prepared request must contain an encoder_result object"
                 )
             classifier_label = self._classifier.classify(encoder_result)
+            logger.info(
+                "Forwarding encoder_result to generator model %s",
+                self._generator_model_name,
+            )
         else:
             generator_request = {**request, "model": self._generator_model_name}
         completion = await self._generator.complete(generator_request, context=context)
