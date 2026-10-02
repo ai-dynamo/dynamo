@@ -19,6 +19,25 @@
   Each check detects an old value path and fails with a migration message.
 */}}
 
+{{/*
+  LPX requires Grove integration. Only a parent chart can install Grove;
+  a standalone operator chart must explicitly enable an external Grove.
+*/}}
+
+{{- if and .Values.lpx.enabled (not (and
+  .Values.global
+  .Values.global.grove
+  (or
+    .Values.global.grove.enabled
+    (and (not .Chart.IsRoot) .Values.global.grove.install)
+  )
+)) }}
+  {{- fail `
+CONFIGURATION ERROR: LPX requires Grove integration to be enabled.
+Set global.grove.enabled=true to use an externally installed Grove operator.
+` }}
+{{- end }}
+
 {{/* ---- NATS toggle (moved to global.nats.install) ---- */}}
 
 {{- if and (hasKey .Values "nats") (hasKey .Values.nats "enabled") }}

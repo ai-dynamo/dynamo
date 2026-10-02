@@ -65,7 +65,7 @@ impl ExpectedError {
     fn status(self) -> reqwest::StatusCode {
         match self {
             Self::Validation => reqwest::StatusCode::BAD_REQUEST,
-            Self::NotImplemented => reqwest::StatusCode::NOT_IMPLEMENTED,
+            Self::NotImplemented => reqwest::StatusCode::BAD_REQUEST,
             Self::UnsupportedContent => reqwest::StatusCode::BAD_REQUEST,
             Self::DeadlineExceeded => reqwest::StatusCode::TOO_MANY_REQUESTS,
         }
@@ -74,7 +74,7 @@ impl ExpectedError {
     fn anthropic_type(self) -> &'static str {
         match self {
             Self::Validation => "invalid_request_error",
-            Self::NotImplemented => "api_error",
+            Self::NotImplemented => "invalid_request_error",
             Self::UnsupportedContent => "invalid_request_error",
             Self::DeadlineExceeded => "rate_limit_error",
         }

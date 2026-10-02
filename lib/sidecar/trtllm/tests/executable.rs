@@ -21,3 +21,22 @@ fn executable_exposes_native_grpc_configuration() {
     }
     assert!(stdout.contains("DYN_SIDECAR_GRPC_ENDPOINT"));
 }
+
+#[test]
+fn invalid_arguments_fail_before_runtime_configuration() {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dynamo-trtllm-sidecar"));
+    for (key, _) in std::env::vars().filter(|(key, _)| {
+        key.starts_with("DYN_") || key.starts_with("ETCD_") || key.starts_with("NATS_")
+    }) {
+        command.env_remove(key);
+    }
+    // A runtime configuration error must not mask a local argument error.
+    let output = command
+        .args(["--grpc-endpoint", "http://127.0.0.1:0", "--model-path", ""])
+        .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("model-path must not be empty"), "{stderr}");
+}
