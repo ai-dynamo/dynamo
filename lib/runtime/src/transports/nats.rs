@@ -310,7 +310,15 @@ pub struct ClientOptions {
     /// Skip TLS certificate verification. For development only.
     #[builder(default = "default_nats_tls_insecure()")]
     tls_insecure: bool,
+
+    /// How long `connect` keeps retrying an unreachable server before failing.
+    #[builder(default = "CONNECT_TIMEOUT")]
+    connect_timeout: time::Duration,
 }
+
+/// Long enough to ride out a NATS pod restart; short enough that a wrong
+/// `NATS_SERVER` still surfaces as a startup failure.
+const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(60);
 
 fn default_server() -> String {
     if let Ok(server) = std::env::var(env_nats::NATS_SERVER) {
@@ -457,12 +465,36 @@ impl ClientOptions {
             None => options,
         };
 
+        // async-nats reconnects on its own once connected but gives up after one
+        // failed initial attempt. Retry in the background and wait a bounded time,
+        // so a NATS outage at startup delays readiness instead of crash-looping.
+        let options = options.retry_on_initial_connect();
+        let server = self.server;
+        let connect_timeout = self.connect_timeout;
         let (client, _) = build_in_runtime(
             async move {
-                options
-                    .connect(self.server)
+                let client = options
+                    .connect(&server)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))?;
+                if client.connection_state() != State::Connected {
+                    tracing::warn!(
+                        server,
+                        timeout_secs = connect_timeout.as_secs(),
+                        "NATS not reachable yet, retrying"
+                    );
+                }
+                // A PING cannot be answered until the connection is up.
+                tokio::time::timeout(connect_timeout, client.flush())
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "Failed to connect to NATS at {server} within {}s. Verify NATS server is running and accessible.",
+                            connect_timeout.as_secs()
+                        )
+                    })?
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS at {server}: {e}"))?;
+                Ok(client)
             },
             NATS_WORKER_THREADS,
         )
@@ -483,6 +515,7 @@ impl Default for ClientOptions {
             tls_client_cert_path: default_nats_tls_client_cert_path(),
             tls_client_key_path: default_nats_tls_client_key_path(),
             tls_insecure: default_nats_tls_insecure(),
+            connect_timeout: CONNECT_TIMEOUT,
         }
     }
 }
@@ -1222,6 +1255,62 @@ mod tests {
             ),
             Ok(_) => panic!("expected error when client cert set without key"),
         }
+    }
+
+    /// Port with nothing listening: TCP connect is refused immediately.
+    fn unused_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn connect_retries_until_deadline_when_server_unreachable() {
+        let port = unused_port();
+        let budget = time::Duration::from_secs(1);
+        let options = ClientOptions::builder()
+            .server(format!("nats://127.0.0.1:{port}"))
+            .connect_timeout(budget)
+            .build()
+            .unwrap();
+
+        let started = time::Instant::now();
+        let Err(err) = options.connect().await else {
+            panic!("connect must fail: nothing is listening");
+        };
+
+        assert!(started.elapsed() >= budget, "gave up before the deadline");
+        assert!(
+            err.to_string().contains("within 1s"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires the `nats-server` binary
+    async fn connect_recovers_when_server_starts_late() {
+        let port = unused_port();
+        let server = tokio::task::spawn_blocking(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            std::process::Command::new("nats-server")
+                .args(["-p", &port.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("nats-server binary on PATH")
+        });
+
+        let options = ClientOptions::builder()
+            .server(format!("nats://127.0.0.1:{port}"))
+            .connect_timeout(time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let client = options
+            .connect()
+            .await
+            .expect("connected once the server came up");
+        assert_eq!(client.client().connection_state(), State::Connected);
+
+        server.await.unwrap().kill().unwrap();
     }
 
     // Integration test for object store data operations using bincode
