@@ -314,6 +314,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     _nixl_ver="${NIXL_REF#v}" && \
     uv pip install --no-deps "nixl==${_nixl_ver}" "nixl-cu13==${_nixl_ver}" && \
+    NIXL_REQUIRED_LIBS="libnixl.so libnixl_build.so libnixl_common.so libserdes.so libstream.so libnixl_capi.so" \
     bash /tmp/install_nixl_from_wheel.sh \
         --cuda-major 13 \
         --site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
@@ -343,8 +344,11 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     fi
 
 # NIXL 1.5.0 bundles UCX 1.23.x; the nixl#1668 hang was reported against the
-# UCX 1.20.0 in nixl-cu13 0.10.1. Keep in sync with the pre_runtime ENV below.
+# UCX 1.20.0 in nixl-cu13 0.10.1. nixl-sys resolves the C API with a bare
+# dlopen("libnixl_capi.so"), so the wheel directory must also be on the loader
+# path. Keep in sync with the pre_runtime ENV below.
 ENV LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/opt/dynamo/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/dynamo/nixl:${LD_LIBRARY_PATH} \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
 {% endif %}
 
@@ -915,7 +919,7 @@ ENV DYNAMO_HOME=/workspace \
     PATH=/opt/dynamo/venv/bin:/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/opt/dynamo/nixl/libnixl.so \
-    LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
+    LD_LIBRARY_PATH=/opt/dynamo/nixl:/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
     OPAL_PREFIX=/opt/dynamo/mpi \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins \
     NIXL_VERSION=

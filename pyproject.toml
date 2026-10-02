@@ -87,7 +87,7 @@ sglang = [
 # Some backend extras have incompatible transitive dependency requirements.
 # Each conflict below identifies the dependency that prevents co-installation.
 conflicts = [
-    # vLLM and SGLang have incompatible NIXL requirements.
+    # vLLM and SGLang have incompatible quack-kernels requirements.
     [
         { extra = "vllm" },
         { extra = "sglang" },
