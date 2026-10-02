@@ -78,13 +78,11 @@ SYSTEM_HEALTH_TOOL = {
 MAX_GPU_MEMORY_UTILIZATION = 0.95
 
 
-def _visible_gpu_total_memory_gib() -> float:
-    """Query the assigned GPU's capacity, failing if its guard cannot be sized."""
-    # The parallel scheduler sizes each test's VRAM budget against an NVML
-    # index and writes that same index into CUDA_VISIBLE_DEVICES, so read it
-    # back as an NVML index to stay on the card the budget describes; serial
-    # runs leave it unset and land on GPU 0.
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip()
+def _pin_gpu_and_get_total_memory_gib(env: Dict[str, str]) -> float:
+    """Pin the worker to its scheduled GPU by UUID and return that GPU's capacity."""
+    # The scheduler assigns NVML indices. Pin this single-GPU worker by UUID
+    # so CUDA cannot interpret the same number as a different physical card.
+    visible = env.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip()
     if not visible.isdigit():
         raise ValueError(
             f"Cannot size the startup VRAM guard for CUDA_VISIBLE_DEVICES={visible!r}; "
@@ -94,7 +92,9 @@ def _visible_gpu_total_memory_gib() -> float:
     pynvml.nvmlInit()
     try:
         handle = pynvml.nvmlDeviceGetHandleByIndex(int(visible))
-        return pynvml.nvmlDeviceGetMemoryInfo(handle).total / (1024**3)
+        total_gib = pynvml.nvmlDeviceGetMemoryInfo(handle).total / (1024**3)
+        env["CUDA_VISIBLE_DEVICES"] = pynvml.nvmlDeviceGetUUID(handle)
+        return total_gib
     finally:
         pynvml.nvmlShutdown()
 
@@ -117,6 +117,7 @@ class WorkerProcess(ManagedProcess):
         vram_mark = request.node.get_closest_marker("profiled_vram_gib")
         self.required_vram_gib = float(vram_mark.args[0]) if vram_mark else None
 
+        env = os.environ.copy()
         command = [
             "python3",
             "-m",
@@ -147,11 +148,10 @@ class WorkerProcess(ManagedProcess):
                     "--kv-cache-memory-bytes",
                     kv_bytes,
                     "--gpu-memory-utilization",
-                    self._gpu_memory_utilization(),
+                    self._gpu_memory_utilization(env),
                 ]
             )
 
-        env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
@@ -173,7 +173,7 @@ class WorkerProcess(ManagedProcess):
             log_dir=log_dir,
         )
 
-    def _gpu_memory_utilization(self) -> str:
+    def _gpu_memory_utilization(self, env: Dict[str, str]) -> str:
         """Express this test's declared VRAM budget as a utilization fraction.
 
         Passing --kv-cache-memory-bytes makes vLLM size the KV cache from that
@@ -190,7 +190,7 @@ class WorkerProcess(ManagedProcess):
             raise ValueError(
                 "profiled_vram_gib is required to size the startup VRAM guard"
             )
-        total_gib = _visible_gpu_total_memory_gib()
+        total_gib = _pin_gpu_and_get_total_memory_gib(env)
         guardable_gib = total_gib * MAX_GPU_MEMORY_UTILIZATION
         if self.required_vram_gib > guardable_gib:
             # Clamping here would hand vLLM a guard weaker than the budget, the
