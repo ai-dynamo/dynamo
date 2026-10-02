@@ -2494,6 +2494,8 @@ async def test_snapshot_restore_does_not_reacquire_failover_lock(monkeypatch):
         side_effect=AssertionError("snapshot lifecycle already owns the lock")
     )
     monkeypatch.setenv("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1")
+    monkeypatch.setenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", "1")
+    monkeypatch.setenv("DYN_VLLM_GMS_POOL_FENCED", "1")
     prepared = []
     monkeypatch.setattr(
         "gpu_memory_service.integrations.vllm.writer_lifecycle.prepare_writer_cohort",
@@ -2507,5 +2509,19 @@ async def test_snapshot_restore_does_not_reacquire_failover_lock(monkeypatch):
     )
 
     assert result == (None, False)
-    assert prepared == [True]
+    assert prepared == []
     factory._acquire_failover_lock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_restore_fails_closed_without_pool_fence(monkeypatch):
+    factory = _make_factory()
+    monkeypatch.setenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", "1")
+    monkeypatch.delenv("DYN_VLLM_GMS_POOL_FENCED", raising=False)
+
+    with pytest.raises(RuntimeError, match="without a fenced active-pool"):
+        await factory._maybe_acquire_failover_lock_before_init(
+            Mock(),
+            SimpleNamespace(gms_shadow_mode=True),
+            snapshot_engine_present=True,
+        )

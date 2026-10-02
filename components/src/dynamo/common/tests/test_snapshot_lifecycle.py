@@ -131,6 +131,59 @@ async def test_elect_and_wake_elects_then_resumes(monkeypatch):
     assert controller.resumed is True
 
 
+async def test_elect_and_wake_fences_after_lock_before_resume(monkeypatch):
+    events = []
+
+    class OrderedController(_PauseController):
+        async def resume(self) -> None:
+            events.append("resume")
+            await super().resume()
+
+    controller = OrderedController()
+    runtime = SimpleNamespace(set_health_status=lambda _ok: None)
+    fake_lock = Mock()
+
+    async def acquire(*, engine_id):
+        assert engine_id == "engine-0"
+        events.append("lock")
+
+    fake_lock.acquire = acquire
+    _patch_flock_lock(monkeypatch, fake_lock)
+
+    async def fence():
+        events.append("fence")
+
+    await elect_and_wake(
+        controller,
+        runtime,
+        lock_path="/tmp/failover.lock",
+        post_lock_pre_wake=fence,
+    )
+
+    assert events == ["lock", "fence", "resume"]
+
+
+async def test_elect_and_wake_does_not_resume_when_fence_fails(monkeypatch):
+    controller = _PauseController()
+    runtime = SimpleNamespace(set_health_status=lambda _ok: None)
+    fake_lock = Mock()
+    fake_lock.acquire = AsyncMock()
+    _patch_flock_lock(monkeypatch, fake_lock)
+
+    async def fence():
+        raise RuntimeError("fence failed")
+
+    with pytest.raises(RuntimeError, match="fence failed"):
+        await elect_and_wake(
+            controller,
+            runtime,
+            lock_path="/tmp/failover.lock",
+            post_lock_pre_wake=fence,
+        )
+
+    assert controller.resumed is False
+
+
 async def test_elect_and_wake_propagates_wake_failure_after_lock(monkeypatch):
     """A failed wake raises, matching the cold-start path. The process exits
     through normal shutdown, which releases the flock with its fd."""

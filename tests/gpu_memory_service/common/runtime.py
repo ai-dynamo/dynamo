@@ -62,10 +62,12 @@ def _tp_visible_devices() -> str:
 
 def _sglang_cuda_graph_args() -> list[str]:
     """Match production graph policy when the explicit GPU gate is enabled."""
-    args = ["--disable-piecewise-cuda-graph"]
-    if not is_truthy_env("GMS_TEST_ENABLE_CUDA_GRAPHS"):
-        args.append("--disable-cuda-graph")
-    return args
+    if is_truthy_env("GMS_TEST_ENABLE_CUDA_GRAPHS"):
+        return []
+    return [
+        "--cuda-graph-backend-decode=disabled",
+        "--cuda-graph-backend-prefill=disabled",
+    ]
 
 
 def _vllm_cuda_graph_args() -> list[str]:

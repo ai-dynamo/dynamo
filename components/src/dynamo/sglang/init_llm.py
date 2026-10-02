@@ -13,9 +13,11 @@ from sglang.srt.observability.trace import set_global_trace_level
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.gms_failover import (
     acquire_gms_failover_lock_before_init,
-    lease_transition_serving_enabled,
+    arm_frozen_shadow_headroom,
+    frozen_predecessor_enabled,
     prepare_gms_failover,
     run_gms_failover_promotion_warmup,
+    wait_for_armed_standby_before_serving,
 )
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.env import env_bool
@@ -83,10 +85,17 @@ def _export_gms_node_rank(server_args) -> None:
 
 
 def _enable_gms_nccl_prewarm(server_args) -> None:
-    """Pay lazy TP communicator setup at startup, before standby quiesce."""
+    """Optionally pay lazy TP communicator setup before standby quiesce.
+
+    SGLang's startup all-reduce can increase sustained TP decode latency, so
+    failover mode must not enable it implicitly. Explicit SGLang configuration
+    remains untouched and deployments may opt in after measuring their model.
+    """
 
     shadow = _shadow_mode_enabled()
     if not shadow:
+        return
+    if not env_bool("DYN_SGLANG_GMS_NCCL_PREWARM", default=False):
         return
     if int(getattr(server_args, "nnodes", 1) or 1) <= 1:
         return
@@ -104,6 +113,7 @@ def _uses_mapped_sleeping_standby() -> bool:
 
 
 def _can_prewarm_mapped_standby() -> bool:
+    frozen_predecessor_enabled("sglang", mapped_standby=_uses_mapped_sleeping_standby())
     if not _uses_mapped_sleeping_standby():
         return False
     enabled = os.environ.get(
@@ -189,6 +199,10 @@ async def _prepare_non_leader_failover(
 
     activation_barrier = None
     if node_rank is not None and node_rank >= 1 and leader_host:
+        from dynamo.common import rank_liveness
+
+        # The client starts only at takeover; keep process startup off that path.
+        rank_liveness.prewarm_helper()
 
         async def activation_barrier() -> None:
             from dynamo.common import rank_liveness
@@ -217,9 +231,6 @@ async def _prepare_non_leader_failover(
         "backend_name": "sglang",
         "tags": ["kv_cache"],
         "promotion_warmup": None,
-        "lease_transition_serving": lease_transition_serving_enabled(
-            "sglang", mapped_standby=_uses_mapped_sleeping_standby()
-        ),
     }
     if activation_barrier is not None:
         failover_kwargs["activation_barrier"] = activation_barrier
@@ -275,6 +286,8 @@ async def init_decode(
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
     _scope_failover_lock_to_node_rank(server_args)
+    if _shadow_mode_enabled():
+        arm_frozen_shadow_headroom("sglang")
     _validate_gms_tp_topology(server_args)
     _enable_gms_nccl_prewarm(server_args)
 
@@ -445,6 +458,7 @@ async def init_decode(
     if early_failover_activation is not None and early_failover_activation.enabled:
         early_failover_activation.attach_to(handler)
         await promotion_warmup()
+        await wait_for_armed_standby_before_serving("sglang")
     else:
         # Give the serving handler a quiesce-capable failover controller so a
         # shadow can quiesce (pause/release memory) before discovery; without it
@@ -501,9 +515,6 @@ async def init_decode(
             promotion_warmup=promotion_warmup,
             warm_standby_before_quiesce=_can_prewarm_mapped_standby(),
             activation_barrier=activation_barrier,
-            lease_transition_serving=lease_transition_serving_enabled(
-                "sglang", mapped_standby=_uses_mapped_sleeping_standby()
-            ),
         )
         failover_activation.attach_to(handler)
     maybe_start_gms_failover_child_watchdog(handler, engine)

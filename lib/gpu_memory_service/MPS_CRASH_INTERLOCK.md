@@ -20,6 +20,56 @@ requirement below:
 Backend-specific variables such as DYN_VLLM_GMS_GPU_CRASH_INTERLOCK override
 the common setting.
 
+## Optional process-death fallback for capacity reclamation
+
+The default `DYN_GMS_FAILOVER_RECLAIM_POLICY=gpu-proof` retains quarantine
+when MPS fails. A deployment may explicitly accept a weaker guarantee:
+
+    DYN_GMS_FAILOVER_RECLAIM_POLICY=process-death-timeout
+    DYN_GMS_FAILOVER_PROCESS_DEATH_GRACE_SECS=2
+
+After the bounded MPS attempt fails, the successor checks the predecessor's
+immutable, retired writer-cohort guard, waits the configured interval, and
+checks it again. Missing or unretired cohorts and live guard holders never
+authorize reclamation. Cancellation during the wait preserves quarantine.
+Phase two still reclaims only quarantine stamped by this recovery owner;
+it does not free SEALED read-pinned generations or classify current-writer pages.
+Serving from safe SEALED/FREE capacity continues while reclamation runs.
+
+This fallback also applies when MPS returns CUDA201 or times out. **It is not
+CUDA quiescence proof:** the MPS server can outlive its client and retain GPU
+work beyond the interval. Late accesses could corrupt reused memory. Repeated
+passing tests provide empirical confidence for the tested driver/workloads,
+not a universal bound. Status is `reclaimed-best-effort`, with
+`gpu_quiesced=False`; it must not be reported as qualified MPS termination.
+Use the default strict policy when that residual risk is unacceptable.
+
+The cohort-death checks add little beyond the CPU fence: admission already
+waited for the predecessor's exclusive lifetime guard, so every registered
+writer process had exited before phase one. What the policy actually relies
+on is elapsed time since that fence (the bounded proof attempt plus the grace)
+being long enough for a surviving MPS server or driver to drain the dead
+client's work.
+
+Both settings are validated when frozen-predecessor mode starts, so a typo
+fails the boot instead of silently stranding capacity. Probe refusals caused
+by contention between TP ranks or I/O errors, and phase-two attempts blocked
+by live successor lease mutations, are retried with capped backoff; process
+death is monotonic, so none of them is a terminal refusal. The per-rank status
+file stays `pending` until a terminal outcome: `reclaimed`,
+`reclaimed-best-effort`, or `quarantined` (strict policy without proof).
+Status files are named `<backend>-<role>-engine<ENGINE_ID>-<pid>.json`, so
+primary and shadow containers sharing one directory cannot overwrite each other.
+
+**Repeated failover.** Phase two only reclaims quarantine stamped by its own
+recovery owner. If a successor dies before its phase two, its stamped
+quarantine would otherwise never become allocatable again. Under this policy
+the next successor's phase one re-stamps that quarantine to itself, clearing
+read pins left by the dead, fenced cohort, and reclaims it with its own pages.
+The older cohort was fenced before the dead successor was admitted, so it has
+been dead for at least that successor's lifetime. The strict policy does not
+inherit: a GPU proof covers only the immediate predecessor.
+
 ## Protocol
 
     engine worker             persistent GMS                 MPS control
@@ -44,8 +94,9 @@ the common setting.
                                      | successor may reclaim HBM     |
 
 The handler does not call Python, CUDA, malloc, logging, locks, or RPC. It uses
-one fixed-size write smaller than PIPE_BUF, SIGSTOP, and pause. Live testing
-shows that MPS can return `CUDA_ERROR_MPS_RPC_FAILURE` while the whole client is
+one fixed-size write smaller than PIPE_BUF and then pauses its own thread; GMS
+may birth-check and SIGSTOP the host process during the termination protocol.
+Live testing shows that MPS can return `CUDA_ERROR_MPS_RPC_FAILURE` while the whole client is
 group-stopped. GMS therefore waits until `/proc` proves the exact birth-checked
 PID is stopped, resumes it solely for the MPS termination protocol, and does not
 authorize the successor during that interval. If MPS fails, GMS birth-checks
@@ -59,9 +110,88 @@ traffic cessation, CPU-process death, and time alone are not proof.
 
 One rank's notification fences its exact registered cohort. For tensor
 parallelism, every CUDA rank must be registered with the GMS/MPS authority for
-its physical GPU. Recovery remains gated until every affected rank supplies a
-proof; a partial multi-rank result is retryable but is never promoted to a
-whole-cohort proof.
+its physical GPU. Reclaiming predecessor-writable pages remains gated until
+every affected rank supplies proof; a partial multi-rank result is retryable
+but is never promoted to a whole-cohort proof.
+
+### Frozen-generation early serving
+
+`DYN_GMS_FAILOVER_FROZEN_PREDECESSOR=1` is an opt-in availability mode for a
+fully initialized, mapped vLLM or SGLang standby. It requires KV leases, an
+authoritative content directory with a compatible manifest, a read-only
+standby directory before takeover, and a configured GPU-quiescence provider.
+Under the default `gpu-proof` policy it does not weaken the MPS proof required
+for reclaiming predecessor-writable HBM; the opt-in process-death fallback
+above is the only exception.
+
+After the global active-writer lock changes hands, the successor first waits
+for all predecessor **CPU writer guards** on every TP rank. The leader then
+promotes and classifies its local directory/lease ring; in vLLM each remote
+worker does the same for its own pod-local GMS directory and `/dev/shm` ring.
+The all-rank RPC must complete before the mapped shadow resumes generation:
+
+| Lease record | Before GPU proof |
+|---|---|
+| Exact directory-backed `SEALED` generation with no predecessor readers | Readable and eligible for ownership adoption |
+| Exact directory-backed `SEALED` generation with predecessor readers | Frozen read-only cache hit; successor pins are tracked, but adoption and writable reuse wait for GPU proof and pin release |
+| Completed `IDLE` or already `FREE` page | Available for a new successor allocation |
+| Mutable or interrupted transition page | Quarantined: neither read nor allocate; a transition is discarded after GPU proof rather than treated as valid KV |
+
+The shadow may serve using only the first two categories. MPS proof runs in
+the background. Under the strict policy, only a positive capability result
+reclaims quarantine, and failed or timed-out proof leaves it quarantined.
+Background attempts are bounded by `DYN_GMS_FAILOVER_BACKGROUND_GPU_PROOF_SECS`
+(default 2 seconds); changing that timeout does not change the safety boundary.
+
+SGLang publishes boot-scoped markers for the allocator: `.gms-reclaimed` after
+phase two under either policy, `.gpu-quiesced` only with strict proof, and
+`.gms-reclaim-refused` when the strict policy terminally keeps quarantine. A
+promoted shadow with no writable page waits, bounded by
+`GMS_SGLANG_HANDOFF_CAPACITY_WAIT_SECS` (default 30), for phase two to settle
+before failing.
+Frozen-page reclamation rejects `gms-mps-inventory` even when the separate
+best-effort survivor-retirement mode is enabled: inventory absence cannot
+prove completion of previously submitted CUDA work.
+
+On a peer-rank crash, a healthy rank's CUDA client may still be registered
+with MPS. Both vLLM and SGLang make one bounded exact-client termination
+attempt before killing that survivor's host processes; this is the last
+reliable opportunity for MPS to certify it. A failed attempt does not prevent
+early sealed/free serving, but leaves that rank's GPU-touched pages
+quarantined. Frozen mode defaults MPS control to 0.4 seconds for SGLang and
+1.5 seconds for vLLM; the backend-specific
+`DYN_VLLM_GMS_GPU_QUIESCENCE_TIMEOUT_SECS` or
+`DYN_SGLANG_GMS_GPU_QUIESCENCE_TIMEOUT_SECS` can override this
+latency-versus-capacity tradeoff. The crashed rank and any remaining
+quarantine are retried asynchronously.
+
+This is a best-effort provider, not a guarantee that all predecessor HBM can
+be reclaimed after an arbitrary crash. In local TP=2 vLLM tests, MPS sometimes
+returned CUDA_SUCCESS only after 0.4–1.3 seconds; once the control call timed
+out, later calls returned CUDA 201 because the client had exited. A 1.0-second
+budget failed the strict all-rank reclamation test, while 1.5 seconds passed
+one rank-0 and one rank-1 TP=2 trial; this is not a reliability guarantee.
+GMS must retain quarantine unless it receives a positive result. Deployments
+that require recovery under full-pool pressure need a qualified alternative
+GPU-quiescence mechanism or spare capacity on an independent replica.
+
+`DYN_GMS_FAILOVER_FROZEN_HEADROOM_BLOCKS` reserves 16 anonymous FREE blocks
+per lease ring by default. Neither primary nor standby prewarm may consume the
+reserve. Once the successor has fenced CPU writers and classified the ring, it
+releases that reserve for early decode. For a near-full pool, launch and warm
+the standby before admitting primary traffic: a reserve established after the
+pool is already full cannot manufacture free pages. Size this reserve for the
+expected number of concurrent replay streams and the interval until GPU proof
+or capacity recovery; exhaustion is explicit backpressure, not permission to
+reuse quarantined pages.
+
+This mode depends on the engine's seal contract: a block is published `SEALED`
+only after its KV writes complete, and every later write or eviction must
+atomically leave `SEALED` before touching the bytes. A software bug that writes
+through a stale pointer into a sealed block violates that contract; neither
+process death nor this mode can make such a write safe. A second crash before
+the replacement standby has armed its own headroom can reduce availability,
+but must still fail closed for KV correctness.
 
 ### Proactive TP teardown
 
@@ -83,6 +213,20 @@ child watchdog: it obtains the same local proof before fencing scheduler childre
 These actions run in parallel across GPUs. Heartbeats are failure suspicion, not
 the reuse proof. Writer-cohort retirement plus each local GMS/MPS result remains
 the proof boundary.
+
+Heartbeats run in a helper process (`DYN_GMS_RANK_LIVENESS_ISOLATED=1`, the
+default), so GIL stalls in the engine process cannot delay them. The helper
+exits, and the rank is then fenced, if its parent stops ticking for
+`DYN_GMS_RANK_LIVENESS_PARENT_HANG_MS` (default 10000). A missed heartbeat
+deadline (`DYN_GMS_RANK_LIVENESS_TIMEOUT_MS`, default 750) is still a false
+failover. It fences a healthy cohort and starts the standby. Crash detection
+does not depend on this deadline: a crash reaches survivors through the crash
+interlock and child sentinels in a few hundred milliseconds. So size the deadline
+for the worst scheduling delay of the helper, not for detection speed. In
+CPU-limited containers, CFS throttling can stall every thread of a container
+for a full period while a co-located standby compiles. At TP16 with 4-CPU
+engine containers, one helper went 354 ms without sending a heartbeat. Use at
+least 1000 ms there, or give engine containers enough CPU to avoid throttling.
 
 ### Opt-in TP survivor retirement
 
@@ -131,6 +275,16 @@ degree, and workload combination.
   is rejected.
 - GMS must remain alive and able to run MPS control. If proof fails, the crashed
   process intentionally remains stopped and shared HBM remains quarantined.
+- `terminate_client` can return a nonzero CUDA result (observed: 201 or 806)
+  during a crash, even when the host later exits or its MPS inventory entry
+  disappears. Neither observation upgrades that attempt to proof. A later
+  attempt may succeed against the same server; if a native crash was already
+  recorded, GMS re-freezes that exact process before retrying rather than
+  sending a second fatal signal.
+- If `terminate_client` already returned CUDA result 0 but inventory retirement
+  timed out, GMS retains that per-client, per-server-PID proof for a retry. It
+  still checks PID birth identity and inventory absence, but does not signal a
+  host process that may have exited after the successful CUDA termination.
 
 ## Failure matrix and limitations
 
@@ -146,6 +300,10 @@ degree, and workload combination.
 | MPS control/server failure | Signal is caught | No proof; process stays stopped |
 | Fatal GPU/Xid or poisoned MPS server | Not reliably recoverable | Restart MPS/GPU workload |
 | Crash before the handler is armed | No | Existing cold/fail-closed path |
+
+The table describes strict **writable** HBM recovery. Frozen-generation mode
+may serve exact sealed generations and safe free pages before that proof; it
+does not make any quarantined page writable or allocatable.
 
 Additional gotchas:
 
@@ -194,6 +352,17 @@ Additional gotchas:
   synchronization during steady-state serving.
 
 ## Operational guidance
+
+Keep standby preparation out of the serving window. With snapshot restore, a
+standby resumes quickly and does not compete with the primary. Without it,
+set `DYN_GMS_FAILOVER_SERVE_AFTER_STANDBY=1`. The initial primary then
+finishes engine initialization but registers for traffic only once a standby
+reports armed. The standby needs the primary's weights and KV geometry, so it
+cannot finish first. Start the standby without waiting for the primary to
+become discoverable; it waits for the published KV geometry itself (raise
+`DYN_VLLM_GMS_SHADOW_INIT_GEOMETRY_WAIT_MS` for large models). An orchestrator
+that starts the standby only after the primary serves deadlocks against this
+gate until `DYN_GMS_FAILOVER_STANDBY_GATE_SECS` expires.
 
 Exercise both modes in qualification:
 

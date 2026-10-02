@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import time
 
 from .args import Config
 
@@ -55,7 +56,7 @@ def build_headless_namespace(config: Config) -> argparse.Namespace:
     return ns
 
 
-def run_dynamo_headless(config: Config) -> None:
+async def run_dynamo_headless(config: Config) -> None:
     """Run in headless mode for multi-node TP/PP.
 
     Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
@@ -70,6 +71,9 @@ def run_dynamo_headless(config: Config) -> None:
             )
 
             join_prepared_writer_cohort()
+            from dynamo.common.gms_failover import arm_frozen_shadow_headroom
+
+            arm_frozen_shadow_headroom("vllm")
         _configure_gms_vllm_worker(config.engine_args)
 
         if config.gms_shadow_mode:
@@ -111,12 +115,33 @@ def _maybe_start_vllm_rank_liveness_client(config: Config) -> None:
     def on_leader_lost(rank: int, reason: str) -> None:
         import signal
 
+        from dynamo.common.gms_failover import (
+            frozen_predecessor_enabled,
+            quiesce_local_gpu_cohort_after_rank_loss,
+        )
+
         logger.warning(
             "[GMS liveness] vLLM leader rank %d lost (%s); terminating "
             "orphaned headless worker",
             rank,
             reason,
         )
+        frozen = frozen_predecessor_enabled("vllm")
+        if frozen:
+            # Preserve the live CUDA client for GMS/MPS termination. Failure
+            # still releases CPU ownership, but leaves old pages quarantined.
+            quiesce_local_gpu_cohort_after_rank_loss("vllm")
+        while not frozen and not quiesce_local_gpu_cohort_after_rank_loss("vllm"):
+            # Killing the launcher also kills its CUDA workers. If MPS has
+            # not certified their termination, that discards the only proof
+            # the successor may use to reattach persistent HBM. Keep the
+            # failed rank and its writer lock alive until proof succeeds.
+            logger.error(
+                "[GMS liveness] vLLM rank %d GPU termination is not "
+                "certified; retaining the headless process and retrying",
+                node_rank,
+            )
+            time.sleep(0.25)
         # This launcher owns no request-plane endpoint to drain. A graceful
         # SIGTERM makes vLLM wait through its worker shutdown grace periods,
         # keeping the CUDA-writer cohort live long after rank 0 has died. Its
@@ -124,4 +149,4 @@ def _maybe_start_vllm_rank_liveness_client(config: Config) -> None:
         # the launcher and let kernel process death fence the complete tree.
         os.kill(os.getpid(), signal.SIGKILL)
 
-    rl.RankLivenessClient(leader_host, node_rank, on_leader_lost=on_leader_lost).start()
+    rl.new_client(leader_host, node_rank, on_leader_lost=on_leader_lost).start()

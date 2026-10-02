@@ -23,9 +23,13 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
 from dynamo.common.gms_failover import (
-    lease_transition_serving_enabled,
+    acquire_lock_while_armed,
+    arm_frozen_shadow_headroom,
+    frozen_predecessor_enabled,
+    quiesce_local_gpu_cohort_after_rank_loss,
     run_gms_failover_post_lock_fence,
     run_gms_failover_promotion_warmup,
+    wait_for_armed_standby_before_serving,
 )
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
@@ -1386,9 +1390,24 @@ class WorkerFactory:
             raise
 
     async def _resume_after_kv_fence(self, handler) -> None:
-        """Resume scheduling after a mapped standby has completed KV fencing."""
+        """Resume a mapped standby after its CPU writers and leases are fenced."""
         timeout = float(os.environ.get("DYN_GMS_FAILOVER_WAKEUP_TIMEOUT_SECS", "120"))
         try:
+            frozen = frozen_predecessor_enabled("vllm", mapped_standby=True)
+            engine_core = getattr(handler.engine_client, "engine_core", None)
+            call_utility = getattr(engine_core, "call_utility_async", None)
+            if not callable(call_utility):
+                raise RuntimeError("GMS mapped standby requires an all-rank fence")
+            utility = (
+                "gms_fence_all_rank_cpu_writers"
+                if frozen
+                else "gms_prove_all_rank_gpu_quiescence"
+            )
+            await _run_gms_operation_with_hard_timeout(
+                call_utility(utility),
+                timeout=timeout,
+                label=f"GMS all-rank {'CPU-writer fence' if frozen else 'GPU proof'}",
+            )
             await _run_gms_operation_with_hard_timeout(
                 handler._pause_controller.resume([]),
                 timeout=timeout,
@@ -1430,6 +1449,7 @@ class WorkerFactory:
                 handler_ref = getattr(preinit_monitor, "_gms_handler_ref", None)
                 if handler_ref is not None:
                     handler_ref[0] = handler
+                handler._gms_rank_loss_started = preinit_monitor._gms_rank_loss_started
                 preinit_monitor.set_timeout_ms(rl.timeout_ms())
                 setattr(handler, "_gms_rank_liveness_monitor", preinit_monitor)
             delattr(self, "_gms_preinit_rank_liveness_monitor")
@@ -1445,11 +1465,41 @@ class WorkerFactory:
             rank_loss_started.set()
             active_handler = handler_ref[0]
             logger.warning(
-                "[GMS liveness] vLLM worker rank %d lost (%s); terminating "
-                "broken leader so process death can release KV ownership",
+                "[GMS liveness] vLLM worker rank %d lost (%s); "
+                "stopping the broken leader",
                 rank,
                 reason,
             )
+            if frozen_predecessor_enabled("vllm"):
+                # Give GMS a bounded chance to terminate the still-live local
+                # CUDA worker before the launcher kills its process tree.
+                # A failed proof does not block frozen takeover: predecessor
+                # pages remain quarantined until a later proof succeeds.
+                quiesce_local_gpu_cohort_after_rank_loss("vllm")
+                os.kill(os.getpid(), signal.SIGKILL)
+                return
+            from gpu_memory_service.integrations.common.gpu_quiescence import (
+                gms_mps_provider_enabled,
+            )
+
+            quiesced = quiesce_local_gpu_cohort_after_rank_loss("vllm")
+            if gms_mps_provider_enabled("vllm"):
+                for attempt in range(2):
+                    if quiesced:
+                        break
+                    logger.error(
+                        "[GMS liveness] vLLM GPU proof attempt %d failed; "
+                        "retaining active lock and retrying",
+                        attempt + 1,
+                    )
+                    _time.sleep(0.25)
+                    quiesced = quiesce_local_gpu_cohort_after_rank_loss("vllm")
+            if gms_mps_provider_enabled("vllm") and not quiesced:
+                logger.critical(
+                    "[GMS liveness] vLLM local GPU teardown is uncertified; "
+                    "retaining the registered CUDA client and active lock"
+                )
+                return
             # A broken TP cohort cannot make progress, so preserving its active
             # streams for the normal graceful-shutdown grace period only delays
             # frontend replay. Wake the handler's abort monitors immediately;
@@ -1498,12 +1548,14 @@ class WorkerFactory:
             # serving handler is attached, then adopt the configured deadline.
             monitor_kwargs["timeout_ms_override"] = rl.startup_timeout_ms()
             monitor_kwargs["runtime_armed"] = False
-        monitor = rl.RankLivenessMonitor(on_rank_lost, **monitor_kwargs)
+        monitor = rl.new_monitor(on_rank_lost, **monitor_kwargs)
         setattr(monitor, "_gms_handler_ref", handler_ref)
+        setattr(monitor, "_gms_rank_loss_started", rank_loss_started)
         if handler is None:
             setattr(self, "_gms_preinit_rank_liveness_monitor", monitor)
         else:
             setattr(handler, "_gms_rank_liveness_monitor", monitor)
+            setattr(handler, "_gms_rank_loss_started", rank_loss_started)
         monitor.start()
         logger.info("[GMS liveness] started vLLM leader rank-liveness monitor")
         return monitor
@@ -1523,16 +1575,49 @@ class WorkerFactory:
         """
         if not config.gms_shadow_mode:
             return None, False
+        recovery_mode = (
+            os.environ.setdefault("GMS_VLLM_KV_RECOVERY_MODE", "granular")
+            .strip()
+            .lower()
+        )
+        if recovery_mode != "granular":
+            raise RuntimeError(
+                "GMS_VLLM_KV_RECOVERY_MODE must be 'granular'; "
+                "the whole-pool recovery path was removed"
+            )
         from gpu_memory_service.integrations.vllm.writer_lifecycle import (
             prepare_writer_cohort,
         )
 
-        # Snapshot restore already owns the active failover lock, but its newly
-        # spawned EngineCore/CUDA workers still need a fresh boot cohort.
-        prepare_writer_cohort()
         if snapshot_engine_present:
+            # Snapshot restore acquires the active lock, creates the boot cohort,
+            # and fences the predecessor before waking the restored CUDA engine.
+            if (
+                os.environ.get("DYN_VLLM_GMS_ACTIVE_LOCK_HELD") != "1"
+                or os.environ.get("DYN_VLLM_GMS_POOL_FENCED") != "1"
+            ):
+                raise RuntimeError(
+                    "snapshot GMS restore reached worker setup without a fenced "
+                    "active-pool ownership proof"
+                )
             return None, False
+        prepare_writer_cohort()
         lock_before_init = os.environ.get("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1").lower()
+        if os.environ.get("DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", "0").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            mapped_standby = os.environ.get(
+                "DYN_VLLM_GMS_MAPPED_STANDBY", "0"
+            ).lower() in {"1", "true", "yes", "on"}
+            frozen_predecessor_enabled(
+                "vllm",
+                mapped_standby=(
+                    mapped_standby and lock_before_init in {"0", "false", "no", "off"}
+                ),
+            )
         if lock_before_init in {"0", "false", "no", "off"}:
             logger.warning(
                 "[Shadow] Preinitialized standby explicitly enabled; shared-KV "
@@ -1579,6 +1664,7 @@ class WorkerFactory:
         """Elect one active GMS writer and prepare it before discovery registration."""
         if not config.gms_shadow_mode:
             return False
+        arm_frozen_shadow_headroom("vllm")
 
         if lock_already_acquired:
             if not post_lock_fence_already_run:
@@ -1586,6 +1672,7 @@ class WorkerFactory:
                     backend_name="vllm", role="pre-init"
                 )
             self._maybe_start_rank_liveness_monitor(handler, config)
+            await wait_for_armed_standby_before_serving("vllm")
             logger.info(
                 "[Shadow] Failover lock already acquired before engine init; "
                 "registering with discovery"
@@ -1615,6 +1702,7 @@ class WorkerFactory:
                     )
                 raise
             self._maybe_start_rank_liveness_monitor(handler, config)
+            await wait_for_armed_standby_before_serving("vllm")
             return False
 
         # The pre-initialized standby relinquishes its writer role without clearing
@@ -1622,9 +1710,7 @@ class WorkerFactory:
         mapped_standby = os.environ.get(
             "DYN_VLLM_GMS_MAPPED_STANDBY", "0"
         ).strip().lower() in {"1", "true", "yes", "on"}
-        lease_transition_serving = lease_transition_serving_enabled(
-            "vllm", mapped_standby=mapped_standby
-        )
+        frozen_predecessor_enabled("vllm", mapped_standby=mapped_standby)
         prewarmed = False
         if mapped_standby and promotion_warmup is not None:
             from gpu_memory_service.integrations.common.kv_lease_client import (
@@ -1656,7 +1742,9 @@ class WorkerFactory:
             failover_metrics.set_state("standby")
         runtime.set_health_status(True)
         logger.info("[Shadow] Engine sleeping, waiting for failover lock")
-        lock = await self._acquire_failover_lock()
+        lock = await acquire_lock_while_armed(
+            f"engine-{engine_id}", self._acquire_failover_lock
+        )
         setattr(handler, "_gms_failover_lock", lock)
         was_contended = bool(getattr(lock, "was_contended", False))
         if failover_metrics is not None:
@@ -1679,11 +1767,6 @@ class WorkerFactory:
             if promotion_warmup is not None and not prewarmed:
                 await promotion_warmup()
             self._maybe_start_rank_liveness_monitor(handler, config, failover_lock=lock)
-            if lease_transition_serving:
-                logger.info(
-                    "[Shadow] Serving from FREE and exact-generation SEALED leases "
-                    "while GPU-quiescence recovery completes"
-                )
         except BaseException as activation_error:
             safe_to_release = not resume_attempted
             activation_may_still_run = isinstance(

@@ -37,6 +37,20 @@ def test_default_endpoints_are_scoped_by_tp_cohort(monkeypatch):
     assert rl.leader_connect_addr("leader", primary) == (f"tcp://leader:{primary_port}")
 
 
+def test_pre_serving_timeout_uses_startup_grace_for_registered_ranks(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_TIMEOUT_MS", "350")
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_STARTUP_GRACE_MS", "900000")
+    monkeypatch.delenv("DYN_GMS_RANK_LIVENESS_STARTUP_TIMEOUT_MS", raising=False)
+
+    # A worker can register before a long model/kernel warmup starves its
+    # heartbeat thread. Runtime detection must tighten only after serving is
+    # armed; the startup grace applies to this already-seen rank too.
+    assert rl.startup_timeout_ms() == 900_000
+
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_STARTUP_TIMEOUT_MS", "120000")
+    assert rl.startup_timeout_ms() == 120_000
+
+
 def _wait(event: threading.Event, timeout: float = 1.0) -> None:
     assert event.wait(timeout), "liveness callback did not fire"
 
@@ -104,6 +118,33 @@ def test_running_monitor_applies_tightened_timeout_promptly():
         monitor.set_timeout_ms(40)
         client.stop()
         assert fired.wait(0.4), "running monitor retained its startup poll interval"
+    finally:
+        client.stop()
+        monitor.stop()
+
+
+def test_registered_rank_heartbeat_gap_is_not_fatal_before_runtime_arm():
+    endpoint = _endpoint()
+    fired = threading.Event()
+    monitor = rl.RankLivenessMonitor(
+        lambda _rank, _reason: fired.set(),
+        bind_addr=endpoint,
+        timeout_ms_override=300,
+        expected_ranks={1},
+        startup_grace_ms_override=1_000,
+        runtime_armed=False,
+    )
+    client = rl.RankLivenessClient("unused", 1, interval_ms=10, connect_addr=endpoint)
+
+    monitor.start()
+    client.start()
+    try:
+        assert monitor.wait_for_ranks({1}, timeout=1.0)
+        client.stop()
+        time.sleep(0.12)
+        assert not fired.is_set()
+        monitor.set_timeout_ms(40)
+        assert fired.wait(0.5)
     finally:
         client.stop()
         monitor.stop()
@@ -664,6 +705,7 @@ def test_direct_gpu_crash_notification_accepts_registered_remote_rank(tmp_path):
         timeout_ms_override=5_000,
         expected_ranks={7},
         failure_marker_path=str(gpu_failure_marker_path(leader_cohort)),
+        broadcast_fence=True,
     )
 
     sender = zmq.Context.instance().socket(zmq.DEALER)
@@ -680,6 +722,8 @@ def test_direct_gpu_crash_notification_accepts_registered_remote_rank(tmp_path):
         ):
             time.sleep(0.01)
         assert monitor._rank_failure_marker_paths[7] == remote_marker
+        assert sender.poll(500)
+        assert sender.recv_multipart() in ([b"ack"], [b"startup-ack"])
 
         sender.send_multipart(
             [
@@ -690,8 +734,190 @@ def test_direct_gpu_crash_notification_accepts_registered_remote_rank(tmp_path):
                 b"signal-11",
             ]
         )
+        # The CUDA worker failed, but its per-rank launcher is still alive
+        # and still owns the active lock. It must not wait for leader timeout.
+        assert sender.poll(500)
+        assert sender.recv_multipart() == [b"fence"]
+        sender.send_multipart([b"fence-ack"])
         assert fired.wait(0.5), "monitor rejected its registered remote cohort"
         assert calls == [(7, "gpu-crash-interlock-zmq")]
     finally:
         sender.close(0)
+        monitor.stop()
+
+
+def _tcp_endpoint() -> str:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return f"tcp://127.0.0.1:{probe.getsockname()[1]}"
+
+
+def _hold_gil(seconds: float) -> None:
+    # One builtins.sum over a range runs in C without releasing the GIL, like
+    # the long engine calls that starved in-process heartbeat threads. Size a
+    # single call from a calibration run: a loop of short calls would yield
+    # the GIL between them on a fast CPU.
+    started = time.perf_counter()
+    sum(range(2_000_000))
+    rate = 2_000_000 / max(time.perf_counter() - started, 1e-6)
+    sum(range(int(rate * seconds)))
+
+
+def test_isolated_pair_registers_arms_and_detects_rank_loss():
+    endpoint = _tcp_endpoint()
+    fired = threading.Event()
+    calls: list[tuple[int, str]] = []
+    monitor = rl.IsolatedRankLivenessMonitor(
+        lambda rank, reason: (calls.append((rank, reason)), fired.set()),
+        bind_addr=endpoint,
+        timeout_ms_override=300,
+        expected_ranks={1},
+        startup_grace_ms_override=10_000,
+        runtime_armed=False,
+    )
+    client = rl.IsolatedRankLivenessClient(
+        "unused",
+        1,
+        interval_ms=50,
+        connect_addr=endpoint,
+        on_leader_lost=lambda _rank, _reason: None,
+        timeout_ms_override=300,
+        startup_grace_ms_override=10_000,
+    )
+    monitor.start()
+    client.start()
+    try:
+        assert monitor.wait_for_ranks({1}, timeout=15.0)
+        assert client.wait_for_runtime_arm(timeout=0.2) is False
+        monitor.arm_runtime()
+        assert client.wait_for_runtime_arm(timeout=5.0) is True
+        client.stop()
+        assert fired.wait(5.0)
+        assert calls == [(1, "liveness-timeout")]
+    finally:
+        client.stop()
+        monitor.stop()
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+def test_gil_stall_false_positive_only_without_isolation(isolated):
+    endpoint = _tcp_endpoint()
+    # Production peers are separate processes. Keep the monitor out of this
+    # process in both cases: an in-process monitor stalls with the client and
+    # races its first post-stall heartbeat, which made the control flaky.
+    client_cls = rl.IsolatedRankLivenessClient if isolated else rl.RankLivenessClient
+    lost: list[str] = []
+    monitor = rl.IsolatedRankLivenessMonitor(
+        lambda _rank, reason: lost.append(f"monitor:{reason}"),
+        bind_addr=endpoint,
+        timeout_ms_override=350,
+        expected_ranks={1},
+        startup_grace_ms_override=15_000,
+    )
+    client = client_cls(
+        "unused",
+        1,
+        interval_ms=50,
+        connect_addr=endpoint,
+        on_leader_lost=lambda _rank, reason: lost.append(f"client:{reason}"),
+        timeout_ms_override=350,
+        startup_grace_ms_override=15_000,
+    )
+    monitor.start()
+    client.start()
+    try:
+        assert monitor.wait_for_ranks({1}, timeout=15.0)
+        time.sleep(0.3)
+        _hold_gil(1.0)
+        time.sleep(1.0)
+        if isolated:
+            assert lost == []
+        else:
+            assert lost, "in-process heartbeats should time out across a GIL stall"
+    finally:
+        client.stop()
+        monitor.stop()
+
+
+def test_isolated_client_stops_heartbeating_when_engine_hangs(monkeypatch):
+    endpoint = _tcp_endpoint()
+    fired = threading.Event()
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_PARENT_HANG_MS", "400")
+    monitor = rl.RankLivenessMonitor(
+        lambda _rank, reason: fired.set(),
+        bind_addr=endpoint,
+        timeout_ms_override=300,
+        expected_ranks={1},
+        startup_grace_ms_override=15_000,
+    )
+    client = rl.IsolatedRankLivenessClient(
+        "unused", 1, interval_ms=50, connect_addr=endpoint
+    )
+    # A hung engine stops ticking its helper.
+    monkeypatch.setattr(rl._LivenessHelper, "_tick", lambda self: None)
+    monitor.start()
+    client.start()
+    try:
+        assert monitor.wait_for_ranks({1}, timeout=15.0)
+        assert fired.wait(5.0)
+    finally:
+        client.stop()
+        monitor.stop()
+
+
+def test_isolated_monitor_fails_closed_when_helper_dies():
+    endpoint = _tcp_endpoint()
+    fired = threading.Event()
+    calls: list[tuple[int, str]] = []
+    monitor = rl.IsolatedRankLivenessMonitor(
+        lambda rank, reason: (calls.append((rank, reason)), fired.set()),
+        bind_addr=endpoint,
+    )
+    monitor.start()
+    try:
+        monitor._helper._proc.kill()
+        assert fired.wait(5.0)
+        assert calls == [(0, "liveness-helper-exited")]
+    finally:
+        monitor.stop()
+
+
+def test_isolated_monitor_reports_bind_failure():
+    endpoint = _tcp_endpoint()
+    first = rl.IsolatedRankLivenessMonitor(lambda *_: None, bind_addr=endpoint)
+    first.start()
+    try:
+        second = rl.IsolatedRankLivenessMonitor(lambda *_: None, bind_addr=endpoint)
+        with pytest.raises(RuntimeError, match="bind"):
+            second.start()
+    finally:
+        first.stop()
+
+
+def test_factories_honor_isolation_switch(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_ISOLATED", "0")
+    assert (
+        type(rl.new_monitor(lambda *_: None, bind_addr=_endpoint()))
+        is rl.RankLivenessMonitor
+    )
+    assert type(rl.new_client("h", 1)) is rl.RankLivenessClient
+    monkeypatch.delenv("DYN_GMS_RANK_LIVENESS_ISOLATED")
+    assert isinstance(rl.new_monitor(lambda *_: None), rl.IsolatedRankLivenessMonitor)
+    assert isinstance(rl.new_client("h", 1), rl.IsolatedRankLivenessClient)
+
+
+def test_prewarmed_helper_runs_the_configured_role(monkeypatch):
+    monkeypatch.setattr(rl, "_prewarmed", [])
+    rl.prewarm_helper()
+    assert len(rl._prewarmed) == 1
+    prewarmed = rl._prewarmed[0]
+    endpoint = _tcp_endpoint()
+    monitor = rl.IsolatedRankLivenessMonitor(lambda *_: None, bind_addr=endpoint)
+    monitor.start()
+    try:
+        assert monitor._helper._proc is prewarmed
+        assert rl._prewarmed == []
+    finally:
         monitor.stop()

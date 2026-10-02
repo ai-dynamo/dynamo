@@ -376,6 +376,19 @@ def _extract_sglang_stop_reason(
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
 
+    async def _fence_output_after_gms_failure(self) -> None:
+        """Keep a failed TP cohort's late chunk out of frontend replay state."""
+        watchdog = getattr(self, "_gms_failover_child_watchdog", None)
+        if watchdog is None or not watchdog.failure_started:
+            return
+        logging.warning("[GMS liveness] discarding late SGLang output after TP failure")
+        if self.shutdown_event is not None:
+            try:
+                await asyncio.wait_for(self.shutdown_event.wait(), timeout=5.0)
+            except TimeoutError:
+                logging.error("[GMS liveness] SGLang shutdown signal timed out")
+        raise EngineShutdown("SGLang TP cohort failed during token generation")
+
     def __init__(
         self,
         engine: sgl.Engine,
@@ -671,6 +684,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     native_payload.get("sampling_params")
                 ),
             ):
+                await self._fence_output_after_gms_failure()
                 yield output
             return
 
@@ -754,6 +768,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         sampling_params
                     ),
                 ):
+                    await self._fence_output_after_gms_failure()
                     yield out
             else:
                 async for out in self._process_text_stream(
@@ -764,6 +779,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
                 ):
+                    await self._fence_output_after_gms_failure()
                     yield out
         else:
             raise_if_unextracted_multimodal(request)
@@ -847,6 +863,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         sampling_params
                     ),
                 ):
+                    await self._fence_output_after_gms_failure()
                     yield out
             else:
                 async for out in self._process_text_stream(
@@ -857,6 +874,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
                 ):
+                    await self._fence_output_after_gms_failure()
                     yield out
 
     async def _process_native_generate_stream(

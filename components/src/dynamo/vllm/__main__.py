@@ -28,9 +28,13 @@ if "PYTHONHASHSEED" not in os.environ:
     os.environ["PYTHONHASHSEED"] = "0"
 
 if __name__ == "__main__":
-    from dynamo.common.gms_failover import configure_failover_nccl_environment
+    from dynamo.common.gms_failover import (
+        configure_failover_nccl_environment,
+        recycle_idle_mps_servers_before_cuda,
+    )
 
     configure_failover_nccl_environment()
+    recycle_idle_mps_servers_before_cuda("vllm")
     _isolate_failover_compile_cache()
 
     from dynamo.common.snapshot.restore_context import maybe_run_restore_standby_mode

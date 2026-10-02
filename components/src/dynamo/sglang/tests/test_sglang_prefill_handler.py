@@ -86,6 +86,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
         )
 
         async def async_generate(self, **kwargs):
+            assert kwargs["cache_salt"] == "prefill-namespace"
             return results(kwargs["rid"])
 
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
@@ -135,6 +136,8 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     inner_request = {"token_ids": [1, 2, 3], "routing": {}}
     if native:
         inner_request["extra_args"] = {"sglang_tito": {"rid": request_id}}
+    else:
+        inner_request["extra_args"] = {"nvext": {"cache_salt": "prefill-namespace"}}
     stream = handler.generate(
         {
             "request": inner_request,

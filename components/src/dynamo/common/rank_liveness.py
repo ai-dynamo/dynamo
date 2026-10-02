@@ -55,7 +55,6 @@ DEFAULT_HEARTBEAT_MS = 250
 DEFAULT_TIMEOUT_MS = 750
 DEFAULT_LIVENESS_PORT = 29555
 DEFAULT_STARTUP_GRACE_MS = 30_000
-DEFAULT_STARTUP_TIMEOUT_MS = 5_000
 # Limit receive work per poll so a busy peer cannot starve lost-rank deadlines.
 _MAX_HEARTBEATS_PER_POLL = 64
 
@@ -97,13 +96,16 @@ def startup_grace_ms() -> int:
 
 
 def startup_timeout_ms() -> int:
-    """Deadline for already-connected peers until serving is armed."""
+    """Deadline for already-connected peers until serving is armed.
+
+    CUDA/kernel warmup may starve a registered rank's Python heartbeat for
+    tens of seconds. Before the engine serves traffic, use the startup-grace
+    window rather than the runtime deadline for that rank as well.
+    """
 
     return max(
         timeout_ms(),
-        _int_env(
-            "DYN_GMS_RANK_LIVENESS_STARTUP_TIMEOUT_MS", DEFAULT_STARTUP_TIMEOUT_MS
-        ),
+        _int_env("DYN_GMS_RANK_LIVENESS_STARTUP_TIMEOUT_MS", startup_grace_ms()),
     )
 
 
@@ -510,9 +512,7 @@ class RankLivenessMonitor:
                             source,
                         )
                         if self._broadcast_fence_enabled:
-                            self._broadcast_fence(
-                                sock, poller, last_seen, lost_rank=rank
-                            )
+                            self._broadcast_fence(sock, poller, last_seen)
                         self._fire(rank, "gpu-crash-interlock")
                         return
                 # startup and must change both the deadline and observation
@@ -538,9 +538,7 @@ class RankLivenessMonitor:
                                 source,
                             )
                             if self._broadcast_fence_enabled:
-                                self._broadcast_fence(
-                                    sock, poller, last_seen, lost_rank=rank
-                                )
+                                self._broadcast_fence(sock, poller, last_seen)
                             self._fire(rank, "gpu-crash-interlock-zmq")
                             return
 
@@ -604,9 +602,7 @@ class RankLivenessMonitor:
                             (now - cycle_started) * 1000,
                         )
                         if self._broadcast_fence_enabled:
-                            self._broadcast_fence(
-                                sock, poller, last_seen, lost_rank=rank
-                            )
+                            self._broadcast_fence(sock, poller, last_seen)
                         self._fire(rank, "liveness-timeout")
                         return
         finally:
@@ -640,7 +636,7 @@ class RankLivenessMonitor:
             return None
         return rank, pid, source
 
-    def _broadcast_fence(self, sock, poller, last_seen, *, lost_rank: int) -> None:
+    def _broadcast_fence(self, sock, poller, last_seen) -> None:
         """Prompt surviving ranks to fail-stop before the leader releases ownership.
 
         The writer-cohort lock remains the correctness fence: takeover still waits
@@ -652,7 +648,10 @@ class RankLivenessMonitor:
 
         import zmq
 
-        pending = {rank for rank in last_seen if rank != lost_rank}
+        # The failed CUDA worker and its rank launcher may be separate
+        # processes. Even the reported rank can still have a live heartbeat
+        # client holding its writer lock, so it too must receive the fence.
+        pending = set(last_seen)
         if not pending:
             return
         for rank in pending:
@@ -722,3 +721,476 @@ class RankLivenessMonitor:
             except ValueError:
                 return None
         return None
+
+
+# ---------------------------------------------------------------------------
+# Process isolation
+# ---------------------------------------------------------------------------
+#
+# A thread in the engine process shares the GIL with the serving loop. A C call
+# that holds the GIL for longer than the deadline (observed: ~470ms under 32-way
+# load) silences heartbeats from a healthy rank, and its peers fail over a live
+# primary. The isolated variants below run the same monitor/client loops in a
+# small helper process that imports only ZMQ, so heartbeats keep their cadence
+# however busy the engine is.
+#
+# The helper exits when the engine dies (its command pipe reaches EOF), which
+# drops the ZMQ connection like any process death. An engine that is alive but
+# hung stops sending ticks; after DYN_GMS_RANK_LIVENESS_PARENT_HANG_MS the helper
+# stops heartbeating so peers still detect the hang, without the false positives
+# of a sub-second GIL stall.
+
+DEFAULT_PARENT_HANG_MS = 10_000
+_HELPER_START_TIMEOUT_S = 30.0
+
+
+def isolation_enabled() -> bool:
+    return env_bool("DYN_GMS_RANK_LIVENESS_ISOLATED", default=True)
+
+
+def parent_hang_ms() -> int:
+    return max(
+        0, _int_env("DYN_GMS_RANK_LIVENESS_PARENT_HANG_MS", DEFAULT_PARENT_HANG_MS)
+    )
+
+
+def new_monitor(on_rank_lost: Callable[[int, str], None], **kwargs):
+    """Leader monitor, process-isolated unless DYN_GMS_RANK_LIVENESS_ISOLATED=0."""
+    if isolation_enabled():
+        return IsolatedRankLivenessMonitor(on_rank_lost, **kwargs)
+    return RankLivenessMonitor(on_rank_lost, **kwargs)
+
+
+def new_client(leader_host: str, rank: int, **kwargs):
+    """Worker client, process-isolated unless DYN_GMS_RANK_LIVENESS_ISOLATED=0."""
+    if isolation_enabled():
+        return IsolatedRankLivenessClient(leader_host, rank, **kwargs)
+    return RankLivenessClient(leader_host, rank, **kwargs)
+
+
+_prewarmed: list = []
+_prewarm_lock = threading.Lock()
+
+
+def _spawn_helper(role: str, spec_json: str):
+    import subprocess
+    import sys
+
+    return subprocess.Popen(
+        [sys.executable, "-m", "dynamo.common.rank_liveness", role, spec_json],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        close_fds=True,
+        text=True,
+        bufsize=1,
+    )
+
+
+def prewarm_helper() -> None:
+    """Spawn one idle helper ahead of time.
+
+    Some callers (SGLang non-leader ranks) start their liveness client only at
+    takeover, as a fail-closed activation barrier. Starting a Python process
+    there would add its startup time to the failover critical path.
+    """
+    if not isolation_enabled():
+        return
+    with _prewarm_lock:
+        if not _prewarmed:
+            _prewarmed.append(_spawn_helper("idle", "{}"))
+
+
+def _take_prewarmed():
+    with _prewarm_lock:
+        while _prewarmed:
+            proc = _prewarmed.pop()
+            if proc.poll() is None:
+                return proc
+    return None
+
+
+class _LivenessHelper:
+    """Parent-side handle: spawn the helper, send commands, dispatch events."""
+
+    def __init__(self, role: str, spec: dict, on_event: Callable[[list[str]], None]):
+        self._role = role
+        self._spec = spec
+        self._on_event = on_event
+        self._proc = None
+        self._lock = threading.Lock()
+        self._stopping = threading.Event()
+        self._reader: Optional[threading.Thread] = None
+        self._ticker: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        import json
+
+        spec_json = json.dumps(self._spec)
+        self._proc = _take_prewarmed()
+        if self._proc is not None and self._proc.stdin is not None:
+            self._proc.stdin.write(f"config {self._role} {spec_json}\n")
+            self._proc.stdin.flush()
+        else:
+            self._proc = _spawn_helper(self._role, spec_json)
+        self._reader = threading.Thread(
+            target=self._read,
+            name=f"gms-rank-liveness-{self._role}-events",
+            daemon=True,
+        )
+        self._reader.start()
+        self._ticker = threading.Thread(
+            target=self._tick, name=f"gms-rank-liveness-{self._role}-ticks", daemon=True
+        )
+        self._ticker.start()
+
+    def send(self, *command) -> None:
+        with self._lock:
+            proc = self._proc
+            if proc is None or proc.stdin is None or proc.poll() is not None:
+                return
+            try:
+                proc.stdin.write(" ".join(str(part) for part in command) + "\n")
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+
+    def stop(self) -> None:
+        self._stopping.set()
+        self.send("stop")
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            proc.kill()
+            proc.wait()
+
+    @property
+    def stopping(self) -> bool:
+        return self._stopping.is_set()
+
+    def _tick(self) -> None:
+        interval = max(0.02, self._spec.get("tick_ms", 100) / 1000.0)
+        while not self._stopping.wait(interval):
+            self.send("tick")
+
+    def _read(self) -> None:
+        proc = self._proc
+        assert proc is not None and proc.stdout is not None
+        for line in proc.stdout:
+            parts = line.split()
+            if parts:
+                self._on_event(parts)
+        self._on_event(["exited"])
+
+
+def _helper_spec(**values) -> dict:
+    spec = {key: value for key, value in values.items() if value is not None}
+    spec["parent_hang_ms"] = parent_hang_ms()
+    return spec
+
+
+class IsolatedRankLivenessMonitor:
+    """RankLivenessMonitor running in a helper process; same public API."""
+
+    def __init__(
+        self,
+        on_rank_lost: Callable[[int, str], None],
+        *,
+        bind_addr: Optional[str] = None,
+        timeout_ms_override: Optional[int] = None,
+        expected_ranks: Optional[Iterable[int]] = None,
+        startup_grace_ms_override: Optional[int] = None,
+        runtime_armed: bool = True,
+        broadcast_fence: bool = False,
+        failure_marker_path: Optional[str] = None,
+    ):
+        self._on_rank_lost = on_rank_lost
+        self._bind_addr = bind_addr or leader_bind_addr()
+        self._fired = False
+        self._seen_ranks: set[int] = set()
+        self._seen_changed = threading.Condition()
+        self._bound = threading.Event()
+        self._bind_error: Optional[str] = None
+        self._helper = _LivenessHelper(
+            "monitor",
+            _helper_spec(
+                bind_addr=self._bind_addr,
+                timeout_ms_override=timeout_ms_override,
+                expected_ranks=None
+                if expected_ranks is None
+                else sorted(int(r) for r in expected_ranks),
+                startup_grace_ms_override=startup_grace_ms_override,
+                runtime_armed=bool(runtime_armed),
+                broadcast_fence=bool(broadcast_fence),
+                failure_marker_path=failure_marker_path,
+                tick_ms=heartbeat_ms(),
+            ),
+            self._on_event,
+        )
+
+    def start(self) -> None:
+        self._helper.start()
+        if not self._bound.wait(timeout=_HELPER_START_TIMEOUT_S):
+            self._helper.stop()
+            raise RuntimeError(
+                f"[GMS liveness] monitor helper for {self._bind_addr} did not start"
+            )
+        if self._bind_error is not None:
+            self._helper.stop()
+            raise RuntimeError(
+                f"[GMS liveness] monitor bind to {self._bind_addr} failed: {self._bind_error}"
+            )
+        logger.info(
+            "[GMS liveness] leader monitor running in helper process for %s",
+            self._bind_addr,
+        )
+
+    def stop(self) -> None:
+        self._helper.stop()
+        with self._seen_changed:
+            self._seen_changed.notify_all()
+
+    def set_timeout_ms(self, value: int) -> None:
+        self._helper.send("timeout", max(1, int(value)))
+
+    def arm_runtime(self) -> None:
+        self._helper.send("arm")
+
+    def wait_for_ranks(
+        self, expected_ranks: Iterable[int], timeout: float | None = None
+    ) -> bool:
+        expected = frozenset(int(rank) for rank in expected_ranks)
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        with self._seen_changed:
+            while True:
+                if self._helper.stopping or self._fired:
+                    return False
+                if expected.issubset(self._seen_ranks):
+                    return True
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return False
+                self._seen_changed.wait(remaining)
+
+    def _on_event(self, parts: list[str]) -> None:
+        kind = parts[0]
+        if kind == "bound":
+            self._bound.set()
+        elif kind == "bind_error":
+            self._bind_error = " ".join(parts[1:]) or "unknown error"
+            self._bound.set()
+        elif kind == "seen":
+            with self._seen_changed:
+                self._seen_ranks.add(int(parts[1]))
+                self._seen_changed.notify_all()
+        elif kind == "fired":
+            self._fire(int(parts[1]), parts[2])
+        elif kind == "exited":
+            self._bound.set()
+            if not self._helper.stopping:
+                # Losing the liveness channel is fail-closed: peers stop seeing
+                # this leader, so release ownership rather than run unmonitored.
+                self._fire(0, "liveness-helper-exited")
+
+    def _fire(self, rank: int, reason: str) -> None:
+        with self._seen_changed:
+            if self._fired:
+                return
+            self._fired = True
+            self._seen_changed.notify_all()
+        logger.warning("[GMS liveness] rank %d lost (%s)", rank, reason)
+        try:
+            self._on_rank_lost(rank, reason)
+        except Exception:
+            logger.exception("[GMS liveness] on_rank_lost callback failed")
+
+
+class IsolatedRankLivenessClient:
+    """RankLivenessClient running in a helper process; same public API."""
+
+    def __init__(
+        self,
+        leader_host: str,
+        rank: int,
+        *,
+        interval_ms: Optional[int] = None,
+        connect_addr: Optional[str] = None,
+        on_leader_lost: Callable[[int, str], None] | None = None,
+        timeout_ms_override: Optional[int] = None,
+        startup_grace_ms_override: Optional[int] = None,
+        startup_timeout_ms_override: Optional[int] = None,
+    ):
+        self._rank = int(rank)
+        self._on_leader_lost = on_leader_lost
+        self._connect_addr = connect_addr or leader_connect_addr(leader_host)
+        self._fired = False
+        self._lock = threading.Lock()
+        self._runtime_armed = False
+        self._runtime_armed_event = threading.Event()
+        self._started = False
+        self._helper = _LivenessHelper(
+            "client",
+            _helper_spec(
+                leader_host=leader_host,
+                rank=self._rank,
+                interval_ms=interval_ms,
+                connect_addr=self._connect_addr,
+                watch_leader=on_leader_lost is not None,
+                timeout_ms_override=timeout_ms_override,
+                startup_grace_ms_override=startup_grace_ms_override,
+                startup_timeout_ms_override=startup_timeout_ms_override,
+                tick_ms=interval_ms or heartbeat_ms(),
+            ),
+            self._on_event,
+        )
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._helper.start()
+        logger.info(
+            "[GMS liveness] rank %d heartbeating leader %s from a helper process",
+            self._rank,
+            self._connect_addr,
+        )
+
+    def stop(self) -> None:
+        self._helper.stop()
+        self._runtime_armed_event.set()
+
+    def wait_for_runtime_arm(self, timeout: float | None = None) -> bool:
+        self._runtime_armed_event.wait(timeout)
+        return self._runtime_armed and not self._helper.stopping and not self._fired
+
+    def _on_event(self, parts: list[str]) -> None:
+        kind = parts[0]
+        if kind == "armed":
+            self._runtime_armed = True
+            self._runtime_armed_event.set()
+        elif kind == "fired":
+            self._fire(int(parts[1]), parts[2])
+        elif kind == "exited" and not self._helper.stopping:
+            self._fire(0, "liveness-helper-exited")
+
+    def _fire(self, rank: int, reason: str) -> None:
+        with self._lock:
+            if self._fired or self._on_leader_lost is None:
+                return
+            self._fired = True
+        self._runtime_armed_event.set()
+        logger.warning("[GMS liveness] leader rank %d lost (%s)", rank, reason)
+        try:
+            self._on_leader_lost(rank, reason)
+        except Exception:
+            logger.exception("[GMS liveness] on_leader_lost callback failed")
+
+
+def _helper_main(role: str, spec_json: str) -> None:
+    """Helper-process entry: run one loop, relay events on stdout."""
+    import json
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s rank_liveness_helper: %(message)s",
+    )
+    if role == "idle":
+        # Prewarmed: wait for "config <role> <json>" from the engine process.
+        line = sys.stdin.readline()
+        if not line.startswith("config "):
+            return
+        _, role, spec_json = line.rstrip("\n").split(" ", 2)
+    spec = json.loads(spec_json)
+    out_lock = threading.Lock()
+    done = threading.Event()
+
+    def emit(*parts) -> None:
+        with out_lock:
+            try:
+                sys.stdout.write(" ".join(str(part) for part in parts) + "\n")
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                done.set()
+
+    def fired(rank: int, reason: str) -> None:
+        emit("fired", rank, reason)
+
+    if role == "monitor":
+        inner = RankLivenessMonitor(
+            fired,
+            bind_addr=spec["bind_addr"],
+            timeout_ms_override=spec.get("timeout_ms_override"),
+            expected_ranks=spec.get("expected_ranks"),
+            startup_grace_ms_override=spec.get("startup_grace_ms_override"),
+            runtime_armed=spec.get("runtime_armed", True),
+            broadcast_fence=spec.get("broadcast_fence", False),
+            failure_marker_path=spec.get("failure_marker_path"),
+        )
+        try:
+            inner.start()
+        except Exception as exc:
+            emit("bind_error", str(exc).replace("\n", " "))
+            return
+        emit("bound")
+    else:
+        inner = RankLivenessClient(
+            spec["leader_host"],
+            spec["rank"],
+            interval_ms=spec.get("interval_ms"),
+            connect_addr=spec.get("connect_addr"),
+            on_leader_lost=fired if spec.get("watch_leader") else None,
+            timeout_ms_override=spec.get("timeout_ms_override"),
+            startup_grace_ms_override=spec.get("startup_grace_ms_override"),
+            startup_timeout_ms_override=spec.get("startup_timeout_ms_override"),
+        )
+        inner.start()
+
+    last_tick = [time.monotonic()]
+
+    def commands() -> None:
+        for line in sys.stdin:
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == "tick":
+                last_tick[0] = time.monotonic()
+            elif parts[0] == "arm" and role == "monitor":
+                inner.arm_runtime()
+            elif parts[0] == "timeout" and role == "monitor":
+                inner.set_timeout_ms(int(parts[1]))
+            elif parts[0] == "stop":
+                break
+        done.set()  # stop command, or EOF because the engine process died
+
+    threading.Thread(
+        target=commands, name="gms-rank-liveness-commands", daemon=True
+    ).start()
+    hang = spec.get("parent_hang_ms", DEFAULT_PARENT_HANG_MS) / 1000.0
+    reported_seen: set[int] = set()
+    armed_reported = False
+    while not done.wait(0.02):
+        if role == "monitor":
+            for rank in sorted(inner._seen_ranks - reported_seen):
+                reported_seen.add(rank)
+                emit("seen", rank)
+        elif not armed_reported and inner._runtime_armed:
+            armed_reported = True
+            emit("armed")
+        if hang > 0 and time.monotonic() - last_tick[0] > hang:
+            logger.warning(
+                "[GMS liveness] engine process sent no tick for %.0fms; stopping "
+                "heartbeats so peers detect the hang",
+                (time.monotonic() - last_tick[0]) * 1000,
+            )
+            break
+    inner.stop()
+
+
+if __name__ == "__main__":
+    import sys as _sys
+
+    _helper_main(_sys.argv[1], _sys.argv[2])

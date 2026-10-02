@@ -124,6 +124,14 @@ class GMSServer:
 
     def __enter__(self) -> "GMSServer":
         self._reclaim_stale_socket()
+        env = os.environ.copy()
+        if mps_pipe := env.get(f"GMS_TEST_MPS_PIPE_DIRECTORY_DEVICE_{self.device}"):
+            # GMS allocates directly on the physical GPU. Only its MPS control
+            # subprocess targets the rank-local engine MPS server.
+            env.pop("CUDA_MPS_PIPE_DIRECTORY", None)
+            env["DYN_GMS_MPS_PIPE_DIRECTORY"] = mps_pipe
+        if mps_logs := env.get(f"GMS_TEST_MPS_LOG_DIRECTORY_DEVICE_{self.device}"):
+            env["CUDA_MPS_LOG_DIRECTORY"] = mps_logs
         command = [
             sys.executable,
             "-m",
@@ -134,7 +142,7 @@ class GMSServer:
         ]
         if self.directory_socket_path:
             command.extend(["--directory-socket", self.directory_socket_path])
-        self._proc = subprocess.Popen(command, start_new_session=True)
+        self._proc = subprocess.Popen(command, start_new_session=True, env=env)
         self._wait_until_serving()
         return self
 

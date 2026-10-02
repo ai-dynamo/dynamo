@@ -1397,6 +1397,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         logger.error(f"vLLM EngineDeadError: {e}")
         self._shutdown_worker()
 
+    async def _fence_output_after_gms_rank_loss(self) -> None:
+        """Never forward a TP cohort's late output after a peer has failed.
+
+        The surviving vLLM worker can flush a stale delta while its EngineCore
+        is being torn down. Wait for the local quiescence path to signal
+        shutdown, then exit so the frontend replays only the last valid chunk.
+        """
+        rank_loss = getattr(self, "_gms_rank_loss_started", None)
+        if rank_loss is None or not rank_loss.is_set():
+            return
+        logger.warning("[GMS liveness] discarding late vLLM output after TP rank loss")
+        if self.shutdown_event is not None:
+            try:
+                await asyncio.wait_for(self.shutdown_event.wait(), timeout=5.0)
+            except TimeoutError:
+                logger.error("[GMS liveness] rank-loss shutdown signal timed out")
+        self._shutdown_worker()
+
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
     ) -> Optional[MultiModalEmbeddingLoader]:
@@ -4092,6 +4110,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         report_kv_cache_hit=kv_params is None,
                         want_engine_data=want_engine_data,
                     ):
+                        await self._fence_output_after_gms_rank_loss()
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
@@ -4179,6 +4198,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
 
                 async for res in gen:
+                    await self._fence_output_after_gms_rank_loss()
                     if not res.outputs:
                         yield {
                             "id": openai_request_id,
