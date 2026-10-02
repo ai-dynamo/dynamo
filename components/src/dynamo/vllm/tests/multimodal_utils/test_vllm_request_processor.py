@@ -1196,7 +1196,7 @@ async def test_receive_transferred_kwargs_injects_vllm_cache(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1229,7 +1229,7 @@ async def test_receive_transferred_kwargs_marks_vllm_feature_hash(monkeypatch):
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1265,7 +1265,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
     processor = _processor(unified_vision_chunk=True)
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1305,7 +1305,7 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
 async def test_receive_transferred_kwargs_falls_back_to_metadata_hashes(monkeypatch):
     processor = _processor()
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1330,7 +1330,7 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
     processor = _processor()
     processor.engine_client = SimpleNamespace(input_processor=input_processor)
     item = MagicMock(spec=mod.MultiModalKwargsItem)
-    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    monkeypatch.setattr(mod, "decode_mm_kwargs_item", lambda payload: item)
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
@@ -1348,6 +1348,54 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
 
     assert result is None
     input_processor.inject_into_mm_cache.assert_not_called()
+
+
+def _real_kwargs_item():
+    """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
+    import torch
+    from vllm.multimodal.inputs import (
+        MultiModalBatchedField,
+        MultiModalFieldElem,
+        MultiModalKwargsItem,
+    )
+
+    elem = MultiModalFieldElem(
+        data=torch.arange(8, dtype=torch.float32),
+        field=MultiModalBatchedField(),
+    )
+    return MultiModalKwargsItem({"pixel_values": elem})
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_rejects_pickle_payload():
+    """A pickle-format payload must fall back, not deserialize.
+
+    The transfer uses vLLM's typed msgpack decoder, so a payload in the old
+    pickle wire format (or any foreign bytes) fails the decode and the request
+    routes to normal multimodal processing. The pre-fix worker ran pickle.loads
+    on this payload and accepted the item, so this assertion fails there.
+    """
+    import pickle
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = pickle.dumps(_real_kwargs_item())
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    result = await processor._receive_mm_kwargs(
+        {
+            "mm_hashes": ["0123456789abcdef"],
+            "mm_placeholders": [[1, 2]],
+            "expanded_token_ids": [10, 11, 12],
+        },
+        "shm",
+        receiver,
+        SimpleNamespace(modality="image", mm_hashes=[]),
+    )
+
+    assert result is None
 
 
 def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs(
