@@ -44,7 +44,8 @@ spec:
               - matchExpressions:
                 - key: cloud.google.com/gke-nodepool
                   operator: In
-                  values: [customer-gpu-o7v, customer-gpu-w0e]
+                  # The TRT-LLM nightly image is validated on o7v's driver stack.
+                  values: [customer-gpu-o7v]
           podAntiAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
