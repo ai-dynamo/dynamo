@@ -1,0 +1,2036 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Rendered by gen-dgds.sh. To change these manifests, edit gen-dgds.sh and re-render.
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-01
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-01
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-01
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-01
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-01
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-02
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-02
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-02
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-02
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-02
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-03
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-03
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-03
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-03
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-03
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-04
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-04
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-04
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-04
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-04
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-05
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-05
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-05
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-05
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-05
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-06
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-06
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-06
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-06
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-06
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-07
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-07
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-07
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-07
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-07
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-08
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-08
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-08
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-08
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-08
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-09
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-09
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-09
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-09
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-09
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-10
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-10
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-10
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-10
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-10
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-11
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-11
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-11
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-11
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-11
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-12
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-12
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-12
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-12
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-12
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-13
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-13
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-13
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-13
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-13
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-14
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-14
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-14
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-14
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-14
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-15
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-15
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-15
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-15
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-15
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-4b-16
+  namespace: default
+  annotations:
+    experiment.nvidia.com/model-revision: "1cfa9a7208912126459214e8b04321603b3df60c"
+    experiment.nvidia.com/runtime-image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0"
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-16
+            experiment.nvidia.com/role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-16
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            experiment.nvidia.com/dgd: qwen3-4b-16
+            experiment.nvidia.com/role: worker
+            kai.scheduler/queue: default-queue
+          annotations:
+            gpu-fraction: "0.5"
+            nvidia.com/container.main.gpu-compute.mode: sm-sharing
+        spec:
+          schedulerName: kai-scheduler
+          runtimeClassName: nvidia
+          terminationGracePeriodSeconds: 180
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - /opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+                - --served-model-name
+                - Qwen/Qwen3-4B
+                - --gpu-memory-utilization
+                - "0.85"
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "32"
+              env:
+                - name: DYN_NAMESPACE
+                  value: default-qwen3-4b-16
+                - name: DYN_DISCOVERY_BACKEND
+                  value: etcd
+                - name: DYN_NAMESPACE_WORKER_SUFFIX
+                  value: ""
+                - name: HF_HOME
+                  value: /opt/hf-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 12Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/hf-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /opt/hf-cache
+                type: Directory

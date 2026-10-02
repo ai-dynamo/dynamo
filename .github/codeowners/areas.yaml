@@ -424,6 +424,7 @@ areas:
   - deploy/utils/manifests/
   - deploy/utils/tests/
   - examples/deployments/
+  - examples/many-models/
   - tests/deploy/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
