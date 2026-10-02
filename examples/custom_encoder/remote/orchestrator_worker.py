@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import asyncio
 
-from dynamo.llm import LLMUnaryClient, ModelInput, ModelType, WorkerType, register_model
-from dynamo.runtime import DistributedRuntime, dynamo_worker, serve_unary_endpoint
+from dynamo.llm import LLMUnaryClient, UnaryChatModel
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_utils.custom_encoder import ExternalEncoderHandoff
 
@@ -27,31 +27,24 @@ async def worker(runtime: DistributedRuntime) -> None:
     generator_client = await runtime.endpoint(config.generator_endpoint).client()
     await generator_client.wait_for_instances()
 
-    backend_class = config.resolve_backend_class()
     handoff = ExternalEncoderHandoff(
-        backend_class(),
-        name="remote-custom-encoder",
+        config.encoder_class(),
+        name=config.service_name,
     )
     try:
         handoff.load(config.model)
-        endpoint = runtime.endpoint(config.orchestrator_endpoint)
-        await register_model(
-            ModelInput.Tokens,
-            ModelType.Chat,
-            endpoint,
-            config.model,
-            model_name=config.public_model_name,
-            custom_template_path=str(config.chat_template_path),
-            worker_type=WorkerType.Aggregated,
-            ignore_weights=True,
-        )
         orchestrator = ExternalEncoderOrchestrator(
             handoff,
             LLMUnaryClient(generator_client),
             DummyClassifier(),
             config.generator_model_name,
         )
-        await serve_unary_endpoint(endpoint, orchestrator)
+        await UnaryChatModel(
+            model_path=config.model,
+            service_name=config.service_name,
+            public_model_name=config.public_model_name,
+            chat_template=config.chat_template_path,
+        ).serve(runtime, orchestrator)
     finally:
         handoff.shutdown()
 
