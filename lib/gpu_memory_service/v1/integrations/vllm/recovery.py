@@ -189,12 +189,14 @@ def register():
 
     @wraps(original_sleep)
     def sleep(self, *args, **kwargs):
-        ensure_adapter(self)
+        if os.environ.get("DYN_KV_RECOVERY") == "true":
+            ensure_adapter(self)
         return original_sleep(self, *args, **kwargs)
 
     @wraps(original_resume)
     def resume(self):
-        ensure_adapter(self)
+        if os.environ.get("DYN_KV_RECOVERY") == "true":
+            ensure_adapter(self)
         return original_resume(self)
 
     EngineCore.sleep = sleep

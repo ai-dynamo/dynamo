@@ -30,7 +30,10 @@ def _stop(server: GMSRPCServer, thread: threading.Thread) -> None:
     assert not thread.is_alive()
 
 
-def test_persistent_wake_reattaches_original_physical_handles(tmp_path, monkeypatch):
+@pytest.mark.parametrize("change_incarnation", [False, True])
+def test_persistent_wake_reattaches_original_physical_handles(
+    tmp_path, monkeypatch, change_incarnation
+):
     path = str(tmp_path / "kv.sock")
     vmm = FakeVMM(granularity=64)
     server_manager = GMSServerMemoryManager("GPU-0", vmm, 0, allow_retention=True)
@@ -63,6 +66,13 @@ def test_persistent_wake_reattaches_original_physical_handles(tmp_path, monkeypa
             assert client.identity == retained_identity
             assert vmm.server_handles == retained_handles
             assert va in vmm.mapped
+            if change_incarnation:
+                client.unmap_all_vas()
+                client.disconnect()
+                server_manager._identity = ("replacement-server", "GPU-0")
+                with pytest.raises(RuntimeError, match="incarnation"):
+                    client.connect(RequestedLockType.RW)
+                return
             client.close()
             assert client.mappings == ()
             assert vmm.server_handles == retained_handles

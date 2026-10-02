@@ -12,7 +12,10 @@ pytest.importorskip("vllm")
 
 from gpu_memory_service.common.persistent_pool import PersistentAllocation
 from gpu_memory_service.kv_recovery.types import KVRecoveryManifest, KVTensorLayout
-from gpu_memory_service.v1.integrations.vllm.recovery import VllmKVRecoveryAdapter
+from gpu_memory_service.v1.integrations.vllm.recovery import (
+    VllmKVRecoveryAdapter,
+    register,
+)
 from gpu_memory_service.v1.integrations.vllm.recovery_compat import (
     install_block_pool_hooks,
     install_engine_hooks,
@@ -165,3 +168,17 @@ def test_failed_gpu_completion_does_not_publish_and_semantic_reset_clears_record
         assert adapter.session._read_blocks() == ()
     finally:
         adapter.session.close()
+
+
+def test_disabled_feature_preserves_sleep_after_plugin_was_registered(
+    core, monkeypatch
+):
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setenv("DYN_KV_RECOVERY", "true")
+    register()
+    monkeypatch.setenv("DYN_KV_RECOVERY", "false")
+    core.async_scheduling = True  # Ordinary sleep still supports this configuration.
+    core.pause_scheduler = Mock(return_value=None)
+    core.sleep(1)
+    assert not hasattr(core, "_gms_kv_recovery_adapter")
+    core.model_executor.sleep.assert_called_once_with(1)

@@ -26,10 +26,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SLAB_SIZE = 2 * 1024 * 1024 * 1024
 
-_SessionFactory = Callable[
-    [str, RequestedLockType],
-    _GMSClientSession,
-]
+_SessionFactory = Callable[..., _GMSClientSession]
 
 
 @dataclass(frozen=True)
@@ -58,6 +55,7 @@ class GMSClientMemoryManager:
         self._session_factory = session_factory
         self._process_fence = process_fence
         self._persistent_backing = False
+        self._retained_identity: tuple[str, str] | None = None
         self._session: _GMSClientSession | None = None
         self._mappings: dict[int, _InstalledMapping] = {}
         self._regions: dict[int, tuple[int, int]] = {}
@@ -96,7 +94,10 @@ class GMSClientMemoryManager:
                 device_uuid = device_identity.get_device_uuid(self._device)
                 session = (
                     self._session_factory(
-                        self._socket_path, lock_type, process_fence=True
+                        self._socket_path,
+                        lock_type,
+                        process_fence=True,
+                        expected_identity=self._retained_identity,
                     )
                     if self._process_fence
                     else self._session_factory(self._socket_path, lock_type)
@@ -249,6 +250,7 @@ class GMSClientMemoryManager:
                 # crash during initial allocation still clears the partial set.
                 session.retain_allocations()
                 self._persistent_backing = True
+                self._retained_identity = session.identity
                 return bool(existing)
             except Exception as exc:
                 raise self._latch("GMS persistent attachment failed", exc) from exc
