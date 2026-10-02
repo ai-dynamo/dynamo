@@ -40,43 +40,6 @@ The sidecar opens eight gRPC connections by default. Override the pool size with
 
 Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a 30-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
-## Startup KV bootstrap
-
-KV-event sources require `replay_endpoint` and positive `buffer_steps` in
-SGLang's `--kv-events-config`, for example:
-
-```json
-{"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:6000","buffer_steps":10000,"topic":""}
-```
-
-Before initial serving registration, every DP rank replays from sequence zero
-into the newly created empty local index. Live events are received during
-bootstrap, overlapping sequences are deduplicated, and bootstrap gaps must be
-resolved. Success waits for actual local index application, not queue admission.
-The attempt uses the configured `--grpc-startup-deadline-secs` as its overall
-deadline, including index application. Individual replay responses also have a
-five-second inactivity deadline.
-
-The shared bootstrap operation returns success, confirmed missing history
-(including the rank and missing sequence), or uncertainty/retryable failure.
-Timeouts and connection errors are uncertainty, never proof of expired history.
-Only success permits initial serving. Other outcomes fail startup; this PR does
-not retry attempts or call the engine's shutdown RPC. A future lifecycle
-controller can consume these outcomes and choose the appropriate policy.
-
-After success the replay connections close and only live ZMQ consumption
-continues. There is no periodic replay, runtime gap repair, engine-state watch,
-replacement detection, or runtime registration management in this feature.
-The engine and publisher instances must remain stable throughout bootstrap;
-engine replacement coordination is deferred to the lifecycle work.
-
-An empty completed replay is accepted with positive retention under SGLang's
-publisher contract: sequences start at zero, the latest batches are retained,
-and the buffer is not independently cleared within an engine lifetime.
-Deployments without KV events retain their existing startup path. This feature
-requires engine replay support, but does not require `Shutdown` or
-`WatchEngineState` RPCs.
-
 ## SGLang-managed module contract
 
 SGLang can load the Python entry point and supply the gRPC endpoint arguments:
