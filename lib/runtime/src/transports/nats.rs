@@ -42,6 +42,7 @@ use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge,
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncRead;
@@ -468,7 +469,18 @@ impl ClientOptions {
         // async-nats reconnects on its own once connected but gives up after one
         // failed initial attempt. Retry in the background and wait a bounded time,
         // so a NATS outage at startup delays readiness instead of crash-looping.
-        let options = options.retry_on_initial_connect();
+        // async-nats reports each failed attempt as an event; keep the last one so a
+        // timeout says why (refused, DNS, bad credentials) instead of just how long.
+        let last_error: Arc<parking_lot::Mutex<Option<String>>> = Arc::default();
+        let options = options.retry_on_initial_connect().event_callback({
+            let last_error = Arc::clone(&last_error);
+            move |event| {
+                if let async_nats::Event::ClientError(e) = event {
+                    *last_error.lock() = Some(e.to_string());
+                }
+                std::future::ready(())
+            }
+        });
         let server = self.server;
         let connect_timeout = self.connect_timeout;
         let (client, _) = build_in_runtime(
@@ -488,8 +500,13 @@ impl ClientOptions {
                 tokio::time::timeout(connect_timeout, client.flush())
                     .await
                     .map_err(|_| {
+                        let cause = last_error
+                            .lock()
+                            .take()
+                            .map(|e| format!(": {e}"))
+                            .unwrap_or_default();
                         anyhow::anyhow!(
-                            "Failed to connect to NATS at {server} within {}s. Verify NATS server is running and accessible.",
+                            "Failed to connect to NATS at {server} within {}s{cause}. Verify NATS server is running and accessible.",
                             connect_timeout.as_secs()
                         )
                     })?
@@ -1279,9 +1296,10 @@ mod tests {
         };
 
         assert!(started.elapsed() >= budget, "gave up before the deadline");
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("within 1s"),
-            "unexpected error: {err}"
+            msg.contains("within 1s: nats: IO error"),
+            "timeout should carry the last connection error: {msg}"
         );
     }
 
