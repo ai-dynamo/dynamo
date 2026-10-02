@@ -88,7 +88,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	SubComponentType string `json:"subComponentType,omitempty"`
 
 	// RuntimeVersionOverride declares the Dynamo runtime version in this component's
-	// runtime image: spec.extraPodSpec.initContainers[name=runtime].image when that init container
+	// runtime image: spec.extraPodSpec.initContainers[name=runtime].image when the dynamo runtime sidecar
 	// is present, otherwise spec.extraPodSpec.mainContainer.image. DGD admission requires it when that image has no parseable
 	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
 	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
