@@ -139,7 +139,7 @@ func TestAugmentEngineForGMS(t *testing.T) {
 		}},
 	}
 
-	augmentEngineForGMS(podSpec, 1, true)
+	augmentEngineForGMS(podSpec, 1, true, 0)
 	c := podSpec.Containers[0]
 
 	assert.True(t, hasEnvVar(c, "ENGINE_ID", ""), "ENGINE_ID should be set (via Downward API)")
@@ -197,7 +197,7 @@ func TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever(t *testing.T) {
 		}},
 	}
 
-	augmentEngineForGMS(podSpec, 0, false)
+	augmentEngineForGMS(podSpec, 0, false, 0)
 
 	assert.Equal(t, corev1.RestartPolicy(""), podSpec.RestartPolicy,
 		"standalone inter-pod GMS engine must not have RestartPolicy overridden; "+
@@ -211,7 +211,7 @@ func TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever(t *testing.T) {
 
 func TestAugmentEngineForGMS_EmptyContainers(t *testing.T) {
 	podSpec := &corev1.PodSpec{}
-	augmentEngineForGMS(podSpec, 0, true)
+	augmentEngineForGMS(podSpec, 0, true, 0)
 	assert.Empty(t, podSpec.Containers)
 }
 
@@ -597,7 +597,7 @@ func intraPodFailoverPodSpec() corev1.PodSpec {
 
 func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	// 2 engines + 1 preserved sidecar
@@ -609,14 +609,14 @@ func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 
 func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
 func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "currently supported only for vLLM")
 }
@@ -624,7 +624,7 @@ func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 	t.Log("Build the active-passive engine containers from a container-discovery base")
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	t.Log("Verify each engine keeps container discovery and receives its own container identity")
@@ -648,7 +648,7 @@ func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 
 func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -663,7 +663,7 @@ func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 
 func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -683,7 +683,7 @@ func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
 
 func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -695,7 +695,7 @@ func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
 
 func TestBuildFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -706,7 +706,7 @@ func TestBuildFailoverPod_PreservesDiscoveryBackend(t *testing.T) {
 
 func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 4, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 4, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {
@@ -715,9 +715,69 @@ func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
 	}
 }
 
+func TestBuildFailoverPod_OrderedEnvironmentKeepsUserSuffix(t *testing.T) {
+	for _, tt := range []struct {
+		name                 string
+		userEnvironmentCount int
+		wantLast             string
+	}{
+		{name: "ordered", userEnvironmentCount: 2, wantLast: "USER_OVERRIDE"},
+		{name: "legacy", userEnvironmentCount: 0, wantLast: "NNODES"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build both engine containers with system and user environment entries")
+			podSpec := intraPodFailoverPodSpec()
+			podSpec.Containers[0].Env = append(podSpec.Containers[0].Env,
+				corev1.EnvVar{Name: "USER_REFERENCE", Value: "$(ENGINE_ID)"},
+				corev1.EnvVar{Name: "USER_OVERRIDE", Value: "value"},
+			)
+			require.NoError(t, buildFailoverPod(&podSpec, 2, BackendFrameworkVLLM, tt.userEnvironmentCount))
+
+			t.Log("Verify the selected ordering and both generated engine values")
+			for i := range 2 {
+				environment := podSpec.Containers[i].Env
+				require.Equal(t, tt.wantLast, environment[len(environment)-1].Name)
+				if tt.userEnvironmentCount > 0 {
+					assert.Less(t, envIndex(t, environment, "ENGINE_ID"), envIndex(t, environment, "USER_REFERENCE"))
+					assert.Less(t, envIndex(t, environment, "NNODES"), envIndex(t, environment, "USER_REFERENCE"))
+				}
+			}
+		})
+	}
+}
+
+func TestAugmentEngineForGMS_OrderedEnvironmentKeepsUserSuffix(t *testing.T) {
+	t.Log("Add inter-pod GMS variables before an existing user reference")
+	podSpec := &corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "engine",
+		Env: []corev1.EnvVar{
+			{Name: "SYSTEM", Value: "value"},
+			{Name: "USER_REFERENCE", Value: "$(ENGINE_ID)"},
+		},
+	}}}
+	augmentEngineForGMS(podSpec, 0, false, 1)
+
+	t.Log("Verify the user reference follows the generated rank and socket variables")
+	environment := podSpec.Containers[0].Env
+	assert.Less(t, envIndex(t, environment, "ENGINE_ID"), envIndex(t, environment, "USER_REFERENCE"))
+	assert.Less(t, envIndex(t, environment, gms.EnvSocketDir), envIndex(t, environment, "USER_REFERENCE"))
+	assert.Equal(t, "USER_REFERENCE", environment[len(environment)-1].Name)
+}
+
+func envIndex(t *testing.T, environment []corev1.EnvVar, name string) int {
+	t.Helper()
+	for i, variable := range environment {
+		if variable.Name == name {
+			return i
+		}
+	}
+	t.Fatalf("environment variable %q was not rendered", name)
+	return 0
+}
+
 func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM, 0)
 	require.NoError(t, err)
 
 	for i := range 2 {

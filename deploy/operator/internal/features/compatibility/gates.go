@@ -30,4 +30,12 @@ var (
 		Name:             "VLLMMultiprocessing",
 		MinOriginVersion: *semver.MustParse("1.0.0"),
 	}
+
+	// OrderedEnvironmentVariables gates order-preserving environment variable
+	// composition. Enabled for DGDs originally created by operator >= 1.6.0 so
+	// an operator upgrade does not reorder existing workloads.
+	OrderedEnvironmentVariables = Gate{
+		Name:             "OrderedEnvironmentVariables",
+		MinOriginVersion: *semver.MustParse("1.6.0"),
+	}
 )

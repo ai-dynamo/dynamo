@@ -2702,9 +2702,8 @@ func envFromSecretMatches(envFrom []corev1.EnvFromSource, name string) bool {
 // Small utilities
 // ---------------------------------------------------------------------------
 
-// mergeEnvs replicates internal/dynamo.MergeEnvs: concatenate `common` and
-// `specific`, de-duplicated by Name with `specific` winning on collision.
-// Duplicated here to avoid an api -> internal cycle.
+// mergeEnvs preserves the v1alpha1 conversion contract: concatenate `common`
+// and `specific`, de-duplicated by Name with `specific` winning on collision.
 func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 	out := make([]corev1.EnvVar, 0, len(common)+len(specific))
 	seen := map[string]int{}

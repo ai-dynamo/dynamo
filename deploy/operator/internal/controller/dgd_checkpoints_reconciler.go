@@ -1106,7 +1106,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 				if err := mergo.Merge(existing, *user, mergo.WithOverride); err != nil {
 					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge SnapshotJob container %q: %w", override.Name, err)
 				}
-				existing.Env = dynamo.MergeEnvs(baseEnv, user.Env)
+				existing.Env = dynamo.MergeEnvsForOrigin(dynamoDeployment.Annotations, baseEnv, user.Env)
 				if user.LivenessProbe != nil {
 					existing.LivenessProbe = user.LivenessProbe.DeepCopy()
 				}
