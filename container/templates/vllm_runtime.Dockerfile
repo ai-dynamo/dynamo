@@ -74,11 +74,8 @@ COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
 {% if device == "cuda" %}
-# Replace upstream vLLM's NIXL wheels with NIXL_REF, the release wheel_builder
-# links KVBM and nixl-sys against. KVBM binds libnixl.so at import time, so an
-# older upstream NIXL fails `import kvbm`. Upgrade both CUDA backends so the
-# meta package's pinned requirements stay satisfied. This must run before the
-# vLLM-Omni step freezes nixl* from container/deps/vllm/protected_packages.txt.
+# Install NIXL_REF over upstream vLLM's NIXL (KVBM binds libnixl.so at import).
+# Upgrade cu12 and cu13 for the nixl meta pin; run before the vLLM-Omni nixl* freeze.
 COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eu; \

@@ -309,11 +309,8 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
     \
-    # nixl/nixl-cu13 at NIXL_REF, the release wheel_builder links KVBM and
-    # nixl-sys against. KVBM binds libnixl.so at import time, so the preloaded
-    # libnixl must be this release too, not TRT-LLM's older bundled copy.
-    # /opt/dynamo/nixl exposes the wheel's libraries and plugins at a stable path
-    # for the LD_PRELOAD and NIXL_PLUGIN_DIR set after this RUN.
+    # nixl/nixl-cu13 at NIXL_REF: KVBM binds libnixl.so at import, so the
+    # LD_PRELOAD set after this RUN must load this release via /opt/dynamo/nixl.
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     _nixl_ver="${NIXL_REF#v}" && \
     uv pip install --no-deps "nixl==${_nixl_ver}" "nixl-cu13==${_nixl_ver}" && \
