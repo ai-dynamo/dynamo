@@ -10,7 +10,10 @@ use dynamo_kv_router::{
     protocols::{
         BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
     },
-    scheduling::{AdvisoryWorkerLoad, QueueRejection, RoutingEligibility, queue::BookingHandle},
+    scheduling::{
+        AdvisoryWorkerLoad, QueueRejection, RequestLifecycle, RoutingEligibility,
+        queue::BookingHandle,
+    },
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -31,10 +34,14 @@ pub(super) struct WorkerSelection {
     pub(super) overlap_amount: u32,
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
+    pub(super) selected_raw_cached_tokens: Option<usize>,
+    /// Greatest raw router-visible overlap among eligible workers, in tokens.
+    pub(super) max_raw_cached_tokens: Option<usize>,
     pub(super) potential_decode_blocks: u64,
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) kv_hint: Option<KvHint>,
+    pub(super) request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 // Transient return value; `Routed` is moved into `WorkerSelection` right away.
@@ -129,6 +136,8 @@ impl RoutingHost {
                 overlap_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                selected_raw_cached_tokens,
+                max_raw_cached_tokens,
                 potential_decode_blocks,
                 routing_hashes,
                 kv_hint,
@@ -138,10 +147,13 @@ impl RoutingHost {
                 overlap_amount: overlap_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                selected_raw_cached_tokens,
+                max_raw_cached_tokens,
                 potential_decode_blocks,
                 selected_worker_load: admitted.advisory_load,
                 routing_hashes,
                 kv_hint,
+                request_lifecycle: None,
             })),
             FindBestMatchOutcome::QueueRejected { rejection } => {
                 Ok(SelectionOutcome::QueueRejected(rejection))
