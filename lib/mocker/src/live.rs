@@ -265,7 +265,6 @@ impl DeterministicTokenGenerator {
     }
 }
 
-/// One deterministic, tokenizer-independent output token ID.
 pub fn deterministic_token_id(seed: u64, request_id: &str, position: usize) -> u32 {
     DeterministicTokenGenerator::new(seed, request_id).token_id(position)
 }

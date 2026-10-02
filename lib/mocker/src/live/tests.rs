@@ -714,15 +714,14 @@ async fn decode_admission_reserves_kv_without_recomputing_the_prompt() {
                 wait_for_idle(&engine).await;
             }
             assert_eq!(engine.active_request_count(), 0);
-            let snapshots = passes.0.lock().unwrap();
-            assert!(!snapshots.is_empty());
-            assert!(
-                snapshots
-                    .iter()
-                    .all(|pass| { pass.num_prefill_requests == 0 && pass.sum_prefill_tokens == 0 })
-            );
-            assert!(snapshots.iter().any(|pass| pass.num_decode_requests > 0));
-            drop(snapshots);
+            {
+                let snapshots = passes.0.lock().unwrap();
+                assert!(!snapshots.is_empty());
+                assert!(snapshots.iter().all(|pass| {
+                    pass.num_prefill_requests == 0 && pass.sum_prefill_tokens == 0
+                }));
+                assert!(snapshots.iter().any(|pass| pass.num_decode_requests > 0));
+            }
             engine.shutdown().await.unwrap();
         })
         .await
