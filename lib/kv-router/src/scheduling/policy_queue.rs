@@ -576,6 +576,24 @@ impl<T> PolicyQueue<T> {
         self.classes.iter().flat_map(PolicyClassQueue::entries)
     }
 
+    /// Refresh worker lanes when a host changes queued request placement.
+    /// Retains each entry's priority, enqueue order, deadline, and accounting;
+    /// previously blocked lanes become eligible for another capacity check.
+    pub fn refresh_placements(&mut self, mut placement: impl FnMut(&T) -> WorkerPlacement) {
+        for class in &mut self.classes {
+            let shared = std::mem::take(&mut class.pending);
+            let workers = std::mem::take(&mut class.ready_by_worker);
+            class.blocked_workers.clear();
+            class.candidate_worker_heads.clear();
+            for entry in shared
+                .into_iter()
+                .chain(workers.into_values().flat_map(|ready| ready.into_iter()))
+            {
+                class.push_ready(placement(entry.payload()), entry);
+            }
+        }
+    }
+
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
     /// accounting while preserving each retained entry's scheduling key.
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
@@ -1029,6 +1047,45 @@ policy_classes:
         // regress heavily past 64 bytes (see QueueEntrySnapshot).
         assert!(std::mem::size_of::<PolicyQueueEntry<()>>() <= 64);
         assert!(std::mem::size_of::<WorkerLaneHead>() <= 48);
+    }
+
+    #[test]
+    fn refreshing_placement_preserves_order_and_accounting() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        for request in 0..3 {
+            queue
+                .enqueue(
+                    0,
+                    2,
+                    QueueSnapshot::new(10, 4),
+                    0.0,
+                    0.0,
+                    0,
+                    WorkerPlacement::Any,
+                    request,
+                )
+                .unwrap();
+        }
+        queue.refresh_placements(|request| {
+            WorkerPlacement::Exact(WorkerWithDpRank::new(0, request % 2))
+        });
+        assert_eq!(queue.pending_count(), 3);
+        assert_eq!(queue.class_stats(0).raw_isl_tokens, 30);
+        assert_eq!(queue.class_stats(0).cached_tokens, 12);
+        assert_eq!(
+            queue
+                .pop_next(|_, _, request| request % 2 == 1)
+                .unwrap()
+                .into_payload(),
+            1
+        );
+        assert!(queue.pop_next(|_, _, _| false).is_none());
+        queue.refresh_placements(|_| WorkerPlacement::Any);
+        assert_eq!(queue.pop_next(|_, _, _| true).unwrap().into_payload(), 0);
+        assert_eq!(queue.pop_next(|_, _, _| true).unwrap().into_payload(), 2);
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.class_stats(0).raw_isl_tokens, 0);
+        assert_eq!(queue.class_stats(0).cached_tokens, 0);
     }
 
     #[test]

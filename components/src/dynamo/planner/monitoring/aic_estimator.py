@@ -3,7 +3,7 @@
 
 """AIConfigurator performance estimator used by the planner (and the profiler).
 
-This thin wrapper around the ``aisimulate_core`` SDK namespace lets callers estimate
+This thin wrapper around the ``aisimulate_core`` SDK lets callers estimate
 prefill / decode latency and KV-cache capacity for a given model + system +
 backend + parallelism config without spinning up a real engine. The planner
 uses it to bootstrap regression models from an AIC spec in rapid mode.
@@ -23,9 +23,9 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def _try_import_aiconfigurator_core():
-    """Load the AIC compatibility SDK shipped by AISimulate on demand."""
-    # Lazy-import the optional AISimulate SDK.
+def _try_import_aisimulate_core():
+    """Load the AISimulate core estimator SDK on demand."""
+    # Lazy-import AISimulate because it is an optional dependency.
     import aisimulate_core.sdk.backends.factory
     import aisimulate_core.sdk.config
     import aisimulate_core.sdk.models
@@ -36,7 +36,7 @@ def _try_import_aiconfigurator_core():
 
 class AIConfiguratorPerfEstimator:
     """
-    This class is used to estimate the performance of a model using aisimulate.
+    This class is used to estimate the performance of a model using aiconfigurator.
     An instance of this class stores information about the model, system, and backend.
     Methods can be called to estimate prefill and/or decode perf for a given ISL, OSL,
     batch_size, and parallelism config.
@@ -48,7 +48,7 @@ class AIConfiguratorPerfEstimator:
         system: str,  # e.g. "h200_sxm"
         backend: str,  # e.g. "trtllm"
     ):
-        aisimulate_core = _try_import_aiconfigurator_core()
+        aisimulate_core = _try_import_aisimulate_core()
 
         logger.info("Loading AISimulate database. This might take a few seconds...")
         version = aisimulate_core.sdk.perf_database.get_latest_database_version(
@@ -71,7 +71,7 @@ class AIConfiguratorPerfEstimator:
         self.hf_id = hf_id
 
     def _get_model(self, **model_config_kwargs):
-        aisimulate_core = _try_import_aiconfigurator_core()
+        aisimulate_core = _try_import_aisimulate_core()
 
         # NOTE: MOE models error out unless moe_tp_size and moe_ep_size are provided.
         model_config = aisimulate_core.sdk.config.ModelConfig(**model_config_kwargs)
@@ -90,7 +90,7 @@ class AIConfiguratorPerfEstimator:
     ) -> dict[str, Any]:
         """
         Estimate the perf of this model + system + backend + ISL/OSL/model_config
-        using aisimulate.
+        using aiconfigurator.
 
         Args:
             isl: Input sequence length
@@ -106,7 +106,7 @@ class AIConfiguratorPerfEstimator:
         Returns:
             dict: Perf metrics returned by aiconfigurator
         """
-        aisimulate_core = _try_import_aiconfigurator_core()
+        aisimulate_core = _try_import_aisimulate_core()
 
         mode_to_aic_mode = {
             "full": "static",

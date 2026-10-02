@@ -1418,9 +1418,16 @@ mod tests {
         assert!(pass_in_flight);
         assert!(is_request_cancellation);
         assert!(effects.by_rank[0].effects.suppressed_pending_output);
+        // Scheduler retirement and pending-output suppression can both report
+        // the same request. Cleanup is idempotent; check the retired identities.
         assert_eq!(
-            effects.by_rank[0].effects.retired_requests,
-            vec![request_id]
+            effects.by_rank[0]
+                .effects
+                .retired_requests
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([request_id])
         );
 
         let completed = actor
@@ -1657,36 +1664,19 @@ mod tests {
                 ..EngineConfig::default()
             },
         );
-        // Start real decode work after destination activation. A direct submit
-        // with zero decode time finishes before a mid-pass command can arrive,
-        // leaving that command waiting behind the unacknowledged pass boundary.
-        let active_handoff = HandoffId::from(Uuid::from_u128(71));
-        for command in [
-            Command::ReserveDestination {
-                handoff_id: active_handoff,
-                request: request(71, 4, 1),
-            },
-            Command::ActivateDestination {
-                handoff_id: active_handoff,
-            },
-        ] {
-            handle
-                .apply_command(SchedulerCommand::new(0, command))
-                .await
-                .unwrap();
-            assert!(matches!(
-                next_event(&mut events).await,
-                GroupedLiveEvent::CommandApplied { .. }
-            ));
-        }
+        handle
+            .apply_command(SchedulerCommand::new(0, Command::Submit(request(71, 4, 1))))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_event(&mut events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
         let GroupedLiveEvent::PassStarted(started) = next_event(&mut events).await else {
             panic!("expected grouped pass start");
         };
         let group_duration_ms = started.end_ms - started.started_at_ms;
-        assert_eq!(
-            group_duration_ms, 100.0,
-            "fixture must admit a mid-pass command"
-        );
+        assert_eq!(group_duration_ms, 100.0);
 
         let handoff_id = HandoffId::from(Uuid::from_u128(72));
         handle

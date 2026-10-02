@@ -42,6 +42,7 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  VLLM_RS_HTTP_PORT       vLLM HTTP port (default: 8100)"
             echo "  VLLM_GRPC_PORT          vLLM gRPC port (default: 50051)"
+            echo "  VLLM_DATA_PARALLEL_SIZE Number of local data-parallel ranks (default: 1)"
             echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS     Maximum concurrent sequences (default: 2)"
             echo "  DEFAULT_KV_CACHE_BYTES  KV cache cap when not profiling (default: 1119388000)"
@@ -85,6 +86,7 @@ vllm-rs serve "$MODEL" \
     --host 127.0.0.1 \
     --port "$VLLM_RS_HTTP_PORT" \
     --grpc-port "$VLLM_GRPC_PORT" \
+    --data-parallel-size "${VLLM_DATA_PARALLEL_SIZE:-1}" \
     --max-model-len "$MAX_MODEL_LEN" \
     -- \
     --enforce-eager \

@@ -205,6 +205,135 @@ fn lcfs_siblings_do_not_hide_a_queued_initializer() {
 }
 
 #[test]
+fn queued_affinity_does_not_block_another_idle_rank() {
+    let mut policy = placement(Some(RouterQueuePolicy::Fcfs));
+    let busy = immediate(place(&mut policy, 1, "busy", 0.0));
+    commit(&mut policy, 1, 0.0);
+    let freeing = immediate(place(&mut policy, 2, "freeing", 0.0));
+    commit(&mut policy, 2, 0.0);
+    assert_ne!(busy.scheduler_id, freeing.scheduler_id);
+    assert!(matches!(
+        place(&mut policy, 3, "busy", 1.0),
+        PlacementDecision::Queued
+    ));
+    assert!(matches!(
+        place(&mut policy, 4, "freeing", 2.0),
+        PlacementDecision::Queued
+    ));
+    let released = complete(&mut policy, 2, 3.0);
+    assert_eq!(
+        released.len(),
+        1,
+        "an available bound rank must make progress"
+    );
+    assert_eq!(released[0].request_id, Uuid::from_u128(4));
+    assert_eq!(released[0].scheduler_id, freeing.scheduler_id);
+    commit(&mut policy, 4, 3.0);
+    let released = complete(&mut policy, 1, 4.0);
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].request_id, Uuid::from_u128(3));
+    assert_eq!(released[0].scheduler_id, busy.scheduler_id);
+    commit(&mut policy, 3, 4.0);
+}
+
+#[test]
+fn new_arrival_to_idle_affinity_rank_bypasses_other_rank_backlog() {
+    let mut policy = placement(Some(RouterQueuePolicy::Fcfs));
+    let busy = immediate(place(&mut policy, 1, "busy", 0.0));
+    commit(&mut policy, 1, 0.0);
+    let freeing = immediate(place(&mut policy, 2, "freeing", 0.0));
+    commit(&mut policy, 2, 0.0);
+    assert_ne!(busy.scheduler_id, freeing.scheduler_id);
+    assert!(complete(&mut policy, 2, 1.0).is_empty());
+    assert!(matches!(
+        place(&mut policy, 3, "busy", 2.0),
+        PlacementDecision::Queued
+    ));
+    let placement = immediate(place(&mut policy, 4, "freeing", 3.0));
+    assert_eq!(placement.scheduler_id, freeing.scheduler_id);
+    commit(&mut policy, 4, 3.0);
+}
+
+#[test]
+fn initialized_siblings_do_not_block_a_new_session_on_an_idle_rank() {
+    let mut policy = placement(Some(RouterQueuePolicy::Fcfs));
+    let busy = immediate(place(&mut policy, 1, "busy", 0.0));
+    commit(&mut policy, 1, 0.0);
+    immediate(place(&mut policy, 2, "freeing", 0.0));
+    commit(&mut policy, 2, 0.0);
+    for (id, session) in [(3, "siblings"), (4, "siblings"), (5, "new-session")] {
+        assert!(matches!(
+            place(&mut policy, id, session, id as f64),
+            PlacementDecision::Queued
+        ));
+    }
+    let initialized = complete(&mut policy, 2, 6.0);
+    assert_eq!(initialized.len(), 1);
+    assert_eq!(initialized[0].request_id, Uuid::from_u128(3));
+    commit(&mut policy, 3, 6.0);
+    assert!(advance(&mut policy, 6.0).is_empty());
+    let released = complete(&mut policy, 1, 7.0);
+    assert_eq!(
+        released.len(),
+        1,
+        "a sibling's pin must not block another rank"
+    );
+    assert_eq!(released[0].request_id, Uuid::from_u128(5));
+    assert_eq!(released[0].scheduler_id, busy.scheduler_id);
+    commit(&mut policy, 5, 7.0);
+}
+
+#[test]
+fn aborted_initializer_unblocks_its_rank_despite_another_bound_backlog() {
+    let mut policy = placement(Some(RouterQueuePolicy::Fcfs));
+    immediate(place(&mut policy, 1, "busy", 0.0));
+    commit(&mut policy, 1, 0.0);
+    let aborted = immediate(place(&mut policy, 2, "aborted", 0.0));
+    assert!(matches!(
+        place(&mut policy, 3, "busy", 1.0),
+        PlacementDecision::Queued
+    ));
+    assert!(matches!(
+        place(&mut policy, 4, "aborted", 2.0),
+        PlacementDecision::Queued
+    ));
+    <Policy as PlacementPolicy<DirectRequest>>::dispatch_aborted(
+        &mut policy,
+        Uuid::from_u128(2),
+        3.0,
+    )
+    .unwrap();
+    let released = advance(&mut policy, 3.0);
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].request_id, Uuid::from_u128(4));
+    assert_eq!(released[0].scheduler_id, aborted.scheduler_id);
+    commit(&mut policy, 4, 3.0);
+}
+
+#[test]
+fn oversized_affinity_clock_returns_error_without_advancing() {
+    let mut policy = placement(None);
+    for now in [f64::MAX, 1e22] {
+        let error = policy
+            .place(
+                &request(1),
+                KvReplayMetadata::default(),
+                Some("session".into()),
+                now,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("replay affinity time is too large")
+        );
+        assert_eq!(policy.router.affinity.as_ref().unwrap().clock.now_ms(), 0.0);
+    }
+    immediate(place(&mut policy, 2, "session", 1.0));
+    commit(&mut policy, 2, 1.0);
+}
+
+#[test]
 fn sibling_group_uses_conversation_ancestry_and_play_namespace() {
     use aisimulate_core::replay::{
         AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1, AgenticConversationLineage, AgenticRuntimeIdentity,

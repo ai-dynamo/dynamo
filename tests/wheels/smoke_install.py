@@ -407,10 +407,10 @@ assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
     run([str(venv_python), "-c", code])
 
 
-def run_aic_core_import_smoke(venv_python: Path) -> None:
+def run_ais_core_import_smoke(venv_python: Path) -> None:
     code = r"""
 import os
-from pathlib import Path
+from importlib.resources import files
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -427,7 +427,7 @@ from dynamo.common.forward_pass_metrics import (
 
 assert aisimulate_core and compile_engine and estimate_num_gpu_blocks
 
-package_root = Path(aisimulate_core.__file__).resolve().parent
+package_root = files("aisimulate_core")
 assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()
 assert (package_root / "systems/h200_sxm.yaml").is_file()
 parquet_files = list(
@@ -443,11 +443,11 @@ model = RustForwardPassPerfModel.best_available(
         "model": "Qwen/Qwen3-32B",
         "system": "h200_sxm",
         "backend": "vllm",
-        "backend_version": "0.24.0",
-        "worker_type": "prefill",
-        "estimation_mode": "op_level",
+        "worker_type": "aggregated",
+        "backend_version": "current",
+        "estimation_mode": "auto",
         "fallback_policy": "deny",
-    },
+    }
 )
 estimate_ms = model.estimate_forward_pass_time_ms(
     [
@@ -508,7 +508,7 @@ def install_mocker_support(wheelhouse: Path, python_spec: str) -> None:
     venv_python = create_venv(python_spec)
     try:
         # AISimulate is a direct ai-dynamo dependency on supported Python versions
-        # and provides the retained AIC compatibility imports used by Mocker.
+        # and provides the canonical estimator used by Mocker.
         pip_install(
             venv_python,
             wheelhouse,
@@ -517,6 +517,6 @@ def install_mocker_support(wheelhouse: Path, python_spec: str) -> None:
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
         assert_local_direct_url(venv_python, "aisimulate", aisimulate, wheelhouse)
-        run_aic_core_import_smoke(venv_python)
+        run_ais_core_import_smoke(venv_python)
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)

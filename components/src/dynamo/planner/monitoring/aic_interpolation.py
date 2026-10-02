@@ -22,7 +22,7 @@ are interchangeable from the regression models' perspective:
   ``wall_time = per-step ITL``. Matches thorough's aggregate semantics. We
   convert aggregate → per-rank before calling AIC (AIC's
   ``RuntimeConfig.batch_size`` is per-attention-DP-rank, per the
-  ``TrtllmWideEPDeepSeekModel`` comment in aiconfigurator/sdk/models.py).
+  ``TrtllmWideEPDeepSeekModel`` comment in aisimulate_core/sdk/models/).
 
 The 7 MoE-DEP bugs that silently corrupted the old profiler path are fixed
 here: every AIC call uses :func:`picked_to_aic_model_config_kwargs` so
@@ -46,7 +46,7 @@ from dynamo.planner.config.parallelization import (
     picked_to_aic_model_config_kwargs,
 )
 
-# aic_estimator itself lazy-imports aiconfigurator-core, so importing the wrapper
+# aic_estimator itself lazy-imports AISimulate, so importing the wrapper
 # class at module load time does NOT pull in the optional dependency —
 # ImportError only materialises when the class is instantiated.
 from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator

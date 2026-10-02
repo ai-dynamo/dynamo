@@ -17,7 +17,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::TierOverlapBlocks;
 use dynamo_kv_router::{
-    ConcurrentRadixTree, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
+    ConcurrentRadixTreeCompressed, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -35,7 +35,7 @@ use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
 #[derive(Clone)]
 enum ReplayIndexer {
     Single(KvIndexer),
-    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTree>>),
+    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>),
 }
 
 impl ReplayIndexer {
@@ -78,7 +78,7 @@ impl ReplayIndexer {
 fn create_replay_indexer(block_size: u32, num_threads: usize) -> ReplayIndexer {
     if num_threads > 1 {
         return ReplayIndexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
-            ConcurrentRadixTree::new(),
+            ConcurrentRadixTreeCompressed::new(),
             num_threads,
             block_size,
         )));

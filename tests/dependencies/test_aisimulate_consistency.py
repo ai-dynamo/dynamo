@@ -125,6 +125,12 @@ def test_dynamo_pins_matching_aisimulate_sources_and_versions() -> None:
     assert not python_requirement.marker.evaluate(environment)
     assert container_requirement.marker is None
     assert _exact_version(container_requirement) == python_version
+    with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
+        benchmarks = tomllib.load(handle)
+    assert _exact_version(_python_requirement(benchmarks)) == python_version
+    assert "aisimulate" not in pyproject.get("tool", {}).get("uv", {}).get(
+        "sources", {}
+    )
 
     cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
     assert not {"path", "branch", "tag"} & cargo_dependency.keys()

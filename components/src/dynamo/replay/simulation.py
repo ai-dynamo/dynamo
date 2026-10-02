@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.runner import EngineReplayRunner
+from aisimulate.runner import EngineReplayRunner, EngineReplayRunnerFactory
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -27,10 +28,14 @@ from aisimulate.sweeper.replay import (
     RunnerCapabilities,
 )
 
-from dynamo.llm import AicPerfConfig, KvRouterConfig
+from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
-from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
-from dynamo.replay.config import resolve_aic_num_gpu_blocks
+from dynamo.replay.api import (
+    TelemetryOptions,
+    run_synthetic_trace_replay,
+    run_trace_replay,
+)
+from dynamo.replay.config import lower_upstream_engine_args
 from dynamo.router.simulation.config import ConversationAffinityConfig
 
 _PLANNER_HOOK = HookCapability(
@@ -44,13 +49,6 @@ _ROUTER_HOOK = HookCapability(
     api_version=1,
 )
 _REPLAY_SPEC_API_VERSION = 1
-_SUPPORTED_BACKEND_TOPOLOGIES = (
-    ("vllm", "agg"),
-    ("vllm", "disagg"),
-    ("sglang", "agg"),
-    ("sglang", "disagg"),
-    ("trtllm", "agg"),
-)
 
 
 @dataclass(frozen=True)
@@ -63,19 +61,43 @@ class DynamoReplayRunnerFactory:
     def capabilities(self) -> RunnerCapabilities:
         """Advertise the backend/topology and Dynamo hook support."""
 
+        engine_capabilities = EngineReplayRunnerFactory().capabilities()
         return RunnerCapabilities(
             # Runner-owned constant: do not inherit the consumer package's default,
             # otherwise an old Dynamo wheel can self-certify against a newer spec.
             replay_spec_api_version=_REPLAY_SPEC_API_VERSION,
-            supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
+            supported_backend_topologies=tuple(
+                (backend, topology)
+                for backend, topology in engine_capabilities.supported_backend_topologies
+                if backend in ("vllm", "sglang", "trtllm")
+                and topology in ("agg", "disagg")
+            ),
             supported_hooks=(_PLANNER_HOOK, _ROUTER_HOOK),
-            supports_disaggregated_attention_dp=True,
+            supports_disaggregated_attention_dp=(
+                engine_capabilities.supports_disaggregated_attention_dp
+            ),
+            supported_execution_modes=("offline",),
+            supported_trace_formats=(
+                "mooncake",
+                "mooncake-delta",
+                "agentic_mooncake",
+                "applied_compute_agentic",
+                "dynamo",
+                "weka",
+            ),
+            supports_agentic_lanes=engine_capabilities.supports_agentic_lanes,
+            # Full AgentX runtime conformance remains a separate checkpoint.
+            # Keep the public runner honest about the narrower integration here.
+            supported_agentic_topologies=tuple(
+                topology
+                for topology in engine_capabilities.supported_agentic_topologies
+                if topology in ("agg", "disagg")
+            ),
+            supported_agentic_backends=engine_capabilities.supported_agentic_backends,
             supports_state_cache=True,
-            supports_agentic_lanes=True,
             supports_agentic_snapshots=True,
             supports_agentic_warmup=True,
             supports_agentic_profile=True,
-            supported_agentic_backends=("vllm", "sglang"),
             supports_agentic_host_offload=False,
             supports_agentic_speculative_decoding=False,
             agentic_qualification="functional_only",
@@ -111,18 +133,15 @@ class DynamoReplayRunner:
 
         output_requirements = output_requirements or ReplayOutputRequirements()
         self.capabilities.require_compatible(spec)
+        execution_model = self._execution_target_model(spec)
         (
             planner_config,
             router_mode,
             router_config,
-            aic_perf_config,
+            ais_perf_config,
             affinity,
         ) = self._resolve_hooks(spec.runtime_hooks)
-        if self._requires_canonical_replay(spec, affinity) or (
-            router_mode == "kv_router"
-            and planner_config is None
-            and spec.backend_deployment.backend in {"vllm", "sglang"}
-        ):
+        if self._requires_canonical_replay(spec, affinity):
             if planner_config is not None:
                 raise ValueError(
                     "conversation affinity, AgentX profiles and attention-DP "
@@ -140,13 +159,14 @@ class DynamoReplayRunner:
                 capabilities=self.capabilities,
                 trace_block_size=self.trace_block_size,
                 runtime=_CanonicalReplayRuntime(
-                    router_config, aic_perf_config, affinity
+                    router_config, ais_perf_config, affinity
                 ),
             )
             try:
                 report = runner.run(spec, output_requirements=output_requirements)
             finally:
                 runner.close()
+            self._require_goodput_metric(report.metrics, spec)
             native = report.metadata.get("native_report")
             if isinstance(native, dict):
                 # Retain the existing Dynamo report envelope while preserving
@@ -169,7 +189,7 @@ class DynamoReplayRunner:
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
-            "aic_perf_config": aic_perf_config,
+            "ais_perf_config": ais_perf_config,
             "arrival_speedup_ratio": self._arrival_speedup_ratio(spec),
             "replay_concurrency": self._effective_in_flight_cap(spec),
             "planner_config": planner_config,
@@ -181,16 +201,33 @@ class DynamoReplayRunner:
             # explicitly request detailed output through the Runner contract.
             "capture_per_request": output_requirements.capture_per_request,
             "capture_planner_details": output_requirements.include_raw_report,
+            "telemetry_options": (
+                TelemetryOptions(
+                    sample_interval_ms=output_requirements.telemetry_sample_interval_ms
+                )
+                if output_requirements.capture_telemetry
+                else None
+            ),
             **self._goodput_sla_kwargs(spec),
         }
 
         if self._is_trace(spec):
-            report = self._run_trace(spec, common)
+            report = self._run_trace(spec, common, execution_model=execution_model)
         else:
             common.update(self._synthetic_kwargs(spec))
             report = self._run_synthetic(spec, common)
 
         metrics, metadata = self._normalize_report(report, output_requirements)
+        trace_format = spec.workload.get("trace_format")
+        agentic_lanes = spec.workload.get("agentic_lanes")
+        if trace_format in {"weka", "agentic_mooncake"} or (
+            trace_format == "dynamo" and agentic_lanes is not None
+        ):
+            metadata.update(
+                agentic_qualification=self.capabilities.agentic_qualification,
+                agentic_input_format=trace_format,
+                agentic_lanes=agentic_lanes,
+            )
         self._require_goodput_metric(metrics, spec)
         return ReplayReport(metrics=metrics, metadata=metadata)
 
@@ -226,7 +263,7 @@ class DynamoReplayRunner:
             if isinstance(rank, dict) and rank.get("state_cache") is not None:
                 return True
             if deployment.deployment_mode == "disagg" and any(
-                isinstance(value, Real) and value > 1
+                isinstance(value, (int, float)) and value > 1
                 for value in (args.get("dp_size"), args.get("aic_attention_dp_size"))
             ):
                 return True
@@ -239,13 +276,13 @@ class DynamoReplayRunner:
         dict[str, JSONValue] | None,
         str,
         KvRouterConfig | None,
-        AicPerfConfig | None,
+        AisPerfConfig | None,
         dict[str, JSONValue] | None,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
-        aic_perf_config: AicPerfConfig | None = None
+        ais_perf_config: AisPerfConfig | None = None
         affinity: dict[str, JSONValue] | None = None
         planner_seen = False
         router_seen = False
@@ -281,19 +318,19 @@ class DynamoReplayRunner:
                     affinity = ConversationAffinityConfig.model_validate(
                         raw_affinity
                     ).model_dump(mode="json")
-                raw_aic = hook.config.get("aic_perf_config")
-                if raw_aic is not None:
-                    if not isinstance(raw_aic, dict):
+                raw_ais = hook.config.get("ais_perf_config")
+                if raw_ais is not None:
+                    if not isinstance(raw_ais, dict):
                         raise TypeError(
-                            "Dynamo Router AIC config must be a mapping or null"
+                            "Dynamo Router AIS config must be a mapping or null"
                         )
-                    aic_perf_config = AicPerfConfig(**raw_aic)
+                    ais_perf_config = AisPerfConfig(config=raw_ais)
                 continue
             raise ValueError(
                 f"unsupported Dynamo runtime hook "
                 f"{hook.provider}:{hook.kind}@{hook.api_version}"
             )
-        return planner_config, router_mode, router_config, aic_perf_config, affinity
+        return planner_config, router_mode, router_config, ais_perf_config, affinity
 
     @staticmethod
     def _is_trace(spec: ReplaySpec) -> bool:
@@ -339,159 +376,55 @@ class DynamoReplayRunner:
         }
 
     @staticmethod
+    def _execution_target_model(spec: ReplaySpec) -> str | None:
+        if not DynamoReplayRunner._is_trace(spec):
+            return None
+        trace_format = spec.workload.get("trace_format", "mooncake")
+        if trace_format not in {"weka", "agentic_mooncake", "dynamo"}:
+            return None
+
+        deployment = spec.backend_deployment
+        if deployment.deployment_mode == "agg":
+            role = "aggregated"
+            raw_engine_args = deployment.agg_engine_args
+        else:
+            role = "decode"
+            raw_engine_args = deployment.decode_engine_args
+
+        # Accept both the upstream wire spelling and the canonical AIS identity.
+        candidates: list[Any] = []
+        metadata = deployment.performance_model_metadata.get(role)
+        if isinstance(metadata, Mapping):
+            config = metadata.get("config")
+            if isinstance(config, Mapping):
+                candidates += [config.get("model_path"), config.get("model")]
+        if isinstance(raw_engine_args, Mapping):
+            candidates.append(raw_engine_args.get("aic_model_path"))
+            ais_config = raw_engine_args.get("ais_perf_config")
+            if isinstance(ais_config, Mapping):
+                candidates.append(ais_config.get("model"))
+        for model in candidates:
+            if isinstance(model, str) and model.strip():
+                return model.strip()
+        if trace_format == "dynamo":
+            # The native loader distinguishes standard from agentic Dynamo
+            # traces and enforces a target model only for the latter.
+            return None
+        raise ValueError("agentic execution requires a configured target model")
+
+    @staticmethod
     def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
-        lowered = dict(payload)
-        # AISim 0.13 spells out defaults absent from legacy MockEngineArgs.
-        # Only identical defaults may be omitted at this compatibility boundary.
-        for field, default in (
-            ("prefill_schedule_interval", 1),
-            ("prefill_decode_interval", 0),
-            ("aic_database_mode", "SILICON"),
-            ("aic_strict_provenance", False),
-        ):
-            if field in lowered:
-                value = lowered.pop(field)
-                if type(value) is not type(default) or value != default:
-                    raise ValueError(
-                        f"legacy Dynamo replay requires {field}={default}; "
-                        "this non-default setting needs canonical replay"
-                    )
-        timing = lowered.get("timing_model")
-        if isinstance(timing, dict) and timing.get("type") == "external":
-            if timing.get("provider") != "aic" or not isinstance(
-                timing.get("config"), dict
-            ):
-                raise ValueError(
-                    "legacy Dynamo replay requires the AIC timing provider"
-                )
-            from aisimulate_core.sdk import ForwardPassPerfModelConfig
+        return MockEngineArgs.from_json(json.dumps(lower_upstream_engine_args(payload)))
 
-            config = dict(timing["config"])
-            names = {
-                "model": "aic_model_path",
-                "system": "aic_system",
-                "backend": "aic_backend",
-                "backend_version": "aic_backend_version",
-                "tp": "aic_tp_size",
-                "attention_dp": "aic_attention_dp_size",
-                "moe_tp_size": "aic_moe_tp_size",
-                "moe_ep_size": "aic_moe_ep_size",
-                "gemm_quant_mode": "aic_gemm_dtype",
-                "moe_quant_mode": "aic_moe_dtype",
-                "fmha_quant_mode": "aic_fmha_dtype",
-                "kvcache_quant_mode": "aic_kv_cache_dtype",
-                "comm_quant_mode": "aic_comm_dtype",
-            }
-            identity = {
-                key: config[key]
-                for key in ("model", "system", "backend", "worker_type")
-            }
-            defaults = ForwardPassPerfModelConfig(**identity).to_dict()
-            expected = {
-                **defaults,
-                "worker_type": lowered.get("worker_type", "aggregated"),
-                "kv_block_size": lowered.get("block_size"),
-                "nextn": lowered.get("aic_nextn", 0),
-            }
-            capacity = {
-                "gpu_memory_utilization",
-                "mem_fraction_static",
-                "free_gpu_memory_fraction",
-                "cuda_graph_reserved_bytes",
-            }
-            # Validate what the legacy callback can represent before resolving
-            # capacity. Auto selection must run on the original canonical spec.
-            for key, value in config.items():
-                if (
-                    key in names
-                    or key in capacity
-                    or key
-                    in {
-                        "estimator_config",
-                        "systems_paths",
-                        "transfer_policy",
-                    }
-                ):
-                    continue
-                if key == "estimation_mode" and value in {"auto", "op_level"}:
-                    continue
-                if key not in expected or value != expected[key]:
-                    raise ValueError(
-                        f"legacy Dynamo replay cannot represent AIC setting {key}={value!r}"
-                    )
-            resolve_aic_num_gpu_blocks(lowered)
-            config = dict(lowered["timing_model"]["config"])
-            if config.get("estimation_mode") != "op_level":
-                raise ValueError(
-                    "legacy Dynamo replay requires the selected op_level estimator; "
-                    f"AIC selected {config.get('estimation_mode')!r}"
-                )
-            # Let the same public SDK expand defaults, including estimator
-            # controls and system roots, instead of maintaining a second schema.
-            reference = ForwardPassPerfModelConfig(
-                **{key: config[key] for key in names},
-                worker_type=config["worker_type"],
-                kv_block_size=config["kv_block_size"],
-                nextn=config["nextn"],
-                estimation_mode="op_level",
-            )
-            reference_args = {
-                "num_gpu_blocks": lowered["num_gpu_blocks"],
-                "timing_model": {
-                    "type": "external",
-                    "provider": "aic",
-                    "config": reference.to_dict(),
-                },
-            }
-            resolve_aic_num_gpu_blocks(reference_args)
-            expected = reference_args["timing_model"]["config"]
-            for key, value in config.items():
-                if key in names:
-                    target = names[key]
-                    if target in lowered and lowered[target] != value:
-                        raise ValueError(f"conflicting legacy AIC setting {target}")
-                    if value is not None:
-                        lowered[target] = value
-                elif key in capacity:
-                    if key in lowered and lowered[key] != value:
-                        raise ValueError(f"conflicting AIC capacity setting {key}")
-                    lowered[key] = value
-                elif key not in expected or value != expected[key]:
-                    raise ValueError(
-                        f"legacy Dynamo replay cannot represent AIC setting {key}={value!r}"
-                    )
-            tensor_parallel_size = lowered.pop(
-                "tensor_parallel_size", config.get("tp", 1)
-            )
-            if tensor_parallel_size != lowered.get("aic_tp_size", 1):
-                raise ValueError("conflicting AIC tensor parallel sizes")
-            lowered.pop("timing_model")
-        if isinstance(timing, dict) and timing.get("type") in {
-            "fixed",
-            "polynomial",
-        }:
-            attention_dp = lowered.pop("aic_attention_dp_size", None)
-            if attention_dp is not None:
-                lowered["dp_size"] = attention_dp
-            for name in (
-                "aic_backend",
-                "aic_backend_version",
-                "aic_system",
-                "aic_model_path",
-            ):
-                lowered.pop(name, None)
-        resolve_aic_num_gpu_blocks(lowered)
-        # The AISim capacity helper has already applied this reservation to the
-        # inferred block count; MockEngineArgs only accepts the materialized pool.
-        lowered.pop("cuda_graph_reserved_bytes", None)
-        # Pipeline parallelism is already represented in the public parallel
-        # mapping and used for AIC capacity. MockEngineArgs has no PP field.
-        lowered.pop("aic_pp_size", None)
-        return MockEngineArgs.from_json(json.dumps(lowered))
-
-    def _run_trace(self, spec: ReplaySpec, common: dict[str, Any]):
+    def _run_trace(
+        self,
+        spec: ReplaySpec,
+        common: dict[str, Any],
+        *,
+        execution_model: str | None,
+    ):
         deployment = spec.backend_deployment
         raw_paths = spec.workload.get("trace_paths")
         trace_files: str | list[str]
@@ -510,15 +443,23 @@ class DynamoReplayRunner:
         if not isinstance(trace_format, str):
             raise TypeError("trace workload requires a string trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
+        trace_block_size = spec.workload.get("trace_block_size")
+        # Weka and Dynamo traces carry their source block size in the trace
+        # metadata. Leave it unset so AISimulate can validate and use that
+        # embedded value instead of imposing the synthetic-workload default.
+        if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
+            trace_block_size = self.trace_block_size
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
                 trace_format=trace_format,
-                trace_block_size=spec.workload.get(
-                    "trace_block_size", self.trace_block_size
+                weka_nested_timestamp_basis=spec.workload.get(
+                    "weka_nested_timestamp_basis"
                 ),
+                trace_block_size=trace_block_size,
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
                 agentic_lanes=agentic_lanes,
+                execution_model=execution_model,
                 extra_engine_args=self._engine_args(deployment.agg_engine_args),
                 num_workers=deployment.num_workers,
                 **common,
@@ -526,11 +467,13 @@ class DynamoReplayRunner:
         return run_trace_replay(
             trace_files=trace_files,
             trace_format=trace_format,
-            trace_block_size=spec.workload.get(
-                "trace_block_size", self.trace_block_size
+            weka_nested_timestamp_basis=spec.workload.get(
+                "weka_nested_timestamp_basis"
             ),
+            trace_block_size=trace_block_size,
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
             agentic_lanes=agentic_lanes,
+            execution_model=execution_model,
             prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
             decode_engine_args=self._engine_args(deployment.decode_engine_args),
             num_prefill_workers=deployment.num_prefill_workers,
@@ -607,12 +550,14 @@ class DynamoReplayRunner:
             "request_count": request_count,
             "request_rate": rate if load_type == "poisson" else None,
             "arrival_interval_ms": (
-                arrival_interval_ms
-                if arrival_interval_ms is not None
-                else (1000.0 / rate if rate is not None else None)
-            )
-            if load_type != "poisson"
-            else None,
+                (
+                    arrival_interval_ms
+                    if arrival_interval_ms is not None
+                    else (1000.0 / rate if rate is not None else None)
+                )
+                if load_type != "poisson"
+                else None
+            ),
             "arrival_seed": _int_value(
                 workload.get("arrival_seed", 42), "arrival_seed"
             ),
@@ -650,6 +595,14 @@ class DynamoReplayRunner:
         else:
             trace_report = dict(report)
 
+        for name in ("agentic_graph", "agentic_model_projection"):
+            value = trace_report.get(name)
+            if isinstance(value, dict):
+                metadata[name] = value
+        resolved_weka_basis = trace_report.get("weka_nested_timestamp_basis")
+        if isinstance(resolved_weka_basis, str):
+            metadata["weka_nested_timestamp_basis"] = resolved_weka_basis
+
         metrics: dict[str, float] = {}
         for name, value in trace_report.items():
             if isinstance(value, Real):
@@ -665,6 +618,8 @@ class DynamoReplayRunner:
             else:
                 native_report = dict(report)
             metadata["native_report"] = native_report
+        if output_requirements.capture_telemetry:
+            metadata["telemetry"] = report.telemetry.to_dict()
         return metrics, metadata
 
     @staticmethod
@@ -692,7 +647,7 @@ class _CanonicalReplayRuntime:
     """Use the existing Dynamo entry point with AISimulate's neutral lowering."""
 
     router_config: KvRouterConfig | None
-    aic_perf_config: AicPerfConfig | None
+    ais_perf_config: AisPerfConfig | None
     affinity: dict[str, JSONValue] | None
 
     def run_replay_json(self, execution_spec_json: str) -> str:
@@ -700,7 +655,7 @@ class _CanonicalReplayRuntime:
             [],
             router_mode="kv_router",
             router_config=self.router_config,
-            aic_perf_config=self.aic_perf_config,
+            ais_perf_config=self.ais_perf_config,
             replay_spec_json=execution_spec_json,
             affinity=self.affinity,
         )

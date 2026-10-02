@@ -6,7 +6,6 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
-use rustc_hash::FxHashSet;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -15,10 +14,11 @@ use tokio_util::sync::CancellationToken;
 use crate::identity::RoutingPartitionId;
 use crate::protocols::{PrefillLoadHint, WorkerId, WorkerWithDpRank};
 use crate::scheduling::PotentialLoad;
-use crate::sequences::topology::{WorkerDpRange, WorkerTopologyError};
+use crate::sequences::topology::{
+    MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError,
+};
 use crate::sequences::{
-    ActiveSequencesMultiWorker, PrefillTokenDeltas, ReplicaWorkerPolicy, SequenceError,
-    SequenceRequest,
+    ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
 };
 
 use crate::services::common::replica_sync::{
@@ -52,6 +52,9 @@ pub enum RegistryError {
 
     #[error("dp_size must be greater than 0")]
     InvalidDpSize,
+
+    #[error("dp_size {dp_size} exceeds the maximum {MAX_DATA_PARALLEL_RANKS_PER_WORKER}")]
+    DpSizeTooLarge { dp_size: u32 },
 
     #[error("dp range overflows u32: start={dp_start} size={dp_size}")]
     InvalidDpRange { dp_start: u32, dp_size: u32 },
@@ -340,20 +343,18 @@ impl SlotTrackerRegistry {
             if !matches_filters(key, model_name, routing_group) {
                 continue;
             }
-            let (decode_blocks, prefill_tokens, _) = entry
+            let projections = entry
                 .value()
                 .tracker
-                .potential_blocks_and_tokens::<false>(None, &PrefillTokenDeltas::none());
-            let mut workers: FxHashSet<_> = decode_blocks.keys().copied().collect();
-            workers.extend(prefill_tokens.keys().copied());
-            for worker in workers {
+                .project_worker_loads(None, Instant::now());
+            for (worker, projection) in projections {
                 loads.push(ActiveLoadInfo {
                     model_name: key.model_name.clone(),
                     routing_group: key.routing_group.clone(),
                     worker_id: worker.worker_id,
                     dp_rank: worker.dp_rank,
-                    active_prefill_tokens: prefill_tokens.get(&worker).copied().unwrap_or(0),
-                    active_decode_blocks: decode_blocks.get(&worker).copied().unwrap_or(0),
+                    active_prefill_tokens: projection.active_prefill_tokens,
+                    active_decode_blocks: projection.active_decode_blocks,
                 });
             }
         }
@@ -375,20 +376,18 @@ impl SlotTrackerRegistry {
         new_isl_tokens: usize,
     ) -> Result<Vec<PotentialLoad>, RegistryError> {
         let entry = self.entry(key)?;
-        let (decode_blocks, prefill_tokens, active_requests) =
-            entry.tracker.potential_blocks_and_tokens::<true>(
-                Some(sequence_hashes),
-                &PrefillTokenDeltas::uniform(new_isl_tokens),
-            );
-        let active_requests = active_requests.expect("active request projection should be present");
-        Ok(decode_blocks
+        // One projection map carries every field; the request's ISL is a uniform prefill delta.
+        let projections = entry
+            .tracker
+            .project_worker_loads(Some(sequence_hashes), Instant::now());
+        Ok(projections
             .into_iter()
-            .map(|(worker, potential_decode_blocks)| PotentialLoad {
+            .map(|(worker, projection)| PotentialLoad {
                 worker_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
-                potential_prefill_tokens: prefill_tokens.get(&worker).copied().unwrap_or(0),
-                potential_decode_blocks,
-                active_requests: active_requests.get(&worker).copied().unwrap_or(0),
+                potential_prefill_tokens: projection.active_prefill_tokens + new_isl_tokens,
+                potential_decode_blocks: projection.potential_decode_blocks(),
+                active_requests: projection.active_requests,
             })
             .collect())
     }
@@ -484,6 +483,9 @@ fn validate_block_size(block_size: u32) -> Result<(), RegistryError> {
 fn topology_error(key: &RoutingPartitionId, error: WorkerTopologyError) -> RegistryError {
     match error {
         WorkerTopologyError::InvalidDpSize { .. } => RegistryError::InvalidDpSize,
+        WorkerTopologyError::DpSizeTooLarge { dp_size, .. } => {
+            RegistryError::DpSizeTooLarge { dp_size }
+        }
         WorkerTopologyError::InvalidDpRange {
             dp_start, dp_size, ..
         } => RegistryError::InvalidDpRange { dp_start, dp_size },
@@ -561,6 +563,16 @@ mod tests {
         assert!(matches!(
             registry.register(key("default"), 1, 16, u32::MAX, 1),
             Err(RegistryError::InvalidDpRange { .. })
+        ));
+        assert!(matches!(
+            registry.register(
+                key("default"),
+                1,
+                16,
+                0,
+                MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1
+            ),
+            Err(RegistryError::DpSizeTooLarge { .. })
         ));
     }
 

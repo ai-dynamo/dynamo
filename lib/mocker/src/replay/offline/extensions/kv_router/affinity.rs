@@ -129,7 +129,12 @@ impl ReplayClock {
             now_ms.is_finite() && now_ms >= 0.0,
             "invalid replay affinity time {now_ms}"
         );
-        let target = self.epoch + Duration::from_secs_f64(now_ms / 1000.0);
+        let elapsed = Duration::try_from_secs_f64(now_ms / 1000.0)
+            .map_err(|_| anyhow!("replay affinity time is too large: {now_ms}"))?;
+        let target = self
+            .epoch
+            .checked_add(elapsed)
+            .ok_or_else(|| anyhow!("replay affinity time is too large: {now_ms}"))?;
         let _entered = self.runtime.enter();
         let now = Instant::now();
         ensure!(target >= now, "replay affinity clock moved backwards");

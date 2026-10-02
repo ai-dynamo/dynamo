@@ -40,10 +40,11 @@ It is a standalone Rust executable and is also compiled into
 - Preprocessed image features with dense placeholders, plus sparse placeholders when the renderer preserves `is_embed`. Sparse layouts such as Nemotron-H Omni require a vLLM revision containing [vllm-project/vllm#54548](https://github.com/vllm-project/vllm/pull/54548) on Python renderer round-trips.
 - Dynamic LoRA load, unload, list, discovery, and request selection when vLLM enables LoRA
 - Opaque encoder-cache handoff through vLLM `ec_transfer_params`
+- Multimodal-aware KV routing for images
 
 Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 
-The sidecar does not support beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. The Dynamo frontend accepts inline media through OpenAI-compatible `data:` URLs; it does not expose a separate raw-byte media variant. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
+The sidecar does not support beam search or `n > 1`. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. The Dynamo frontend accepts inline media through OpenAI-compatible `data:` URLs; it does not expose a separate raw-byte media variant.
 
 In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
 
@@ -164,6 +165,33 @@ python -m dynamo.vllm.sidecar \
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
 
+### Tool-call and reasoning parsing
+
+Configure Dynamo frontend parsing on the sidecar with the same flags used by
+`python -m dynamo.vllm` and `python -m dynamo.sglang`. For the Qwen3 example above:
+
+```bash
+python -m dynamo.vllm.sidecar \
+  --grpc-endpoint 127.0.0.1:50051 \
+  --dyn-tool-call-parser hermes \
+  --dyn-reasoning-parser qwen3
+```
+
+`DYN_TOOL_CALL_PARSER` and `DYN_REASONING_PARSER` provide the equivalent environment
+settings. Use Dynamo parser names. The sidecar advertises these names to the
+Dynamo frontend, which parses the generated output. vLLM's gRPC generation path
+bypasses its chat output parsers, so setting native vLLM parsers does not parse
+the response twice.
+
+When these flags and environment variables are absent, the sidecar advertises no
+parsers. It does not infer Dynamo parser settings from vLLM's native parser names.
+
+Requests that require visible stop-token preservation, `max_thinking_tokens`, or
+reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`) still fail
+explicitly in the gRPC request converter. These limitations affect some tool
+terminators and reasoning/structured-output combinations; enabling a parser does
+not add support for those request controls.
+
 ### RL workflows
 
 Start vLLM with the capabilities required by the workflow, then opt the sidecar into RL discovery. This example targets vLLM 0.28:
@@ -199,9 +227,22 @@ The update request bodies match vLLM's RL HTTP schemas: `init_weight_transfer_en
 
 The RL endpoint, engine routes, and raw HTTP compatibility surface are administrative interfaces that can pause serving, release GPU memory, and replace model weights. The sidecar does not add HTTP authentication to the advertised URL. Enable these interfaces only on trusted request and system networks, or place the HTTP endpoint behind an authenticated private proxy without embedding credentials in the published URL.
 
-The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
+The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser names returned by Control are used for engine identity validation; configure Dynamo frontend parsers explicitly as described above.
 
 For hybrid data parallelism, run one vLLM gRPC frontend and sidecar per node with `--data-parallel-hybrid-lb` and the node's local DP size and starting rank. Point each sidecar's `--grpc-endpoint` at its local frontend. This requires a vLLM build that reports local DP size.
+
+For a multimodal model, the sidecar resolves the model's chat image-placeholder
+token from its local or Hugging Face configuration and attaches it to every ZMQ
+source. This lets backend events use the same canonical image hash as frontend
+routing. If the model configuration or exact-routing prerequisites cannot be
+resolved, inference remains available but falls back to ordinary text-prefix KV
+routing.
+
+The forwarded 64-hex vLLM media identifier contains Dynamo's 64-bit routing hash
+and becomes part of vLLM's encoder and prefix-cache identity. Treat passed-through
+HTTP URLs as immutable: changing the bytes behind one URL can reuse stale media
+cache state. User-supplied media UUIDs retain their vLLM semantics and disable
+exact Dynamo multimodal credit.
 
 Aggregated serving is the default. The sidecar role is configured explicitly because the current Control API does not report it:
 

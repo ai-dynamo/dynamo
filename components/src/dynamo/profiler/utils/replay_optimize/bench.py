@@ -26,8 +26,8 @@ def compare_aic_and_replay_disagg(
             "requestCount and concurrency"
         )
 
-    # Deferred: aiconfigurator is optional, so the package must import without it
-    # (mirrors aic._load_aiconfigurator_modules). Only this function needs AIC.
+    # Deferred: AISimulate is optional, so the package must import without it
+    # (mirrors aic._load_aisimulate_modules). Only this function needs AIC.
     from aisimulate.sdk.task_v2 import Task
 
     aic_task = Task(

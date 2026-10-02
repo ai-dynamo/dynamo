@@ -26,7 +26,6 @@ zmq-events = ["dep:tmq"]
 dynamo-custom-policy-builtin = { workspace = true }
 # repo
 aisimulate-core = { workspace = true }
-dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
 dynamo-tokens = { workspace = true }
 

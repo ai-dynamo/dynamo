@@ -359,7 +359,7 @@ def _preprocess_worker(
         pre.tool_call_parser,
         pre.reasoning_parser,
         require_reasoning=_guided_output_requires_reasoning(
-            request, pre.force_reasoning, _w_reasoning_parser_name
+            request, pre.force_reasoning, _w_reasoning_parser_name, pre.guided_decoding
         ),
     )
 
@@ -617,7 +617,10 @@ class SglangProcessor:
                 pre.tool_call_parser,
                 pre.reasoning_parser,
                 require_reasoning=_guided_output_requires_reasoning(
-                    request, pre.force_reasoning, self.reasoning_parser_name
+                    request,
+                    pre.force_reasoning,
+                    self.reasoning_parser_name,
+                    pre.guided_decoding,
                 ),
             )
         except PreprocessError as exc:
@@ -690,6 +693,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             reasoning_parser_name=preproc_result.effective_reasoning_parser_name,
             force_reasoning=preproc_result.force_reasoning,
+            tokenizer=self.tokenizer,
         )
 
         post = SglangStreamingPostProcessor(
