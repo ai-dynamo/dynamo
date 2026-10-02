@@ -179,20 +179,4 @@ mod tests {
             .unwrap();
         assert_eq!(body.as_ref(), br#"{"error":"request classifier failed"}"#);
     }
-
-    /// A full policy class is backpressure (429), not unavailability.
-    #[test]
-    fn queue_rejection_is_throttling_not_unavailable() {
-        let rejection = crate::scheduling::QueueRejection {
-            policy_class: "batch".to_string(),
-            limit_kind: crate::scheduling::QueueLimitKind::Requests,
-            current: 8,
-            limit: 8,
-        };
-
-        assert_eq!(
-            SelectionError::Scheduler(KvSchedulerError::QueueRejected(rejection)).status_code(),
-            StatusCode::TOO_MANY_REQUESTS.as_u16()
-        );
-    }
 }

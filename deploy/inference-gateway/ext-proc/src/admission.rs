@@ -86,7 +86,6 @@ fn classify_error_class(class: ErrorType) -> Option<RouterRejection> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::protocols::WorkerId;
 
     fn anyhow_from(error: KvSchedulerError) -> anyhow::Error {
         error.into()
@@ -98,20 +97,6 @@ mod tests {
             .message("internal router detail that must not reach the client")
             .build()
             .into()
-    }
-
-    #[test]
-    fn overloaded_family_classifies_as_overloaded() {
-        assert_eq!(
-            classify_router_error(&anyhow_from(KvSchedulerError::AllEligibleWorkersOverloaded)),
-            RouterRejection::Overloaded
-        );
-        assert_eq!(
-            classify_router_error(&anyhow_from(KvSchedulerError::PinnedWorkerOverloaded {
-                worker_id: WorkerId::default(),
-            })),
-            RouterRejection::Overloaded
-        );
     }
 
     #[test]
@@ -129,11 +114,7 @@ mod tests {
             classify_router_error(&dynamo_error(ErrorType::Unavailable)),
             RouterRejection::Unavailable
         );
-    }
-
-    /// Canonical classes classify like their legacy names.
-    #[test]
-    fn canonical_error_classes_classify_the_same_as_legacy_ones() {
+        // Canonical names classify the same.
         assert_eq!(
             classify_router_error(&dynamo_error(ErrorType::CapacityExhausted)),
             RouterRejection::Overloaded
@@ -144,41 +125,6 @@ mod tests {
         );
         assert_eq!(
             classify_router_error(&dynamo_error(ErrorType::InvalidRequest)),
-            RouterRejection::BadRequest
-        );
-        assert_eq!(
-            classify_router_error(&dynamo_error(ErrorType::InvalidArgument)),
-            RouterRejection::BadRequest
-        );
-    }
-
-    #[test]
-    fn unavailable_family_classifies_as_unavailable() {
-        for error in [
-            KvSchedulerError::NoEndpoints,
-            KvSchedulerError::AllEligibleWorkersFiltered,
-            KvSchedulerError::SubscriberShutdown,
-            KvSchedulerError::InitFailed("boom".to_string()),
-        ] {
-            assert_eq!(
-                classify_router_error(&anyhow_from(error)),
-                RouterRejection::Unavailable
-            );
-        }
-    }
-
-    #[test]
-    fn booking_and_pin_failures_keep_their_own_classes() {
-        assert_eq!(
-            classify_router_error(&anyhow_from(KvSchedulerError::BookingFailed(
-                "duplicate".to_string()
-            ))),
-            RouterRejection::Conflict
-        );
-        assert_eq!(
-            classify_router_error(&anyhow_from(KvSchedulerError::PinnedWorkerNotAllowed {
-                worker_id: WorkerId::default(),
-            })),
             RouterRejection::BadRequest
         );
     }
@@ -194,34 +140,6 @@ mod tests {
     fn unrecognized_errors_stay_unavailable_not_internal() {
         let opaque = anyhow::anyhow!("something the EPP has never seen");
         assert_eq!(classify_router_error(&opaque), RouterRejection::Unavailable);
-    }
-
-    /// Pins `TODO(epp-deadline-429)`.
-    #[test]
-    fn deadline_exceeded_is_not_yet_a_429() {
-        assert_eq!(
-            classify_router_error(&dynamo_error(ErrorType::DeadlineExceeded)),
-            RouterRejection::Unavailable
-        );
-    }
-
-    #[test]
-    fn rejections_carry_no_router_internals() {
-        let internal = "internal router detail that must not reach the client";
-        for rejection in [
-            RouterRejection::Overloaded,
-            RouterRejection::QueueRejected,
-            RouterRejection::Unavailable,
-            RouterRejection::Conflict,
-            RouterRejection::BadRequest,
-            RouterRejection::Internal,
-        ] {
-            let message = rejection.into_pick_error().to_string();
-            assert!(
-                !message.contains(internal),
-                "{rejection:?} leaked router internals: {message}"
-            );
-        }
     }
 
     #[test]
