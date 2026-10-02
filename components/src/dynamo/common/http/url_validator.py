@@ -16,6 +16,7 @@ below.
 
 import asyncio
 import ipaddress
+import logging
 import os
 import socket
 from dataclasses import dataclass
@@ -23,9 +24,48 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import unquote, urlparse
 
+logger = logging.getLogger(__name__)
+
 
 class UrlValidationError(ValueError):
     """Raised when a URL or filesystem path fails the configured policy."""
+
+
+# Size cap for a ``data:`` URL, which carries its whole payload inline.
+DYN_MM_MAX_DATA_URL_MB: Final = "DYN_MM_MAX_DATA_URL_MB"
+DEFAULT_MAX_DATA_URL_MB: Final = 16
+
+
+def max_data_url_bytes() -> int:
+    """Size cap in bytes for a ``data:`` URL, from ``DYN_MM_MAX_DATA_URL_MB``.
+
+    Read per call, like ``media_reference.max_media_bytes``. An unparseable or
+    non-positive value falls back to the default with a warning, so a bad value
+    neither stops the worker nor removes the cap.
+    """
+    default = DEFAULT_MAX_DATA_URL_MB * 1024 * 1024
+    raw = os.getenv(DYN_MM_MAX_DATA_URL_MB, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid %s=%r; using %s MB",
+            DYN_MM_MAX_DATA_URL_MB,
+            raw,
+            DEFAULT_MAX_DATA_URL_MB,
+        )
+        return default
+    if value <= 0:
+        logger.warning(
+            "Ignoring non-positive %s=%r; using %s MB",
+            DYN_MM_MAX_DATA_URL_MB,
+            raw,
+            DEFAULT_MAX_DATA_URL_MB,
+        )
+        return default
+    return value * 1024 * 1024
 
 
 # IP ranges that must never be reachable from a user-controlled URL.
@@ -180,6 +220,20 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     # URI carries the whole payload inline, so building one for the branch that
     # returns without using it dominates the call (98% of it at 32 MiB).
     if scheme == "data":
+        limit = max_data_url_bytes()
+        # len() counts characters. isascii() is O(1), so only a non-ASCII URL
+        # is encoded to count its bytes. surrogatepass counts a lone surrogate
+        # instead of raising UnicodeEncodeError.
+        if url.isascii():
+            size = len(url)
+        else:
+            size = len(url.encode("utf-8", "surrogatepass"))
+        if size > limit:
+            raise UrlValidationError(
+                f"data: URL is {size} bytes, exceeds the {limit}-byte limit. "
+                f"To raise the limit, set {DYN_MM_MAX_DATA_URL_MB} (in megabytes) "
+                "on both the frontend and the workers."
+            )
         return url
 
     # Every message below is surfaced to the caller (the diffusion handlers
