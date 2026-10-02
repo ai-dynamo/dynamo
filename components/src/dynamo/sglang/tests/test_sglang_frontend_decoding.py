@@ -26,6 +26,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     FrontendDecodedVideo,
 )
+from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
     Modality,
     MultimodalEncodeWorkerHandler,
@@ -449,7 +450,15 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
-        yield None
+        async def wait_forever():
+            await asyncio.Future()
+
+        task = asyncio.create_task(wait_forever())
+        try:
+            yield task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     handler._cancellation_monitor = no_cancellation_monitor
 
@@ -505,6 +514,37 @@ async def test_aggregated_fd_off_passes_media_url_strings():
 
 
 @pytest.mark.asyncio
+async def test_aggregated_forwards_grouped_mm_hashes_in_sglang_item_order():
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    handler._mm_hashes_supported = True
+    captured: Dict[str, Any] = {}
+
+    async def fake_async_generate(**kwargs):
+        captured.update(kwargs)
+        return _empty_stream()
+
+    handler.engine = SimpleNamespace(async_generate=fake_async_generate)
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": ["https://example.com/a.jpg"],
+            "video_url": ["https://example.com/a.mp4"],
+        },
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                "video": ["video-a"],
+                "image": ["image-a"],
+            }
+        },
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert captured["mm_hashes"] == ["image-a", "video-a"]
+
+
+@pytest.mark.asyncio
 async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
     """With --frontend-decoding, Decoded items are loaded via ImageLoader and
     forwarded as PIL Images (not strings) to engine.async_generate."""
@@ -533,6 +573,7 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
 
     request = {
         "token_ids": [1, 2, 3],
+        "image_cache_scope": "session-42",
         "multi_modal_data": {"image_url": [{"Decoded": decoded_metadata}]},
     }
 
@@ -540,7 +581,7 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
         pass
 
     image_loader.load_image_batch.assert_awaited_once_with(
-        [{"Decoded": decoded_metadata}]
+        [{"Decoded": decoded_metadata}], cache_scope="session-42"
     )
     assert captured["image_data"] == [pil_stub]
 
@@ -613,3 +654,224 @@ async def test_aggregated_fd_on_no_images_passes_none():
         pass
 
     assert captured["image_data"] is None
+
+
+class _GenerateRecorder:
+    """Stands in for ``sgl.Engine``, recording each ``async_generate`` call.
+
+    ``calls`` holds one keyword-argument dict per call, so a test can assert both
+    what reached the engine and that the engine was reached exactly once. The
+    ``**kwargs`` signature accepts whatever keyword arguments a call site passes,
+    so the recorder stays compatible as those call sites evolve.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[Dict[str, Any]] = []
+
+    async def async_generate(
+        self, **kwargs: Any
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        self.calls.append(kwargs)
+        return _empty_stream()
+
+
+@pytest.fixture
+def session_agent_context() -> Dict[str, Any]:
+    """Request fields carrying a session id, rebuilt for each test.
+
+    The nested ``agent_context`` mapping reaches the handler by reference, so
+    each test needs its own copy.
+    """
+    return {"agent_context": {"session_id": "s-1"}}
+
+
+def _enable_session_radix_cache(handler: Any) -> None:
+    """Enable the former session-radix path on the test handler.
+
+    The core-contract tests below run with the flag on because that is the most
+    demanding state: if any code ever reads the flag again, on is the state that
+    would re-enable the removed path. No production code reads it today.
+    """
+    handler.enable_session_radix_cache = True
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(
+            served_model_name="test-model", enable_session_radix_cache=True
+        )
+    )
+
+
+def _new_prefill_handler() -> PrefillWorkerHandler:
+    """Build a PrefillWorkerHandler without invoking sgl.Engine."""
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.use_sglang_tokenizer = False
+    handler.enable_trace = False
+    handler.serving_mode = DisaggregationMode.PREFILL
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(served_model_name="test-model")
+    )
+    handler.bootstrap_host = "127.0.0.1"
+    handler.bootstrap_port = 1234
+    handler._generate_bootstrap_room = lambda: 7
+    handler._consume_tasks = set()
+
+    @asynccontextmanager
+    async def no_cancellation_monitor(*args, **kwargs):
+        async def wait_forever():
+            await asyncio.Future()
+
+        task = asyncio.create_task(wait_forever())
+        try:
+            yield task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    handler._cancellation_monitor = no_cancellation_monitor
+
+    handler._get_input_param = lambda req: {"input_ids": req.get("token_ids", [])}
+    handler._resolve_lora = lambda req: None
+    handler._priority_kwargs = lambda priority: {}
+
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    [
+        DisaggregationMode.AGGREGATED,
+        DisaggregationMode.PREFILL,
+        DisaggregationMode.DECODE,
+    ],
+)
+async def test_cache_salt_reaches_engine(mode, unused_tcp_port):
+    handler = (
+        _new_prefill_handler()
+        if mode == DisaggregationMode.PREFILL
+        else _new_decode_handler(enable_frontend_decoding=False)
+    )
+    handler.serving_mode = mode
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {"cache_salt": "tenant-a"},
+        "extra_args": {"nvext": {"cache_salt": "body-salt"}},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": unused_tcp_port,
+            "bootstrap_room": 7,
+        },
+    }
+    routed_request = (
+        {"request": request, "sampling_params": {}}
+        if mode == DisaggregationMode.PREFILL
+        else request
+    )
+
+    async for _ in handler.generate(routed_request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["cache_salt"] == "tenant-a"
+
+    del request["routing"]
+    del request["extra_args"]
+    async for _ in handler.generate(routed_request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 2
+    assert "cache_salt" not in recorder.calls[1]
+
+
+@pytest.mark.asyncio
+async def test_aggregated_decode_omits_session_params_for_agent_context(
+    session_agent_context: Dict[str, Any],
+):
+    """Aggregated decode must not turn ``agent_context.session_id`` into
+    ``session_params``.
+    """
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    _enable_session_radix_cache(handler)
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {},
+        **session_agent_context,
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    captured = recorder.calls[0]
+    assert captured["input_ids"] == [1, 2, 3]
+    assert "session_params" not in captured
+
+
+@pytest.mark.asyncio
+async def test_disaggregated_decode_omits_session_params_for_agent_context(
+    session_agent_context: Dict[str, Any],
+):
+    """Disaggregated decode must not attach ``session_params`` either.
+
+    ``DecodeWorkerHandler.generate`` reaches the engine through a separate
+    disaggregated branch, so that call site needs its own coverage.
+    """
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    handler.serving_mode = DisaggregationMode.DECODE
+    _enable_session_radix_cache(handler)
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {},
+        "bootstrap_info": {
+            "bootstrap_host": "127.0.0.1",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 7,
+        },
+        **session_agent_context,
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    captured = recorder.calls[0]
+    assert captured["input_ids"] == [1, 2, 3]
+    assert captured["bootstrap_room"] == 7
+    assert "session_params" not in captured
+
+
+@pytest.mark.asyncio
+async def test_prefill_omits_session_params_for_agent_context(
+    session_agent_context: Dict[str, Any],
+):
+    """Prefill must not attach ``session_params`` either.
+
+    ``PrefillWorkerHandler.generate`` has its own engine call site, so it needs
+    coverage independent of the decode handler.
+    """
+    handler = _new_prefill_handler()
+    _enable_session_radix_cache(handler)
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        **session_agent_context,
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    captured = recorder.calls[0]
+    assert captured["input_ids"] == [1, 2, 3]
+    assert "session_params" not in captured

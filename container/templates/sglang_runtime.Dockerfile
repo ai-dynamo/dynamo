@@ -14,6 +14,9 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG MODELEXPRESS_VERSION
+{% if device == "cuda" %}
+ARG CUDA_MAJOR
+{% endif %}
 
 WORKDIR /workspace
 
@@ -180,11 +183,125 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 # Install SGLang-specific runtime dependencies without changing the upstream
 # dependency solution. imageio-ffmpeg is installed from source (no bundled
 # binary) for the VP9 video-encode path; see requirements.sglang.txt.
+{% if device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
+    [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: requirements.sglang.txt hardcodes the mooncake-transfer-engine-cuda13 distribution; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
+
+# Assert what the install left. The upstream SGLang image ships no
+# PyNvVideoCodec, so nothing is removed first -- but that is a property of the
+# current base rather than a guarantee, and checking the result is what keeps it
+# honest. PINNED is duplicated from the requirements file deliberately: this stage
+# must not parse the file it is checking; a test asserts the two agree.
+RUN python3 - <<'PYEOF'
+import csv
+import glob
+import os
+import re
+import sys
+from importlib.metadata import distributions
+
+PINNED = "2.2.3"
+NAME = "pynvvideocodec"
+# Mirrors the deny globs in container/compliance/policy/codec_policy.yaml. Kept as
+# families rather than the four this package happens to have shed, so a future
+# release vendoring libpostproc or libx264 is caught here -- beside the install
+# that introduced it -- instead of as an unattributed scan violation later.
+DENIED = (
+    "libavcodec",
+    "libavdevice",
+    "libavfilter",
+    "libswscale",
+    "libswresample",
+    "libpostproc",
+    "libx264",
+    "libx265",
+    "libfdk-aac",
+)
+
+
+def canonical(name):
+    return re.sub(r"[-_.]+", "-", name or "").lower()
+
+
+# Enumerated over sys.path rather than one scheme directory: these images carry
+# both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
+# and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
+# alone is guaranteed to be the install target or the only place a copy can hide.
+# A surviving base copy beside the new one is the failure being looked for, which
+# is also why this counts distributions instead of asking for one version.
+installed = [d for d in distributions() if canonical(d.metadata["Name"]) == NAME]
+versions = sorted(d.version for d in installed)
+print("PyNvVideoCodec distributions on sys.path:", versions)
+if len(installed) != 1:
+    sys.exit(f"ERROR: expected exactly one PyNvVideoCodec, found {versions}")
+if versions[0] != PINNED:
+    sys.exit(f"ERROR: PyNvVideoCodec is {versions[0]}, but the requirements file "
+             f"pins {PINNED}")
+
+site = os.path.normpath(str(installed[0].locate_file("")))
+pkg = os.path.join(site, "PyNvVideoCodec")
+bundled = sorted(
+    os.path.relpath(p, pkg)
+    for p in glob.glob(os.path.join(pkg, "**", "lib*.so*"), recursive=True)
+)
+print("PyNvVideoCodec bundles:", bundled)
+# Positive first, and on both libraries: an empty package directory satisfies
+# every negative check below while shipping no demuxer at all.
+for required in ("libavformat", "libavutil"):
+    if not any(os.path.basename(n).startswith(required) for n in bundled):
+        sys.exit(
+            f"ERROR: PyNvVideoCodec bundles no {required}, so the checks below "
+            f"would pass vacuously; found {bundled}"
+        )
+denied = [n for n in bundled if os.path.basename(n).startswith(DENIED)]
+if denied:
+    sys.exit(f"ERROR: PyNvVideoCodec bundles libraries the codec gate denies: {denied}")
+
+# The FFmpeg source tarball lands outside site-packages, so its directory is read
+# from the wheel's own RECORD rather than guessed from a sysconfig path -- the
+# RECORD is what the installer actually wrote, and it moves if the layout does.
+record = installed[0].read_text("RECORD") or ""
+declared = [
+    row[0]
+    for row in csv.reader(record.splitlines())
+    if row and row[0].endswith((".tar.xz", ".tar.gz", ".tar.bz2"))
+]
+if len(declared) != 1:
+    sys.exit(f"ERROR: expected one source tarball in the RECORD, found {declared}")
+external = os.path.dirname(os.path.normpath(os.path.join(site, declared[0])))
+tarballs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(external, "ffmpeg-*.tar.*")))
+print("bundled FFmpeg source tarballs in", external, "->", tarballs)
+if len(tarballs) != 1:
+    sys.exit(f"ERROR: expected exactly one bundled FFmpeg source tarball, found {tarballs}")
+PYEOF
+{% else %}
+# mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
+# distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
+# are inert on the XPU image and neither is present in its base. The patterns are
+# anchored to the line start so they cannot match inside another requirement, and
+# the checks fail the build if either package arrives by another route -- a filter
+# that silently stopped matching would otherwise look like success. Both checks
+# are positive tests with no `!` and no stderr redirect, so a broken interpreter
+# fails the build instead of passing it vacuously.
+#
+# Whole-RUN branches, rather than a conditional inside one RUN: a `{% raw %}{% if %}{% endraw %}` in the
+# middle of a `\`-continued command emits a blank line that ends the command
+# early. Matches the equivalent branch in vllm_runtime.Dockerfile.
+RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' \
+        /tmp/requirements.sglang.txt > /tmp/requirements.sglang.nonvidia.txt && \
+    pip install --break-system-packages --force-reinstall --no-deps \
+        --requirement /tmp/requirements.sglang.nonvidia.txt && \
+    rm -f /tmp/requirements.sglang.nonvidia.txt && \
+    python3 -c "import importlib.util,sys; sys.exit(1 if importlib.util.find_spec('PyNvVideoCodec') else 0)" && \
+    python3 -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
+{% endif %}
 
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image
 # (PyAV, decord, OpenCV, torchcodec + any base ffmpeg/libav*), then copy the
@@ -290,6 +407,12 @@ RUN set -eu; \
         echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
         exit 1; \
     fi
+
+# Frontend video decoding is part of the shipped SGLang CUDA contract. Fail the
+# image build if the runtime wheel was accidentally compiled without it.
+{% if target not in ("dev", "local-dev") %}
+RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder(), "enable_video")'
+{% endif %}
 {% else %}
 ENV IMAGEIO_FFMPEG_EXE=
 {% endif %}

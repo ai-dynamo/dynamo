@@ -17,6 +17,15 @@ var (
 		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
 	}
 
+	// IncreasedWorkerFailureThreshold gates the worker liveness default.
+	// Runtime 1.5.0 is the first version whose resolved runtime version is
+	// included in the worker hash, so enabling the feature cannot silently
+	// change an existing worker generation.
+	IncreasedWorkerFailureThreshold = Gate{
+		Name:              "IncreasedWorkerFailureThreshold",
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
+	}
+
 	// NativeRustEPP gates the native Rust EPP requirement: runtime versions at
 	// or above this threshold must not carry the legacy Go EPP's eppConfig,
 	// and versions below it still require it. Introduced for Dynamo runtime
@@ -24,5 +33,15 @@ var (
 	NativeRustEPP = Gate{
 		Name:              "NativeRustEPP",
 		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
+	}
+
+	// PlannerDGDComponentStatus gates Planner discovery of model, runtime,
+	// accelerator, and power facts from operator-projected DGD component status.
+	// Runtime 1.6.0 is the first Planner version that no longer depends on the
+	// component-level PodTemplate, so it can consume components with role-specific
+	// PodTemplates.
+	PlannerDGDComponentStatus = Gate{
+		Name:              "PlannerDGDComponentStatus",
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 6, Patch: 0},
 	}
 )

@@ -78,9 +78,9 @@ fn publish_overloaded_instances_if_needed(
     overloaded_tracker: &OverloadedWorkerTracker,
     overloaded_changed: bool,
 ) -> bool {
-    // NOTE: Recovery still relies on load producers publishing after meaningful capacity or
-    // lifecycle changes. This only prevents the next observation from being suppressed when
-    // request-path backpressure changed Client state outside this monitor's cached set.
+    // A fresh load observation clears request-path overload leases early.
+    // This prevents the monitor's unchanged-set suppression from retaining
+    // a request-path mark until its bounded lease expires.
     if !overloaded_changed && !overload_reconciliation_needed(client) {
         return false;
     }
@@ -907,6 +907,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                         last_thresholds = cfg.clone();
                         let overloaded_workers = collect_overloaded_workers(&worker_load_states, &cfg);
+                        // Deliberately not `publish_overloaded_instances_if_needed`: unlike the
+                        // load branches below, this one carries no fresh load observation. It wakes
+                        // on endpoint membership and runtime-config changes, so the recompute above
+                        // reads whatever load state was last observed. Publishing on an unchanged
+                        // set here would retire request-path overload leases on no load evidence at
+                        // all — and because `runtime_config_watch` joins availability for the whole
+                        // endpoint, one unrelated worker appearing would clear another worker's
+                        // in-force lease. Leases are bounded, so they expire on their own instead.
                         if overloaded_tracker.replace(overloaded_workers) {
                             publish_overloaded_instances(&client, &overloaded_tracker.ids());
                         }

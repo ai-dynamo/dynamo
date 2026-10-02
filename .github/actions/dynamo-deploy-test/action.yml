@@ -157,7 +157,8 @@ runs:
           namespaces="${NAMESPACE},default"
         fi
 
-        mkdir -p "${DYN_TEST_OUTPUT_PATH}"
+        bash "${{ github.workspace }}/.github/scripts/collect_vcluster_diagnostics.sh" "${DYN_TEST_OUTPUT_PATH}"
+
         kubectl cluster-info dump \
           --namespaces="${namespaces}" \
           --output-directory="${DYN_TEST_OUTPUT_PATH}/cluster-info" || true

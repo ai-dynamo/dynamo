@@ -66,6 +66,10 @@ def _make_handler(
 
     tokenizer_manager = SimpleNamespace(
         server_args=SimpleNamespace(elastic_ep_backend=backend),
+        pause_generation=lambda: None,
+        continue_generation=lambda: None,
+        release_memory_occupation=lambda: None,
+        resume_memory_occupation=lambda: None,
         get_elastic_ep_state=MagicMock(
             return_value=state
             if state is not None
