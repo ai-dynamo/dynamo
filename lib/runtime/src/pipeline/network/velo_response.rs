@@ -70,12 +70,30 @@ pub(crate) enum ResponseTransport {
 /// within noise, and ITL p99 was no higher.
 const RESPONSE_CREDIT_WINDOW: u32 = 32;
 
+/// TCP lanes to each frontend for response streams.
+///
+/// 4, not velo's default of 1. Each lane is its own TCP connection, read by
+/// its own task on the frontend, and the mux spreads the response streams over
+/// the lanes. One connection is limited by the task that reads it. On the
+/// mocker rig (8 worker processes of 64, concurrency 8,192, ISL 1,024, OSL
+/// 900), 4 lanes against 1 gave 2,406 against 1,359 requests/s, ITL p99 4.9
+/// against 15.0 ms, end-to-end p99 4.5 against 13.5 s, and 20.0 against
+/// 37.4 ms of frontend CPU per request.
+const RESPONSE_TCP_LANES: u16 = 4;
+
 fn response_mux_config() -> MuxConfig {
     MuxConfig {
         enabled: true,
         initial_credit: RESPONSE_CREDIT_WINDOW,
         ..Default::default()
     }
+}
+
+fn tcp_transport(address: SocketAddr) -> Result<velo::transports::tcp::TcpTransport> {
+    velo::transports::tcp::TcpTransportBuilder::new()
+        .bind_addr(address)
+        .lanes(RESPONSE_TCP_LANES)
+        .build()
 }
 
 impl ResponseTransport {
@@ -157,11 +175,7 @@ impl VeloResponseService {
             .messenger_mux(response_mux_config())?;
         match transport {
             ResponseTransport::Tcp => {
-                builder = builder.add_transport(Arc::new(
-                    velo::transports::tcp::TcpTransportBuilder::new()
-                        .bind_addr(address)
-                        .build()?,
-                ));
+                builder = builder.add_transport(Arc::new(tcp_transport(address)?));
             }
             ResponseTransport::Ucx => {
                 #[cfg(all(target_os = "linux", feature = "velo-ucx"))]
@@ -530,6 +544,13 @@ mod tests {
     fn response_streams_use_a_credit_window_of_32() {
         assert_eq!(response_mux_config().initial_credit, 32);
         assert!(response_mux_config().enabled);
+    }
+
+    #[test]
+    fn tcp_responses_use_four_lanes() {
+        use velo::Transport;
+        let transport = tcp_transport("127.0.0.1:0".parse().unwrap()).unwrap();
+        assert_eq!(transport.lanes(velo::InstanceId::new_v4()).get(), 4);
     }
 
     async fn pair(
