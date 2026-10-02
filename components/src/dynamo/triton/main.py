@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import tritonclient.grpc.model_config_pb2 as mc
@@ -78,40 +79,34 @@ def _read_model_config(
         return serialized_config
 
 
-def _collect_classify_dependency_models(
-    server: TritonServer,
-    model_names: list[str],
-    repository_path: str,
-) -> set[str]:
-    """Return names of models referenced as a step inside another model's ensemble.
+def _collect_classify_dependency_models(repository_path: str) -> set[str]:
+    """Return names of models referenced as a step inside any model's
+    ``ensemble_scheduling`` anywhere in the repository.
 
     Invoked only on the ``--task classify`` path. A typical classify
-    ensemble in Triton pairs one ``ensemble`` model with a Python
-    tokenizer dependency and a numeric classifier dependency; Triton
-    loads all three as ready, but only the ensemble carries the
-    STRING-in / FP32-out contract the OpenAI ``/v1/classify`` adapter
-    needs. Constructing a ``ClassifyWorkerHandler`` for the tokenizer or
-    numeric stage raises, which cancels the entire TaskGroup and aborts
-    the valid ensemble with it.
+    ensemble pairs one ``ensemble`` model with a Python tokenizer
+    dependency and a numeric classifier dependency; only the ensemble
+    carries the STRING-in / FP32-out contract the OpenAI
+    ``/v1/classify`` adapter needs. Constructing a
+    ``ClassifyWorkerHandler`` for the tokenizer or numeric stage raises,
+    which cancels the entire TaskGroup and aborts the valid ensemble.
 
-    Dependency models remain loaded in Triton so their ensembles can
-    call them, but are not exposed as Dynamo endpoints.
+    Scanning the repository FS instead of only the ready set also
+    catches the case where the public ensemble fails to load: we still
+    know its leaves are its deps and keep them out of ``/v1/classify``
+    rather than exposing them with the wrong tensor contract.
     """
     deps: set[str] = set()
-    for name in model_names:
+    repo = Path(repository_path)
+    for pbtxt in sorted(repo.glob("*/config.pbtxt")):
         try:
-            model = server.model(name)
-            cfg = mc.ModelConfig.FromString(
-                _read_model_config(model, name, repository_path)
-            )
-        except (OSError, text_format.ParseError, mc.DecodeError) as exc:
-            # A config we cannot read also cannot declare dependencies; let
-            # the model fall through to registration, where the same read
-            # path raises with the full error context.
+            with pbtxt.open() as f:
+                cfg = text_format.Parse(f.read(), mc.ModelConfig())
+        except (OSError, text_format.ParseError) as exc:
+            # A config we cannot read also cannot declare dependencies.
             logger.warning(
-                "Could not read config for model %r while scanning for "
-                "ensemble dependencies: %s",
-                name,
+                "Could not read %s while scanning for ensemble " "dependencies: %s",
+                pbtxt,
                 exc,
             )
             continue
@@ -281,9 +276,7 @@ async def init_worker(
     # everything so a dependency model is still addressable directly over
     # KServe gRPC for debugging.
     if config.task == "classify":
-        deps = _collect_classify_dependency_models(
-            server, model_names, model_repository
-        )
+        deps = _collect_classify_dependency_models(model_repository)
         skipped = sorted(set(model_names) & deps)
         exposed = [n for n in model_names if n not in deps]
         if skipped:
