@@ -403,11 +403,11 @@ def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
         dcd_roles = next(field for field in dcd.fields if field.name == "roles")
         assert dcd_roles.type == "object array"
         if (
-            "Standalone DCD roles accept only `name` and `replicas`"
+            "Standalone DCD roles support `name`, `replicas`, and `podTemplate`"
             not in dcd_roles.description
         ):
             raise AssertionError(
-                "standalone DCD roles must document `name` and `replicas`"
+                "standalone DCD roles must document `name`, `replicas`, and `podTemplate`"
             )
         for type_name in (
             "DynamoComponentDeploymentSharedSpec",

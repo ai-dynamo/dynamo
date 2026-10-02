@@ -77,7 +77,7 @@ spec:
 </ParamField>
 
 <ParamField path="annotations" type="map[string]string">
-  Annotations propagated to all child resources (scaling adapters, DCDs, Deployments, and pod templates). Component-level `podTemplate` values take precedence on conflict.
+  Annotations propagated to all child resources (scaling adapters, DCDs, Deployments, and pod templates). Values on the selected component or role `podTemplate` take precedence on conflict.
 </ParamField>
 
 <ParamField path="labels" type="map[string]string">
@@ -280,6 +280,18 @@ Replica information for a single component, keyed by component name in `status.c
 
 <ParamField path="runtimeNamespace" type="string">
   Effective Dynamo runtime namespace for the component. Workers may include a generation suffix; non-workers use the base namespace. During a rolling update, worker status retains the old active revision's namespace until cutover completes.
+</ParamField>
+
+<ParamField path="servedModelName" type="string">
+  Effective primary model identity resolved from the fully rendered serving Pod. The operator checks `--served-model-name`, `--model-name`, `--model`, and `--model-path` in that order. Omitted when the rendered command declares none of those flags. During a rolling update, worker status retains the old active revision's value until cutover completes.
+</ParamField>
+
+<ParamField path="runtimeComponentName" type="string">
+  Explicit Dynamo runtime component identity resolved from the serving Pod's `--endpoint` value. Omitted when the rendered command does not declare a component override. During a rolling update, worker status retains the old active revision's value until cutover completes.
+</ParamField>
+
+<ParamField path="gpuPowerLimitWatts" type="integer">
+  Effective per-GPU power limit configured for the component. Omitted when no positive component-level power limit is configured. Minimum `1`.
 </ParamField>
 
 <ParamField path="gpusPerEngine" type="integer">
