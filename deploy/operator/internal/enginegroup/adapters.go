@@ -58,7 +58,18 @@ type CapacityTarget struct {
 type CapacityAllocation struct {
 	Incarnation ReplicaIncarnation
 	Available   bool
+	Health      AllocationHealth
 }
+
+// AllocationHealth distinguishes health from usable capacity during partial member failure.
+type AllocationHealth string
+
+const (
+	AllocationHealthHealthy  AllocationHealth = "Healthy"
+	AllocationHealthDegraded AllocationHealth = "Degraded"
+	AllocationHealthFailed   AllocationHealth = "Failed"
+	AllocationHealthUnknown  AllocationHealth = "Unknown"
+)
 
 // CapacityObservation is the workload manager's current allocation state.
 type CapacityObservation struct {

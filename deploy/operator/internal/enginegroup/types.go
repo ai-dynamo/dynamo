@@ -82,6 +82,15 @@ func (t MembershipTopology) ReplicaCount() int32 {
 	return int32(len(t.Replicas))
 }
 
+// NativeMemberCount returns committed native members, including partial replica allocations.
+func (t MembershipTopology) NativeMemberCount() int32 {
+	var count int32
+	for _, replica := range t.Replicas {
+		count += int32(len(replica.NativeMembers))
+	}
+	return count
+}
+
 // ProcessLifecycleOwner identifies the system responsible for starting and stopping engine processes.
 type ProcessLifecycleOwner string
 
