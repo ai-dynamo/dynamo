@@ -229,13 +229,13 @@ impl SglangMockerService {
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
         let prepared = PreparedRequest::new(request, &self.config).map_err(|status| *status)?;
-        let live = self
-            .engine
-            .submit(prepared.direct_request())
-            .await
-            .map_err(|error| {
-                Status::internal(format!("Mocker request submission failed: {error}"))
-            })?;
+        let direct = prepared.direct_request();
+        let live = if prepared.has_decode_handoff {
+            self.engine.submit_decode(direct).await
+        } else {
+            self.engine.submit(direct).await
+        }
+        .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
         Ok((prepared, live, permit))
     }
 

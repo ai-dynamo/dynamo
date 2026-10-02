@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use dynamo_mocker::common::protocols::DirectRequest;
-use dynamo_mocker::live::{deterministic_token_id, stable_request_uuid};
+use dynamo_mocker::live::{DeterministicTokenGenerator, stable_request_uuid};
 use dynamo_trtllm_sidecar::proto as pb;
 use prost_types::{Struct, value::Kind};
 use tonic::Status;
@@ -21,8 +21,7 @@ const REQUEST_TYPE_KEY: &str = "request_type";
 const CONTEXT_ONLY: &str = "context_only";
 
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
-// Bound the request-owned synthetic token plan independently of LiveEngine's
-// fixed per-request delivery buffer.
+// Bound the synthetic token plan and full-response delivery buffer.
 pub(super) const MAX_NEW_TOKENS: u32 = 32_768;
 pub(super) const MAX_CANDIDATES: usize = 20;
 
@@ -30,9 +29,8 @@ pub(super) const MAX_CANDIDATES: usize = 20;
 pub(super) struct PreparedRequest {
     pub(super) uuid: Uuid,
     pub(super) request_id: String,
-    pub(super) session_id: String,
     pub(super) has_kv_session: bool,
-    seed: u64,
+    output_tokens: DeterministicTokenGenerator,
     /// The context phase's first token, replayed as this leg's first output —
     /// what a real generation worker does with the handoff. The sidecar drops
     /// the prefill leg's tokens, so the token is delivered to the client once.
@@ -40,6 +38,7 @@ pub(super) struct PreparedRequest {
     /// Selected and candidate logprobs from the context phase, absent if not requested.
     replayed_first_logprobs: Option<Vec<pb::LogProb>>,
     prompt_tokens: Vec<u32>,
+    prompt_len: usize,
     pub(super) max_output_tokens: usize,
     /// Token IDs that end the request with `STOP` instead of `LENGTH`. Stop
     /// *strings* are accepted and never match: this server has no tokenizer, so
@@ -117,14 +116,12 @@ impl PreparedRequest {
 
         let request_id = request.request_id;
         let uuid = stable_request_uuid(config.seed, &request_id);
-        let session_id = handoff::session_id(uuid);
         let response = request.response.unwrap_or_default();
 
         Ok(Self {
             uuid,
             has_kv_session: kv.session.is_some(),
-            session_id,
-            seed: config.seed,
+            output_tokens: DeterministicTokenGenerator::new(config.seed, &request_id),
             replayed_first_token: kv.session.as_ref().and_then(handoff::first_gen_token),
             replayed_first_logprobs: kv
                 .session
@@ -133,6 +130,7 @@ impl PreparedRequest {
                 .transpose()?
                 .flatten(),
             request_id,
+            prompt_len: prompt_tokens.len(),
             prompt_tokens,
             max_output_tokens,
             stop_token_ids: stopping
@@ -151,9 +149,13 @@ impl PreparedRequest {
         })
     }
 
-    pub(super) fn direct_request(&self) -> DirectRequest {
+    pub(super) fn direct_request(&mut self) -> DirectRequest {
         DirectRequest {
-            tokens: self.prompt_tokens.clone(),
+            tokens: if self.return_prompt_logprobs {
+                self.prompt_tokens.clone()
+            } else {
+                std::mem::take(&mut self.prompt_tokens)
+            },
             max_output_tokens: self.max_output_tokens,
             uuid: Some(self.uuid),
             dp_rank: super::DP_RANK,
@@ -191,13 +193,13 @@ impl PreparedRequest {
     }
 
     pub(super) fn prompt_len(&self) -> usize {
-        self.prompt_tokens.len()
+        self.prompt_len
     }
 
     pub(super) fn output_token(&self, position: usize) -> u32 {
         match (position, self.replayed_first_token) {
             (0, Some(token_id)) => token_id,
-            _ => deterministic_token_id(self.seed, &self.request_id, position),
+            _ => self.output_tokens.token_id(position),
         }
     }
 
@@ -329,7 +331,7 @@ impl PreparedRequest {
         pb::PrefillReady {
             kv_session: Some(handoff::build_session(
                 config,
-                self.session_id.clone(),
+                handoff::session_id(self.uuid),
                 &self.request_id,
                 self.prompt_len(),
                 &self.token_info(
@@ -429,11 +431,11 @@ fn is_context_only(extra: Option<&Struct>) -> bool {
 /// started as. Serving a decode request on a prefill server would "work" and
 /// quietly invalidate whatever the test was asserting.
 fn validate_role(
-    context_only: bool,
+    is_context_only: bool,
     session: Option<&pb::KvSessionRef>,
     mode: ServerMode,
 ) -> BoxedStatusResult<()> {
-    let (shape, accepted_by): (&str, &[ServerMode]) = match (context_only, session.is_some()) {
+    let (shape, accepted_by): (&str, &[ServerMode]) = match (is_context_only, session.is_some()) {
         (true, true) => {
             return Err(Box::new(Status::invalid_argument(
                 "a request cannot be both context_only and carry a kv_session",
@@ -470,26 +472,27 @@ fn selected_logprob(token_id: u32) -> f64 {
 }
 
 fn candidates(selected: u32, selection: Option<&pb::CandidateTokenSelection>) -> Vec<pb::LogProb> {
-    let ids: Vec<u32> = match selection.and_then(|selection| selection.selection.as_ref()) {
+    let candidate = |index: usize, token_id: u32| pb::LogProb {
+        token_id,
+        logprob: selected_logprob(selected) - 0.1 * index as f64,
+        token: token_text(token_id),
+        rank: Some(index as u32 + 1),
+    };
+    match selection.and_then(|selection| selection.selection.as_ref()) {
         None => Vec::new(),
         Some(pb::candidate_token_selection::Selection::TopN(count)) => (0..(*count as usize)
             .min(MAX_CANDIDATES))
-            .map(|offset| selected.wrapping_add(offset as u32))
+            .map(|index| candidate(index, selected.wrapping_add(index as u32)))
             .collect(),
-        Some(pb::candidate_token_selection::Selection::TokenIds(ids)) => {
-            ids.ids.iter().copied().take(MAX_CANDIDATES).collect()
-        }
+        Some(pb::candidate_token_selection::Selection::TokenIds(ids)) => ids
+            .ids
+            .iter()
+            .take(MAX_CANDIDATES)
+            .enumerate()
+            .map(|(index, &token_id)| candidate(index, token_id))
+            .collect(),
         Some(pb::candidate_token_selection::Selection::All(_)) => (0..MAX_CANDIDATES)
-            .map(|offset| selected.wrapping_add(offset as u32))
+            .map(|index| candidate(index, selected.wrapping_add(index as u32)))
             .collect(),
-    };
-    ids.into_iter()
-        .enumerate()
-        .map(|(index, token_id)| pb::LogProb {
-            token_id,
-            logprob: selected_logprob(selected) - 0.1 * index as f64,
-            token: token_text(token_id),
-            rank: Some(index as u32 + 1),
-        })
-        .collect()
+    }
 }

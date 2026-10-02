@@ -286,9 +286,9 @@ pub(super) fn validate_session(session: &pb::KvSessionRef) -> BoxedStatusResult<
     Ok(())
 }
 
-fn attribute_string(attributes: &Struct, key: &str) -> BoxedStatusResult<String> {
+fn attribute_string<'a>(attributes: &'a Struct, key: &str) -> BoxedStatusResult<&'a str> {
     match attributes.fields.get(key).map(|value| &value.kind) {
-        Some(Some(Kind::StringValue(value))) => Ok(value.clone()),
+        Some(Some(Kind::StringValue(value))) => Ok(value),
         Some(_) => invalid(format!("kv_session attribute '{key}' must be a string")),
         None => invalid(format!("kv_session is missing attribute '{key}'")),
     }

@@ -253,13 +253,13 @@ impl VllmMockerService {
             self.server_info.kv_block_size as usize,
         )
         .map_err(|status| *status)?;
-        let live = self
-            .engine
-            .submit(prepared.direct_request())
-            .await
-            .map_err(|error| {
-                Status::internal(format!("Mocker request submission failed: {error}"))
-            })?;
+        let direct = prepared.direct_request();
+        let live = if prepared.has_decode_handoff {
+            self.engine.submit_decode(direct).await
+        } else {
+            self.engine.submit(direct).await
+        }
+        .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
         Ok((prepared, live, permit))
     }
 }

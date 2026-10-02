@@ -7,7 +7,7 @@ use tonic_v14 as tonic;
 use std::collections::BTreeMap;
 
 use dynamo_mocker::common::protocols::DirectRequest;
-use dynamo_mocker::live::stable_request_uuid;
+use dynamo_mocker::live::{DeterministicTokenGenerator, stable_request_uuid};
 use dynamo_vllm_sidecar::proto as pb;
 use prost_types::{ListValue, Struct, Value, value::Kind};
 use tonic::Status;
@@ -59,10 +59,11 @@ impl SequenceOutputExt for pb::SequenceOutput {
 pub(super) struct PreparedRequest {
     pub(super) uuid: Uuid,
     request_id: String,
-    output_token_seed: u64,
+    output_tokens: DeterministicTokenGenerator,
     prompt_tokens: Vec<u32>,
     block_size: usize,
     pub(super) max_output_tokens: usize,
+    pub(super) has_decode_handoff: bool,
     stop_token: Option<u32>,
     priority: i32,
     response: pb::ResponseOptions,
@@ -185,12 +186,12 @@ impl PreparedRequest {
             request.request_id
         };
         let uuid = stable_request_uuid(config.seed, &request_id);
-        let output_token_seed = synthetic_token_seed(config.seed, &request_id);
+        let output_tokens = DeterministicTokenGenerator::new(config.seed, &request_id);
         let stop_match = stopping
             .filter(|stopping| !stopping.stop_token_ids.is_empty())
             .and_then(|stopping| {
                 (min_new_tokens as usize..max_new_tokens as usize).find_map(|position| {
-                    let token = deterministic_token_id(output_token_seed, position);
+                    let token = output_tokens.token_id(position);
                     stopping
                         .stop_token_ids
                         .contains(&token)
@@ -201,10 +202,11 @@ impl PreparedRequest {
         Ok(Self {
             uuid,
             request_id,
-            output_token_seed,
+            output_tokens,
             prompt_tokens,
             block_size,
             max_output_tokens,
+            has_decode_handoff: transfer_role == KvTransferRole::Decode,
             stop_token: stop_match.map(|(_, token)| token),
             priority: request.priority,
             response: request.response.unwrap_or_default(),
@@ -229,7 +231,7 @@ impl PreparedRequest {
     }
 
     pub(super) fn output_token(&self, position: usize) -> u32 {
-        deterministic_token_id(self.output_token_seed, position)
+        self.output_tokens.token_id(position)
     }
 
     pub(super) fn prompt_info(&self) -> pb::PromptInfo {
@@ -430,22 +432,6 @@ impl KvTransferRole {
             }
         }
     }
-}
-
-fn synthetic_token_seed(seed: u64, request_id: &str) -> u64 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&seed.to_le_bytes());
-    hasher.update(request_id.as_bytes());
-    let mut seed_bytes = [0u8; 8];
-    seed_bytes.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
-    u64::from_le_bytes(seed_bytes)
-}
-
-fn deterministic_token_id(seed: u64, position: usize) -> u32 {
-    let mut value = seed.wrapping_add((position as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    1_000 + ((value ^ (value >> 31)) as u32 % 31_000)
 }
 
 fn selected_logprob(token_id: u32) -> f32 {

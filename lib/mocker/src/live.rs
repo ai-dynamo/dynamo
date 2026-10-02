@@ -237,22 +237,44 @@ pub fn stable_request_uuid(seed: u64, request_id: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-/// One deterministic, tokenizer-independent output token ID. Addressable by
-/// position so a caller that needs a single token does not have to materialize
-/// the whole plan.
+/// Deterministic output tokens with one hash per request and random access by position.
+#[derive(Clone, Copy, Debug)]
+pub struct DeterministicTokenGenerator {
+    seed: u64,
+}
+
+impl DeterministicTokenGenerator {
+    pub fn new(seed: u64, request_id: &str) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&seed.to_le_bytes());
+        hasher.update(request_id.as_bytes());
+        let mut seed_bytes = [0u8; 8];
+        seed_bytes.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
+        Self {
+            seed: u64::from_le_bytes(seed_bytes),
+        }
+    }
+
+    pub fn token_id(&self, position: usize) -> u32 {
+        let mut value = self
+            .seed
+            .wrapping_add((position as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        1_000 + ((value ^ (value >> 31)) as u32 % 31_000)
+    }
+}
+
+/// One deterministic, tokenizer-independent output token ID.
 pub fn deterministic_token_id(seed: u64, request_id: &str, position: usize) -> u32 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&seed.to_le_bytes());
-    hasher.update(request_id.as_bytes());
-    hasher.update(&(position as u64).to_le_bytes());
-    let bytes = hasher.finalize();
-    1_000 + (u32::from_le_bytes(bytes.as_bytes()[..4].try_into().unwrap()) % 31_000)
+    DeterministicTokenGenerator::new(seed, request_id).token_id(position)
 }
 
 /// Produce deterministic, tokenizer-independent output token IDs.
 pub fn deterministic_output_tokens(seed: u64, request_id: &str, count: usize) -> Vec<u32> {
+    let generator = DeterministicTokenGenerator::new(seed, request_id);
     (0..count)
-        .map(|position| deterministic_token_id(seed, request_id, position))
+        .map(|position| generator.token_id(position))
         .collect()
 }
 

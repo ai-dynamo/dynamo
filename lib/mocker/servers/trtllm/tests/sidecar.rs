@@ -162,7 +162,15 @@ async fn collect(
 
 #[tokio::test]
 async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
-    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
+    let server = RunningServer::start_with(
+        MockerServerConfig {
+            context_length: 4_096,
+            is_request_recording_enabled: true,
+            ..Default::default()
+        },
+        fast_engine_args(),
+    )
+    .await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     // Starting at all proves Control.GetModelInfo returned a usable context
     // length; the sidecar refuses to start otherwise.
@@ -243,8 +251,26 @@ async fn sidecar_start_does_not_check_the_served_model_name() {
 /// the decode server verifies the payload arrived byte-for-byte.
 #[tokio::test]
 async fn prefill_handoff_round_trips_through_a_decode_server() {
-    let prefill_server = RunningServer::start(ServerMode::Prefill, fast_engine_args()).await;
-    let decode_server = RunningServer::start(ServerMode::Decode, fast_engine_args()).await;
+    let prefill_server = RunningServer::start_with(
+        MockerServerConfig {
+            mode: ServerMode::Prefill,
+            context_length: 4_096,
+            is_request_recording_enabled: true,
+            ..Default::default()
+        },
+        fast_engine_args(),
+    )
+    .await;
+    let decode_server = RunningServer::start_with(
+        MockerServerConfig {
+            mode: ServerMode::Decode,
+            context_length: 4_096,
+            is_request_recording_enabled: true,
+            ..Default::default()
+        },
+        fast_engine_args(),
+    )
+    .await;
     let prefill = sidecar(&prefill_server.endpoint, DisaggregationMode::Prefill).await;
     let decode = sidecar(&decode_server.endpoint, DisaggregationMode::Decode).await;
     prefill.start(0).await.unwrap();

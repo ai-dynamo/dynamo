@@ -21,6 +21,7 @@ pub(super) struct PreparedRequest {
     uuid: Uuid,
     prompt_tokens: Vec<u32>,
     pub(super) max_output_tokens: usize,
+    pub(super) has_decode_handoff: bool,
     output_token_ids: Vec<u32>,
     stop_token: Option<u32>,
     response_metadata: ResponseMetadata,
@@ -129,6 +130,8 @@ impl PreparedRequest {
             uuid,
             prompt_tokens,
             max_output_tokens,
+            has_decode_handoff: config.mode == ServerMode::Decode
+                && request.disaggregated_params.is_some(),
             output_token_ids,
             stop_token,
             response_metadata,
