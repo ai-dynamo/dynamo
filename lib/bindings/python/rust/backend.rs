@@ -60,6 +60,13 @@ fn sidecar_startup_to_pyerr(error: SidecarStartupError) -> PyErr {
     }
 }
 
+fn sidecar_run_to_pyerr(error: anyhow::Error) -> PyErr {
+    match error.downcast::<SidecarStartupError>() {
+        Ok(error) => sidecar_startup_to_pyerr(error),
+        Err(error) => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
+    }
+}
+
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
@@ -101,12 +108,11 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
-    let (engine, config) = py
-        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args(cli_argv))
+    let bootstrap = dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args_async(cli_argv)
         .map_err(sidecar_startup_to_pyerr)?;
 
-    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
+        .map_err(sidecar_run_to_pyerr)
 }
 
 const VLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-vllm-sidecar";
@@ -127,12 +133,11 @@ fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = vllm_sidecar_argv(argv.unwrap_or_default());
-    let (engine, config) = py
-        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args(cli_argv))
+    let bootstrap = dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args_async(cli_argv)
         .map_err(sidecar_startup_to_pyerr)?;
 
-    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
+        .map_err(sidecar_run_to_pyerr)
 }
 
 const TRTLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-trtllm-sidecar";
@@ -153,12 +158,11 @@ fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
-    let (engine, config) = py
-        .allow_threads(move || dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args(cli_argv))
+    let bootstrap = dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args_async(cli_argv)
         .map_err(sidecar_startup_to_pyerr)?;
 
-    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
+        .map_err(sidecar_run_to_pyerr)
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +234,7 @@ impl LlmRegistration {
         bootstrap_host = None,
         bootstrap_port = None,
         enable_eagle = false,
+        max_gpu_lora_count = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -243,6 +248,7 @@ impl LlmRegistration {
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
         enable_eagle: bool,
+        max_gpu_lora_count: Option<u32>,
     ) -> Self {
         Self {
             inner: RsLlmRegistration {
@@ -251,6 +257,7 @@ impl LlmRegistration {
                 total_kv_blocks,
                 max_num_seqs,
                 max_num_batched_tokens,
+                max_gpu_lora_count,
                 data_parallel_size,
                 data_parallel_start_rank,
                 enable_eagle,
@@ -279,6 +286,10 @@ impl LlmRegistration {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn max_gpu_lora_count(&self) -> Option<u32> {
+        self.inner.max_gpu_lora_count
     }
     #[getter]
     fn data_parallel_size(&self) -> Option<u32> {
@@ -896,6 +907,7 @@ impl PyEngineCore {
                     total_kv_blocks: opt_attr::<u64>(&v, "total_kv_blocks")?,
                     max_num_seqs: opt_attr::<u64>(&v, "max_num_seqs")?,
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
+                    max_gpu_lora_count: opt_attr::<u32>(&v, "max_gpu_lora_count")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
                     enable_eagle: opt_attr::<bool>(&v, "enable_eagle")?.unwrap_or(false),
@@ -1616,6 +1628,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
             endpoint: item.getattr("endpoint")?.extract()?,
             topic: item.getattr("topic")?.extract()?,
             dp_rank,
+            image_token_id: None,
         }),
         "PushSource" => {
             // Capture the Python callable as a `PyObject` and wrap in a

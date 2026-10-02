@@ -110,7 +110,7 @@ impl PrefillLoadSnapshot {
     /// reduce later modeled prefills. The final worker backlog is clipped at zero.
     ///
     /// `Err(MissingExpectedDuration)` means at least one active prefill was added
-    /// without a modeled duration, which is expected when AIC is absent or
+    /// without a modeled duration, which is expected when AIS is absent or
     /// prediction failed. In that case the snapshot was created via the fast path
     /// and did not scan active prefills to sum modeled time.
     pub(super) fn modeled_remaining_prefill_time_ms_at(
@@ -209,6 +209,11 @@ pub(super) struct PrefillLoadTracker {
     /// local time the front request became oldest, may shift forward when a
     /// modeled non-front prefill is removed, and is capped at that removal time.
     pub(super) anchored_prefill: Option<(RequestId, Instant)>,
+    /// Load state of the anchored request, cached so snapshots need no lookup.
+    anchored_load: Option<PrefillLoadState>,
+    /// Sum of `duration_millis_u64` over modeled active prefills, so snapshots
+    /// need not walk them. Never overflows: each term is below `2^64`.
+    modeled_prefill_ms: u128,
 }
 
 impl PrefillLoadTracker {
@@ -220,13 +225,15 @@ impl PrefillLoadTracker {
     ) {
         self.prefills.insert(request_id.clone(), prefill);
         self.prefill_full_tokens_sum += prefill.initial_effective_prefill_tokens;
-        if prefill.expected_prefill_duration.is_none() {
-            self.unmodeled_prefill_count += 1;
+        match prefill.expected_prefill_duration {
+            Some(duration) => self.modeled_prefill_ms += u128::from(duration_millis_u64(duration)),
+            None => self.unmodeled_prefill_count += 1,
         }
         let should_anchor = self.anchored_prefill.is_none();
         self.prefill_order.push_back(request_id.clone());
         if should_anchor {
             self.anchored_prefill = Some((request_id.clone(), decay_now));
+            self.anchored_load = Some(prefill);
         }
     }
 
@@ -240,11 +247,19 @@ impl PrefillLoadTracker {
             .prefill_full_tokens_sum
             .checked_sub(prefill.initial_effective_prefill_tokens)
             .expect("prefill_full_tokens_sum underflow");
-        if prefill.expected_prefill_duration.is_none() {
-            self.unmodeled_prefill_count = self
-                .unmodeled_prefill_count
-                .checked_sub(1)
-                .expect("unmodeled_prefill_count underflow");
+        match prefill.expected_prefill_duration {
+            Some(duration) => {
+                self.modeled_prefill_ms = self
+                    .modeled_prefill_ms
+                    .checked_sub(u128::from(duration_millis_u64(duration)))
+                    .expect("modeled_prefill_ms underflow");
+            }
+            None => {
+                self.unmodeled_prefill_count = self
+                    .unmodeled_prefill_count
+                    .checked_sub(1)
+                    .expect("unmodeled_prefill_count underflow");
+            }
         }
         let removed_front = self.prefill_order.front() == Some(request_id);
         if removed_front {
@@ -283,50 +298,30 @@ impl PrefillLoadTracker {
             .front()
             .cloned()
             .map(|request_id| (request_id, now));
+        self.anchored_load = self.anchored_prefill.as_ref().map(|(request_id, _)| {
+            self.prefills
+                .get(request_id)
+                .copied()
+                .expect("anchored prefill missing request state")
+        });
     }
 
     pub(super) fn snapshot(&self) -> PrefillLoadSnapshot {
-        let total_modeled_prefill_time_ms = if self.unmodeled_prefill_count > 0 {
-            None
-        } else {
-            // TODO: This all-modeled path walks active prefills on snapshot refresh even if the
-            // modeled-time diagnostic read is never consumed. Consider moving this to an on-demand
-            // worker-slot read if snapshot-time O(active_prefills) work becomes undesirable.
-            let sum = self
-                .prefill_order
-                .iter()
-                .map(|request_id| {
-                    let prefill = self
-                        .prefills
-                        .get(request_id)
-                        .expect("prefill_order references missing request state");
-                    duration_millis_u64(
-                        prefill
-                            .expected_prefill_duration
-                            .expect("modeled snapshot saw unmodeled prefill after zero count"),
-                    )
-                })
-                .fold(0_u64, |acc, millis| acc.saturating_add(millis));
-            Some(sum)
-        };
+        let total_modeled_prefill_time_ms = (self.unmodeled_prefill_count == 0)
+            .then(|| self.modeled_prefill_ms.min(u128::from(u64::MAX)) as u64);
 
         PrefillLoadSnapshot {
             prefill_full_tokens_sum: self.prefill_full_tokens_sum,
-            anchored_prefill: self
-                .anchored_prefill
-                .as_ref()
-                .map(|(request_id, anchored_since)| {
-                    let prefill = self
-                        .prefills
-                        .get(request_id)
-                        .copied()
-                        .expect("anchored prefill missing request state");
-                    AnchoredPrefillSnapshot {
-                        initial_effective_prefill_tokens: prefill.initial_effective_prefill_tokens,
-                        expected_prefill_duration: prefill.expected_prefill_duration,
-                        anchored_since: *anchored_since,
-                    }
-                }),
+            anchored_prefill: self.anchored_prefill.as_ref().map(|(_, anchored_since)| {
+                let prefill = self
+                    .anchored_load
+                    .expect("anchored prefill missing cached load state");
+                AnchoredPrefillSnapshot {
+                    initial_effective_prefill_tokens: prefill.initial_effective_prefill_tokens,
+                    expected_prefill_duration: prefill.expected_prefill_duration,
+                    anchored_since: *anchored_since,
+                }
+            }),
             total_modeled_prefill_time_ms,
         }
     }
@@ -342,6 +337,23 @@ impl PrefillLoadTracker {
             .values()
             .map(|prefill| prefill.initial_effective_prefill_tokens)
             .sum();
+        let recomputed_modeled_prefill_ms: u128 = self
+            .prefills
+            .values()
+            .filter_map(|prefill| prefill.expected_prefill_duration)
+            .map(|duration| u128::from(duration_millis_u64(duration)))
+            .sum();
+        assert_eq!(
+            self.modeled_prefill_ms, recomputed_modeled_prefill_ms,
+            "modeled_prefill_ms drifted from tracker state",
+        );
+        assert_eq!(
+            self.anchored_load,
+            self.anchored_prefill
+                .as_ref()
+                .and_then(|(request_id, _)| self.prefills.get(request_id).copied()),
+            "anchored_load drifted from the anchored request state",
+        );
         let recomputed_unmodeled_prefill_count = self
             .prefills
             .values()
@@ -431,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn modeled_remaining_no_aic_prefill_returns_missing_duration_error() {
+    fn modeled_remaining_no_ais_prefill_returns_missing_duration_error() {
         let epoch = Instant::now();
         let mut tracker = PrefillLoadTracker::default();
         let r1 = "r1".to_string();
