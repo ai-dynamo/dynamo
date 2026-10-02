@@ -1189,8 +1189,7 @@
     {
       "name": "Speculative Decoding",
       "sglang": {
-        "status": "wip",
-        "note": "Code hooks exist; no examples or docs yet"
+        "status": "yes"
       },
       "trtllm": {
         "status": "yes"
