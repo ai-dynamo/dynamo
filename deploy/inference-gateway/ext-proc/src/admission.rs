@@ -57,9 +57,9 @@ impl RouterRejectionExt for RouterRejection {
 /// Frontend, which does not treat it as a rejection.
 pub(crate) fn record_rejection(rejection: RouterRejection, error: &dyn std::fmt::Display) {
     if rejection == RouterRejection::Internal {
-        tracing::warn!(rejection = rejection.metric_label(), error = %error, "Router rejected the request");
+        tracing::warn!(rejection = rejection.metric_label(), error = %format_args!("{error:#}"), "Router rejected the request");
     } else {
-        tracing::debug!(rejection = rejection.metric_label(), error = %error, "Router rejected the request");
+        tracing::debug!(rejection = rejection.metric_label(), error = %format_args!("{error:#}"), "Router rejected the request");
     }
     if rejection != RouterRejection::DeadlineExceeded {
         crate::metrics::inc_router_rejection(rejection);
