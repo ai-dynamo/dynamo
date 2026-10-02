@@ -20,7 +20,7 @@ The concurrent indexers achieve a combined throughput of over **10 million event
 | `radix_tree.rs` | `RadixTree` — single-threaded compressed tree with `Rc<RefCell<RadixBlock>>` nodes |
 | `concurrent_radix_tree_compressed/` | `ConcurrentRadixTreeCompressed` — thread-safe compressed trie; see its `README.md` |
 | `positional.rs` | `PositionalIndexer` — flat `DashMap<(pos, hash), SeqEntry>` with jump optimization |
-| `positional_carrier.rs` | `PositionalCarrierIndex<W>` — sparse position buckets for PLHs, with deepest-held queries |
+| `positional_carrier.rs` | `PositionalCarrierIndex<W>` — sparse position buckets for PLHs, with deepest-held queries; carrier-feed replicas live in `crate::carrier_feed` |
 | `thread_pool.rs` | `ThreadPoolIndexer<T: SyncIndexer>` — N OS threads for sticky-routed writes, inline reads; wraps `ConcurrentRadixTreeCompressed` or `PositionalIndexer` |
 | `local.rs` | `LocalKvIndexer` — thin wrapper around `KvIndexer` with a circular event buffer for worker-side decentralized routing |
 | `pruning.rs` | `PruneManager` — TTL-based approximate expiration via 100ms buckets and per-worker pruning queues |
