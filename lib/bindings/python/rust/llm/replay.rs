@@ -906,7 +906,7 @@ pub fn run_mocker_trace_replay(
                 .map_err(|error| {
                     PyValueError::new_err(format!("invalid router affinity: {error}"))
                 })?;
-            let (prefill_load_estimator, _) = load_replay_prefill_load_estimator(
+            let prefill_load_estimator = load_replay_prefill_load_estimator(
                 py,
                 dynamo_mocker::replay::ReplayRouterMode::KvRouter,
                 router_config.as_ref(),
@@ -2366,7 +2366,6 @@ fn build_synthetic_workload(
     }
 
     RsTrace::synthetic(SyntheticTraceSpec {
-        cached_prefix_tokens: 0,
         block_size,
         num_sessions: request_count,
         turns_per_session,
