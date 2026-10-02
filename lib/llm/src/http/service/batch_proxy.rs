@@ -194,6 +194,13 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
         return proxy_error(StatusCode::BAD_REQUEST, "Invalid Batch API path");
     }
     url.set_query(parts.uri.query());
+    // Enforce that forwarding never leaves the configured gateway origin.
+    if url.scheme() != state.gateway.scheme()
+        || url.host_str() != state.gateway.host_str()
+        || url.port_or_known_default() != state.gateway.port_or_known_default()
+    {
+        return proxy_error(StatusCode::BAD_REQUEST, "Invalid Batch API path");
+    }
     remove_hop_headers(&mut parts.headers);
     parts.headers.remove(header::HOST);
     parts.headers.remove(header::CONTENT_LENGTH);
