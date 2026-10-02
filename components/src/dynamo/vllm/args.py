@@ -40,6 +40,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
+# The worker extension classes Dynamo installs: the launcher calls their methods
+# by name in the model workers after a self-benchmark. Class path literals, not
+# imports: importing dynamo.vllm.gc_policy auto-starts the GC policy in the
+# importing process, and this launcher process must stay untouched.
+BENCHMARK_WORKER_EXTENSION = (
+    "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension"
+)
+GC_WORKER_EXTENSION = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
+
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     component: str
@@ -381,6 +390,17 @@ def update_engine_config_with_dynamo(
             )
 
     if dynamo_config.benchmark_mode is not None:
+        # vLLM attaches the observed dispatch to ModelRunnerOutput without GPU
+        # timing or synchronization. Enable it before model workers are created,
+        # unless the user already did: the launcher turns only an option Dynamo
+        # enabled back off before serving (worker_factory._restore_cudagraph_metrics).
+        # A vLLM without the option has nothing to enable or restore.
+        cudagraph_metrics_auto_enabled = (
+            hasattr(engine_config, "cudagraph_metrics")
+            and not engine_config.cudagraph_metrics
+        )
+        if cudagraph_metrics_auto_enabled:
+            defaults["cudagraph_metrics"] = True
         if dynamo_config.enable_multimodal:
             logger.warning(
                 "--benchmark-mode is not supported for multimodal workers. "
@@ -401,10 +421,7 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
         if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() == "freeze":
-            # Class path as a literal, not an import: importing
-            # dynamo.vllm.gc_policy auto-starts the policy in the importing
-            # process, and this launcher process must stay untouched.
-            worker_extension_cls = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
+            worker_extension_cls = GC_WORKER_EXTENSION
             existing_ext = getattr(engine_config, "worker_extension_cls", None)
             if not existing_ext:
                 defaults["worker_extension_cls"] = worker_extension_cls
@@ -421,6 +438,20 @@ def update_engine_config_with_dynamo(
                     f"is set to '{existing_ext}'. Remove it or unset "
                     f"DYN_FPM_GC_POLICY."
                 )
+        if not (
+            defaults.get("worker_extension_cls")
+            or getattr(engine_config, "worker_extension_cls", None)
+        ):
+            # After the benchmark the launcher calls this class's methods in
+            # every model worker by name (the engine probe and the
+            # cudagraph_metrics restore): vLLM's engine-core client cannot carry
+            # a callable. The GC extension above inherits them; another user
+            # class is kept, and the launcher then skips those calls.
+            defaults["worker_extension_cls"] = BENCHMARK_WORKER_EXTENSION
+            logger.info(
+                "Benchmark mode: injecting worker_extension_cls=%s",
+                BENCHMARK_WORKER_EXTENSION,
+            )
         if dynamo_config.benchmark_randomize_kda_state:
             if engine_config.worker_cls not in ("auto", RANDOM_KDA_WORKER):
                 raise ValueError(
@@ -434,6 +465,13 @@ def update_engine_config_with_dynamo(
                     "Random KDA benchmarking does not support the GMS worker"
                 )
             defaults["worker_cls"] = RANDOM_KDA_WORKER
+        configured_extension = defaults.get("worker_extension_cls") or getattr(
+            engine_config, "worker_extension_cls", None
+        )
+        worker_extension_installed = configured_extension in (
+            BENCHMARK_WORKER_EXTENSION,
+            GC_WORKER_EXTENSION,
+        )
         benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
             "randomize_kda_state": dynamo_config.benchmark_randomize_kda_state,
@@ -443,7 +481,18 @@ def update_engine_config_with_dynamo(
             "timeout": dynamo_config.benchmark_timeout,
             "max_batch_size": dynamo_config.benchmark_max_batch_size,
             "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
+            # Not a BenchmarkConfig field (the scheduler drops unknown keys): it
+            # tells the launcher whether the model workers load a Dynamo
+            # extension class, the only kind it can call by name.
+            "worker_extension_installed": worker_extension_installed,
         }
+        if configured_extension and not worker_extension_installed:
+            # So the launcher can name the user's class when it skips the call.
+            benchmark_config["user_worker_extension_cls"] = configured_extension
+        if cudagraph_metrics_auto_enabled:
+            # Not a BenchmarkConfig field (the scheduler drops unknown keys): it
+            # tells the launcher to turn the option back off before serving.
+            benchmark_config["cudagraph_metrics_auto_enabled"] = True
         explicit_points = dynamo_config._benchmark_points
         if explicit_points is not None:
             # exclude_none so a v1 manifest round-trips as itself: the v3

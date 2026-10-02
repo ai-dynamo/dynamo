@@ -12,6 +12,8 @@ spinning up vLLM engine internals.
 
 from __future__ import annotations
 
+import dataclasses
+import enum
 import hashlib
 import json
 import threading
@@ -23,7 +25,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
+import torch
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import CUDAGraphMode  # noqa: E402
+from vllm.utils.hashing import sha256
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.request import RequestStatus  # noqa: E402
 
 
@@ -34,6 +44,7 @@ def _isolate_synthetic_content_env(monkeypatch):
     explicitly."""
     monkeypatch.delenv("DYN_BENCH_PREFILL_CONTENT", raising=False)
     monkeypatch.delenv("DYN_BENCH_POOL_TAG", raising=False)
+    monkeypatch.delenv("DYN_BENCH_CONTENT_SEED", raising=False)
     monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
     monkeypatch.delenv("DYN_BENCH_GIANT_KV_THRESHOLD", raising=False)
     monkeypatch.delenv("DYN_BENCH_GIANT_KV_REPEATS", raising=False)
@@ -64,6 +75,7 @@ from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -318,6 +330,119 @@ def test_benchmark_timing_stops_before_vllm_state_update(monkeypatch):
     assert result == "parent-result"
     assert stub._extract_metrics.call_args.args[2] == 10.0
     assert stub._last_update_time == 20.0
+
+
+@pytest.mark.parametrize(
+    ("phase", "steady", "expected_basis", "expected_start", "expected_wall"),
+    [
+        ("prefill", False, "schedule_to_output", 19.0, 1.0),
+        ("decode", False, "schedule_to_output", 19.0, 1.0),
+        ("decode", True, "inter_output", 18.0, 2.0),
+    ],
+)
+@pytest.mark.parametrize("graph_observation", ["observed", "absent", "incomplete"])
+def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
+    monkeypatch,
+    phase,
+    steady,
+    expected_basis,
+    expected_start,
+    expected_wall,
+    graph_observation,
+):
+    point = BenchmarkPoint(
+        phase,
+        benchmark_id=7,
+        batch_size=4,
+        total_prefill_tokens=80,
+        expected_cudagraph_mode="FULL",
+        expected_capture_size=128,
+    )
+    stub = _benchmark_save_stub(point, [])
+    stub._bench_active = True
+    stub._bench_forward_index = 12
+    stub._bench_expected_fpms = 2 if steady else 1
+    if steady:
+        stub._bench_current_fpms.append({"wall_time": 0.5})
+    stub._schedule_times = deque([19.0])
+    stub._last_update_time = 18.0
+    scheduled = instrumented_scheduler_module.ScheduledRequestMetrics(
+        num_prefill_requests=4 if phase == "prefill" else 0,
+        sum_prefill_tokens=80 if phase == "prefill" else 0,
+        num_decode_requests=4 if phase == "decode" else 0,
+    )
+    stub._extract_scheduled = MagicMock(return_value=scheduled)
+    stub._compute_queued = MagicMock(return_value=None)
+    stub._cleanup_finished = MagicMock()
+    stub._fpm_worker_id = "worker"
+    model_output = SimpleNamespace()
+    if graph_observation == "observed":
+        model_output.cudagraph_stats = SimpleNamespace(
+            runtime_mode="NONE",
+            num_unpadded_tokens=80,
+            num_padded_tokens=80,
+            num_paddings=0,
+        )
+    elif graph_observation == "incomplete":
+        model_output.cudagraph_stats = SimpleNamespace(runtime_mode="FULL")
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        lambda *_: "parent-result",
+    )
+    monotonic = MagicMock(return_value=20.0)
+    monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", monotonic)
+
+    result = stub.update_from_output(
+        SimpleNamespace(total_num_scheduled_tokens=80), model_output
+    )
+
+    assert result == "parent-result"
+    raw = stub._bench_current_fpms[-1]
+    assert raw["wall_time"] == expected_wall
+    sample = raw["benchmark_sample"]
+    assert sample["sample_index"] == int(steady)
+    assert sample["forward_index"] == 12
+    assert sample["timing"] == {
+        "basis": expected_basis,
+        "start_monotonic": expected_start,
+        "end_monotonic": 20.0,
+    }
+    assert sample["cudagraph"] == {
+        "status": "observed" if graph_observation == "observed" else "unavailable",
+        "runtime_mode": "NONE" if graph_observation == "observed" else None,
+        "num_unpadded_tokens": 80 if graph_observation == "observed" else None,
+        "num_padded_tokens": 80 if graph_observation == "observed" else None,
+        "num_paddings": 0 if graph_observation == "observed" else None,
+    }
+    # Actual eager execution does not become the grid's expected FULL graph.
+    assert point.expected_cudagraph_mode == "FULL"
+    monotonic.assert_called_once_with()
+
+
+def test_missing_schedule_timestamp_is_explicit_in_raw_sample(monkeypatch):
+    stub = _benchmark_save_stub(BenchmarkPoint("prefill", benchmark_id=1), [])
+    stub._bench_active = True
+    stub._schedule_times = deque()
+    stub._last_update_time = 0.0
+    stub._fpm_worker_id = "worker"
+    stub._extract_scheduled = MagicMock(
+        return_value=instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=4
+        )
+    )
+    stub._compute_queued = MagicMock(return_value=None)
+    stub._cleanup_finished = MagicMock()
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", lambda: 20.0)
+    stub.update_from_output(SimpleNamespace(total_num_scheduled_tokens=4), object())
+    raw = stub._bench_current_fpms[0]
+    assert raw["wall_time"] == 0.0
+    assert raw["benchmark_sample"]["timing"]["start_monotonic"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +874,7 @@ def _digest_stub(max_num_running_reqs: int):
     mirroring the activation-time filtering of the decode capture sizes."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_config = BenchmarkConfig()
+    stub._bench_vocab_size = 0
     stub.block_size = 16
     stub._bench_hash_block_size = 16
     stub.cache_config = SimpleNamespace(block_size=16, enable_prefix_caching=True)
@@ -2700,6 +2826,7 @@ def test_agg_eager_warmups_stay_contiguous_with_their_phase():
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
     stub._bench_grid_error = None
+    stub._bench_results = []
     stub._bench_feasible_max_decode_batch_size = 0
     stub._bench_config.mode = "agg"
     stub._bench_explicit_points = None
@@ -3029,6 +3156,7 @@ def test_prefill_kv_read_uses_fake_cache_and_measures_immediately():
     stub._bench_cache_fake_prefixes.assert_called_once_with(
         prefix_lengths=[16, 16, 8],
         cache_salts=seed_salts,
+        content_salts=stub._bench_cache_fake_prefixes.call_args.kwargs["content_salts"],
     )
     stub.kv_cache_manager.new_step_starts.assert_called_once_with()
     assert calls == [
@@ -3037,6 +3165,9 @@ def test_prefill_kv_read_uses_fake_cache_and_measures_immediately():
             "max_tokens": 1,
             "cache_salts": seed_salts,
             "expected_kv_read_tokens": [16, 16, 8],
+            "content_salts": stub._bench_cache_fake_prefixes.call_args.kwargs[
+                "content_salts"
+            ],
         }
     ]
     assert stub._bench_sync_pending is True
@@ -3055,6 +3186,7 @@ def _realseed_prefill_stub(point, monkeypatch, seq=0, drop=0, points=None):
     stub._bench_hash_block_size = 8
     stub._schedule_times = deque()
     stub._bench_skipped_points = []
+    stub._bench_results = []
     stub._bench_sync_pending = False
     stub.requests = {}
     stub.kv_cache_manager = SimpleNamespace(new_step_starts=MagicMock())
@@ -3136,7 +3268,7 @@ def test_prefill_real_seed_stages_warms_then_measures(monkeypatch):
         p[:8] for p in warm["prompt_token_ids_list"]
     ]
     assert any("rswarm" in s for s in stub._salts_requested)
-    assert any("__bench_rsm_" in s for s in stub._salts_requested)
+    assert any(":rsm:" in s for s in stub._salts_requested)
     assert (
         measured["prompt_token_ids_list"][0][16:]
         != warm["prompt_token_ids_list"][0][16:]
@@ -3439,8 +3571,8 @@ def test_prefill_real_seed_staging_content_is_measured_prefix(monkeypatch):
         stub._fpm_dp_rank = dp_rank
         stub._bench_block_hasher = None
         stub.add_request = MagicMock()
-        stub._bench_cached_kv_read_tokens = (
-            lambda req: 16 if len(req.prompt_token_ids) > 16 else 8
+        stub._bench_cached_kv_read_tokens = lambda req: (
+            16 if len(req.prompt_token_ids) > 16 else 8
         )
 
         InstrumentedScheduler._bench_step_prefill(stub)  # staging
@@ -3561,6 +3693,7 @@ def test_prefill_fake_cache_validation_miss_skips_measured_point():
         max_tokens=1,
         cache_salts=seed_salts,
         expected_kv_read_tokens=[16, 16, 8],
+        content_salts=stub._bench_cache_fake_prefixes.call_args.kwargs["content_salts"],
     )
 
 
@@ -3791,6 +3924,7 @@ def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
     )
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(output_path=str(output_path))
     stub._bench_expected_points = 1
     stub._bench_results = []
@@ -3840,6 +3974,7 @@ def test_benchmark_timing_excludes_engine_startup_and_sums_measured_groups(
 
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(output_path=str(output_path))
     stub._bench_start_monotonic = None
     stub._bench_started_at = None
@@ -3966,6 +4101,7 @@ def test_benchmark_output_marks_timeout_result_partial_and_usable(tmp_path):
     fpm = {"counter_id": 1, "dp_rank": 0, "wall_time": 0.25}
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(output_path=str(output_path), timeout=1)
     stub._bench_expected_points = 2
     stub._bench_results = [
@@ -4023,6 +4159,7 @@ def test_benchmark_output_marks_timeout_result_partial_and_usable(tmp_path):
 def test_benchmark_output_marks_requested_empty_phase_invalid(tmp_path):
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(mode="decode", output_path=str(output_path))
     stub._bench_expected_points = 0
     stub._bench_results = []
@@ -4052,6 +4189,7 @@ def _benchmark_save_stub(point: BenchmarkPoint, fpms: list[dict]):
         fpm.setdefault("dp_rank", 0)
         fpm.setdefault("wall_time", 0.01)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_grid_digest = None
     stub._bench_current_point = point
     stub._bench_current_fpms = fpms
     stub._bench_expected_fpms = 1
@@ -4515,7 +4653,12 @@ def test_save_records_only_the_steady_fpm():
 
     assert len(stub._bench_results) == 1
     # the kept sample is marked as a recorded steady step
-    assert stub._bench_results[0].fpms == [{**steady, "kvwarm_steady_sample": True}]
+    (fpm,) = stub._bench_results[0].fpms
+    assert {k: v for k, v in fpm.items() if k != "benchmark_measurement"} == {
+        **steady,
+        "kvwarm_steady_sample": True,
+    }
+    assert fpm["benchmark_measurement"]["estimate"]["raw_sample_indices"] == [1]
     assert stub._bench_skipped_points == []
 
 
@@ -4781,6 +4924,7 @@ def test_kvwarm_chain_tokens_are_deterministic_and_extend_monotonically():
 def test_synthetic_content_pool_windows_share_prefix_across_lengths(monkeypatch):
     monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt")
     monkeypatch.delenv("DYN_BENCH_POOL_TAG", raising=False)
+    monkeypatch.delenv("DYN_BENCH_CONTENT_SEED", raising=False)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_vocab_size = 1_000
     stub._fpm_dp_rank = 0
@@ -4801,8 +4945,8 @@ def test_synthetic_content_chain_mode_routes_through_kvwarm_chains(monkeypatch):
     stub._bench_vocab_size = 1_000
     stub._fpm_dp_rank = 0
     seen = []
-    stub._kvwarm_chain_token_ids = (
-        lambda idx, depth: seen.append((idx, depth)) or [7] * depth
+    stub._kvwarm_chain_token_ids = lambda idx, depth: (
+        seen.append((idx, depth)) or [7] * depth
     )
     out = InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt", 9)
     assert out == [7] * 9
@@ -4936,6 +5080,16 @@ def test_warmup_replica_with_failed_validation_is_discarded_not_skipped():
     assert stub._bench_results == []
     assert stub._bench_skipped_points == []
     assert stub._bench_current_point is None
+    record = stub._bench_warmup_evidence[0]
+    assert record.kind == "eager_shape"
+    assert record.status == "failed"
+    assert record.requested_shape["total_kv_read_tokens"] == 48
+    assert record.validation == {
+        "status": "failed",
+        "reason": "measured_decode_context_mismatch",
+        "scope": "attention_dp_group",
+        "failed_dp_rank": 0,
+    }
 
 
 def test_warmup_replica_injection_failure_is_discarded_not_skipped():
@@ -4956,6 +5110,7 @@ def test_warmup_replica_injection_failure_is_discarded_not_skipped():
     stub._bench_current_point = None
     stub._bench_current_fpms = []
     stub._bench_skipped_points = []
+    stub._bench_results = []
     stub.deferred_frees = deque()  # nothing fenced
     stub._bench_cleanup_requests = MagicMock()
     stub._bench_inject_fake_decode = MagicMock(
@@ -4968,6 +5123,12 @@ def test_warmup_replica_injection_failure_is_discarded_not_skipped():
     assert stub._bench_current_point is None
     assert stub._bench_skipped_points == []
     stub._bench_cleanup_requests.assert_called_once_with()
+    record = stub._bench_warmup_evidence[0]
+    assert record.status == "failed"
+    assert record.validation == {
+        "status": "not_performed",
+        "reason": "decode_injection_failed",
+    }
 
 
 def test_skip_point_exempts_warmup_replicas_on_every_path():
@@ -4989,6 +5150,7 @@ def test_skip_point_exempts_warmup_replicas_on_every_path():
     )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_skipped_points = []
+    stub._bench_results = []
 
     for reason in (
         "fake_prefix_cache_allocation_failed",
@@ -5002,6 +5164,66 @@ def test_skip_point_exempts_warmup_replicas_on_every_path():
     assert stub._bench_skipped_points == [
         SkippedBenchmarkPoint(point=real, reason="prefill_injection_failed")
     ]
+
+
+@pytest.mark.parametrize("injected", [0, 1])
+def test_global_warmup_records_completion_without_claiming_configured_steps(injected):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig(warmup_iterations=5)
+    stub._bench_results = []
+    stub._bench_active_req_ids = set()
+    stub._bench_current_fpms = []
+    stub._bench_cleanup_requests = MagicMock()
+    stub.requests = {}
+
+    def inject(**_kwargs):
+        if injected:
+            stub._bench_active_req_ids.add("warmup")
+        return injected
+
+    stub._bench_inject_prefill = inject
+    stub._bench_step_warmup()
+    record = stub._bench_warmup_evidence[0]
+    assert record.requested_shape == {"prompt_lengths": [256], "max_tokens": 5}
+    if injected:
+        # One completed prefill can terminate on EOS; configured max_tokens=5
+        # is not evidence of five decode forwards having run.
+        scheduled = instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=256
+        )
+        stub._bench_forward_index = 1
+        stub._bench_observe_warmup(scheduled)
+        stub._bench_step_warmup()
+        assert record.status == "completed"
+        assert record.observed_forward_count == 1
+        assert record.first_scheduled_requests.sum_prefill_tokens == 256
+        assert record.last_scheduled_requests.num_decode_requests == 0
+        assert record.forward_index_end == 1
+        assert record.validation == {"status": "not_performed", "reason": None}
+    else:
+        assert record.status == "failed"
+        assert record.observed_forward_count == 0
+        assert record.validation["reason"] == "warmup_injection_failed"
+
+
+def test_real_prefix_preparation_records_attempt_order(monkeypatch):
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=25, total_kv_read_tokens=40, batch_size=3
+    )
+    stub, _ = _realseed_prefill_stub(point, monkeypatch)
+    for _ in range(3):
+        stub._bench_step_prefill()
+        stub._bench_forward_index += 1
+    records = stub._bench_warmup_evidence
+    assert [record.kind for record in records] == [
+        "real_prefix_seed",
+        "real_prefix_shape",
+    ]
+    assert [
+        (record.forward_index_start, record.forward_index_end) for record in records
+    ] == [(0, 1), (1, 2)]
+    assert all(record.status == "completed" for record in records)
+    assert all(record.validation["status"] == "not_performed" for record in records)
 
 
 # ---------------------------------------------------------------------------
@@ -6017,6 +6239,61 @@ def test_two_fpm_save_path_records_the_steady_sample_at_the_measured_coordinate(
     assert fpm["kvwarm_steady_sample"] is True
 
 
+def test_off_by_batch_correction_rekeys_every_rank_measurement(monkeypatch):
+    """Each rank keys its measurement evidence at the declared coordinate before
+    the group exchange. The merge rejects a point_key that differs from the group
+    point, so the correction must re-key every rank's evidence -- including the
+    copies a follower receives from the coordinator."""
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_THRESHOLD", "1000")
+    scheduled = {"num_decode_requests": 2, "sum_decode_kv_tokens": 1998}
+    key = instrumented_scheduler_module.benchmark_content_point_key
+    declared = key(dataclasses.asdict(_giant_fake_point()))
+    peer = {
+        "counter_id": 1,
+        "dp_rank": 0,
+        "wall_time": 0.02,
+        "scheduled_requests": dict(scheduled),
+        "kvwarm_steady_sample": True,
+        "benchmark_measurement": {"point_key": declared},
+    }
+    stub = _benchmark_save_stub(
+        _giant_fake_point(),
+        [
+            {"scheduled_requests": dict(scheduled), "dp_rank": 1, "wall_time": 0.5},
+            {"scheduled_requests": dict(scheduled), "dp_rank": 1, "wall_time": 0.02},
+        ],
+    )
+    stub._bench_expected_fpms = 2
+    stub._bench_dp_size = 2
+    stub._fpm_dp_rank = 1
+    stub._bench_deadline_monotonic = None
+    stub._bench_synchronizer = SimpleNamespace(
+        collect_result=lambda point, fpms, **_: (
+            instrumented_scheduler_module._BenchmarkGroupResult(
+                rank_results=json.loads(
+                    json.dumps(
+                        [{"dp_rank": 0, "fpms": [peer]}, {"dp_rank": 1, "fpms": fpms}]
+                    )
+                ),
+                stop_requested=False,
+            )
+        )
+    )
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    (group,) = stub._bench_iteration_groups
+    assert group["point"]["total_kv_read_tokens"] == 1998
+    measured = key(group["point"])
+    assert measured != declared
+    assert [
+        result["fpms"][0]["benchmark_measurement"]["point_key"]
+        for result in group["rank_results"]
+    ] == [measured, measured]
+    (fpm,) = stub._bench_results[0].fpms
+    assert fpm["benchmark_measurement"]["point_key"] == measured
+
+
 def test_two_fpm_save_path_skips_an_admission_only_giant_sample(monkeypatch):
     monkeypatch.setenv("DYN_BENCH_GIANT_KV_THRESHOLD", "1000")
     scheduled = {"num_decode_requests": 2, "sum_decode_kv_tokens": 1998}
@@ -6855,3 +7132,1352 @@ def test_random_kda_allows_hybrid_warm_chains_without_expert_parallelism(monkeyp
     stub._bench_random_kda = True
     assert stub._kvwarm_warm_eligible()
     assert stub._kvwarm_meta["skip_reason"] is None
+
+
+# --------------------------------------------------------------------------
+# Engine provenance (AIC-1950)
+# --------------------------------------------------------------------------
+
+
+class _ProvenanceBackend(enum.Enum):
+    """Stands in for vLLM's AttentionBackendEnum: a plain Enum whose value is
+    a class path, so json.dumps() raises on it and only ``.name`` is usable."""
+
+    FLASHINFER_MLA = "vllm.v1.attention.backends.mla.flashinfer.FlashInferMLA"
+
+
+class _ProvenanceQuantMode(enum.IntEnum):
+    """Stands in for KVQuantMode: an IntEnum that would silently serialise as
+    a bare integer."""
+
+    FP8_PER_TENSOR = 1
+
+
+class _ProvenanceDtype:
+    """Stands in for a torch dtype: not JSON-serialisable, str() is
+    ``torch.<name>``."""
+
+    def __str__(self) -> str:
+        return "torch.bfloat16"
+
+
+class _ProvenanceNumpyScalar:
+    """Stands in for a numpy/torch scalar: has ``.item()``, but str() would
+    produce a wrapper repr rather than the bare value."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def item(self):
+        return self._value
+
+    def __str__(self) -> str:
+        return f"array({self._value})"
+
+
+@dataclasses.dataclass
+class _ProvenanceEplbConfig:
+    window_size: int = 100
+    num_redundant_experts: int = 0
+
+
+class MLAAttentionSpec(SimpleNamespace):
+    """The class name is the payload: the provenance block records
+    ``type(spec).__name__`` for every KV cache group."""
+
+
+class UniformTypeKVCacheSpecs(SimpleNamespace):
+    """Stands in for vLLM's wrapper spec: same class name as the real type,
+    so ``type(spec).__name__`` reports it accurately. Its own dtype/
+    head_size/num_kv_heads stay unset -- real values live in the wrapped
+    ``kv_cache_specs``."""
+
+
+class _ExplodingConfig:
+    """Any attribute read raises, which getattr(..., default) does not
+    swallow: exercises the capture_error path."""
+
+    def __getattr__(self, name):
+        raise RuntimeError("boom")
+
+
+def _provenance_vllm_config(
+    *,
+    with_indexer: bool = True,
+    with_layout: bool = True,
+):
+    hf_config = SimpleNamespace(model_type="deepseek_v32")
+    if with_indexer:
+        hf_config.index_topk = 2048
+        hf_config.index_n_heads = 64
+        hf_config.index_head_dim = 128
+    attention_config = SimpleNamespace(
+        backend=_ProvenanceBackend.FLASHINFER_MLA,
+        backend_per_kind={"mla_attention": _ProvenanceBackend.FLASHINFER_MLA},
+        mla_prefill_backend=None,
+        flash_attn_version=3,
+        use_trtllm_attention=None,
+        indexer_kv_dtype="auto",
+        resolve_indexer_kv_dtype=lambda default: default,
+    )
+    cache_config = SimpleNamespace(
+        cache_dtype="fp8_ds_mla",
+        block_size=64,
+        enable_prefix_caching=True,
+        num_gpu_blocks=1234,
+    )
+    if with_layout:
+        cache_config.kv_cache_layout = "LBNHC"
+    spec = MLAAttentionSpec(
+        dtype=_ProvenanceDtype(),
+        head_size=576,
+        num_kv_heads=1,
+        block_size=64,
+        kv_quant_mode=_ProvenanceQuantMode.FP8_PER_TENSOR,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
+    )
+    if with_layout:
+        kv_cache_config.kv_cache_layout = "LBNHC"
+    model_config = SimpleNamespace(
+        dtype=_ProvenanceDtype(),
+        max_model_len=163840,
+        architectures=["DeepseekV32ForCausalLM"],
+        model="/weights/dsv32",
+        quantization="modelopt_fp4",
+        model_arch_config=SimpleNamespace(
+            quantization_config={"quant_method": "modelopt_fp4", "group_size": 16}
+        ),
+        hf_config=hf_config,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        cache_config=cache_config,
+        attention_config=attention_config,
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8192,
+            max_num_seqs=256,
+            async_scheduling=True,
+            enable_chunked_prefill=True,
+            long_prefill_token_threshold=0,
+        ),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=16,
+            data_parallel_rank=3,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+            enable_expert_parallel=True,
+            enable_eplb=False,
+            all2all_backend="deepep_low_latency",
+            eplb_config=_ProvenanceEplbConfig(),
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=[8, 2, 1, 0],
+            max_cudagraph_capture_size=8,
+        ),
+        speculative_config=None,
+        quant_config=None,
+    )
+    return vllm_config, kv_cache_config
+
+
+def test_json_safe_coerces_enums_dtypes_and_dataclasses():
+    coerce = instrumented_scheduler_module._json_safe
+
+    assert coerce(_ProvenanceBackend.FLASHINFER_MLA) == "FLASHINFER_MLA"
+    assert coerce(_ProvenanceQuantMode.FP8_PER_TENSOR) == "FP8_PER_TENSOR"
+    assert coerce(_ProvenanceDtype()) == "bfloat16"
+    assert coerce(_ProvenanceEplbConfig()) == {
+        "window_size": 100,
+        "num_redundant_experts": 0,
+    }
+    assert coerce({"a": [1, _ProvenanceBackend.FLASHINFER_MLA]}) == {
+        "a": [1, "FLASHINFER_MLA"]
+    }
+    assert coerce(None) is None
+    assert coerce(True) is True
+    assert coerce(7) == 7
+    assert coerce("plain") == "plain"
+    json.dumps(coerce({"nested": _ProvenanceEplbConfig()}))
+    # Sets/frozensets: hash order is per-process and would break Task 2's
+    # cross-rank equality check, so they must come back sorted.
+    assert coerce({3, 1, 2}) == [1, 2, 3]
+    assert coerce(frozenset({"b", "a", "c"})) == ["a", "b", "c"]
+    # Mixed types aren't mutually comparable (int < str raises); falls back
+    # to sorting by str(), still deterministic.
+    assert coerce({1, "a"}) == [1, "a"]
+    # numpy/torch scalars: .item() before the str() fallback.
+    assert coerce(_ProvenanceNumpyScalar(42)) == 42
+
+
+def test_bench_capture_engine_records_requested_engine_facts():
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=[1, 2, 8],
+        # Deliberately different from the fixture's vllm_config.parallel_
+        # config.data_parallel_rank (3): proves data_parallel_rank in the
+        # emitted block comes from this parameter, not from re-reading
+        # parallel_config, which vLLM zeroes for dense-model DP children.
+        dp_rank=7,
+    )
+
+    assert engine["attention"] == {
+        "backend_requested": "FLASHINFER_MLA",
+        "backend_per_kind": {"mla_attention": "FLASHINFER_MLA"},
+        "mla_prefill_backend_requested": None,
+        "flash_attn_version": 3,
+        "use_trtllm_attention": None,
+        "indexer_kv_dtype": "fp8",
+        "indexer_kv_dtype_configured": "auto",
+        "backend_resolved": None,
+        "mla_prefill_backend_resolved": None,
+        "resolution": "pending_worker_probe",
+        "indexer": {
+            "index_topk": 2048,
+            "index_n_heads": 64,
+            "index_head_dim": 128,
+        },
+    }
+    assert engine["kv_cache"] == {
+        "cache_dtype": "fp8_ds_mla",
+        "block_size": 64,
+        "enable_prefix_caching": True,
+        "kv_cache_layout": "LBNHC",
+        "groups": [
+            {
+                "type": "MLAAttentionSpec",
+                "dtype": "bfloat16",
+                "head_size": 576,
+                "num_kv_heads": 1,
+                "block_size": 64,
+                "kv_quant_mode": "FP8_PER_TENSOR",
+            }
+        ],
+    }
+    assert engine["quantization"] == {
+        "method": "modelopt_fp4",
+        "checkpoint_config": {"quant_method": "modelopt_fp4", "group_size": 16},
+        "quant_config_class": None,
+    }
+    assert engine["scheduler"] == {
+        "max_num_batched_tokens": 8192,
+        "max_num_seqs": 256,
+        "async_scheduling": True,
+        "enable_chunked_prefill": True,
+        "long_prefill_token_threshold": 0,
+    }
+    assert engine["model"] == {
+        "dtype": "bfloat16",
+        "model_type": "deepseek_v32",
+        "architectures": ["DeepseekV32ForCausalLM"],
+        "model": "/weights/dsv32",
+    }
+    assert engine["parallel"] == {
+        "data_parallel_size": 16,
+        "data_parallel_rank": 7,
+        "tensor_parallel_size": 1,
+        "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 2,
+        "decode_context_parallel_size": 1,
+        "enable_expert_parallel": True,
+        "enable_eplb": False,
+        "all2all_backend": "deepep_low_latency",
+        "eplb_config": {"window_size": 100, "num_redundant_experts": 0},
+    }
+    assert engine["speculative"] is None
+    assert engine["graph"] == {
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
+        "cudagraph_capture_sizes": [1, 2, 8],
+        "resolution": "pre_resolution",
+    }
+    assert engine["resolved"] is None
+    assert engine["resolution"] == "pending_worker_probe"
+    assert set(engine["versions"]) == {
+        "vllm",
+        "vllm_build_commit",
+        "dynamo",
+        "python",
+    }
+    assert isinstance(engine["versions"]["python"], str)
+    json.dumps(engine)
+
+
+@pytest.mark.parametrize("size", [None, 1, 2])
+def test_bench_capture_engine_preserves_observed_decode_context_parallel_size(size):
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    if size is None:
+        del vllm_config.parallel_config.decode_context_parallel_size
+    else:
+        vllm_config.parallel_config.decode_context_parallel_size = size
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=[1, 2, 8],
+        dp_rank=7,
+    )
+    assert engine["parallel"]["decode_context_parallel_size"] == size
+
+
+def test_bench_capture_engine_omits_absent_optional_blocks():
+    """vLLM 0.28.0 has no kv_cache_layout, and a model without a sparse
+    indexer has no indexer topology."""
+    vllm_config, kv_cache_config = _provenance_vllm_config(
+        with_indexer=False, with_layout=False
+    )
+
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=[1, 2, 8],
+        dp_rank=7,
+    )
+
+    assert "kv_cache_layout" not in engine["kv_cache"]
+    assert "indexer" not in engine["attention"]
+    assert engine["attention"]["indexer_kv_dtype"] is None
+
+
+def test_bench_capture_engine_fans_out_uniform_type_kv_cache_specs_wrapper():
+    """A group whose spec is vLLM's UniformTypeKVCacheSpecs wrapper has no
+    dtype/head_size/num_kv_heads of its own; fan out the wrapped specs into
+    a ``specs`` list instead of just recording nulls (M5)."""
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    wrapped_a = MLAAttentionSpec(
+        dtype=_ProvenanceDtype(),
+        head_size=576,
+        num_kv_heads=1,
+        block_size=64,
+        kv_quant_mode=_ProvenanceQuantMode.FP8_PER_TENSOR,
+    )
+    wrapped_b = MLAAttentionSpec(
+        dtype=_ProvenanceDtype(),
+        head_size=512,
+        num_kv_heads=2,
+        block_size=64,
+    )
+    wrapper = UniformTypeKVCacheSpecs(
+        block_size=64,
+        kv_cache_specs={"layer.0": wrapped_a, "layer.1": wrapped_b},
+    )
+    kv_cache_config.kv_cache_groups = [SimpleNamespace(kv_cache_spec=wrapper)]
+
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=[1, 2, 8],
+        dp_rank=7,
+    )
+
+    assert engine["kv_cache"]["groups"] == [
+        {
+            "type": "UniformTypeKVCacheSpecs",
+            "dtype": None,
+            "head_size": None,
+            "num_kv_heads": None,
+            "block_size": 64,
+            "specs": [
+                {
+                    "type": "MLAAttentionSpec",
+                    "dtype": "bfloat16",
+                    "head_size": 576,
+                    "num_kv_heads": 1,
+                    "block_size": 64,
+                    "kv_quant_mode": "FP8_PER_TENSOR",
+                },
+                {
+                    "type": "MLAAttentionSpec",
+                    "dtype": "bfloat16",
+                    "head_size": 512,
+                    "num_kv_heads": 2,
+                    "block_size": 64,
+                },
+            ],
+        }
+    ]
+    json.dumps(engine)
+
+
+@pytest.mark.parametrize(
+    "window,chunk,non_causal",
+    [(None, None, False), (512, None, False), (None, 128, False), (None, None, True)],
+)
+def test_bench_capture_engine_records_full_attention_retention(
+    window, chunk, non_causal
+):
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=32,
+        dtype=torch.bfloat16,
+        sliding_window=window,
+        attention_chunk_size=chunk,
+        non_causal=non_causal,
+    )
+    kv_cache_config.kv_cache_groups = [SimpleNamespace(kv_cache_spec=spec)]
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="NONE",
+        cudagraph_capture_sizes=[],
+        dp_rank=0,
+    )
+    observed = engine["kv_cache"]["groups"][0]
+    assert "capture_error" not in engine
+    assert observed["type"] == "FullAttentionSpec"
+    assert observed["sliding_window"] == window
+    assert observed["attention_chunk_size"] == chunk
+    assert observed["non_causal"] is non_causal
+    json.dumps(engine)
+
+
+def test_bench_capture_engine_preserves_absent_and_wrapped_retention():
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=32, dtype=torch.bfloat16
+    )
+    older = SimpleNamespace(block_size=16)
+    wrapper = UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs={"full": full, "older": older}
+    )
+    kv_cache_config.kv_cache_groups = [SimpleNamespace(kv_cache_spec=wrapper)]
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="NONE",
+        cudagraph_capture_sizes=[],
+        dp_rank=0,
+    )
+    observed = engine["kv_cache"]["groups"][0]
+    assert "capture_error" not in engine
+    assert observed["specs"][0]["sliding_window"] is None
+    assert observed["specs"][0]["attention_chunk_size"] is None
+    assert observed["specs"][0]["non_causal"] is False
+    for key in ("sliding_window", "attention_chunk_size", "non_causal"):
+        assert key not in observed
+        assert key not in observed["specs"][1]
+    json.dumps(engine)
+
+
+def test_bench_capture_engine_reports_failed_retention_observation():
+    class UnreadableSpec:
+        @property
+        def sliding_window(self):
+            raise RuntimeError("retention unavailable")
+
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    kv_cache_config.kv_cache_groups = [SimpleNamespace(kv_cache_spec=UnreadableSpec())]
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="NONE",
+        cudagraph_capture_sizes=[],
+        dp_rank=0,
+    )
+    assert engine["capture_error"] == "retention unavailable"
+    json.dumps(engine)
+
+
+def test_bench_capture_engine_records_capture_error_instead_of_raising():
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        _ExplodingConfig(),
+        None,
+        cudagraph_mode="NONE",
+        cudagraph_capture_sizes=[],
+        dp_rank=None,
+    )
+
+    assert engine == {"capture_error": "boom"}
+
+
+def test_benchmark_output_includes_engine_and_observed_warmup(tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
+    stub._bench_config = BenchmarkConfig(output_path=str(output_path))
+    stub._bench_expected_points = 0
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+    stub._bench_missing_phases = []
+    stub.max_num_scheduled_tokens = 40
+    stub.max_num_running_reqs = 8
+    stub.max_model_len = 128
+    stub.block_size = 8
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
+    stub._bench_engine = {"versions": {"vllm": "0.28.0"}, "resolved": None}
+    stub._bench_begin_warmup("global", {"prompt_lengths": [256], "max_tokens": 5})
+    stub._bench_observe_warmup(
+        instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=256
+        )
+    )
+    stub._bench_forward_index += 1
+    stub._bench_finish_warmup()
+
+    InstrumentedScheduler._bench_write_results(stub)
+
+    output = json.loads(output_path.read_text())
+    assert output["schema_version"] == 2
+    assert output["engine"] == {"versions": {"vllm": "0.28.0"}, "resolved": None}
+    warmup = output["warmup_evidence"]
+    assert warmup["status"] == "recorded"
+    assert len(warmup["records"]) == 1
+    record = warmup["records"][0]
+    assert record["observed_forward_count"] == 1
+    assert record["first_scheduled_requests"]["sum_prefill_tokens"] == 256
+    assert record["last_scheduled_requests"]["num_decode_requests"] == 0
+    assert record["forward_index_start"] == 0
+    assert record["forward_index_end"] == 1
+    assert record["validation"]["status"] == "not_performed"
+
+
+def test_benchmark_output_omits_engine_block_when_not_captured(tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
+    stub._bench_config = BenchmarkConfig(output_path=str(output_path))
+    stub._bench_expected_points = 0
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+    stub._bench_missing_phases = []
+    stub.max_num_scheduled_tokens = 40
+    stub.max_num_running_reqs = 8
+    stub.max_model_len = 128
+    stub.block_size = 8
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
+
+    InstrumentedScheduler._bench_write_results(stub)
+
+    assert "engine" not in json.loads(output_path.read_text())
+
+
+def test_bench_init_wires_engine_capture_into_written_results(tmp_path, monkeypatch):
+    """Drives the real ``_bench_init`` (not ``_bench_capture_engine`` called
+    directly) end to end into a real ``_bench_write_results``. The other
+    engine-provenance tests all call ``_bench_capture_engine`` directly or
+    hand-set ``stub._bench_engine``, so none of them would notice if the
+    ``_bench_init`` call site were ever deleted; this one would."""
+    monkeypatch.setenv("DYN_BENCH_CONTENT_SEED", "accepted-campaign-seed")
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._fpm_dp_rank = 7
+    stub.max_num_running_reqs = 8
+    stub._bench_hash_block_size = 16
+    stub.cache_config = SimpleNamespace(enable_prefix_caching=False, num_gpu_blocks=64)
+    stub.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+    output_path = tmp_path / "out.json"
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            data_parallel_master_ip="127.0.0.1",
+        ),
+        additional_config={
+            "benchmark": {"mode": "agg", "output_path": str(output_path)}
+        },
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.NONE,
+            cudagraph_capture_sizes=[],
+            max_cudagraph_capture_size=0,
+        ),
+        speculative_config=None,
+    )
+
+    InstrumentedScheduler._bench_init(stub, vllm_config)
+
+    assert isinstance(stub._bench_engine, dict)
+    assert stub._bench_engine["graph"] == {
+        "cudagraph_mode": "NONE",
+        "cudagraph_capture_sizes": [],
+        "resolution": "pre_resolution",
+    }
+    # The I2 regression this test exists for: the rank in the capture must
+    # equal the same self._fpm_dp_rank the rest of the artifact uses, not a
+    # field vLLM may have zeroed on parallel_config.
+    assert stub._bench_engine["parallel"]["data_parallel_rank"] == 7
+    assert set(stub._bench_engine["versions"]) == {
+        "vllm",
+        "vllm_build_commit",
+        "dynamo",
+        "python",
+    }
+
+    stub.max_num_scheduled_tokens = 40
+    stub.max_model_len = 128
+    stub.block_size = 8
+
+    InstrumentedScheduler._bench_write_results(stub)
+
+    # _bench_init suffixes output_path with "_dp<rank>" for dp_rank > 0, so
+    # the actual artifact is not at the original tmp_path / "out.json".
+    with open(stub._bench_config.output_path) as f:
+        output = json.load(f)
+    assert output["engine"]["parallel"]["data_parallel_rank"] == 7
+    assert output["engine"]["parallel"]["data_parallel_rank"] == output["dp"]["rank"]
+    assert output["measurement_protocol"]["content_seed"] == "accepted-campaign-seed"
+    monkeypatch.setenv("DYN_BENCH_CONTENT_SEED", "changed-after-startup")
+    assert (
+        stub._bench_measurement_protocol()["content_seed"] == "accepted-campaign-seed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FPM port block vs. the kernel's ephemeral port range
+# ---------------------------------------------------------------------------
+
+
+def _capture_scheduler_warnings(monkeypatch) -> list:
+    """Collect logger.warning calls without depending on logging config."""
+    warnings: list = []
+    monkeypatch.setattr(
+        instrumented_scheduler_module.logger,
+        "warning",
+        lambda message, *args, **kwargs: warnings.append(str(message)),
+    )
+    return warnings
+
+
+def test_fpm_port_warning_fires_once_when_the_block_overlaps(tmp_path, monkeypatch):
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768\t60999\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        32760, 16, path=str(range_file)
+    )
+
+    assert message is not None
+    assert "32768" in message and "60999" in message
+    assert "DYN_FORWARDPASS_METRIC_PORT" in message
+    assert warnings == [message]
+
+
+def test_fpm_port_warning_silent_below_the_range(tmp_path, monkeypatch):
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768 60999\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        instrumented_scheduler_module.DEFAULT_FPM_PORT, 16, path=str(range_file)
+    )
+
+    assert message is None
+    assert warnings == []
+
+
+def test_fpm_port_warning_silent_without_the_proc_file(tmp_path, monkeypatch):
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        40000, 16, path=str(tmp_path / "absent")
+    )
+
+    assert message is None
+    assert warnings == []
+
+
+def test_fpm_port_warning_silent_on_garbage_proc_content(tmp_path, monkeypatch):
+    """A readable but unparseable file (corrupt mount, wrong file) must not
+    raise and must not warn -- same "cannot check" treatment as a missing
+    file."""
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("not-a-port\tnumber\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        40000, 16, path=str(range_file)
+    )
+
+    assert message is None
+    assert warnings == []
+
+
+def test_fpm_port_warning_scales_block_width_with_dp_size(tmp_path, monkeypatch):
+    """At dp_size <= 1 no _BenchmarkSynchronizer is ever constructed (see
+    _bench_init's ``if self._bench_dp_size > 1:`` gate), so the checked
+    block at dp_size=1 is just the lone publisher port [base_port,
+    base_port] -- not [base_port, base_port + 1]. A base_port one below the
+    ephemeral range's start must not warn at dp_size=1 (an off-by-one here
+    would warn at exactly this boundary), but the same base_port does warn
+    once dp_size is large enough for the real synchronizer port to reach
+    the range."""
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768\t60999\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    silent = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        32767, 1, path=str(range_file)
+    )
+
+    assert silent is None
+    assert warnings == []
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        32767, 16, path=str(range_file)
+    )
+
+    assert message is not None
+    assert "32767-32783" in message
+    assert warnings == [message]
+
+
+def test_fpm_port_warning_survives_a_non_int_dp_size(tmp_path, monkeypatch):
+    """A malformed dp_size must not propagate past this function. Uses a
+    real, parseable range file so the failure is reached inside the
+    dp_size/block-arithmetic try (not short-circuited earlier by
+    _ephemeral_port_range returning None for a missing/garbage file) --
+    caught, debug-logged, and treated as "cannot evaluate": silent, not a
+    raise."""
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768\t60999\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        20380, "not-an-int", path=str(range_file)
+    )
+
+    assert message is None
+    assert warnings == []
+
+
+def test_ephemeral_port_range_reads_the_kernel_pair(tmp_path):
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768\t60999\n")
+
+    assert instrumented_scheduler_module._ephemeral_port_range(str(range_file)) == (
+        32768,
+        60999,
+    )
+    assert (
+        instrumented_scheduler_module._ephemeral_port_range(str(tmp_path / "absent"))
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# Benchmark measurement protocol and reproducible subset content
+# ---------------------------------------------------------------------------
+
+
+def _measurement_injection_stub(seq: int, dp_rank: int = 0):
+    stub = _vocab_stub(4096, dp_rank=dp_rank)
+    stub._bench_seq = seq
+    stub._bench_grid_digest = f"grid-{seq}"
+    stub._bench_block_hasher = None
+    stub._bench_active_req_ids = set()
+    stub._bench_config = BenchmarkConfig()
+    stub.requests = {}
+    stub.running = []
+    stub.finished_req_ids = set()
+    stub.connector = None
+    stub.ec_connector = None
+    stub.add_request = MagicMock()
+    stub.kv_cache_manager = MagicMock()
+    stub.kv_cache_manager.num_kv_cache_groups = 1
+    stub.kv_cache_manager.use_eagle = False
+    stub.kv_cache_manager.take_new_block_ids.return_value = None
+    stub.kv_cache_manager.allocate_slots.return_value.get_block_ids.return_value = (
+        [0, 1],
+    )
+    return stub
+
+
+def _inject_measurement_prompts(stub, phase):
+    if phase == "prefill":
+        stub._bench_inject_prefill(prompt_lens=[32, 31], max_tokens=1)
+        return [
+            args.args[0].prompt_token_ids for args in stub.add_request.call_args_list
+        ]
+    output = stub._bench_inject_fake_decode(context_lengths=[16, 17])
+    return [request.prompt_token_ids for request in output.scheduled_new_reqs]
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_measured_prompt_content_is_independent_of_grid_and_request_history(phase):
+    full_grid = _measurement_injection_stub(seq=500)
+    subset = _measurement_injection_stub(seq=1)
+    full_grid._bench_current_point = BenchmarkPoint(phase, benchmark_id=100)
+    subset._bench_current_point = BenchmarkPoint(phase, benchmark_id=1)
+
+    actual_full = _inject_measurement_prompts(full_grid, phase)
+    actual_subset = _inject_measurement_prompts(subset, phase)
+
+    # This checks real Request/NewRequestData content, not a proposed seed.
+    assert actual_full == actual_subset
+    assert full_grid._bench_prompt_evidence == subset._bench_prompt_evidence
+    assert actual_full[0] != actual_full[1]
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_measured_prompt_content_changes_with_rank_or_explicit_seed(phase):
+    original = _measurement_injection_stub(seq=0)
+    other_rank = _measurement_injection_stub(seq=0, dp_rank=1)
+    other_seed = _measurement_injection_stub(seq=0)
+    other_seed._bench_content_seed = "campaign-second-draw"
+
+    actual = _inject_measurement_prompts(original, phase)
+    assert actual != _inject_measurement_prompts(other_rank, phase)
+    assert actual != _inject_measurement_prompts(other_seed, phase)
+
+
+def test_real_kv_chain_content_does_not_depend_on_grid_selection():
+    full_grid = _kvwarm_text_stub()
+    subset = _kvwarm_text_stub()
+    full_grid._bench_grid_digest = "full-grid"
+    subset._bench_grid_digest = "subset"
+
+    assert full_grid._kvwarm_chain_token_ids(1, 20) == subset._kvwarm_chain_token_ids(
+        1, 20
+    )
+    prefix = subset._kvwarm_chain_token_ids(1, 7)
+    assert prefix == full_grid._kvwarm_chain_token_ids(1, 20)[:7]
+    subset._fpm_dp_rank = 1
+    subset._kvwarm_token_cache = None
+    assert full_grid._kvwarm_chain_token_ids(1, 20) != subset._kvwarm_chain_token_ids(
+        1, 20
+    )
+
+
+def test_real_seed_measured_tail_is_independent_of_request_history(monkeypatch):
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=25, total_kv_read_tokens=40, batch_size=3
+    )
+    measured = []
+    for seq in (0, 500):
+        stub, calls = _realseed_prefill_stub(point, monkeypatch, seq=seq)
+        del stub._bench_synthetic_token_ids
+        stub._bench_vocab_size = 4096
+        stub._fpm_dp_rank = 0
+        stub._bench_step_prefill()  # stage
+        stub._bench_step_prefill()  # same-shape warmup
+        stub._bench_step_prefill()  # measurement
+        measured.append(calls[-1]["prompt_token_ids_list"])
+    assert measured[0] == measured[1]
+
+
+@pytest.fixture
+def realseed_prefix_cache(monkeypatch):
+    """Real vLLM request hashes/cache metadata; no model or KV tensors."""
+    # Not a module-level import: tests/report_pytest_markers.py collects this file
+    # with vLLM stubbed, and a stub for this module would satisfy the vLLM probe
+    # in test_vllm_kv_cache_metadata_compat.py.
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+    monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test-root"), raising=False)
+
+    def build(point, *, drop=0, seq=0):
+        stub, _ = _realseed_prefill_stub(point, monkeypatch, seq=seq, drop=drop)
+        del stub._bench_inject_prefill
+        del stub._bench_synthetic_token_ids
+        stub._bench_hash_block_size = 32
+        stub._bench_vocab_size = 4096
+        stub._bench_content_seed = "0"
+        stub._fpm_dp_rank = 0
+        stub._bench_block_hasher = kv_cache_utils.get_request_block_hasher(32, sha256)
+        stub.kv_cache_manager = KVCacheManager(
+            KVCacheConfig(
+                num_blocks=2048,
+                kv_cache_tensors=[],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(
+                        ["layer"],
+                        FullAttentionSpec(
+                            block_size=32,
+                            num_kv_heads=1,
+                            head_size=1,
+                            dtype=torch.bfloat16,
+                        ),
+                    )
+                ],
+            ),
+            max_model_len=4096,
+            scheduler_block_size=32,
+            hash_block_size=32,
+            enable_caching=True,
+            use_eagle=bool(drop),
+        )
+        stub.add_request = lambda req: stub.requests.__setitem__(req.request_id, req)
+        stub._bench_results = []
+        stub._bench_iteration_groups = []
+        stub._bench_grid_digest = "test-grid"
+        stub._bench_synchronizer = None
+        stub._bench_dp_size = 1
+        stub._bench_soft_timeout_elapsed = lambda: False
+        return stub
+
+    return build
+
+
+def _complete_realseed_cache_shot(stub):
+    """Complete only CPU cache bookkeeping and save a synthetic FPM shape."""
+    manager = stub.kv_cache_manager
+    requests = list(stub.requests.values())
+    hits = []
+    for req in requests:
+        blocks, num_cached, _ = manager.get_computed_blocks(req)
+        hits.append(num_cached)
+        assert (
+            manager.allocate_slots(
+                req,
+                req.num_tokens - num_cached,
+                num_new_computed_tokens=num_cached,
+                new_computed_blocks=blocks,
+            )
+            is not None
+        )
+    for req in requests:
+        manager.free(req)
+    manager.new_step_starts()
+    stub.requests.clear()
+    stub._bench_active_req_ids.clear()
+    point = stub._bench_current_point
+    if point is not None:
+        stub._bench_current_fpms = [
+            {
+                "counter_id": point.benchmark_id,
+                "dp_rank": 0,
+                "wall_time": 0.01,
+                "scheduled_requests": {
+                    "num_prefill_requests": len(requests),
+                    "sum_prefill_tokens": sum(req.num_tokens for req in requests)
+                    - sum(hits),
+                    "sum_prefill_kv_tokens": sum(hits),
+                },
+            }
+        ]
+        stub._bench_save_current_point()
+    return requests, hits
+
+
+@pytest.mark.parametrize("content", ["random", "zeros", "sharegpt"])
+@pytest.mark.parametrize("drop", [0, 32])
+def test_real_seed_aligned_zero_kv_repeats_keep_content_and_miss_cache(
+    monkeypatch, realseed_prefix_cache, content, drop
+):
+    """Block alignment can collapse several native points to the same KV=0 row."""
+    monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", content)
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=8192, total_kv_read_tokens=0, batch_size=4
+    )
+    stub = realseed_prefix_cache(point, drop=drop)
+    if content == "zeros":
+        stub._bench_vocab_size = 1
+    elif content == "sharegpt":
+        stub._bench_prefill_pool = [7] * 4096
+    measured = []
+    evidence = []
+    salts = []
+    for benchmark_id in (11, 12, 13):
+        stub._bench_realseed_stage_point(
+            replace(point, benchmark_id=benchmark_id), [0] * 4, [2048] * 4
+        )
+        assert stub._bench_realseed_staged is False
+        assert stub._bench_realseed_pending_step()  # untimed shape warmup
+        warm, warm_hits = _complete_realseed_cache_shot(stub)
+        assert warm_hits == [0] * 4
+        assert stub._bench_realseed_pending_step()  # measured injection
+        assert stub._bench_realseed_ready is None
+        assert stub._bench_current_point is not None
+        evidence.append(stub._bench_prompt_evidence)
+        requests, hits = _complete_realseed_cache_shot(stub)
+        assert hits == [0] * 4
+        measured.append([req.prompt_token_ids for req in requests])
+        salts.extend(req.cache_salt for req in warm + requests)
+    assert stub._bench_skipped_points == []
+    assert [result.point.benchmark_id for result in stub._bench_results] == [11, 12, 13]
+    assert measured[0] == measured[1] == measured[2]
+    if content != "random":
+        expected = 0 if content == "zeros" else 7
+        assert all(set(prompt) == {expected} for prompt in measured[0])
+    assert evidence[0] == evidence[1] == evidence[2]
+    assert len(set(salts)) == 24  # warm and measured requests are all isolated
+
+
+@pytest.mark.parametrize("content", ["random", "zeros", "sharegpt"])
+@pytest.mark.parametrize("drop", [0, 32])
+def test_real_seed_mixed_slots_isolate_zero_kv_and_reuse_seeded_prefix(
+    monkeypatch, realseed_prefix_cache, content, drop
+):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", content)
+    new_tokens = [128, 32 + drop]
+    point = BenchmarkPoint(
+        "prefill",
+        total_prefill_tokens=sum(new_tokens),
+        total_kv_read_tokens=64,
+        batch_size=2,
+        rows=[[new_tokens[0], 0], [new_tokens[1], 64]],
+    )
+    stub = realseed_prefix_cache(point, drop=drop)
+    if content == "zeros":
+        stub._bench_vocab_size = 1
+    elif content == "sharegpt":
+        stub._bench_prefill_pool = [7] * 4096
+    prompts = []
+    zero_salts = []
+    for benchmark_id in (1, 2, 3):
+        stub._bench_realseed_stage_point(
+            replace(point, benchmark_id=benchmark_id), [0, 64], new_tokens
+        )
+        if benchmark_id == 1:
+            seeded, _ = _complete_realseed_cache_shot(stub)
+            assert len(seeded) == 1  # zero-KV slot never seeds an empty prompt
+        else:
+            assert not stub.requests  # reuse the existing real prefix
+        chain = stub._bench_rsc[2]
+        for stage in ("warm", "measure"):
+            assert stub._bench_realseed_pending_step()
+            requests, hits = _complete_realseed_cache_shot(stub)
+            assert hits == [0, 64]
+            assert requests[1].cache_salt == chain["salts"][1]
+            assert requests[0].cache_salt != chain["salts"][0]
+            zero_salts.append(requests[0].cache_salt)
+            if stage == "measure":
+                prompts.append([req.prompt_token_ids for req in requests])
+    assert stub._bench_skipped_points == []
+    assert [result.point.benchmark_id for result in stub._bench_results] == [1, 2, 3]
+    assert prompts[0] == prompts[1] == prompts[2]
+    if content != "random":
+        expected = 0 if content == "zeros" else 7
+        assert all(set(prompt) == {expected} for prompt in prompts[0])
+    assert len(set(zero_salts)) == 6
+
+
+def test_real_seed_mixed_slots_restage_evicted_positive_prefix(realseed_prefix_cache):
+    point = BenchmarkPoint(
+        "prefill",
+        benchmark_id=1,
+        total_prefill_tokens=160,
+        total_kv_read_tokens=64,
+        batch_size=2,
+        rows=[[128, 0], [32, 64]],
+    )
+    stub = realseed_prefix_cache(point)
+    stub._bench_realseed_stage_point(point, [0, 64], [128, 32])
+    _complete_realseed_cache_shot(stub)  # seed the positive-KV slot
+    assert stub._bench_realseed_pending_step()
+    warm, _ = _complete_realseed_cache_shot(stub)
+    assert stub.kv_cache_manager.reset_prefix_cache()
+
+    assert stub._bench_realseed_pending_step()  # miss: re-stage once
+    assert stub._bench_realseed_retried is True
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == []
+    seeded, _ = _complete_realseed_cache_shot(stub)
+    assert len(seeded) == 1
+    assert stub._bench_realseed_pending_step()
+    retried_warm, warm_hits = _complete_realseed_cache_shot(stub)
+    assert warm_hits == [0, 64]
+    assert [req.prompt_token_ids for req in warm] == [
+        req.prompt_token_ids for req in retried_warm
+    ]
+    assert warm[0].cache_salt != retried_warm[0].cache_salt
+    assert stub._bench_realseed_pending_step()
+    _, hits = _complete_realseed_cache_shot(stub)
+    assert hits == [0, 64]
+    assert stub._bench_realseed_retried is False
+    assert stub._bench_skipped_points == []
+    assert [result.point.benchmark_id for result in stub._bench_results] == [1]
+
+
+def test_benchmark_engine_versions_preserves_unavailable_metadata(monkeypatch):
+    class UnavailableMetadata:
+        def __getattr__(self, name):
+            raise RuntimeError("metadata unavailable")
+
+    def missing_package(name):
+        raise RuntimeError("package metadata unavailable")
+
+    monkeypatch.setattr(instrumented_scheduler_module, "vllm", UnavailableMetadata())
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "vllm_envs", UnavailableMetadata()
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_package_version", missing_package
+    )
+    actual = instrumented_scheduler_module._bench_engine_versions()
+    assert actual["vllm"] is None
+    assert actual["vllm_build_commit"] is None
+    assert actual["dynamo"] is None
+    assert isinstance(actual["python"], str)
+
+
+def test_real_seed_eager_warmup_does_not_reuse_measured_tail(monkeypatch):
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=25, total_kv_read_tokens=40, batch_size=3
+    )
+    measured = []
+    for reasons in ([], [EAGER_WARMUP_REASON]):
+        stub, calls = _realseed_prefill_stub(
+            replace(point, sample_reasons=reasons), monkeypatch
+        )
+        del stub._bench_synthetic_token_ids
+        stub._bench_vocab_size = 4096
+        stub._fpm_dp_rank = 0
+        stub._bench_step_prefill()
+        stub._bench_step_prefill()
+        stub._bench_step_prefill()
+        measured.append(calls[-1]["prompt_token_ids_list"])
+    for normal, warmup, kv in zip(*measured, [16, 16, 8], strict=True):
+        assert normal[:kv] == warmup[:kv]
+        assert normal[kv:] != warmup[kv:]
+
+
+@pytest.mark.parametrize(
+    "walls,expected,method,indices",
+    [
+        ([0.01], 1, "single_step", [0]),
+        ([0.1, 0.03], 2, "last_step", [1]),
+        ([0.1, 0.03, 0.5, 0.02], 4, "adjacent_upper_median", [1, 2, 3]),
+    ],
+)
+def test_measurement_evidence_preserves_raw_steps_and_stalls(
+    walls, expected, method, indices
+):
+    point = BenchmarkPoint(
+        "decode", benchmark_id=7, total_kv_read_tokens=48, batch_size=3
+    )
+    fpms = [
+        {
+            "wall_time": wall,
+            "benchmark_sample": {
+                "sample_index": index,
+                "forward_index": 10 + index,
+                "timing": {
+                    "basis": "inter_output" if index else "schedule_to_output",
+                    "start_monotonic": 100.0 + index,
+                    "end_monotonic": 100.0 + index + wall,
+                },
+                "cudagraph": {
+                    "status": "observed",
+                    "runtime_mode": f"mode-{index}",
+                    "num_unpadded_tokens": 3,
+                    "num_padded_tokens": 4,
+                    "num_paddings": 1,
+                },
+            },
+            "scheduled_requests": {
+                "num_decode_requests": 3,
+                "sum_decode_kv_tokens": 48,
+            },
+        }
+        for index, wall in enumerate(walls)
+    ]
+    stub = _benchmark_save_stub(point, fpms)
+    stub._bench_grid_digest = "captured-grid"
+    stub._bench_expected_fpms = expected
+    stub._bench_record_prompt_evidence([[3, 4], [5, 6], [7, 8]])
+    stub._bench_save_current_point()
+
+    retained = stub._bench_results[0].fpms[0]
+    evidence = retained["benchmark_measurement"]
+    assert [sample["wall_time"] for sample in evidence["raw_fpms"]] == walls
+    assert evidence["estimate"] == {"method": method, "raw_sample_indices": indices}
+    assert evidence["expected_internal_samples"] == expected
+    assert evidence["preparation"]["grid_digest"] == "captured-grid"
+    assert all("benchmark_measurement" not in sample for sample in evidence["raw_fpms"])
+    assert "benchmark_sample" not in retained
+    # The steady-step marker belongs to the retained estimate, not to raw samples.
+    assert retained.get("kvwarm_steady_sample", False) is (method != "single_step")
+    assert all("kvwarm_steady_sample" not in sample for sample in evidence["raw_fpms"])
+    assert [
+        sample["benchmark_sample"]["sample_index"] for sample in evidence["raw_fpms"]
+    ] == list(range(len(walls)))
+    assert [
+        sample["benchmark_sample"]["cudagraph"]["runtime_mode"]
+        for sample in evidence["raw_fpms"]
+    ] == [f"mode-{index}" for index in range(len(walls))]
+    # Serialization must not recurse when the estimate was a raw sample.
+    assert json.loads(json.dumps(stub._bench_iteration_groups))[0]["complete"]
+    if expected == 4:
+        assert retained["wall_time"] == 0.03
+        assert 0.5 in [sample["wall_time"] for sample in evidence["raw_fpms"]]
+    # The raw snapshot must not alias later mutations of the retained sample.
+    retained["scheduled_requests"]["sum_decode_kv_tokens"] = 999
+    assert evidence["raw_fpms"][0]["scheduled_requests"]["sum_decode_kv_tokens"] == 48
+
+
+def test_prompt_evidence_does_not_claim_observed_decode_continuations():
+    stub = _measurement_injection_stub(seq=0)
+    output = stub._bench_inject_fake_decode(context_lengths=[16, 17])
+    # vLLM's async CPU placeholders are not actual consumed GPU token IDs.
+    for request in stub.requests.values():
+        request._all_token_ids.append(-1)
+    protocol = stub._bench_measurement_protocol()
+    assert protocol["input_evidence_scope"] == "injected_prompt_token_ids"
+    assert "sampled_continuation_token_ids" in protocol["unobserved"]
+    assert "kv_cache_tensors" in protocol["unobserved"]
+    assert stub._bench_prompt_evidence["status"] == "recorded"
+    assert [row["num_tokens"] for row in stub._bench_prompt_evidence["requests"]] == [
+        17,
+        18,
+    ]
+    assert [len(row.prompt_token_ids) for row in output.scheduled_new_reqs] == [17, 18]
+
+
+@pytest.mark.parametrize("different", ["seed", "content", "pool_tag"])
+def test_grid_invariants_include_measurement_content_policy(different, monkeypatch):
+    first = _digest_stub(max_num_running_reqs=8)
+    first._bench_vocab_size = 4096
+    original = first._bench_grid_invariants_digest()
+    if different == "seed":
+        first._bench_content_seed = "second-content-draw"
+    elif different == "content":
+        monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt")
+    else:
+        monkeypatch.setenv("DYN_BENCH_POOL_TAG", "different-pool")
+    assert first._bench_grid_invariants_digest() != original
+
+
+def test_benchmark_content_key_ignores_grid_annotations_but_keeps_shape():
+    point = BenchmarkPoint(
+        "prefill", benchmark_id=9, total_prefill_tokens=32, batch_size=2
+    )
+    subset = replace(point, benchmark_id=1, sample_reasons=["explicit"])
+    key = instrumented_scheduler_module.benchmark_content_point_key
+    assert key(dataclasses.asdict(point)) == key(dataclasses.asdict(subset))
+    assert key(dataclasses.asdict(point)) != key(
+        dataclasses.asdict(replace(point, batch_size=4))
+    )
+    assert key(dataclasses.asdict(point)) != key(
+        dataclasses.asdict(replace(point, rows=[[1, 0], [31, 0]]))
+    )
+
+
+def test_fake_prefix_content_is_stable_and_matches_measured_request():
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=25, total_kv_read_tokens=40, batch_size=3
+    )
+    prompts = []
+    cache_salts = []
+    for seq in (0, 500):
+        stub = _measurement_injection_stub(seq)
+        stub._bench_grid = deque([point])
+        stub._bench_drain_pending = False
+        stub._bench_current_point = None
+        stub._bench_current_fpms = []
+        stub._bench_hash_block_size = 8
+        stub._bench_skipped_points = []
+        stub._schedule_times = deque()
+        stub._bench_cached_kv_read_tokens = MagicMock(side_effect=[16, 16, 8])
+        stub._bench_step_prefill()
+        seeds = [
+            args.args[0] for args in stub.kv_cache_manager.allocate_slots.call_args_list
+        ]
+        measured = [args.args[0] for args in stub.add_request.call_args_list]
+        assert len(seeds) == len(measured) == 3
+        for seed, request, kv in zip(seeds, measured, [16, 16, 8], strict=True):
+            assert seed.prompt_token_ids == request.prompt_token_ids[:kv]
+            assert seed.cache_salt == request.cache_salt
+        prompts.append([request.prompt_token_ids for request in measured])
+        cache_salts.append([request.cache_salt for request in measured])
+    assert prompts[0] == prompts[1]
+    assert cache_salts[0] != cache_salts[1], "allocation identities stay independent"
+
+
+def _record_benchmark_content_salts(stub) -> list[str]:
+    """Wrap the stub's real synthetic-prompt generator so every content salt
+    it receives is recorded, in call order."""
+    salts: list[str] = []
+    generate = stub._bench_synthetic_token_ids
+
+    def recording(salt, length):
+        salts.append(salt)
+        return generate(salt, length)
+
+    stub._bench_synthetic_token_ids = recording
+    return salts
+
+
+def _inject_benchmark_batch(stub, phase, lengths) -> None:
+    if phase == "prefill":
+        stub._bench_inject_prefill(prompt_lens=lengths, max_tokens=1)
+    else:
+        stub._bench_inject_fake_decode(context_lengths=lengths)
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_benchmark_seed_digest_keeps_slot_salts_fixed_length(phase):
+    """Each slot's content salt carries one fixed-length digest of the batch
+    shape. Embedding the shape itself made every salt O(B) long, so seeding a
+    batch of B requests did O(B^2) work."""
+    salts_by_batch = {}
+    for batch in (4, 512):
+        lengths = [1] * batch
+        stub = _measurement_injection_stub(seq=0)
+        salts = _record_benchmark_content_salts(stub)
+
+        _inject_benchmark_batch(stub, phase, lengths)
+
+        shape = json.dumps(lengths, separators=(",", ":"))
+        digest = hashlib.sha256(shape.encode()).hexdigest()
+        assert salts == [f"{phase}:{digest}:slot{index}" for index in range(batch)]
+        salts_by_batch[batch] = salts
+    # The same slot in a batch 128 times larger has a salt of the same length.
+    assert len(salts_by_batch[512][3]) == len(salts_by_batch[4][3])
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_benchmark_seed_digest_is_deterministic_per_shape_and_slot(phase):
+    def salts_for(lengths, seq):
+        stub = _measurement_injection_stub(seq=seq)
+        salts = _record_benchmark_content_salts(stub)
+        _inject_benchmark_batch(stub, phase, lengths)
+        return salts
+
+    first = salts_for([32, 31, 30], seq=0)
+
+    # The same shape after an unrelated request history: identical salts.
+    assert salts_for([32, 31, 30], seq=500) == first
+    # Every slot of a batch has its own salt.
+    assert len(set(first)) == 3
+    # A different shape changes every slot's salt, even where a length matches.
+    other = salts_for([30, 31, 32], seq=0)
+    assert all(mine != theirs for mine, theirs in zip(first, other, strict=True))
+
+
+def test_benchmark_seed_digest_leaves_explicit_prefill_salts_alone():
+    """Only the fallback salt carries the digest: explicit content salts (the
+    fake-prefix pairing) and cache salts reach the generator unchanged."""
+    stub = _measurement_injection_stub(seq=0)
+    salts = _record_benchmark_content_salts(stub)
+
+    stub._bench_inject_prefill(
+        prompt_lens=[8, 8],
+        max_tokens=1,
+        cache_salts=["cache-0", "cache-1"],
+        content_salts=["content-0", "content-1"],
+    )
+    stub._bench_inject_prefill(
+        prompt_lens=[8, 8], max_tokens=1, cache_salts=["cache-2", "cache-3"]
+    )
+
+    assert salts == ["content-0", "content-1", "cache-2", "cache-3"]
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_benchmark_seed_digest_hashes_the_shape_once_per_batch(phase, monkeypatch):
+    """The batch shape is digested once per batch, not once per slot. The salts
+    come out the same either way, so count the SHA-256 calls over the shape."""
+    lengths = [1] * 64
+    shape_bytes = json.dumps(lengths, separators=(",", ":")).encode()
+    real_sha256 = hashlib.sha256
+    shape_hashes = []
+
+    def counting_sha256(data=b"", *args, **kwargs):
+        if data == shape_bytes:
+            shape_hashes.append(1)
+        return real_sha256(data, *args, **kwargs)
+
+    monkeypatch.setattr(hashlib, "sha256", counting_sha256)
+    _inject_benchmark_batch(_measurement_injection_stub(seq=0), phase, lengths)
+
+    assert len(shape_hashes) == 1, "the shape is digested once per batch"
