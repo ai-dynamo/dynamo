@@ -7,6 +7,9 @@ inputs:
     required: true
 
 outputs:
+  all_modified_files:
+    description: 'Space-separated changed paths used by downstream selectors'
+    value: ${{ steps.filter.outputs.all_all_modified_files }}
   api_docs:
     description: 'Whether generated API documentation inputs changed'
     value: ${{ steps.filter.outputs.api_docs_any_modified }}

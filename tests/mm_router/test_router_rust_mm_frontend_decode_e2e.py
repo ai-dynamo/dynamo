@@ -63,6 +63,7 @@ BLOCK_SIZE = 16
 NAMESPACE = "router-rust-mm-fed"
 
 pytestmark = [
+    pytest.mark.router,
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,

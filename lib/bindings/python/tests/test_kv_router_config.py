@@ -5,6 +5,8 @@ import pytest
 
 from dynamo.llm import KvRouterConfig
 
+pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
 
 def test_removed_router_options_cannot_shift_positional_arguments() -> None:
     with pytest.raises(TypeError):

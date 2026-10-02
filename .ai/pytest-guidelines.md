@@ -245,6 +245,7 @@ Every test must have **at least**:
    - `nightly` -- runs nightly
    - `weekly` -- runs weekly
    - `release` -- runs on release pipelines
+   - `local_only` -- developer tooling checks intentionally excluded from CI
 
 2. **A GPU marker** -- how many GPUs are needed:
    - `gpu_0` -- no GPU required
@@ -256,9 +257,15 @@ Every test must have **at least**:
    - `integration` -- integration test
    - `e2e` -- end-to-end test
 
-4. **A component marker** -- which backend component the test exercises (only required
-   when the test also has a framework marker like `vllm`/`trtllm`/`sglang`). Pick
-   **exactly one** so tests are grouped consistently by feature area:
+4. **A selective component marker** -- which backend component a non-unit test
+   exercises. This is required when a non-unit test also has a framework marker
+   like `vllm`/`trtllm`/`sglang`. Pick at least one; tests that intentionally span
+   features may carry multiple markers. Unit tests are always-on smoke tests and
+   do not require a component marker. The canonical selective marker vocabulary
+   is [`.github/codeowners/pytest_markers.py`](../.github/codeowners/pytest_markers.py),
+   while [`.github/codeowners/areas.yaml`](../.github/codeowners/areas.yaml)
+   maps those markers to paths. The
+   descriptions below explain the common markers but do not define the set:
    - `multimodal` -- exercises image/video/audio paths, VL models, omni pipeline,
      multimodal embedding caches, multimodal hashing/routing
    - `router` -- exercises the dynamo request router (worker selection, KV-prefix
@@ -327,7 +334,7 @@ def test_poll_server():
 @pytest.mark.gpu_0
 @pytest.mark.unit
 @pytest.mark.vllm
-@pytest.mark.core  # component bucket: pick one of core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # non-unit framework tests need at least one selective component
 def test_vllm_aggregated(...):
     ...
 ```
@@ -352,7 +359,7 @@ Timing comments let AI/automation understand requirements when shuffling test su
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.vllm
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
+@pytest.mark.core  # non-unit framework tests need at least one selective component
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(300)
 def test_vllm_aggregated(start_serve_deployment):
@@ -584,4 +591,3 @@ vllm_configs = {
 
 Configs are parametrized into test functions via `params_with_model_mark()`, which
 auto-applies the `model` marker from the config's model field.
-
