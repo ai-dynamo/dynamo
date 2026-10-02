@@ -31,6 +31,7 @@ impl RouterRejectionExt for RouterRejection {
         match self {
             Self::Overloaded => "overloaded",
             Self::QueueRejected => "queue_rejected",
+            Self::DeadlineExceeded => "deadline_exceeded",
             Self::Unavailable => "unavailable",
             Self::Conflict => "conflict",
             Self::BadRequest => "bad_request",
@@ -42,6 +43,7 @@ impl RouterRejectionExt for RouterRejection {
         match self {
             Self::Overloaded => PickError::RouterOverloaded,
             Self::QueueRejected => PickError::RouterQueueRejected,
+            Self::DeadlineExceeded => PickError::RouterDeadlineExceeded,
             Self::Unavailable => PickError::NoEndpoints,
             Self::Conflict => PickError::RouterConflict,
             Self::BadRequest => PickError::InvalidRequest("request is not routable".to_string()),
@@ -56,7 +58,7 @@ pub fn classify_router_error(error: &anyhow::Error) -> RouterRejection {
     // Same check as the Frontend. Other `DeadlineExceeded` errors are transport
     // timeouts and are not backpressure.
     if request_deadline_exceeded(error.as_ref()) {
-        return RouterRejection::Overloaded;
+        return RouterRejection::DeadlineExceeded;
     }
     for cause in error.chain() {
         if let Some(dynamo_error) = cause.downcast_ref::<DynamoError>()
@@ -140,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_deadline_classifies_as_overloaded() {
+    fn queue_deadline_classifies_as_deadline_exceeded() {
         let queue_deadline: anyhow::Error = DynamoError::builder()
             .error_type(ErrorType::DeadlineExceeded)
             .reason(ErrorReason::new("router.queue_deadline_exceeded").unwrap())
@@ -149,7 +151,7 @@ mod tests {
             .into();
         assert_eq!(
             classify_router_error(&queue_deadline.context("decode selection failed")),
-            RouterRejection::Overloaded
+            RouterRejection::DeadlineExceeded
         );
     }
 
@@ -172,6 +174,7 @@ mod tests {
         let labels: Vec<&str> = [
             RouterRejection::Overloaded,
             RouterRejection::QueueRejected,
+            RouterRejection::DeadlineExceeded,
             RouterRejection::Unavailable,
             RouterRejection::Conflict,
             RouterRejection::BadRequest,

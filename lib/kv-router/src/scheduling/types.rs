@@ -146,6 +146,8 @@ pub enum SchedulerRejection {
     Overloaded,
     /// A policy class refused to admit the request rather than queue it.
     QueueRejected,
+    /// The request's deadline passed while it waited in the router's queue.
+    DeadlineExceeded,
     /// No worker can serve the request right now.
     Unavailable,
     /// The request itself was not routable, such as a pin outside the allowed set.
@@ -175,10 +177,7 @@ impl KvSchedulerError {
             | Self::AllEligibleWorkersFiltered
             | Self::SubscriberShutdown
             | Self::InitFailed(_) => SchedulerRejection::Unavailable,
-            // Deadline expiry is deliberately 429, not 504: the deadline elapsed
-            // while waiting for capacity, so it is backpressure the client should
-            // respond to like the overloaded family, not a gateway timeout.
-            Self::DeadlineExceeded => SchedulerRejection::Overloaded,
+            Self::DeadlineExceeded => SchedulerRejection::DeadlineExceeded,
             Self::PinnedWorkerNotAllowed { .. } => SchedulerRejection::BadRequest,
             // A duplicate live request id, or a lifecycle the caller ended (or
             // re-registered) mid-classification, is caller-induced, like

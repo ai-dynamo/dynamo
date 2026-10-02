@@ -70,9 +70,12 @@ impl SelectionError {
 
 pub fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
     match error.rejection() {
-        SchedulerRejection::Overloaded | SchedulerRejection::QueueRejected => {
-            StatusCode::TOO_MANY_REQUESTS
-        }
+        // Deadline expiry is deliberately 429, not 504: the deadline elapsed
+        // while waiting for capacity, so it is backpressure the client should
+        // respond to like the overloaded family, not a gateway timeout.
+        SchedulerRejection::Overloaded
+        | SchedulerRejection::QueueRejected
+        | SchedulerRejection::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
         SchedulerRejection::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         SchedulerRejection::BadRequest => StatusCode::BAD_REQUEST,
         SchedulerRejection::Conflict => StatusCode::CONFLICT,

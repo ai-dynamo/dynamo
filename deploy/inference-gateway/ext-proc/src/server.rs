@@ -1008,6 +1008,10 @@ impl ExtProcError {
                 status_code: StatusCode::TooManyRequests,
                 message: e.to_string(),
             },
+            PickError::RouterDeadlineExceeded => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: e.to_string(),
+            },
             PickError::RouterConflict => Self {
                 status_code: StatusCode::Conflict,
                 message: e.to_string(),

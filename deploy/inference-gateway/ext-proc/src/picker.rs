@@ -211,6 +211,9 @@ pub enum PickError {
     /// have capacity, so it stays distinct from [`Self::RouterOverloaded`].
     #[error("router queue is full")]
     RouterQueueRejected,
+    /// The request's deadline passed while it waited in the router's queue → 429.
+    #[error("request deadline exceeded")]
+    RouterDeadlineExceeded,
     /// The request contradicts router state, e.g. a duplicate booking → 409.
     #[error("conflicting router state for this request")]
     RouterConflict,
