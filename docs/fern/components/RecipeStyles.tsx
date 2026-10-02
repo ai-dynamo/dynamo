@@ -541,8 +541,13 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
     align-items: start;
 }
 
-.dynamo-model-card-top > div:nth-child(2) {
+.dynamo-model-card-top > div:last-child {
     min-width: 0;
+}
+
+/* Cards without a provider logo or mark use the full header width. */
+.dynamo-model-card-top > div:only-child {
+    grid-column: 1 / -1;
 }
 
 .dynamo-model-card-top h3 {
