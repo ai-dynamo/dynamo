@@ -2524,7 +2524,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `all` _boolean_ | all runs every partition on the Cyborg GPU. |  | Optional: \{\} <br /> |
-| `ids` _integer array_ | ids lists the compiler partition IDs that run on the Cyborg GPU. |  | MinItems: 1 <br />items:Minimum: 0 <br />Optional: \{\} <br /> |
+| `ids` _integer array_ | ids lists the compiler partition IDs that run on the Cyborg GPU. |  | MinItems: 1 <br />items:Maximum: 4.294967295e+09 <br />items:Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### MockerSpec

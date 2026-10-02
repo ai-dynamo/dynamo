@@ -13,6 +13,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+const testPart11Path = "part-11"
+
 func TestProjectModelV2LocalPartitions(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -34,13 +36,13 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 		},
 		{
 			name: "independent partition runs locally", pipeline: PipelineLPX,
-			selection:  &dynamov1beta1.LPXLocalPartitions{IDs: []int32{11}},
+			selection:  &dynamov1beta1.LPXLocalPartitions{IDs: []int64{11}},
 			wantAgents: 9, wantCompilerIDs: []int64{7, 8}, wantConnectors: 1,
 			wantRuntimeIDs: "7", wantLocalIDs: []int{11},
 		},
 		{
 			name: "selected chain runs locally as one runtime partition", pipeline: PipelineLPX,
-			selection:  &dynamov1beta1.LPXLocalPartitions{IDs: []int32{7}},
+			selection:  &dynamov1beta1.LPXLocalPartitions{IDs: []int64{7}},
 			wantAgents: 8, wantCompilerIDs: []int64{11}, wantConnectors: 0,
 			wantRuntimeIDs: "11", wantLocalIDs: []int{7},
 		},
@@ -52,17 +54,17 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 		},
 		{
 			name: "chain member is not a runtime partition", pipeline: PipelineLPX,
-			selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int32{8}},
+			selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int64{8}},
 			wantErr:   "localPartitions references partition 8 of the prop-sync chain that starts at partition 7; select 7",
 		},
 		{
 			name: "unknown partition", pipeline: PipelineLPX,
-			selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int32{99}},
+			selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int64{99}},
 			wantErr:   "localPartitions references partition 99, which the build does not contain",
 		},
 		{
 			name: "LPU-only pipeline has no Cyborg GPU", pipeline: PipelineSingle,
-			selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int32{11}},
+			selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int64{11}},
 			wantErr:   "unsupported LPX runtime: localPartitions requires a hybrid build with a Cyborg conductor",
 		},
 	}
@@ -83,7 +85,7 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			build.Partitions[1].Topology = secondTopology
 			third := build.Partitions[1]
 			third.SourcePartitionID = 11
-			third.PartPath = "part-11"
+			third.PartPath = testPart11Path
 			build.Partitions = append(build.Partitions, third)
 			build.SelectedPropSyncChains = [][]int{{7, 8}}
 
@@ -169,7 +171,7 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			wantAgents: 17, wantStartsAfter: []string{"agt"}, wantGroupMembers: []string{"agt", "cond"},
 		},
 		{
-			name: "partial selection renders Agents for remote partitions", selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int32{11}},
+			name: "partial selection renders Agents for remote partitions", selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int64{11}},
 			wantAgents: 9, wantStartsAfter: []string{"agt"}, wantGroupMembers: []string{"agt", "cond"}, wantLocalEnv: "11",
 		},
 		{
@@ -194,7 +196,7 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			build.Partitions[1].Topology = chainTopology
 			third := build.Partitions[1]
 			third.SourcePartitionID = 11
-			third.PartPath = "part-11"
+			third.PartPath = testPart11Path
 			build.Partitions = append(build.Partitions, third)
 			build.SelectedPropSyncChains = [][]int{{7, 8}}
 			projections, err := appendModelProjections(nil, ModelProjectionInput{

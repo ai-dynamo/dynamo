@@ -36,7 +36,8 @@ type LPXLocalPartitions struct {
 	// +listType=set
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:Minimum=0
-	IDs []int32 `json:"ids,omitempty"`
+	// +kubebuilder:validation:items:Maximum=4294967295
+	IDs []int64 `json:"ids,omitempty"`
 }
 
 // SchedulingSpec configures LPX scheduling attempts.
