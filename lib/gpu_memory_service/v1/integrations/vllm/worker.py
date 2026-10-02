@@ -53,7 +53,11 @@ class GMSV1Worker(Worker):
             raise RuntimeError("KV recovery requires awake persistent GMS backing")
         specs = self.model_runner.get_kv_cache_spec()
         if not specs or any(
-            not isinstance(s, FullAttentionSpec) for s in specs.values()
+            type(s) is not FullAttentionSpec
+            or s.sliding_window is not None
+            or s.attention_chunk_size is not None
+            or s.non_causal
+            for s in specs.values()
         ):
             raise RuntimeError("initial KV recovery supports full attention only")
         manager = client._kv_cache

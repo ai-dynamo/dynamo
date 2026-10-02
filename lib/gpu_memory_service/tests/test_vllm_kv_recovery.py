@@ -20,10 +20,12 @@ from gpu_memory_service.v1.integrations.vllm.recovery_compat import (
     install_block_pool_hooks,
     install_engine_hooks,
 )
+from gpu_memory_service.v1.integrations.vllm.worker import GMSV1Worker
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
+from vllm.v1.kv_cache_interface import FullAttentionSpec, RSWASpec
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -182,3 +184,27 @@ def test_disabled_feature_preserves_sleep_after_plugin_was_registered(
     core.sleep(1)
     assert not hasattr(core, "_gms_kv_recovery_adapter")
     core.model_executor.sleep.assert_called_once_with(1)
+
+
+@pytest.mark.parametrize("kind", ["windowed", "subclass"])
+def test_recovery_rejects_nonstandard_full_attention_specs(kind):
+    import torch
+
+    fields = {
+        "block_size": 16,
+        "num_kv_heads": 1,
+        "head_size": 64,
+        "dtype": torch.bfloat16,
+    }
+    spec = (
+        FullAttentionSpec(**fields, sliding_window=32)
+        if kind == "windowed"
+        else RSWASpec(**fields, rswa_window=32)
+    )
+    worker = GMSV1Worker.__new__(GMSV1Worker)
+    worker._get_sleep_mode_backend = lambda: NS(
+        _client=NS(_state="RUNNING", _persistent_kv=True)
+    )
+    worker.model_runner = NS(get_kv_cache_spec=lambda: {"layer": spec})
+    with pytest.raises(RuntimeError, match="full attention only"):
+        worker.get_kv_recovery_state()
