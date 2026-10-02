@@ -17,7 +17,7 @@ Dynamo 是一个开源、高吞吐、低延迟的推理框架，专为在分布�
 - **在任意引擎之上的系统级优化** -- 推理引擎优化单 GPU 前向传递。Dynamo 增加分布式层：分离式服务、智能路由、跨内存层级的 KV 缓存管理，以及自动扩缩容。
 - **可组合的性能提升技术** -- 分离式服务、KV 缓存感知路由和 KV 缓存卸载等技术各自都能提升性能；组合使用时会带来叠加收益。
 - **引擎无关** -- 可与 vLLM、SGLang 和 TensorRT-LLM 配合使用。无需改变服务基础设施即可替换引擎。正在扩展对 Intel XPU 和 AMD 硬件的支持。
-- **面向大规模生产就绪** -- Dynamo 覆盖完整部署生命周期：自动配置（AIConfigurator）、运行时自动扩缩容（Planner）、拓扑感知的 gang scheduling（Grove）、容错和可观测性。
+- **面向大规模生产就绪** -- Dynamo 覆盖完整部署生命周期：离线预测与配置搜索（AISimulate）、运行时自动扩缩容（Planner）、拓扑感知的 gang scheduling（Grove）、容错和可观测性。
 - **模块化采用** -- 可以从一个组件开始（例如，仅在现有引擎之上使用 Router 实现 KV 感知路由）。按需采用更多组件。每个组件都可通过 pip 独立安装。
 
 ## 设计原则
@@ -56,7 +56,7 @@ Dynamo 生态系统包含以下额外的模块化组件，并会随着时间继�
 | **扩缩容 / 云** | Planner | 在给定 SLA 约束（TTFT 和 TPOT）下，实时自动调优 prefill 和 decode 的性能 |
 | | [Grove](https://github.com/ai-dynamo/grove) | 支持 Kubernetes 多节点分离式服务所需的 gang scheduling 和拓扑感知 |
 | | [Model Express](https://github.com/ai-dynamo/model-express) | 通过缓存模型权重并经由 NIXL 将其传输到其他 GPU，快速加载模型权重。未来也将用于容错 |
-| **性能** | [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | 基于模型、ISL/OSL、HW 等估算聚合式与分离式服务的性能。以前称为 LLMPet |
+| **性能** | [AISimulate](https://pypi.org/project/aisimulate/) | 基于模型、ISL/OSL、硬件等信息离线预测聚合式与分离式服务的性能，并搜索部署配置。 |
 | | [AIPerf](https://github.com/ai-dynamo/aiperf) | 用 Python 编写、重新架构的 GenAI-Perf，具有最大可扩展性；支持分布式基准测试 |
 | | AITune | 给定模型或 pipeline，搜索最适合部署的后端（例如 TensorRT、Torch.compile 等）（即将推出） |
 | | Flex Tensor | 从主机内存向 GPU 流式传输权重，以便在内存容量有限的 GPU 上运行超大语言模型（即将推出） |
@@ -103,15 +103,15 @@ Dynamo 通过组合三项核心技术实现先进的 LLM 性能：分离式服�
 
 ## 从配置到生产级部署
 
-### 使用 AIConfigurator 在 30 秒内找到最佳配置
+### 使用 AISimulate 搜索部署配置
 
 手动为分离式服务寻找最佳并行度可能需要数天的穷举配置扫描，而这一挑战在大规模环境中只会更加严峻。
 
-Dynamo 的 [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/) 通过在 30 秒内识别性能最佳的配置来解决这一问题，并清晰预测相较于标准聚合式服务的性能提升。该逻辑原生集成到 Kubernetes Custom Resource Definition (CRD) 和 Dynamo Graph Deployment Request (DGDR) 中，使用户能够使用自动生成的优化配置进行部署。
+Dynamo 的 [AISimulate](https://pypi.org/project/aisimulate/) 可以离线预测聚合式与分离式服务的行为，并根据流量、延迟目标和 GPU 预算搜索候选部署配置。DGDR 使用同一性能建模能力生成 DynamoGraphDeployment（DGD）。
 
 ### 使用 Planner 根据 SLA 自动调整部署
 
-一旦通过 AIConfigurator 或 DGDR 找到离线配置，开发者就可以将所需模型部署到生产环境。然而，生产流量在线上可能变化很大，离线确定的静态配置将无法充分处理流量峰值。
+一旦通过 AISimulate 或 DGDR 找到离线配置，开发者就可以将所需模型部署到生产环境。然而，生产流量在线上可能变化很大，离线确定的静态配置将无法充分处理流量峰值。
 
 Dynamo 提供 [Planner](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md) 来规避这个问题。开发者只需用 TTFT 和 Time Per Output Token (TPOT) 设置 SLA。Planner 会检查在线流量，并自动决定如何扩展 prefill 和 decode worker，从而在维持指定 SLA 的同时有效处理流量峰值。
 

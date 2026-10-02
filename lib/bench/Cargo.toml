@@ -49,6 +49,7 @@ mooncake = [
   "dep:dynamo-mocker",
   "dep:indicatif",
   "dep:libc",
+  "dep:sha2",
   "dep:tokio-util",
 ]
 multiturn = [
@@ -58,7 +59,7 @@ multiturn = [
   "dep:indicatif",
   "dep:rand",
 ]
-offline-replay = ["dep:blake3", "dep:dynamo-mocker"]
+offline-replay = ["dep:blake3", "dep:dynamo-mocker", "dep:libc"]
 router-bench = ["dynamo-kv-router/bench"]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
@@ -73,7 +74,7 @@ router-test-support = [
   "dep:tracing-subscriber",
 ]
 satf = ["dep:dynamo-data-gen"]
-request-trace-to-mooncake = ["dep:dynamo-data-gen", "dep:tempfile"]
+request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
 test-support = [
   "router-test-support",
   "dynamo-mocker/test-support",

@@ -29,6 +29,7 @@ from dynamo.profiler.utils.config import (
     get_component_by_name,
     get_component_name_by_type,
     get_main_container,
+    remove_all_argument_occurrences,
     sanitize_cli_args,
     set_unique_argument_value,
     setup_worker_component_resources,
@@ -171,6 +172,14 @@ class BaseConfigModifier:
     # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
     WORKER_MODEL_PATH_ARG: str = "--model-path"
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
+
+    # Worker CLI args that cap the context window. An external generator derives
+    # these from one workload's target sequence lengths, which would leave the
+    # deployment unable to serve a longer request the model itself supports, so
+    # they are dropped from generated args and the engine default applies. A
+    # value set in `spec.overrides.dgd` is merged after generation and survives.
+    # Subclasses declare the arg their backend reads.
+    GENERATED_CONTEXT_LENGTH_ARGS: tuple[str, ...] = ()
 
     @classmethod
     def _get_model_name_and_path_from_args(cls, args: list[str]) -> Tuple[str, str]:
@@ -608,8 +617,23 @@ class BaseConfigModifier:
                 return component.name
         return None
 
-    @staticmethod
+    @classmethod
+    def _drop_generated_context_length_args(cls, args: list[str]) -> list[str]:
+        """Drop context-window caps a generator derived from the target ISL/OSL."""
+        for arg_name in cls.GENERATED_CONTEXT_LENGTH_ARGS:
+            remaining = remove_all_argument_occurrences(args, arg_name)
+            if remaining != args:
+                logger.info(
+                    "Dropping generated %s so the worker keeps the engine default; "
+                    "set it in spec.overrides.dgd to pin an explicit value.",
+                    arg_name,
+                )
+            args = remaining
+        return args
+
+    @classmethod
     def _apply_worker_config(
+        cls,
         component: Component,
         cli_args: list[str],
         replicas: int,
@@ -618,7 +642,9 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to one worker component."""
         component.replicas = replicas
-        get_main_container(component).args = sanitize_cli_args(list(cli_args))
+        get_main_container(component).args = cls._drop_generated_context_length_args(
+            sanitize_cli_args(list(cli_args))
+        )
 
         # Apply resources after args so multinode sizing can inspect final TP/PP flags.
         setup_worker_component_resources(component, gpus, num_gpus_per_node)

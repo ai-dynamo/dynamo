@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+sidebar-title: API Reference (K8s)
 ---
 
 > **⚠️ Important**: This documentation is automatically generated from source code.
@@ -24,7 +25,6 @@ a high-level, SLA-driven interface for deploying machine learning models on Dyna
 Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API group.
 
 ### Resource Types
-- [DynamoCheckpoint](#dynamocheckpoint)
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
@@ -74,7 +74,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs and artifacts when the owning DGD is deleted.<br /> |
-| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
+| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Retained automatic<br />checkpoints are not valid checkpointRef targets.<br /> |
 
 
 #### CheckpointMode
@@ -83,7 +83,7 @@ _Underlying type:_ _string_
 
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
-checkpoint; checkpointRef restores the named checkpoint.
+checkpoint; checkpointRef restores the named PodSnapshot.
 
 _Validation:_
 - Enum: [Auto Manual]
@@ -94,7 +94,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Auto` | Deprecated: use checkpoint.enabled=true and omit checkpointRef.<br /> |
-| `Manual` | Deprecated: use checkpointRef to restore an existing checkpoint.<br /> |
+| `Manual` | Deprecated: use checkpointRef to restore an existing PodSnapshot.<br /> |
 
 
 #### CheckpointStartupPolicy
@@ -111,7 +111,7 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Immediate` | CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint<br />job runs in the background, and only pods created after the checkpoint is<br />Ready are restore-shaped by the pod-create mutating webhook.<br /> |
+| `Immediate` | CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob<br />capture runs in the background, and only pods created after the checkpoint is<br />Ready are restore-shaped by the pod-create mutating webhook.<br /> |
 | `WaitForCheckpoint` | CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the<br />component's checkpoint is Ready, then starts them from the checkpoint.<br /> |
 
 
@@ -133,6 +133,26 @@ _Appears in:_
 | `PodCliqueScalingGroup` | ComponentKindPodCliqueScalingGroup represents a PodCliqueScalingGroup resource.<br /> |
 | `Deployment` | ComponentKindDeployment represents a Deployment resource.<br /> |
 | `LeaderWorkerSet` | ComponentKindLeaderWorkerSet represents a LeaderWorkerSet resource.<br /> |
+
+
+#### ComponentRoleSpec
+
+
+
+ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+The enclosing component type defines the allowed role names and cardinality.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name identifies the role within the enclosing component independently of<br />generated provider resource names. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
+| `replicas` _integer_ | Replicas is the logical cardinality of this role in one complete component<br />instance. The enclosing component type defines the cardinality. For<br />multinode components, admission defaults and persists omitted values from<br />Multinode.NodeCount; leader must be 1 and worker must be<br />Multinode.NodeCount minus 1. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | ProviderOverride configures the provider workload unit generated for this<br />role. It is supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate defines the Pod configuration for this role. Admission permits<br />it only when the enclosing component type explicitly supports role-specific<br />Pod templates. |  | Optional: \{\} <br /> |
 
 
 #### ConfigMapKeySelector
@@ -240,152 +260,28 @@ _Appears in:_
 
 
 
-#### DynamoCheckpoint
-
-
-
-DynamoCheckpoint is the Schema for the dynamocheckpoints API
-It represents a container checkpoint that can be used to restore pods to a warm state
-
-
-
-
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
-| `kind` _string_ | `DynamoCheckpoint` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoCheckpointSpec](#dynamocheckpointspec)_ |  |  |  |
-| `status` _[DynamoCheckpointStatus](#dynamocheckpointstatus)_ |  |  |  |
-
-
-
-
 #### DynamoCheckpointIdentity
 
 
 
-Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
-requires spec.identity; omit DGD-managed identity and use checkpointRef for
-explicit restores.
+Deprecated: omit in DGD service checkpoint configs. Automatic capture
+needs no replacement; use CheckpointRef to restore a PodSnapshot.
 
 
 
 _Appears in:_
-- [DynamoCheckpointSpec](#dynamocheckpointspec)
 - [ServiceCheckpointConfig](#servicecheckpointconfig)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B")<br />Deprecated: legacy spec.identity only. |  | Required: \{\} <br /> |
-| `backendFramework` _string_ | BackendFramework is the runtime framework (vllm, sglang, trtllm)<br />Deprecated: legacy spec.identity only. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
-| `dynamoVersion` _string_ | DynamoVersion is the Dynamo platform version (optional).<br />Deprecated: legacy spec.identity only. |  | Optional: \{\} <br /> |
-| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration.<br />Deprecated: checkpoint launch uses the pod template instead. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration.<br />Deprecated: checkpoint launch uses the pod template instead. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.).<br />Deprecated: legacy spec.identity only. |  | Optional: \{\} <br /> |
-| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length.<br />Deprecated: legacy spec.identity only. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters are additional parameters that affect the checkpoint hash.<br />Use for any framework-specific or custom parameters not covered above.<br />Deprecated: legacy spec.identity only. |  | Optional: \{\} <br /> |
-
-
-#### DynamoCheckpointJobConfig
-
-
-
-DynamoCheckpointJobConfig defines the configuration for the checkpoint creation Job
-
-
-
-_Appears in:_
-- [DynamoCheckpointSpec](#dynamocheckpointspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `podTemplateSpec` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplateSpec allows customizing the checkpoint Job pod<br />This should include the container that runs the workload to be checkpointed<br />and any workload/runtime env, service account, GMS, or DRA wiring needed<br />by that container. Auto-created checkpoints from DynamoGraphDeployment<br />render Dynamo defaults before creating the DynamoCheckpoint. |  | Required: \{\} <br /> |
-| `targetContainerName` _string_ | TargetContainerName is the container in PodTemplateSpec to snapshot. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.<br />When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components. |  | Optional: \{\} <br /> |
-| `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `backoffLimit` _integer_ | Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `ttlSecondsAfterFinished` _integer_ | Deprecated: TTLSecondsAfterFinished is ignored. The operator deletes checkpoint<br />Jobs after recording their terminal outcome. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-
-
-#### DynamoCheckpointPhase
-
-_Underlying type:_ _string_
-
-DynamoCheckpointPhase represents the current phase of the checkpoint lifecycle
-
-_Validation:_
-- Enum: [Pending Creating Ready Failed]
-
-_Appears in:_
-- [DynamoCheckpointStatus](#dynamocheckpointstatus)
-
-| Field | Description |
-| --- | --- |
-| `Pending` | DynamoCheckpointPhasePending indicates the checkpoint CR has been created but the Job has not started<br /> |
-| `Creating` | DynamoCheckpointPhaseCreating indicates the checkpoint Job is running<br /> |
-| `Ready` | DynamoCheckpointPhaseReady indicates the checkpoint artifact is available<br /> |
-| `Failed` | DynamoCheckpointPhaseFailed indicates the checkpoint creation failed<br /> |
-
-
-#### DynamoCheckpointSpec
-
-
-
-DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
-
-
-
-_Appears in:_
-- [DynamoCheckpoint](#dynamocheckpoint)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: required by v1alpha1 for standalone checkpoints. Auto<br />checkpoints synthesize it; checkpointRef restores use the referenced CR. |  | Required: \{\} <br /> |
-| `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService records checkpoint-time GPU Memory Service metadata for<br />a prepared checkpoint Job pod. The DynamoCheckpoint controller does not<br />inject GMS/DRA resources; auto-created checkpoints from<br />DynamoGraphDeployment prepare the pod template before creating this object.<br />Manual GMS-enabled checkpoints must provide the prepared pod template; the<br />controller fails the checkpoint if the required GMS/DRA wiring is missing.<br />This field is intentionally outside spec.identity, so it does not affect<br />the checkpoint identity hash or deduplication. |  | Optional: \{\} <br /> |
-| `job` _[DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)_ | Job defines the configuration for the checkpoint creation Job |  | Required: \{\} <br /> |
-
-
-#### DynamoCheckpointStatus
-
-
-
-DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
-
-
-
-_Appears in:_
-- [DynamoCheckpoint](#dynamocheckpoint)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br />Optional: \{\} <br /> |
-| `checkpointID` _string_ | CheckpointID is the artifact ID used by the snapshot protocol. |  | Optional: \{\} <br /> |
-| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity.<br />Deprecated: use CheckpointID. This field is retained for compatibility<br />with older status consumers. |  | Optional: \{\} <br /> |
-| `location` _string_ | Deprecated: Location is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Optional: \{\} <br /> |
-| `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | Deprecated: StorageType is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
-| `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
-| `podSnapshotName` _string_ | PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is<br />the authoritative pointer to the snapshot (which is otherwise located by label, not by<br />reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)<br />from one that was created and later went missing (set, but no longer found). |  | Optional: \{\} <br /> |
-| `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint became ready |  | Optional: \{\} <br /> |
-| `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
-
-
-#### DynamoCheckpointStorageType
-
-_Underlying type:_ _string_
-
-Deprecated: StorageType is retained for compatibility with older
-DynamoCheckpoint status consumers. The current checkpoint flow publishes
-PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
-
-_Validation:_
-- Enum: [pvc s3 oci]
-
-_Appears in:_
-- [DynamoCheckpointStatus](#dynamocheckpointstatus)
-
+| `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B").<br />Deprecated: legacy identity only. |  | Required: \{\} <br /> |
+| `backendFramework` _string_ | BackendFramework is the runtime framework (vllm, sglang, trtllm).<br />Deprecated: legacy identity only. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `dynamoVersion` _string_ | DynamoVersion is the Dynamo platform version.<br />Deprecated: legacy identity only. |  | Optional: \{\} <br /> |
+| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration.<br />Deprecated: automatic capture derives compatibility from the worker. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration.<br />Deprecated: automatic capture derives compatibility from the worker. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.).<br />Deprecated: legacy identity only. |  | Optional: \{\} <br /> |
+| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length.<br />Deprecated: legacy identity only. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters contains additional legacy identity parameters.<br />Deprecated: legacy identity only. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeployment
@@ -423,9 +319,9 @@ _Appears in:_
 | `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
 | `serviceName` _string_ | The name of the component |  |  |
-| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
+| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -441,10 +337,12 @@ _Appears in:_
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  |  |
+| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
+| `lpx` _[LPXConfig](#lpxconfig)_ | LPX holds LPX integration configuration. Only meaningful when<br />ComponentType is "lpx".<br />Experimental: requires the operator's lpx.enabled setting and may change incompatibly. |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
@@ -468,9 +366,9 @@ _Appears in:_
 | `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
 | `serviceName` _string_ | The name of the component |  |  |
-| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
+| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -486,9 +384,10 @@ _Appears in:_
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _object_ | Multinode is the configuration for multinode components. Standalone DCDs accept only `nodeCount`; `leader` and `worker` are DGD-only provider contexts. |  |  |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  |  |
+| `roles` _object array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
@@ -805,8 +704,10 @@ _Appears in:_
 
 
 
-EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
-EPP is responsible for intelligent endpoint selection and KV-aware routing.
+EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+
+Deprecated: Go EPP is deprecated. New EPP components should omit eppConfig and
+use the native Rust EPP. Kept for round-trip and upgrade compatibility.
 
 
 
@@ -963,7 +864,6 @@ GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a worker compon
 
 
 _Appears in:_
-- [DynamoCheckpointSpec](#dynamocheckpointspec)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
@@ -972,7 +872,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled activates GMS wiring. GPU resources on client containers are<br />replaced with a DRA ResourceClaim for shared GPU access. |  |  |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the GMS deployment topology. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
 | `deviceClassName` _string_ | DeviceClassName is the DRA DeviceClass to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
-| `extraClientContainers` _string array_ | ExtraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in pods rendered from the enclosing spec.<br />DGD/DCD services apply this to service pods. Auto-created checkpoints<br />apply checkpoint job clients before creating the DynamoCheckpoint; manual<br />DynamoCheckpoint users must provide an already-prepared pod template.<br />Every name must match a user-declared container in the enclosing pod spec. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `extraClientContainers` _string array_ | ExtraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in pods rendered from the enclosing spec.<br />DGD/DCD services apply this to service pods. Automatic captures apply<br />SnapshotJob capture Pod clients before creating the SnapshotJob.<br />Every name must match a user-declared container in the enclosing pod spec. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `extraClientPods` _[GMSClientPodSpec](#gmsclientpodspec) array_ | ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is<br />reserved for future use and is rejected until inter-pod client orchestration is wired. |  | Optional: \{\} <br /> |
 
 
@@ -1061,6 +961,8 @@ _Appears in:_
 
 
 
+
+
 #### ModelReference
 
 
@@ -1095,22 +997,6 @@ _Appears in:_
 | `uri` _string_ | URI is the model source URI<br />Supported formats:<br />- S3: s3://bucket/path/to/model<br />- HuggingFace: hf://org/model@revision_sha<br />- Local filesystem: file:///path/to/model |  | Required: \{\} <br /> |
 
 
-#### MultinodeRoleSpec
-
-
-
-MultinodeRoleSpec configures one explicit role of a multinode component.
-
-
-
-_Appears in:_
-- [MultinodeSpec](#multinodespec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the Grove PCLQ template generated for this<br />multinode role. It uses apiVersion `grove.io/v1alpha1`, target<br />`PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is<br />supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
-
-
 #### MultinodeSpec
 
 
@@ -1121,12 +1007,11 @@ _Appears in:_
 
 _Appears in:_
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `nodeCount` _integer_ | Indicates the number of nodes to deploy for multinode components.<br />Total number of GPUs is NumberOfNodes * GPU limit.<br />Must be greater than 1. | 2 | Minimum: 2 <br /> |
-| `leader` _[MultinodeRoleSpec](#multinoderolespec)_ | Leader configures the generated multinode leader unit. |  | Optional: \{\} <br /> |
-| `worker` _[MultinodeRoleSpec](#multinoderolespec)_ | Worker configures the generated multinode worker unit. |  | Optional: \{\} <br /> |
+| `nodeCount` _integer_ | Indicates the number of nodes to deploy for multinode components.<br />Total number of GPUs is NumberOfNodes * GPU limit.<br />Must be greater than 1 and is immutable after creation. | 2 | Minimum: 2 <br /> |
 
 
 #### PVC
@@ -1231,9 +1116,9 @@ All other providers, versions, targets, and fields are rejected.
 
 
 _Appears in:_
+- [ComponentRoleSpec](#componentrolespec)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
-- [MultinodeRoleSpec](#multinoderolespec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1446,21 +1331,21 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false | Optional: \{\} <br /> |
-| `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named checkpoint. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
+| `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service. When<br />true, omit CheckpointRef for a DGD-managed automatic checkpoint or set<br />CheckpointRef to restore a PodSnapshot in the same namespace. | false | Optional: \{\} <br /> |
+| `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named PodSnapshot. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
 | `startupPolicy` _[CheckpointStartupPolicy](#checkpointstartuppolicy)_ | StartupPolicy defines when normal worker replicas are started relative to<br />automatic checkpoint readiness.<br />- Immediate: start workers cold immediately; later Pods restore from the<br />  checkpoint once it is Ready.<br />- WaitForCheckpoint: keep worker replicas at zero until the checkpoint is<br />  Ready, then start them from the checkpoint. | Immediate | Enum: [Immediate WaitForCheckpoint] <br />Optional: \{\} <br /> |
-| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
-| `checkpointRef` _string_ | CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.<br />If specified, this service's Identity is ignored and the referenced checkpoint is used directly. |  | Optional: \{\} <br /> |
-| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; no action is needed.<br />Use CheckpointRef to restore an existing checkpoint. |  | Optional: \{\} <br /> |
+| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `checkpointRef` _string_ | CheckpointRef references an existing PodSnapshot in the same namespace by<br />metadata.name. If specified, this service's Identity is ignored and the<br />referenced PodSnapshot is used directly.<br />Standalone worker-class (worker, prefill, or decode)<br />DynamoComponentDeployment resources cannot set this field; configure<br />CheckpointRef on the owning DynamoGraphDeployment service. |  | Optional: \{\} <br /> |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.<br />Use CheckpointRef to restore an existing PodSnapshot. |  | Optional: \{\} <br /> |
 | `targetContainerName` _string_ | TargetContainerName is the workload container to snapshot and restore. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `job` _[ServiceCheckpointJobConfig](#servicecheckpointjobconfig)_ | Job customizes the DGD-managed checkpoint Job. |  | Optional: \{\} <br /> |
+| `job` _[ServiceCheckpointJobConfig](#servicecheckpointjobconfig)_ | Job customizes the DGD-managed SnapshotJob capture Pod. |  | Optional: \{\} <br /> |
 
 
 #### ServiceCheckpointJobConfig
 
 
 
-ServiceCheckpointJobConfig customizes the checkpoint Job created for a DGD service.
+ServiceCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD service.
 
 
 
@@ -1469,8 +1354,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gmsClientContainers` _string array_ | GMSClientContainers lists checkpoint Job containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the service. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate customizes the checkpoint Job pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
+| `gmsClientContainers` _string array_ | GMSClientContainers lists SnapshotJob capture Pod containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the service. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate customizes the SnapshotJob capture Pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
 
 
 #### ServiceCheckpointStatus
@@ -1486,9 +1371,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `checkpointName` _string_ | CheckpointName is the name of the associated Checkpoint CR |  | Optional: \{\} <br /> |
-| `checkpointID` _string_ | CheckpointID is the artifact ID used by the snapshot protocol |  | Optional: \{\} <br /> |
-| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />Deprecated: automatic checkpoints use CheckpointID. This field is retained<br />for older status consumers. |  | Optional: \{\} <br /> |
+| `checkpointName` _string_ | CheckpointName is the name of the active PodSnapshot. |  | Optional: \{\} <br /> |
+| `checkpointID` _string_ | CheckpointID is a deprecated legacy Dynamo artifact ID. Native standalone<br />snapshots leave this field empty. |  | Optional: \{\} <br /> |
+| `identityHash` _string_ | IdentityHash is a deprecated legacy checkpoint identity hash. Native<br />standalone snapshots leave this field empty. |  | Optional: \{\} <br /> |
 | `ready` _boolean_ | Ready indicates the checkpoint artifact is ready for future pods to restore. |  | Optional: \{\} <br /> |
 
 
@@ -1509,6 +1394,8 @@ _Appears in:_
 | `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  |  |
 | `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | RuntimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers and<br />Grove-backed workers use the base namespace. During rolling updates, worker<br />status keeps the old active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
+| `gpusPerEngine` _integer_ | GPUsPerEngine is the number of GPUs assigned to one inference engine in a<br />service replica, across all of its nodes. Independent auxiliary GPU<br />allocations are excluded. A present zero means the engine itself has no<br />GPUs; consult GPUsPerReplica for auxiliary allocations. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `gpusPerReplica` _integer_ | GPUsPerReplica is the unique GPU allocation added when this service scales<br />by one replica, across all nodes, application and initialization phases,<br />and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod<br />scheduling footprint; shared DRA claims are counted once. A present zero<br />records a successful non-GPU resolution; omission means no current shape<br />is available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -1525,7 +1412,6 @@ _Appears in:_
 
 
 _Appears in:_
-- [DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
@@ -1663,7 +1549,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs and artifacts when the owning DGD is deleted.<br /> |
-| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
+| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Retained automatic<br />checkpoints are not valid checkpointRef targets.<br /> |
 
 
 #### CheckpointMode
@@ -1672,7 +1558,7 @@ _Underlying type:_ _string_
 
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
-checkpoint; checkpointRef restores the named checkpoint.
+checkpoint; checkpointRef restores the named PodSnapshot.
 
 _Validation:_
 - Enum: [Auto Manual]
@@ -1683,7 +1569,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Auto` | Deprecated: use checkpoint.enabled=true and omit checkpointRef.<br /> |
-| `Manual` | Deprecated: use checkpointRef to restore an existing checkpoint.<br /> |
+| `Manual` | Deprecated: use checkpointRef to restore an existing PodSnapshot.<br /> |
 
 
 #### CheckpointStartupPolicy
@@ -1700,7 +1586,7 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Immediate` | CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint<br />job runs in the background, and only pods created after the checkpoint is<br />Ready are restore-shaped by the pod-create mutating webhook.<br /> |
+| `Immediate` | CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob<br />capture runs in the background, and only pods created after the checkpoint is<br />Ready are restore-shaped by the pod-create mutating webhook.<br /> |
 | `WaitForCheckpoint` | CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the<br />component's checkpoint is Ready, then starts them from the checkpoint.<br /> |
 
 
@@ -1715,7 +1601,7 @@ users do not need to hand-wire them into the pod template.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -1737,21 +1623,21 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | enabled indicates whether checkpointing is enabled for this component.<br />When true, omit checkpointRef for a DGD-managed automatic checkpoint or<br />set checkpointRef to restore an existing checkpoint. Omit the checkpoint<br />block, or set enabled=false, to disable checkpointing. |  | Required: \{\} <br /> |
-| `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named checkpoint. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
+| `enabled` _boolean_ | enabled indicates whether checkpointing is enabled for this component.<br />When true, omit checkpointRef for a DGD-managed automatic checkpoint or<br />set checkpointRef to restore an existing PodSnapshot in the same namespace.<br />Omit the checkpoint block, or set enabled=false, to disable checkpointing. |  | Required: \{\} <br /> |
+| `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named PodSnapshot. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
 | `startupPolicy` _[CheckpointStartupPolicy](#checkpointstartuppolicy)_ | startupPolicy defines when normal worker replicas are started relative to<br />automatic checkpoint readiness.<br />`Immediate` (default): start workers cold immediately; later Pods restore<br />from the checkpoint once it is Ready.<br />`WaitForCheckpoint`: keep worker replicas at zero until the checkpoint is<br />Ready, then start them from the checkpoint. | Immediate | Enum: [Immediate WaitForCheckpoint] <br />Optional: \{\} <br /> |
-| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
-| `checkpointRef` _string_ | checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.<br />When set, this component's `identity` is ignored and the referenced<br />checkpoint is used directly. |  | Optional: \{\} <br /> |
-| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; no action is needed.<br />Use checkpointRef to restore an existing checkpoint. |  | Optional: \{\} <br /> |
+| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `checkpointRef` _string_ | checkpointRef references an existing PodSnapshot in the same namespace by<br />metadata.name.<br />When set, this component's `identity` is ignored and the referenced<br />PodSnapshot is used directly.<br />Standalone worker-class (worker, prefill, or decode)<br />DynamoComponentDeployment resources cannot set this field; configure<br />checkpointRef on the owning DynamoGraphDeployment component. |  | Optional: \{\} <br /> |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.<br />Use checkpointRef to restore an existing PodSnapshot. |  | Optional: \{\} <br /> |
 | `targetContainerName` _string_ | targetContainerName is the workload container to snapshot and restore. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `job` _[ComponentCheckpointJobConfig](#componentcheckpointjobconfig)_ | job customizes the DGD-managed checkpoint Job. |  | Optional: \{\} <br /> |
+| `job` _[ComponentCheckpointJobConfig](#componentcheckpointjobconfig)_ | job customizes the DGD-managed SnapshotJob capture Pod. |  | Optional: \{\} <br /> |
 
 
 #### ComponentCheckpointJobConfig
 
 
 
-ComponentCheckpointJobConfig customizes the checkpoint Job created for a DGD component.
+ComponentCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD component.
 
 
 
@@ -1760,8 +1646,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gmsClientContainers` _string array_ | gmsClientContainers lists checkpoint Job containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the component. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate customizes the checkpoint Job pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
+| `gmsClientContainers` _string array_ | gmsClientContainers lists SnapshotJob capture Pod containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the component. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate customizes the SnapshotJob capture Pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
 
 
 #### ComponentCheckpointStatus
@@ -1773,13 +1659,13 @@ ComponentCheckpointStatus contains checkpoint information for a single component
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `checkpointName` _string_ | checkpointName is the name of the associated DynamoCheckpoint CR. |  | Optional: \{\} <br /> |
-| `checkpointID` _string_ | checkpointID is the artifact ID used by the snapshot protocol. |  | Optional: \{\} <br /> |
-| `identityHash` _string_ | identityHash is the computed hash of the checkpoint identity.<br />Deprecated: automatic checkpoints use checkpointID. This field is retained<br />for older status consumers. |  | Optional: \{\} <br /> |
+| `checkpointName` _string_ | checkpointName is the name of the active PodSnapshot. |  | Optional: \{\} <br /> |
+| `checkpointID` _string_ | checkpointID is a deprecated legacy Dynamo artifact ID. Native standalone<br />snapshots leave this field empty. |  | Optional: \{\} <br /> |
+| `identityHash` _string_ | identityHash is a deprecated legacy checkpoint identity hash. Native<br />standalone snapshots leave this field empty. |  | Optional: \{\} <br /> |
 | `ready` _boolean_ | ready indicates the checkpoint artifact is ready for future pods to restore. |  | Optional: \{\} <br /> |
 
 
@@ -1812,18 +1698,40 @@ ComponentReplicaStatus contains replica information for a single component.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
 | `componentNames` _string array_ | componentNames is the list of underlying Kubernetes resource names for<br />this Dynamo component. During normal operation this contains a single<br />name; during rolling updates it contains both old and new resource names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers<br />use the base namespace. During rolling updates, worker status keeps the old<br />active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
+| `gpusPerEngine` _integer_ | gpusPerEngine is the number of GPUs assigned to one inference engine in a<br />component replica, across all of its nodes. Independent auxiliary GPU<br />allocations are excluded. A present zero means the engine itself has no<br />GPUs; consult gpusPerReplica for auxiliary allocations. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `gpusPerReplica` _integer_ | gpusPerReplica is the unique GPU allocation added when this component<br />scales by one replica, across all nodes, application and initialization<br />phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective<br />Pod scheduling footprint; shared DRA claims are counted once. A present<br />zero records a successful non-GPU resolution; omission means no current<br />shape is available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the total number of non-terminated replicas. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the number of ready replicas. Populated for<br />`PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for<br />`PodCliqueScalingGroup`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | availableReplicas is the number of available replicas. Populated for<br />`Deployment` and `PodCliqueScalingGroup`; not available for<br />`PodClique` or `LeaderWorkerSet`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `scheduledReplicas` _integer_ | scheduledReplicas is the number of replicas the backend scheduler has<br />scheduled, expressed strictly in Dynamo component-replica units (not<br />raw backend pod counts). It is a diagnostic aid for distinguishing<br />capacity/scheduling shortfalls from runtime readiness.<br />It is optional and omitted (nil) when the active backend cannot derive<br />it reliably in component-replica units — for example before the backing<br />resource's status has been observed, or for backends that do not report<br />a scheduling count. A nil value therefore means "not reported", never<br />"zero scheduled"; consumers must not treat absence as a scheduling<br />failure. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+
+
+#### ComponentRoleSpec
+
+
+
+ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+The enclosing component type defines the allowed role names and cardinality.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name identifies the role within the enclosing component independently of<br />generated provider resource names. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
+| `replicas` _integer_ | replicas is the logical cardinality of this role in one complete component<br />instance. The enclosing component type defines the cardinality. For<br />multinode components, admission defaults and persists omitted values from<br />multinode.nodeCount; leader must be 1 and worker must be<br />multinode.nodeCount minus 1. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the provider workload unit generated for this<br />role. It is supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the Pod configuration for this role. Admission permits<br />it only when the enclosing component type explicitly supports role-specific<br />Pod templates. |  | Optional: \{\} <br /> |
 
 
 #### ComponentType
@@ -1837,10 +1745,10 @@ are first-class values: users can set them directly and downstream consumers
 (e.g., the EPP) can filter on the pod label `nvidia.com/dynamo-component-type`.
 
 _Validation:_
-- Enum: [frontend worker prefill decode planner epp]
+- Enum: [frontend worker prefill decode planner epp lpx]
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description |
@@ -1851,6 +1759,7 @@ _Appears in:_
 | `decode` |  |
 | `planner` |  |
 | `epp` |  |
+| `lpx` |  |
 
 
 #### DGDRPhase
@@ -1885,7 +1794,7 @@ _Validation:_
 - Enum: [initializing pending successful failed]
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description |
 | --- | --- |
@@ -1916,9 +1825,9 @@ _Appears in:_
 
 
 
-Deprecated: omit in DGD component checkpoint configs. Auto needs no
-replacement; use checkpointRef for explicit restores.
-Duplicated from v1alpha1; DynamoCheckpoint itself remains v1alpha1.
+Deprecated: omit in DGD component checkpoint configs. Automatic capture
+needs no replacement; use checkpointRef to restore a PodSnapshot.
+Duplicated from v1alpha1 for conversion compatibility.
 
 
 
@@ -1959,7 +1868,7 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 | `spec` _[DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)_ | spec defines the desired state for this Dynamo component deployment. |  |  |
 
 
-#### DynamoComponentDeploymentSharedSpec
+#### v1beta1 DynamoComponentDeploymentSharedSpec
 
 
 
@@ -1978,23 +1887,25 @@ directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />only `topologyConstraint`. Standalone DCD OpenAPI omits this field. |  | Optional: \{\} <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
-| `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly.<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures multinode components. |  | Optional: \{\} <br /> |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
+| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. |  | Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds EPP-specific configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`. |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`.<br />Deprecated: omit this field for the native Rust EPP. Presence of<br />`eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config<br />mount) so existing DGDs keep running across operator upgrades until<br />migration is started by clearing this field. |  | Optional: \{\} <br /> |
+| `lpx` _[LPXConfig](#lpxconfig)_ | lpx holds LPX integration configuration. Only meaningful when<br />`type` is `lpx`.<br />Experimental: requires the operator's lpx.enabled setting and may change incompatibly. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _string_ | frontendSidecar optionally designates a container in<br />`podTemplate.spec.containers` as the frontend sidecar. The value must<br />match the `name` of a container in that list; the operator merges its<br />frontend-sidecar defaults (auto-generated Dynamo env vars, ports,<br />health probes) into that container the same way it merges into `"main"`.<br />The full container definition (image, args, envFrom, env) lives in<br />`podTemplate` -- this eliminates the redundant `image`, `args`,<br />`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.<br />The validation webhook rejects values that do not match any container<br />name in `podTemplate.spec.containers`. |  | Optional: \{\} <br /> |
 | `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | topologyConstraint applies to this component.<br />`topologyConstraint.packDomain` is required. When both this and<br />`spec.topologyConstraint.packDomain` are set, this field's `packDomain`<br />must be narrower than or equal to the spec-level value. |  | Optional: \{\} <br /> |
@@ -2016,17 +1927,18 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
-| `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly.<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _object_ | multinode configures multinode components. Standalone DCDs accept only `nodeCount`; `leader` and `worker` are DGD-only provider contexts. |  | Optional: \{\} <br /> |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
+| `roles` _object array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds EPP-specific configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`. |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`.<br />Deprecated: omit this field for the native Rust EPP. Presence of<br />`eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config<br />mount) so existing DGDs keep running across operator upgrades until<br />migration is started by clearing this field. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _string_ | frontendSidecar optionally designates a container in<br />`podTemplate.spec.containers` as the frontend sidecar. The value must<br />match the `name` of a container in that list; the operator merges its<br />frontend-sidecar defaults (auto-generated Dynamo env vars, ports,<br />health probes) into that container the same way it merges into `"main"`.<br />The full container definition (image, args, envFrom, env) lives in<br />`podTemplate` -- this eliminates the redundant `image`, `args`,<br />`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.<br />The validation webhook rejects values that do not match any container<br />name in `podTemplate.spec.containers`. |  | Optional: \{\} <br /> |
 | `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | topologyConstraint applies to this component.<br />`topologyConstraint.packDomain` is required. When both this and<br />`spec.topologyConstraint.packDomain` are set, this field's `packDomain`<br />must be narrower than or equal to the spec-level value. |  | Optional: \{\} <br /> |
@@ -2052,8 +1964,8 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 | `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
 | `kind` _string_ | `DynamoGraphDeployment` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentSpec](#dynamographdeploymentspec)_ | spec defines the desired state for this graph deployment. |  |  |
-| `status` _[DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)_ | status reflects the current observed state of this graph deployment. |  |  |
+| `spec` _[DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)_ | spec defines the desired state for this graph deployment. |  |  |
+| `status` _[DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)_ | status reflects the current observed state of this graph deployment. |  |  |
 
 
 #### DynamoGraphDeploymentComponentRef
@@ -2088,7 +2000,7 @@ v1beta1 releases. Component-level experimental features live under
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2242,7 +2154,7 @@ _Appears in:_
 | `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | lastScaleTime is the last time the adapter scaled the target component. |  | Optional: \{\} <br /> |
 
 
-#### DynamoGraphDeploymentSpec
+#### v1beta1 DynamoGraphDeploymentSpec
 
 
 
@@ -2259,7 +2171,7 @@ _Appears in:_
 | `annotations` _object (keys:string, values:string)_ | annotations to propagate to all child resources (PCS, DCD, Deployments,<br />and pod templates). Component-level (`podTemplate`) values take precedence<br />on conflict. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | labels to propagate to all child resources. Same precedence rules as `annotations`. |  | Optional: \{\} <br /> |
 | `priorityClassName` _string_ | priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
-| `components` _[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
+| `components` _[DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env is prepended to every component's environment. Component-specific<br />env entries with the same name take precedence and may reference values<br />from this list. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
@@ -2267,7 +2179,7 @@ _Appears in:_
 | `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
 
 
-#### DynamoGraphDeploymentStatus
+#### v1beta1 DynamoGraphDeploymentStatus
 
 
 
@@ -2295,12 +2207,17 @@ _Appears in:_
 
 
 
-EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
+EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+
+Deprecated: Go EPP is deprecated. New EPP components should omit `eppConfig`
+and use the native Rust EPP (env-var configuration only). Existing DGDs that
+still set `eppConfig` keep the Go EPP Pod contract until they migrate
+explicitly by clearing `eppConfig` (and updating the image).
 
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2324,7 +2241,7 @@ spec) once their API is considered stable.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2332,7 +2249,7 @@ _Appears in:_
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU<br />access for GMS clients is managed via DRA. |  | Optional: \{\} <br /> |
 | `failover` _[FailoverSpec](#failoverspec)_ | failover configures active-passive GPU failover for this component.<br />Requires `gpuMemoryService` to also be set, and `failover.mode` must<br />match `gpuMemoryService.mode` (enforced by the validation webhook). |  | Optional: \{\} <br /> |
 | `grove` _[GroveSpec](#grovespec)_ | grove groups Grove-specific rendering options. |  | Optional: \{\} <br /> |
-| `checkpoint` _[ComponentCheckpointConfig](#componentcheckpointconfig)_ | checkpoint configures container-image snapshotting and restore for<br />this component. Set `checkpoint.enabled: true` to opt in. Without<br />checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint<br />CR and later restores pods in the same DGD generation from that<br />checkpoint. With checkpointRef, the DGD restores from that existing<br />checkpoint instead. The user-facing shape of this field is still settling,<br />which is why it lives under `experimental` in v1beta1 instead of at the<br />top level. |  | Optional: \{\} <br /> |
+| `checkpoint` _[ComponentCheckpointConfig](#componentcheckpointconfig)_ | checkpoint configures container-image snapshotting and restore for<br />this component. Set `checkpoint.enabled: true` to opt in. Without<br />checkpointRef, the DGD controller creates a DGD-scoped SnapshotJob and<br />later restores pods in the same DGD generation from its PodSnapshot.<br />With checkpointRef, the DGD restores from the named<br />PodSnapshot in the same namespace. The user-facing shape of this field is<br />still settling, which is why it lives under `experimental` in v1beta1<br />instead of at the top level. |  | Optional: \{\} <br /> |
 
 
 #### FailoverSpec
@@ -2429,7 +2346,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | mode selects the GMS deployment topology. | IntraPod | Enum: [IntraPod InterPod] <br />Optional: \{\} <br /> |
 | `deviceClassName` _string_ | deviceClassName is the DRA `DeviceClass` to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
-| `extraClientContainers` _string array_ | extraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in service pods. Checkpoint Job clients are declared<br />under checkpoint.job.gmsClientContainers. Every name must match a container<br />in the enclosing component's podTemplate.spec.containers. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `extraClientContainers` _string array_ | extraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in service pods. SnapshotJob capture Pod clients are<br />declared under checkpoint.job.gmsClientContainers. Every name must match a container<br />in the enclosing component's podTemplate.spec.containers. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `extraClientPods` _[GMSClientPodSpec](#gmsclientpodspec) array_ | extraClientPods declares additional GMS client pods for inter-pod GMS. This field is<br />reserved for future use and is rejected until inter-pod client orchestration is wired. |  | Optional: \{\} <br /> |
 
 
@@ -2440,7 +2357,7 @@ _Underlying type:_ _string_
 GPUSKUType is the AIC hardware system identifier for a supported GPU.
 
 _Validation:_
-- Enum: [gb200_sxm gb10 b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
+- Enum: [gb200_sxm gb10 b300_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
 
 _Appears in:_
 - [HardwareSpec](#hardwarespec)
@@ -2449,6 +2366,7 @@ _Appears in:_
 | --- | --- |
 | `gb200_sxm` | --- Blackwell ---<br /> |
 | `gb10` |  |
+| `b300_sxm` |  |
 | `b200_sxm` |  |
 | `h200_sxm` | --- Hopper ---<br /> |
 | `h100_sxm` |  |
@@ -2479,7 +2397,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `forceScalingGroup` _boolean_ | forceScalingGroup opts a single-node component into rendering as a<br />PodCliqueScalingGroup with one single-pod PodClique per replica.<br />Scaling changes the scaling-group replica count. The first<br />`minAvailable` replicas join the deployment's base PodGang together<br />with its other base workloads; each replica beyond `minAvailable`<br />gets its own PodGang, gang-scheduled separately from the rest of the<br />deployment. `false` or omitted means automatic selection (multi-node<br />and inter-pod GMS components use a scaling group, other single-node<br />components a standalone PodClique), not "force PodClique".<br />Immutable after creation. |  | Optional: \{\} <br /> |
+| `forceScalingGroup` _boolean_ | forceScalingGroup opts a single-node component into rendering as a<br />PodCliqueScalingGroup with one single-pod PodClique per replica.<br />Scaling changes the scaling-group replica count. The first<br />`minAvailable` replicas join the deployment's base PodGang together<br />with its other base workloads; each replica beyond `minAvailable`<br />gets its own PodGang, gang-scheduled separately from the rest of the<br />deployment. `false` or omitted means automatic selection (multi-node<br />and inter-pod GMS components use a scaling group, other single-node<br />components a standalone PodClique), not "force PodClique".<br />The pointer preserves field presence on the wire: `nil` and `false` are<br />semantically identical, and consumers must dereference with `false`.<br />Immutable after creation. |  | Optional: \{\} <br /> |
 
 
 #### HardwareSpec
@@ -2500,7 +2418,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected by selecting the GPU with the highest<br />node count, then highest VRAM. In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU. |  | Enum: [gb200_sxm gb10 b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected by selecting the GPU with the highest<br />node count, then highest VRAM. In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU. |  | Enum: [gb200_sxm gb10 b300_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB.<br />When omitted, auto-detected from cluster GPU nodes. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the GPU budget for profiling and deployment.<br />The profiler uses this to determine parallelism and replica count.<br />When omitted, computed by counting GPUs on discovered nodes<br />(filtered by gpuSku when set), temporarily capped at 32 to<br />limit profiler search space. This cap may be removed in a future<br />release. Set this field explicitly to override. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node.<br />When omitted, auto-detected from cluster GPU nodes. |  | Optional: \{\} <br /> |
@@ -2565,6 +2483,24 @@ _Appears in:_
 | `preferredWeight` _float_ | preferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
+#### LPXConfig
+
+
+
+LPXConfig identifies the component's compiled model and configures scheduling.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
+| `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
+
+
 #### MockerSpec
 
 
@@ -2609,31 +2545,13 @@ When specified, a headless service is created for endpoint discovery.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | name is the base model identifier (e.g. "llama-3-70b-instruct-v1"). |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `revision` _string_ | revision is the model revision/version. |  | Optional: \{\} <br /> |
-
-
-#### MultinodeRoleSpec
-
-
-
-MultinodeRoleSpec configures one explicit role of a multinode component.
-Additional role-specific settings can be added here without introducing a
-polymorphic list keyed by generated provider resource names.
-
-
-
-_Appears in:_
-- [MultinodeSpec](#multinodespec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the Grove PCLQ template generated for this<br />multinode role. It uses apiVersion `grove.io/v1alpha1`, target<br />`PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is<br />supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
 
 
 #### MultinodeSpec
@@ -2645,13 +2563,12 @@ MultinodeSpec configures a multinode component.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `nodeCount` _integer_ | nodeCount is the number of nodes to deploy for the multinode component.<br />Total GPUs used is `nodeCount * container GPU request`. | 2 | Minimum: 2 <br />Optional: \{\} <br /> |
-| `leader` _[MultinodeRoleSpec](#multinoderolespec)_ | leader configures the generated multinode leader unit. |  | Optional: \{\} <br /> |
-| `worker` _[MultinodeRoleSpec](#multinoderolespec)_ | worker configures the generated multinode worker unit. |  | Optional: \{\} <br /> |
+| `nodeCount` _integer_ | nodeCount is the number of nodes to deploy for the multinode component.<br />Total GPUs used is `nodeCount * container GPU request`. The value is<br />immutable after creation. | 2 | Minimum: 2 <br />Optional: \{\} <br /> |
 
 
 #### OptimizationType
@@ -2685,7 +2602,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob allows overriding the profiling Job specification.<br />Fields set here are merged into the controller-generated Job spec. |  | Optional: \{\} <br /> |
+| `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob allows overriding the profiling Job specification.<br />Fields set here are merged into the controller-generated Job spec.<br />Security: creating a DGDR is workload-creation authority in its namespace —<br />these overrides carry the same blast radius as creating a Job or Pod directly<br />there, by design. Pod security is enforced centrally by Kubernetes Pod Security<br />Admission on the resulting Pods once the namespace is labeled (see<br />pod-security.kubernetes.io/enforce): it applies the full Pod Security Standards —<br />covering privileged, host namespaces, and hostPath, not only securityContext —<br />not this API. ServiceAccount identity is a separate layer: these overrides can<br />set serviceAccountName and automountServiceAccountToken, which are bounded by<br />RBAC and namespace membership rather than PSA — the same authority any Pod author<br />in the namespace already holds. Grant create/update on DGDRs only to principals<br />trusted to create Pods in the namespace. The profiling Job always runs in the<br />DGDR's own namespace and overrides cannot change that — but namespace containment<br />is not node or cross-tenant isolation. Dynamo's workloads, including this Job,<br />satisfy the baseline standard, so enforce baseline (non-exempt) on every resulting<br />Pod to close the privileged, host-namespace, host-device, and hostPath paths. |  | Optional: \{\} <br /> |
+| `trustRemoteCode` _boolean_ | TrustRemoteCode explicitly permits generated vLLM and SGLang workers to<br />execute custom code from the configured model repository. When enabled,<br />the profiler adds --trust-remote-code to every generated worker component<br />after the deployment topology has been generated. Enable this setting only<br />for model repositories you trust. | false | Optional: \{\} <br /> |
 | `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD provides a partial, versioned DynamoGraphDeployment override for the<br />profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or<br />nvidia.com/v1beta1 and kind to DynamoGraphDeployment.<br />The profiler merges the override using the schema for its declared version.<br />If the generated DGD uses another supported version, the complete DGD is<br />converted before the merge and converted back afterward. The final DGD<br />selected or created by a DGDR is nvidia.com/v1beta1.<br />The override can update DGD fields, but topology entries are limited to<br />services or components already present in the generated DGD. Metadata labels<br />and annotations are merged, metadata.name selects the final DGD name, and<br />other identity or runtime metadata is ignored.<br />V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows<br />structural schema merge behavior, including map-list merging and atomic-list<br />replacement.<br />The raw embedded resource preserves either supported schema. The API server<br />validates that it has apiVersion and kind; override processing validates the<br />DGD kind, supported version, and field schema. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 
 
@@ -2752,7 +2670,7 @@ conversion are landed here so downstream consumers can rely on the shape.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2819,9 +2737,9 @@ All other providers, versions, targets, and fields are rejected.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
-- [MultinodeRoleSpec](#multinoderolespec)
+- [ComponentRoleSpec](#componentrolespec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2839,7 +2757,7 @@ Restart specifies the restart policy for a graph deployment.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2876,7 +2794,7 @@ RestartStatus contains the status of a graph-level restart.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2949,7 +2867,7 @@ RollingUpdateStatus tracks the progress of an operator-managed rolling update.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2991,9 +2909,25 @@ Omit the field to opt out.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
+
+
+#### SchedulingSpec
+
+
+
+SchedulingSpec configures LPX scheduling attempts.
+
+
+
+_Appears in:_
+- [LPXConfig](#lpxconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `attemptDeadlineSeconds` _integer_ | attemptDeadlineSeconds limits how long each LPR may remain pending.<br />Omission means unlimited; the value is not a solver budget. |  | Maximum: 9.223372036e+09 <br />Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### SearchStrategy
@@ -3023,7 +2957,7 @@ SpecTopologyConstraint defines deployment-level topology placement requirements.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -3042,7 +2976,7 @@ The topology profile is inherited from the deployment-level
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -3130,66 +3064,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
 | `seccomp` _[CheckpointSeccompConfiguration](#checkpointseccompconfiguration)_ | Seccomp controls the localhost seccomp profile applied to checkpoint and<br />restore pods. A nil value means "use the default profile"; set<br />Seccomp.Disabled=true to disable seccomp injection entirely. |  |  |
-| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage optionally configures the namespace-local checkpoint PVC that<br />workload pods mount. When omitted, the operator preserves the legacy<br />behavior of discovering storage from a snapshot-agent DaemonSet in the<br />workload namespace. |  |  |
-| `cleanupImage` _string_ | CleanupImage is the image used by best-effort artifact cleanup Jobs for<br />automatically-created checkpoints. It must provide a POSIX shell and `rm`. | busybox:1.36 |  |
-
-
-#### CheckpointOCIConfig
-
-
-
-Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the legacy OCI URI (oci://registry/repository). |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy docker config secret name. |  |  |
-
-
-#### CheckpointPVCConfig
-
-
-
-CheckpointPVCConfig configures the namespace-local PVC mounted into
-checkpoint and restore workload pods.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the PVC name in each workload namespace. |  |  |
-| `basePath` _string_ | BasePath is the mount path inside checkpoint and restore workload pods. |  |  |
-| `create` _boolean_ | Create tells the operator to create the PVC in workload namespaces when<br />it is missing. When false, the PVC must already exist. |  |  |
-| `size` _string_ | Size is the storage request used when Create is true. |  |  |
-| `storageClassName` _string_ | StorageClassName is the optional StorageClass name used when Create is true. |  |  |
-| `accessMode` _string_ | AccessMode is the PVC access mode used when Create is true. |  |  |
-
-
-#### CheckpointS3Config
-
-
-
-Deprecated: CheckpointS3Config is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix). |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy credentials secret name. |  |  |
 
 
 #### CheckpointSeccompConfiguration
@@ -3212,26 +3086,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `disabled` _boolean_ | Disabled, when true, suppresses seccomp profile injection entirely.<br />Use this for clusters where custom localhost profiles are not allowed<br />(e.g. OpenShift's restricted-v2 SCC) or for CRIU builds that handle<br />io_uring natively. |  |  |
 | `profile` _string_ | Profile is the localhost seccomp profile path. Empty falls back to<br />DefaultSeccompProfile. Ignored when Disabled is true. |  |  |
-
-
-#### CheckpointStorageConfiguration
-
-
-
-CheckpointStorageConfiguration configures checkpoint storage for operator
-pod mutations. Only PVC storage is implemented today.
-
-
-
-_Appears in:_
-- [CheckpointConfiguration](#checkpointconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `type` _string_ | Type is the storage backend type. Only pvc is implemented today. |  |  |
-| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for pvc-based settings. |  |  |
-| `s3` _[CheckpointS3Config](#checkpoints3config)_ | Deprecated: S3 is retained for compatibility and ignored. |  |  |
-| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | Deprecated: OCI is retained for compatibility and ignored. |  |  |
 
 
 #### DRAConfiguration
@@ -3412,6 +3266,23 @@ _Appears in:_
 
 
 
+#### LPXConfiguration
+
+
+
+LPXConfiguration holds LPX scheduler integration and model-registry settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled opts the operator into LPX request production. When true, startup<br />requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to<br />be installed separately. | false |  |
+| `modelRegistryURL` _string_ | ModelRegistryURL configures the location of the LPU model registry used by LPX.<br />Supported values are an absolute local path (or file:// URL) and gs:// URLs. |  |  |
+
+
 #### LWSConfiguration
 
 
@@ -3561,6 +3432,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  |  |
 | `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  |  |
 | `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  |  |
+| `lpx` _[LPXConfiguration](#lpxconfiguration)_ | LPX scheduler integration and model-registry configuration. |  |  |
 
 
 #### OrchestratorConfiguration
@@ -3931,7 +3803,7 @@ These are injected into all components when the corresponding infrastructure ser
 | `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Endpoints whose health status is used for readiness | `["generate"]` | `string` (JSON array) |
 | `DYN_SYSTEM_PORT` | Port for the system HTTP server (health, metrics) | `9090` | `int` |
 | `DYN_HEALTH_CHECK_ENABLED` | Disables the legacy health check mechanism in favor of the system server | `false` | `string` (boolean) |
-| `NIXL_TELEMETRY_ENABLE` | Enables or disables NIXL telemetry collection | `n` | `string` | Options: `y`, `n` |
+| `NIXL_TELEMETRY_ENABLE` | Enables or disables NIXL telemetry collection. Case-insensitive options: `y`, `1`, `yes`, `on`, `true`, `enable`, `n`, `0`, `no`, `off`, `false`, `disable`. Unrecognized values fail SGLang admission or worker validation. Use `y` to opt in to SGLang operator rank port declarations. | `n` | `string` |
 | `NIXL_TELEMETRY_EXPORTER` | Telemetry exporter format for NIXL metrics | `prometheus` | `string` |
 | `NIXL_TELEMETRY_PROMETHEUS_PORT` | Port for NIXL Prometheus metrics endpoint | `19090` | `int` |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | Hash suffix appended to worker namespace for rolling updates | — | `string` | Only set during rolling update transitions |
@@ -4060,7 +3932,6 @@ For users who want to understand the implementation details or contribute to the
 - **Checkpoint / Restore**:
   - [`internal/checkpoint/podspec.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/podspec.go) - Checkpoint env var injection and volume setup
   - [`internal/checkpoint/resolve.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resolve.go) - Checkpoint resolution logic
-  - [`internal/checkpoint/resource.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resource.go) - Checkpoint resource management
 - **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes

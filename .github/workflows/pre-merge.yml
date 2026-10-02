@@ -47,9 +47,32 @@ jobs:
         with:
           gh_token: ${{ github.token }}
 
+  # Structural docs rules the Fern CLI does not cover: SPDX headers, frontmatter, body H1,
+  # link scope, dangling nav paths, and internal references. Read-only, so it reports through
+  # the job summary rather than a pull request comment.
+  #
+  # The step summary lists every finding; that is the surface to point readers at.
+  # Inline annotations are best-effort on top of it, for two reasons: GitHub caps
+  # workflow-command annotations at 10 per level per step, so a PR introducing 15
+  # errors surfaces only 10 in the diff, and the step scans all of docs/ rather
+  # than the changed files, so a finding outside the diff has no line to attach to
+  # and appears only in the run log.
+  docs-lint:
+    name: Docs Lint
+    needs: changed-files
+    if: needs.changed-files.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+    - name: Lint docs structure
+      run: python3 docs/fern/scripts/docs_lint.py --scan docs --github
+
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, recipe-check, api-docs, fern-check, fern-broken-links, operator, rust-tests, rust-clippy, docs-website-composition]
+    needs: [changed-files, pre-commit, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -87,14 +110,20 @@ jobs:
         python3 -m pip install \
           'pytest>=8.0' \
           'jinja2==3.1.6' \
+          'jsonschema>=4' \
           'pyyaml>=6.0' \
           'pydantic>=2' \
           'pytest-asyncio>=1.0' \
-          'pytest-benchmark>=4'
+          'pytest-benchmark>=4' \
+          'pytest-timeout==2.4.0'
+    - name: Install qualified Kustomize renderer
+      run: |
+        go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
+        echo "KUSTOMIZE_BIN=$(go env GOPATH)/bin/kustomize" >> "$GITHUB_ENV"
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
-    - name: Test recipe generators
-      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py
+    - name: Test recipe generators and docs artifacts
+      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py docs/tests/
 
   api-docs:
     name: Generated API References
@@ -406,6 +435,18 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Check isolated kv-router feature builds
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # Workspace feature unification hides these; check each on its own.
+      run: |
+        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-slot-tracker
+        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-indexer
+    - name: Run standalone slot-tracker feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # No workspace member requests standalone-slot-tracker, so it needs an explicit run here.
+      run: cargo test --locked -p dynamo-kv-router --features standalone-slot-tracker --lib 'services::'
     - name: Run canonical replay feature tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -415,10 +456,10 @@ jobs:
           testdata/mooncake_trace_tiny.jsonl \
           --iterations 2 \
           --canonical-reports-jsonl "$RUNNER_TEMP/canonical-replay.jsonl"
-    - name: Run Python bindings AIC feature tests
+    - name: Run Python bindings AIS feature tests
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --features aic-forward-pass -- --nocapture
+      run: cargo test --locked --features ais-forward-pass -- --nocapture
     - name: Compile feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -487,14 +528,18 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
-    - name: Run Python bindings AIC feature clippy
+    - name: Run Python bindings AIS feature clippy
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
-      run: cargo clippy --locked --no-deps --features aic-forward-pass --all-targets -- -D warnings
-    - name: Lint Python bindings custom worker-selection policy support
+      run: cargo clippy --locked --no-deps --features ais-forward-pass --all-targets -- -D warnings
+    - name: Lint Python bindings worker-selection policy builds
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
-      run: cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
+      run: |
+        # custom-policy is on by default; also lint it alongside the standalone selection
+        # service, and the build without the optional policy catalog.
+        cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
+        cargo clippy --locked --no-deps --no-default-features --all-targets -- -D warnings
     - name: Lint feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

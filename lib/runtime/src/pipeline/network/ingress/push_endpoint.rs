@@ -102,7 +102,11 @@ impl PushEndpoint {
                         instance_id,
                     )
                 } else {
-                    tracing::info_span!(target: "request_span", "handle_payload")
+                    tracing::info_span!(
+                        target: "request_span",
+                        "handle_payload",
+                        otel.kind = "server"
+                    )
                 };
 
                 // Extract request_id from headers before passing payload

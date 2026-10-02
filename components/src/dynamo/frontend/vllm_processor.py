@@ -6,6 +6,7 @@
 #
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -37,13 +38,17 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 )
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
 from .utils import (
+    as_error_envelope,
+    backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
@@ -233,6 +238,57 @@ class _ReasoningParserMetadata:
     engine_reasoning_ended: bool | None
     response_reasoning_ended: bool | None
     parser_kwargs: dict[str, Any] | None
+
+
+def _ensure_reasoning_parser_output_capable(
+    parser_name: str,
+    parser_class: type[ReasoningParser],
+    tokenizer: TokenizerLike,
+    chat_template_kwargs: dict[str, Any],
+    model_config: Any,
+) -> None:
+    # vLLM ships boundary-only parsers (e.g. GptOssReasoningParser) that raise
+    # NotImplementedError from every output-parsing method, while this
+    # processor calls extract_reasoning_streaming per request. Probe once here
+    # so the combination is rejected at engine setup instead of failing every
+    # request with a 500 (issue #14936). The probe constructor mirrors the
+    # production construction sites (chat_template_kwargs, model_config).
+    probe = parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    try:
+        inspect.signature(probe.extract_reasoning_streaming).bind(
+            "", "", "", [], [], []
+        )
+    except TypeError as e:
+        raise RuntimeError(
+            f"reasoning_parser {parser_name!r} ({parser_class.__name__}) has an "
+            f"extract_reasoning_streaming signature this processor cannot call: {e}"
+        ) from e
+    try:
+        probe.extract_reasoning_streaming("", "", "", [], [], [])
+    except NotImplementedError as e:
+        msg = (
+            f"reasoning_parser {parser_name!r} ({parser_class.__name__}) only "
+            "provides boundary detection; this processor needs a parser that "
+            "implements extract_reasoning_streaming (issue #14936)"
+        )
+        if parser_name == "openai_gptoss":
+            msg += (
+                "; gpt-oss output parsing requires HarmonyParser, which this "
+                "processor does not support yet"
+            )
+        raise RuntimeError(msg) from e
+    except Exception as e:
+        # Parsers are not contracted to accept empty input; the probe only
+        # proves the method is implemented, so log and accept.
+        logger.debug(
+            "reasoning_parser %r probe raised %r on empty input; accepting",
+            parser_name,
+            e,
+        )
 
 
 def _build_reasoning_parser_metadata(
@@ -583,11 +639,23 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
+        logprobs = request.get("logprobs")
+        top_logprobs = request.get("top_logprobs")
+        if (
+            logprobs is True
+            or (isinstance(logprobs, int) and not isinstance(logprobs, bool))
+            or top_logprobs not in (None, 0)
+        ):
+            raise HttpError(
+                400,
+                "Validation: `logprobs` and `top_logprobs` are not supported by the "
+                "vLLM chat processor (--dyn-chat-processor vllm).",
+            )
+
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
-        # Validate cache-UUID modality support before vLLM downloads or
-        # processes media. Dynamo currently exposes vLLM cache UUIDs for
-        # images only.
+        # Preserve user cache UUIDs alongside URL-backed media. UUID-only image
+        # slots are resolved by the worker-side vLLM processor cache.
         mm_data, mm_uuids = extract_mm_urls(messages)
 
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
@@ -643,7 +711,7 @@ class VllmProcessor:
         sampling_fields = (
             set(getattr(SamplingParams, "__annotations__", ()))
             & set(type(request_for_sampling).model_fields)
-        ) - {"max_tokens", "logprobs", "output_kind"}
+        ) - {"max_tokens", "logprobs", "output_kind", "thinking_token_budget"}
         for k in sorted(sampling_fields):
             v = getattr(request_for_sampling, k, None)
             if v is not None:
@@ -652,25 +720,10 @@ class VllmProcessor:
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would
         # cause process_inputs._validate_params to reject the request. Pluck
-        # the value out of nvext and pass it directly into dynamo_preproc
-        # below.
-        nvext_max_thinking_tokens = (request.get("nvext") or {}).get(
-            "max_thinking_tokens"
-        )
-        logprobs = request_for_sampling.logprobs
-        top_logprobs = request_for_sampling.top_logprobs
-        if logprobs is True:
-            sampling_params.logprobs = top_logprobs if top_logprobs is not None else 1
-        elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-            sampling_params.logprobs = logprobs
-        elif top_logprobs not in (None, 0):
-            sampling_params.logprobs = top_logprobs
-        # TODO: Support logprobs in the distributed vLLM chat processor by
-        # converting worker log_probs/top_logprobs into EngineCoreOutput.new_logprobs.
-        if sampling_params.logprobs is not None:
-            logger.warning(
-                "Logprobs requested but not supported in distributed inference mode"
-            )
+        # the value out of the request and pass it directly into dynamo_preproc
+        # below. Prefer the OpenAI-compatible root-level field, fall back to the
+        # legacy nvext passthrough.
+        thinking_token_budget = resolve_thinking_token_budget(request)
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             # render_messages_async returns a raw prompt. Convert it to a typed
@@ -717,7 +770,7 @@ class VllmProcessor:
                 "stop_token_ids": sp.stop_token_ids,
                 "min_tokens": sp.min_tokens,
                 "ignore_eos": sp.ignore_eos,
-                "max_thinking_tokens": nvext_max_thinking_tokens,
+                "max_thinking_tokens": thinking_token_budget,
             },
             "sampling_options": {
                 "n": sp.n,
@@ -928,20 +981,24 @@ class VllmProcessor:
                         request_id,
                         message,
                     )
-                    yield make_internal_error(request_id, message)
+                    yield as_error_envelope(make_internal_error(request_id, message))
                     break
                 engine_response = dynamo_response.data()
 
                 if engine_response is None:
                     if dynamo_response.is_error():
-                        yield handle_engine_error(engine_response, request_id, logger)
+                        yield as_error_envelope(
+                            handle_engine_error(engine_response, request_id, logger)
+                        )
                         break
                     # No data or error fields, means we may have a comment or other kind of event.
                     # I'm not sure what those are used for, so TODO. Skip for now.
                     continue
 
                 if "token_ids" not in engine_response:
-                    yield handle_engine_error(engine_response, request_id, logger)
+                    yield as_error_envelope(
+                        handle_engine_error(engine_response, request_id, logger)
+                    )
                     break
 
                 # Count before any choice gate — tool/reasoning parsers may
@@ -952,15 +1009,17 @@ class VllmProcessor:
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
                 if output_request_id is None:
-                    yield {
-                        "error": {
-                            "message": (
-                                f"Invalid engine choice index {output_idx} "
-                                f"for request {request_id}"
-                            ),
-                            "type": "internal_error",
+                    yield as_error_envelope(
+                        {
+                            "error": {
+                                "message": (
+                                    f"Invalid engine choice index {output_idx} "
+                                    f"for request {request_id}"
+                                ),
+                                "type": "internal_error",
+                            }
                         }
-                    }
+                    )
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
@@ -997,15 +1056,17 @@ class VllmProcessor:
                     for output in vllm_out.request_outputs[0].outputs:
                         post = post_processors.get(output.index)
                         if post is None:
-                            yield {
-                                "error": {
-                                    "message": (
-                                        f"Invalid postprocessor choice index {output.index} "
-                                        f"for request {request_id}"
-                                    ),
-                                    "type": "internal_error",
+                            yield as_error_envelope(
+                                {
+                                    "error": {
+                                        "message": (
+                                            f"Invalid postprocessor choice index "
+                                            f"{output.index} for request {request_id}"
+                                        ),
+                                        "type": "internal_error",
+                                    }
                                 }
-                            }
+                            )
                             postprocess_error = True
                             break
                         choice = post.process_output(output)
@@ -1013,7 +1074,8 @@ class VllmProcessor:
                             choices.append(choice)
 
                 if postprocess_error:
-                    continue
+                    # Stop: the error frame is terminal, so do not read more.
+                    break
 
                 # One envelope per iteration carries both data and metrics so
                 # client cancellation can't drop the annotation between yields.
@@ -1042,8 +1104,12 @@ class VllmProcessor:
                     metrics["video_count"] = video_count
                 if audio_count:
                     metrics["audio_count"] = audio_count
-                envelope["event"] = "llm_metrics"
-                envelope["comment"] = [json.dumps(metrics)]
+                # Attach metrics to data when available; otherwise use an annotation.
+                if data := envelope.get("data"):
+                    data["llm_metrics"] = metrics
+                else:
+                    envelope["event"] = "llm_metrics"
+                    envelope["comment"] = [json.dumps(metrics)]
 
                 yield envelope
             _nvtx.end_range(rng_stream)
@@ -1053,8 +1119,20 @@ class VllmProcessor:
             # below is reserved for genuine internal failures.
             raise
         except Exception as e:
+            backend_error = backend_invalid_argument_to_http_error(e)
+            if backend_error is not None:
+                # The worker already judged the request invalid and said so with
+                # its own status. Reporting that as a 500 blames the server for a
+                # client error and drops the only text explaining the rejection.
+                logger.warning(
+                    "Backend rejected request %s with %d: %s",
+                    request_id,
+                    backend_error.code,
+                    backend_error.message,
+                )
+                raise backend_error from e
             logger.exception("Error generating response for request %s", request_id)
-            yield make_internal_error(request_id, str(e))
+            yield as_error_envelope(make_internal_error(request_id, str(e)))
         finally:
             for output_request_id in registered_request_ids:
                 if output_request_id in self.output_processor.request_states:
@@ -1202,6 +1280,13 @@ class EngineFactory:
         if reasoning_parser_name:
             reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
                 reasoning_parser_name
+            )
+            _ensure_reasoning_parser_output_capable(
+                reasoning_parser_name,
+                reasoning_parser_class,
+                tokenizer,
+                getattr(self.flags, "default_chat_template_kwargs", None) or {},
+                model_config,
             )
         else:
             reasoning_parser_class = None

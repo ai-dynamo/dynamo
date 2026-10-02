@@ -14,8 +14,12 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CRD_DIR = REPO_ROOT / "deploy/operator/config/crd/bases"
-OUTPUT_PATH = (
-    REPO_ROOT / "recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json"
+# The matrix workflow and the copy-and-fill scaffold each carry a checked-in copy
+# so that a copied scaffold stays self-contained outside the repository.
+OUTPUT_PATHS = (
+    REPO_ROOT / "recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json",
+    REPO_ROOT
+    / "recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json",
 )
 GENERATED_WARNING = "Generated file. Do not edit this checked-in copy."
 REGENERATE_COMMAND = "python3 scripts/generate_kustomize_openapi.py"
@@ -88,6 +92,8 @@ def pruned_schema(source: Any) -> dict[str, Any] | None:
 
 
 def crd_definitions(crd_path: Path) -> dict[str, dict[str, Any]]:
+    """Generate CRD merge definitions, including Kustomize-only overrides."""
+
     crd = yaml.safe_load(crd_path.read_text(encoding="utf-8"))
     if not isinstance(crd, dict):
         raise TypeError(f"{crd_path} must contain one CustomResourceDefinition")
@@ -116,6 +122,25 @@ def crd_definitions(crd_path: Path) -> dict[str, dict[str, Any]]:
             continue
 
         spec_schema = pruned_schema(source_schema.get("properties", {}).get("spec"))
+        if spec_schema is not None and (group, version, kind) == (
+            "nvidia.com",
+            "v1beta1",
+            "DynamoGraphDeployment",
+        ):
+            # Merge shared environment entries by name in Kustomize without
+            # changing the CRD's server-side apply ownership semantics.
+            env_schema = source_schema["properties"]["spec"]["properties"].get("env")
+            if env_schema is None:
+                raise ValueError(
+                    f"{crd_path}: {group}/{version} {kind} schema is missing spec.env"
+                )
+            spec_schema["properties"]["env"] = pruned_schema(
+                {
+                    **env_schema,
+                    "x-kubernetes-list-type": "map",
+                    "x-kubernetes-list-map-keys": ["name"],
+                }
+            )
         definition_name = f"{group}.{version}.{kind}"
         properties: dict[str, Any] = {
             "apiVersion": {"type": "string"},
@@ -164,19 +189,25 @@ def main() -> int:
         print(f"generate_kustomize_openapi.py: {exc}", file=sys.stderr)
         return 1
 
-    current = OUTPUT_PATH.read_text(encoding="utf-8") if OUTPUT_PATH.exists() else None
     if args.check:
-        if current == rendered:
+        stale = [
+            path
+            for path in OUTPUT_PATHS
+            if not path.exists() or path.read_text(encoding="utf-8") != rendered
+        ]
+        if not stale:
             return 0
-        print(
-            f"Generated Kustomize OpenAPI schema is stale: {OUTPUT_PATH.relative_to(REPO_ROOT)}",
-            file=sys.stderr,
-        )
+        for path in stale:
+            print(
+                f"Generated Kustomize OpenAPI schema is stale: {path.relative_to(REPO_ROOT)}",
+                file=sys.stderr,
+            )
         print(f"Run: {REGENERATE_COMMAND}", file=sys.stderr)
         return 1
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(rendered, encoding="utf-8")
+    for path in OUTPUT_PATHS:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(rendered, encoding="utf-8")
     return 0
 
 

@@ -46,6 +46,17 @@ issues:
     - linters:
         - staticcheck
       text: "SA1019:.*(CheckpointMode|omit mode|DynamoCheckpointIdentity|required by v1alpha1|omit for DGD-managed checkpoints|legacy spec.identity|checkpoint launch uses)"
+    # Intentional compatibility usage of the deprecated eppConfig field/type.
+    # Conversion, reconciliation, and validation code must still read and write
+    # eppConfig to preserve the legacy Go EPP Pod contract for existing DGDs
+    # until they migrate explicitly; see epp.IsLegacyGoEPP.
+    - linters:
+        - staticcheck
+      # Single-quoted: in a double-quoted YAML scalar \b is the backspace
+      # escape, not a regex word boundary. The boundary keeps this to the
+      # EPPConfig symbol itself rather than also silencing a future
+      # LegacyEPPConfig / EPPConfigRef.
+      text: 'SA1019:.*\bEPPConfig is deprecated'
 linters:
   disable-all: true
   enable:

@@ -6,11 +6,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -18,11 +19,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
@@ -32,9 +28,12 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
+from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.frontend.vllm_protocol import DeltaFunctionCall, DeltaMessage, DeltaToolCall
 from dynamo.llm.exceptions import InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .utils import legacy_guided_decoding
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -67,8 +66,33 @@ class PreprocessResult:
     uses_dynamo_json_tool_call_fallback: bool = False
 
 
-_ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
+# One executor per live tokenizer. The id-keyed registry stores only a weak
+# reference to the tokenizer, and every lookup verifies object identity. This
+# avoids both id reuse and WeakKeyDictionary's referent-based equality.
+_ASYNC_TOKENIZER_EXECUTORS: dict[
+    int, tuple[weakref.ReferenceType[TokenizerLike], ThreadPoolExecutor]
+] = {}
+# Fallback for tokenizers that do not support weak references; retains
+# entries for the process lifetime (the previous behavior for all tokenizers).
+# The tokenizer is stored alongside its executor so its id() cannot be
+# recycled by a different tokenizer while the entry lives.
+_STRONG_ASYNC_TOKENIZER_EXECUTORS: dict[
+    int, tuple[TokenizerLike, ThreadPoolExecutor]
+] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
+
+
+def _evict_async_tokenizer_executor(
+    key: int,
+    executor: ThreadPoolExecutor,
+    tokenizer_ref: weakref.ReferenceType[TokenizerLike],
+) -> None:
+    entry = _ASYNC_TOKENIZER_EXECUTORS.get(key)
+    if entry is not None and entry[0] is tokenizer_ref:
+        del _ASYNC_TOKENIZER_EXECUTORS[key]
+    # The tokenizer's last reference may be released by this executor's own
+    # worker, so shutdown must not try to join the current thread.
+    executor.shutdown(wait=False)
 
 
 def _reject_non_finite_json(value: str) -> Any:
@@ -267,8 +291,13 @@ def build_tool_call_guided_decoding(
         # _validate_chat_completion_request.
         json_schema = get_json_schema_from_tools(tool_choice, request.tools)
         if json_schema is not None:
+            if _is_named_tool_choice(tool_choice) and admits_only_empty_object(
+                json_schema
+            ):
+                return {"regex": r"\{\}"}
             if (
                 request.parallel_tool_calls is False
+                and tool_choice == "required"
                 and json_schema.get("type") == "array"
             ):
                 json_schema["maxItems"] = 1
@@ -313,50 +342,42 @@ def _build_assistant_guided_decoding(
     )
 
     request_extra = request.model_extra or {}
-    # Pick a single legacy guided_* constraint by precedence rather than merging
-    # several keys into one dict, because guided_decoding carries exactly one
-    # constraint and the elif chain above already honors that for
-    # structured_outputs.
-    #
-    # TODO: first-match-wins silently discards the other constraints the caller
-    # explicitly set, with no error and no annotation.
-    # GuidedDecodingOptions::validate in protocols/common.rs rejects the same
-    # request outright, so `guided_json` + `guided_regex` is a 400 through the Rust
-    # frontend and a silent single-constraint request here. Rejecting is the
-    # correct behavior; it is left as-is only to avoid adding a second new 400 to
-    # this change. Note that validate() also counts whitespace_pattern toward its
-    # exclusivity limit, so the {"json": ..., "whitespace_pattern": ...} pair built
-    # below is accepted here and rejected there -- whitespace_pattern modifies a
-    # grammar rather than being one, so that counter is the side that is wrong.
-    legacy_guidance: dict[str, Any] = {}
-    for key, value in (
-        ("json", request_extra.get("guided_json")),
-        ("regex", request_extra.get("guided_regex")),
-        ("grammar", request_extra.get("guided_grammar")),
-        ("choice", request_extra.get("guided_choice") or None),
-    ):
-        if value is not None:
-            legacy_guidance = {key: value}
-            break
+    # Match GuidedDecodingOptions::validate: modifiers are allowed alongside one
+    # constraint, but multiple legacy constraints must not be silently discarded.
+    legacy_guidance = legacy_guided_decoding(request_extra)
     if legacy_guidance:
         # Legacy guided_* takes precedence over structured_outputs (prior
         # behavior), but as a single constraint.
+        # legacy_guided_decoding already carried whitespace_pattern across.
         guided_decoding = legacy_guidance
-        whitespace_pattern = request_extra.get("guided_whitespace_pattern")
-        if whitespace_pattern is not None:
-            guided_decoding["whitespace_pattern"] = whitespace_pattern
     return guided_decoding
 
 
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
-    key = id(tokenizer)
-    async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
-    if async_tokenizer is None:
-        async_tokenizer = make_async(
-            tokenizer, executor=ThreadPoolExecutor(max_workers=1)
-        )
-        _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
-    return async_tokenizer
+    try:
+        tokenizer_ref = weakref.ref(tokenizer)
+    except TypeError:
+        # Tokenizer does not support weak references.
+        key = id(tokenizer)
+        entry = _STRONG_ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if entry is None:
+            executor = ThreadPoolExecutor(max_workers=1)
+            _STRONG_ASYNC_TOKENIZER_EXECUTORS[key] = (tokenizer, executor)
+        else:
+            executor = entry[1]
+    else:
+        key = id(tokenizer)
+        entry = _ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if entry is None or entry[0]() is not tokenizer:
+            executor = ThreadPoolExecutor(max_workers=1)
+            tokenizer_ref = weakref.ref(
+                tokenizer,
+                partial(_evict_async_tokenizer_executor, key, executor),
+            )
+            _ASYNC_TOKENIZER_EXECUTORS[key] = (tokenizer_ref, executor)
+        else:
+            executor = entry[1]
+    return make_async(tokenizer, executor=executor)
 
 
 def _materialize_assistant_tool_calls(
@@ -747,7 +768,7 @@ async def preprocess_chat_request(
         and parser_guided_decoding is None
         and guided_decoding is tool_guided_decoding
         and isinstance(tool_guided_decoding, dict)
-        and "json" in tool_guided_decoding
+        and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
@@ -1509,10 +1530,8 @@ class StreamingPostProcessor:
                 if len(delta) > 1:
                     choice = self._build_choice(output, delta)
             elif delta_message.tool_calls:
-                if output.finish_reason and self.in_progress_tool_calls:
-                    # Tool calls and finish_reason arrived in the same chunk.
-                    # Emit now — there will be no subsequent process_output call
-                    # to drain the buffer.
+                if self.in_progress_tool_calls:
+                    # Emit each parser delta instead of waiting for a quiet chunk.
                     choice = self._emit_tool_calls_choice(output)
             elif self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)

@@ -38,7 +38,7 @@ _DGD = {
     "spec": {
         "components": [
             {
-                "name": "VllmPrefillWorker",
+                "name": "prefill",
                 "type": "prefill",
                 "replicas": 2,
                 "podTemplate": {
@@ -56,7 +56,7 @@ _DGD = {
                 },
             },
             {
-                "name": "VllmDecodeWorker",
+                "name": "decode",
                 "type": "decode",
                 "replicas": 2,
                 "podTemplate": {

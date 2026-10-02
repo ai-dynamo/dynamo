@@ -62,6 +62,7 @@ pub async fn wait_for_endpoint_model_card(
                 }
                 Ok(DiscoveryEvent::ModelTaintsUpdated(_)) => {}
                 Ok(DiscoveryEvent::Removed(_)) => {}
+                Ok(DiscoveryEvent::Resync(_)) => {}
                 Err(e) => {
                     tracing::debug!(
                         error = %e,

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,8 +13,65 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
 MODULE_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
+USER_FACING_MANIFEST_ROOTS = (
+    REPO_ROOT / "benchmarks",
+    REPO_ROOT / "components/src/dynamo/profiler/templates",
+    REPO_ROOT / "examples",
+    REPO_ROOT / "recipes",
+)
+LEGACY_VLLM_COMPONENT_NAME = re.compile(
+    r"^\s*(?:"
+    r"-\s+name:\s*['\"]?Vllm(?:Worker|Prefill(?:Worker)?|Decode(?:Worker)?)['\"]?"
+    r"|['\"]?Vllm(?:Worker|Prefill(?:Worker)?|Decode(?:Worker)?)['\"]?\s*:"
+    r")\s*(?:#.*)?$"
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+
+def test_user_facing_manifests_use_short_vllm_component_names():
+    violations = []
+    for root in USER_FACING_MANIFEST_ROOTS:
+        for path in sorted(root.rglob("*.yaml")):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if LEGACY_VLLM_COMPONENT_NAME.fullmatch(line):
+                    violations.append(
+                        f"{path.relative_to(REPO_ROOT)}:{line_number}: {line.strip()}"
+                    )
+
+    assert not violations, (
+        "user-facing manifests must use worker, prefill, or decode instead of "
+        "legacy vLLM component names:\n" + "\n".join(violations)
+    )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "expected_worker_names"),
+    [
+        ("agg-gb200-agentic", {"worker"}),
+        ("agg-gb300-agentic", {"worker"}),
+        ("agg-h200-agentic", {"worker"}),
+        ("disagg-gb300-agentic", {"prefill", "decode"}),
+    ],
+)
+def test_kimi_k3_vllm_recipes_use_short_worker_names(deployment, expected_worker_names):
+    """Unprefixed names like PrefillWorker must not escape the vLLM rename."""
+    manifest = REPO_ROOT / "recipes/kimi-k3/vllm" / deployment / "deploy.yaml"
+    resources = list(yaml.safe_load_all(manifest.read_text(encoding="utf-8")))
+    dgd = next(
+        resource
+        for resource in resources
+        if resource and resource.get("kind") == "DynamoGraphDeployment"
+    )
+    worker_names = {
+        component["name"]
+        for component in dgd["spec"]["components"]
+        if component["type"] != "frontend"
+    }
+
+    assert worker_names == expected_worker_names
 
 
 def load_matrix_module():
@@ -826,3 +885,154 @@ def test_help():
 
     assert result.returncode == 0
     assert "{unfold,render,check,compose}" in result.stdout
+
+
+def test_sort_options_default_and_opt_in():
+    """A matrix without `sortOptions` keeps fifo; only an opt-in matrix differs."""
+    module = load_matrix_module()
+
+    # Omitted -> byte-identical to the repository-wide default, so existing
+    # matrices regenerate unchanged.
+    assert module.parse_sort_options(None) == "sortOptions:\n  order: fifo"
+
+    # Opt-in renders a legacy block with explicit kind ordering. Kustomize applies
+    # sortOptions from the kustomization being built, so this only works when the
+    # generated overlay carries it -- a base cannot set it.
+    rendered = module.parse_sort_options(
+        {
+            "order": "legacy",
+            "legacySortOptions": {
+                "orderFirst": ["ResourceClaimTemplate", "ComputeDomain"],
+                "orderLast": [],
+            },
+        }
+    )
+    assert rendered == (
+        "sortOptions:\n"
+        "  order: legacy\n"
+        "  legacySortOptions:\n"
+        '    orderFirst: ["ResourceClaimTemplate", "ComputeDomain"]\n'
+        "    orderLast: []"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw, message",
+    [
+        ({}, "non-empty mapping"),
+        ({"order": "alphabetical"}, "must be fifo or legacy"),
+        ({"order": "fifo", "legacySortOptions": {}}, "requires order: legacy"),
+        ({"order": "legacy", "nope": 1}, "unsupported sortOptions key"),
+        (
+            {"order": "legacy", "legacySortOptions": {"orderFirst": "Secret"}},
+            "must be a list of kinds",
+        ),
+        # An empty (or all-null) mapping would render `legacySortOptions:` with no
+        # children, which parses back as null -- not an empty mapping -- and lets
+        # Kustomize fall back to its own hardcoded legacy ordering.
+        (
+            {"order": "legacy", "legacySortOptions": {}},
+            "must set orderFirst or orderLast",
+        ),
+        (
+            {"order": "legacy", "legacySortOptions": {"orderFirst": None}},
+            "must set orderFirst or orderLast",
+        ),
+    ],
+)
+def test_sort_options_rejects_invalid_input(raw, message):
+    module = load_matrix_module()
+    with pytest.raises(ValueError, match=message):
+        module.parse_sort_options(raw)
+
+
+def _kustomize_build_argv():
+    """Real Kustomize, so the test asserts what users get, not what we emit."""
+    for argv in (["kustomize", "build"], ["kubectl", "kustomize"]):
+        if shutil.which(argv[0]):
+            return argv
+    return None
+
+
+@pytest.mark.parametrize(
+    "variant_sort_options, expected_order",
+    [
+        # fifo keeps authored order, so the claim template lands last.
+        ("", ["ComputeDomain", "DynamoGraphDeployment", "ResourceClaimTemplate"]),
+        # The opt-in puts the claim template before the DGD that claims it.
+        (
+            "      sortOptions:\n"
+            "        order: legacy\n"
+            "        legacySortOptions:\n"
+            "          orderFirst: [ResourceClaimTemplate, ComputeDomain]\n"
+            "          orderLast: []\n",
+            ["ResourceClaimTemplate", "ComputeDomain", "DynamoGraphDeployment"],
+        ),
+    ],
+    ids=["default-fifo", "opt-in-legacy"],
+)
+def test_sort_options_control_rendered_resource_order(
+    tmp_path, variant_sort_options, expected_order
+):
+    """Render with real Kustomize and assert the order the user receives.
+
+    The unit tests cover the emitted YAML. Only a real build proves the property
+    the feature exists for: the claim template comes before the DGD.
+    """
+    argv = _kustomize_build_argv()
+    if argv is None:
+        pytest.skip("no kustomize or kubectl on PATH")
+
+    recipe = tmp_path / "recipe"
+    base = recipe / "kustomize/base"
+    write_kustomization(base, "resources:\n  - deploy.yaml\n")
+    (base / "deploy.yaml").write_text(
+        "apiVersion: resource.nvidia.com/v1beta1\n"
+        "kind: ComputeDomain\n"
+        "metadata:\n  name: cd\n"
+        "---\n"
+        "apiVersion: nvidia.com/v1beta1\n"
+        "kind: DynamoGraphDeployment\n"
+        "metadata:\n  name: dgd\n",
+        encoding="utf-8",
+    )
+    component = recipe / "kustomize/components/claim"
+    component.mkdir(parents=True)
+    (component / "kustomization.yaml").write_text(
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\n"
+        "kind: Component\n"
+        "resources:\n  - rct.yaml\n",
+        encoding="utf-8",
+    )
+    (component / "rct.yaml").write_text(
+        "apiVersion: resource.k8s.io/v1\n"
+        "kind: ResourceClaimTemplate\n"
+        "metadata:\n  name: rct\n",
+        encoding="utf-8",
+    )
+
+    matrix = recipe / ".kustomize-matrix.yaml"
+    matrix.write_text(
+        "source: kustomize/base\n"
+        'nameTemplate: "${variant}"\n'
+        "matrix:\n"
+        "  variant:\n"
+        "    - name: claimed\n"
+        "      components:\n"
+        "        - kustomize/components/claim\n" + variant_sort_options,
+        encoding="utf-8",
+    )
+
+    module = load_matrix_module()
+    module.unfold_matrix(module.load_matrix(str(matrix)), check=False, clean=False)
+
+    overlay = recipe / "kustomize/overlays/claimed"
+    result = subprocess.run(
+        [*argv, str(overlay)], capture_output=True, text=True, check=True
+    )
+    order = [
+        line.split(":", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("kind:")
+    ]
+    assert order == expected_order

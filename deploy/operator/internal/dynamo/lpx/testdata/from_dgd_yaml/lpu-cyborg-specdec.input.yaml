@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: lpu-cyborg-specdec
+  namespace: test
+  uid: 22222222-2222-4222-8222-222222222222
+  generation: 1
+spec:
+  components:
+  - name: draft
+    type: lpx
+    replicas: 1
+    lpx:
+      buildId: node-local-v2-connected
+    roles:
+    - name: conductor
+      podTemplate:
+        spec:
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            volumeMounts:
+            - name: model-storage
+              mountPath: /models
+            image: example.invalid/lpu-conductor:test
+            command: [/opt/dynamo-lpu]
+            args: [serve]
+    - name: agent
+      podTemplate:
+        spec:
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            volumeMounts:
+            - name: model-storage
+              mountPath: /models
+            image: example.invalid/lpu-agent:test
+            command: [/opt/dynamo-lpu]
+            args: [serve]
+  - name: target
+    type: lpx
+    replicas: 1
+    lpx:
+      buildId: node-local-v2-connected-lpx
+    roles:
+    - name: conductor
+      replicas: 1
+      podTemplate:
+        spec:
+          resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: decode-gpu
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            volumeMounts:
+            - name: model-storage
+              mountPath: /models
+            image: example.invalid/cyborg-specdecode:test
+            command: [python, -m, dynamo.cyborg]
+            args: [--draft-endpoint, test-lpu-cyborg-specdec/backend/generate]
+            resources:
+              claims:
+              - name: gpu
+    - name: agent
+      podTemplate:
+        spec:
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            volumeMounts:
+            - name: model-storage
+              mountPath: /models
+            image: example.invalid/lpu-agent:test
+            command: [/opt/dynamo-lpu]
+            args: [serve]

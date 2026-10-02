@@ -12,7 +12,10 @@
 
 FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS planner_builder
 
-ARG PYTHON_VERSION
+# Planner-scoped interpreter; see container/context.yaml `planner_python_version`.
+# The planner build/runtime bases decouple this stage's CPython from the
+# global PYTHON_VERSION used by the frontend and framework stages.
+ARG PLANNER_PYTHON_VERSION
 ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
@@ -21,9 +24,9 @@ ARG TARGETARCH
 # from sdist (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64
 # the prebuilt wheel from PyPI is used and the toolchain is skipped
 # entirely. Python headers come from the base image's
-# /usr/local/include/python${PYTHON_VERSION} (python:3.X-slim bundles them
-# directly — no apt python*-dev needed, and python${PYTHON_VERSION}-dev is
-# not available in this base's apt index anyway). libc6-dev is required
+# /usr/local/include/python${PLANNER_PYTHON_VERSION} (python:3.X-slim bundles
+# them directly — no apt python*-dev needed, and python${PLANNER_PYTHON_VERSION}-dev
+# is not available in this base's apt index anyway). libc6-dev is required
 # explicitly because on Debian it's a Recommends of gcc, not a Depends, so
 # --no-install-recommends would otherwise skip it and the build fails with
 # "fatal error: stdlib.h: No such file or directory". The toolchain stays
@@ -62,7 +65,7 @@ USER dynamo
 
 RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv venv ${VIRTUAL_ENV} --python ${PYTHON_VERSION}
+    uv venv ${VIRTUAL_ENV} --python ${PLANNER_PYTHON_VERSION}
 
 # Install the local wheels and planner/profiler runtime dependencies before the
 # repo copies so changes in tests/configs don't invalidate the dependency layer.
@@ -83,16 +86,16 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites. AI Simulate
 # runtime code comes from the published wheel installed above. The Router
-# adapter and replay bridge unit tests also run here because this image installs
-# that wheel.
+# adapter, replay bridge, and unified CLI E2E tests also run here because this
+# image installs that wheel.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
-COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/replay/tests/test_main.py /workspace/components/src/dynamo/replay/tests/test_main.py
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation.py /workspace/components/src/dynamo/replay/tests/test_simulation.py
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation_integration.py /workspace/components/src/dynamo/replay/tests/test_simulation_integration.py
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/replay/tests/data /workspace/components/src/dynamo/replay/tests/data
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/replay/tests/e2e /workspace/components/src/dynamo/replay/tests/e2e
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/router/tests/test_router_sweep_config_provider.py /workspace/components/src/dynamo/router/tests/test_router_sweep_config_provider.py
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev

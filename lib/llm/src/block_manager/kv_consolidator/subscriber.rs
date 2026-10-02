@@ -298,6 +298,7 @@ mod tests {
             kv_cache_spec_sliding_window: None,
             locality,
             ownership: None,
+            session_id: None,
         }
     }
 

@@ -42,9 +42,8 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
-| Thu, Sep 10, 2026 | **[Baseten x Dynamo x SGLang RL post training meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL)** | [Luma](https://luma.com/BaseDynSGL) |
-| Mon, Aug 24, 2026 | ~~[vLLM x Dynamo meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0)~~ | [Luma](https://luma.com/r8o604o0) |
-| Thu, Jul 30, 2026 | ~~[Dynamo Afterhours](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours)~~ | [Luma](https://luma.com/JulyDynamoAfterHours) |
+| Wed, Sep 23, 2026 | ~~[Dynamo community meeting](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260923T173000Z%2F20260923T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok)~~ | [Online](https://meet.google.com/heb-demu-qok) |
+| Thu, Sep 10, 2026 | ~~[Baseten x Dynamo x SGLang RL post training meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL)~~ | [Luma](https://luma.com/BaseDynSGL) |
 <!-- EVENTS:END -->
 
 > Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
@@ -103,12 +102,12 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 | [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL/NVLink | 7x faster cold-start for new replicas |
 | [**Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | SLA-driven autoscaler that profiles workloads and right-sizes pools | Meets latency targets at minimum total cost of ownership (TCO) |
 | [**Grove**](https://github.com/ai-dynamo/grove) | K8s operator for topology-aware gang scheduling (NVL72) | Places workloads optimally across racks, hosts, and NUMA nodes |
-| [**AIConfigurator**](https://github.com/ai-dynamo/aiconfigurator) | Simulates 10K+ deployment configs in seconds | Finds optimal serving config without burning GPU-hours |
+| [**AISimulate**](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline | Finds a strong serving configuration without bringing up a GPU cluster |
 | [**Fault Tolerance**](https://docs.nvidia.com/dynamo/user-guides/fault-tolerance/request-migration) | Canary health checks + in-flight request migration | Workers fail; user requests don't |
 
 ### New in 1.0
 
-- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
+- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AISimulate performance models estimate candidate configurations, Planner optimizes the topology, and Dynamo deploys
 - **Agentic inference:** Per-request hints for priority, expected output length, and speculative prefill, plus session metadata for tracing and SGLang subagent KV isolation. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
 - **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
 - **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200
@@ -139,15 +138,19 @@ the Gateway API setup, supported features, and configuration.
 
 ### Option A: Container (fastest)
 
+Choose either vLLM or SGLang:
+
+#### vLLM
+
 ```bash
-# Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.1
+# Pull a prebuilt container
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
-python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file &
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file &
 
-# Send a request
+# Once the worker is ready, send a request
 curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
   "model": "Qwen/Qwen3-0.6B",
   "messages": [{"role": "user", "content": "Hello!"}],
@@ -155,19 +158,45 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.4.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.4.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+#### SGLang
+
+```bash
+# Pull a prebuilt container
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+
+# Inside the container — start frontend and worker
+python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file &
+
+# Once the worker is ready, send a request
+curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [{"role": "user", "content": "Hello!"}],
+  "max_tokens": 100
+}' | jq
+```
+
+Also available: [`tensorrtllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
-Install [uv](https://github.com/astral-sh/uv) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then:
+Install [uv](https://github.com/astral-sh/uv) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then choose your backend:
+
+#### vLLM
 
 ```bash
-uv pip install --prerelease=allow "ai-dynamo[sglang]"   # or [vllm]
+uv pip install --prerelease=allow "ai-dynamo[vllm]"
+```
+
+#### SGLang
+
+```bash
+uv pip install --prerelease=allow "ai-dynamo[sglang]"
 ```
 
 > **Note:** TensorRT-LLM requires `pip` with `--extra-index-url https://pypi.nvidia.com`. See the [install guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for TRT-LLM-specific instructions.
 
-Then start the frontend and a worker as shown above. See the [full installation guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for system dependencies and backend-specific notes.
+Then start the frontend and the matching worker as shown above. See the [full installation guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for system dependencies and backend-specific notes.
 
 ### Option C: Kubernetes (recommended)
 

@@ -22,7 +22,6 @@ use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::time::Instant;
-use uuid::Uuid;
 
 #[cfg(test)]
 use rustc_hash::FxHashSet;
@@ -32,7 +31,11 @@ use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::PrefillLoadHint;
 
-/// Duration after which stale requests may be expired (5 minutes).
+/// Shared active-request liveness duration (5 minutes).
+///
+/// Legacy selection services and standalone slot trackers use it as an absolute-age
+/// threshold. The embedded `KvRouter` uses it as the request-lease CLOCK scan interval;
+/// its second chance expires idle leases after approximately one to two scans.
 pub const DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(300);
 
 /// How often we *check* for stale requests (30 seconds). This is not
@@ -121,27 +124,13 @@ impl ActiveSequences {
         Self::new_with_expiry(block_size, Some(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION))
     }
 
-    /// Creates a tracker with an explicit stale-request expiry duration.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `expiry_duration` is zero or `block_size` is zero.
-    pub(super) fn new_with_expiry_duration(block_size: usize, expiry_duration: Duration) -> Self {
+    /// Builds a tracker from an optional stale-request expiry policy.
+    pub(super) fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
+        assert!(block_size > 0, "block_size must be greater than 0");
         assert!(
-            !expiry_duration.is_zero(),
+            expiry_duration.is_none_or(|duration| !duration.is_zero()),
             "expiry_duration must be greater than zero"
         );
-        Self::new_with_expiry(block_size, Some(expiry_duration))
-    }
-
-    /// Creates a tracker that relies only on explicit request lifecycle events.
-    pub(super) fn new_without_expiry(block_size: usize) -> Self {
-        Self::new_with_expiry(block_size, None)
-    }
-
-    /// Builds a tracker from an optional stale-request expiry policy.
-    fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
-        assert!(block_size > 0, "block_size must be greater than 0");
 
         Self {
             requests: HashMap::new(),
@@ -225,18 +214,18 @@ impl ActiveSequences {
             None
         };
 
+        if let Some(prefill) = prefill {
+            self.prefill.insert(&request_id, prefill, decay_now);
+        }
+
         self.requests.insert(
-            request_id.clone(),
+            request_id,
             RequestState {
                 blocks,
                 started_at,
                 expected_output_tokens,
             },
         );
-
-        if let Some(prefill) = prefill {
-            self.prefill.insert(&request_id, prefill, decay_now);
-        }
 
         self.validate_state();
         outcome
@@ -275,24 +264,30 @@ impl ActiveSequences {
         Some(membership_delta)
     }
 
-    /// Add an output block with a random hash and optional fractional decay weight.
+    /// Append output blocks and apply the optional decay weight once.
     ///
-    /// This is used during generation to track output blocks as they are created.
-    pub(super) fn add_output_block(
+    /// Return whether blocks were appended. A zero count or missing request returns
+    /// `false` without changing block state or applying decay.
+    pub(super) fn add_output_blocks(
         &mut self,
         request_id: &RequestId,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
-    ) -> Option<SequenceHash> {
+    ) -> bool {
+        if num_blocks == 0 {
+            return false;
+        }
         let Some(request_state) = self.requests.get_mut(request_id) else {
-            tracing::warn!("Request {request_id} not found for add_output_block");
-            return None;
+            tracing::warn!("Request {request_id} not found for add_output_blocks");
+            return false;
         };
 
         // TODO: Output blocks still use random hashes, so indexing them mainly simplifies
         // generic block bookkeeping and usually adds little real reuse signal.
-        let random_hash: SequenceHash = Uuid::new_v4().as_u64_pair().0;
-        self.blocks
-            .append_output(&mut request_state.blocks, random_hash);
+        for _ in 0..num_blocks {
+            let hash = fastrand::u64(..);
+            self.blocks.append_output(&mut request_state.blocks, hash);
+        }
 
         if let Some(frac) = decay_fraction {
             self.blocks
@@ -300,7 +295,7 @@ impl ActiveSequences {
         }
 
         self.validate_state();
-        Some(random_hash)
+        true
     }
 
     /// Force expiry of stale requests if the timer has elapsed.
@@ -392,7 +387,7 @@ mod tests {
     #[test]
     fn active_worker_teardown_with_a_live_long_chain_is_iterative() {
         const DEPTH: usize = 65_536;
-        let mut sequences = ActiveSequences::new_without_expiry(1);
+        let mut sequences = ActiveSequences::new_with_expiry(1, None);
         sequences.add_request_with_prefill_tracking(
             "long-lived".to_string(),
             Some((1..=DEPTH as u64).collect()),
@@ -488,25 +483,17 @@ mod tests {
                 new_suffix_start: 0,
             }]
         );
-        assert_eq!(
-            seq_manager.active_block_hashes(),
-            [1, 2, 3].into_iter().collect()
-        );
+        let prompt_hashes = seq_manager.active_block_hashes();
+        assert_eq!(prompt_hashes, [1, 2, 3].into_iter().collect());
 
-        let output_hash = seq_manager
-            .add_output_block(&"r1".to_string(), Some(0.5))
-            .expect("request exists");
-        assert_eq!(
-            seq_manager.active_block_hashes(),
-            [1, 2, 3, output_hash].into_iter().collect()
-        );
+        assert!(seq_manager.add_output_blocks(&"r1".to_string(), 1, Some(0.5)));
+        let active_hashes = seq_manager.active_block_hashes();
+        assert!(active_hashes.is_superset(&prompt_hashes));
+        assert_eq!(active_hashes.len(), prompt_hashes.len() + 1);
 
         seq_manager.mark_prefill_completed(&"r1".to_string(), decay_now);
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
-        assert_eq!(
-            seq_manager.active_block_hashes(),
-            [1, 2, 3, output_hash].into_iter().collect()
-        );
+        assert_eq!(seq_manager.active_block_hashes(), active_hashes);
 
         let free_delta = seq_manager
             .free(&"r1".to_string(), decay_now)
@@ -588,12 +575,10 @@ mod tests {
         );
         assert_eq!(seq_manager.active_blocks(), 3);
 
-        assert!(
-            seq_manager
-                .add_output_block(&"r1".to_string(), Some(0.5))
-                .is_some()
-        );
-        assert_eq!(seq_manager.active_blocks(), 2);
+        assert!(!seq_manager.add_output_blocks(&"r1".to_string(), 0, Some(0.0)));
+        assert_eq!(seq_manager.active_blocks(), 3);
+        assert!(seq_manager.add_output_blocks(&"r1".to_string(), 3, Some(0.5)));
+        assert_eq!(seq_manager.active_blocks(), 3);
 
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
@@ -603,17 +588,14 @@ mod tests {
             tracking_hint(8),
             decay_now,
         );
-        assert_eq!(seq_manager.active_blocks(), 2);
+        assert_eq!(seq_manager.active_blocks(), 3);
 
-        assert!(
-            seq_manager
-                .add_output_block(&"r1".to_string(), Some(0.0))
-                .is_some()
-        );
+        assert!(seq_manager.add_output_blocks(&"r1".to_string(), 2, Some(0.0)));
         assert_eq!(seq_manager.active_blocks(), 1);
 
         seq_manager.free(&"r2".to_string(), decay_now);
         seq_manager.free(&"r1".to_string(), decay_now);
+        assert!(!seq_manager.add_output_blocks(&"r1".to_string(), 1, None));
         assert_eq!(seq_manager.active_blocks(), 0);
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
     }
@@ -768,7 +750,15 @@ mod tests {
         assert_eq!(seq_manager.active_blocks(), 4);
         seq_manager.assert_consistent();
 
-        tokio::time::advance(Duration::from_secs(270)).await;
+        tokio::time::advance(Duration::from_secs(90)).await;
+        let expired = seq_manager.force_expiry();
+        assert!(
+            expired.expired_request_ids.is_empty(),
+            "request remains live before the shared 300-second default"
+        );
+        assert_eq!(seq_manager.active_blocks(), 4);
+
+        tokio::time::advance(Duration::from_secs(180)).await;
         let expired = seq_manager.force_expiry();
         assert_eq!(
             expired.expired_request_ids,
@@ -798,7 +788,7 @@ mod tests {
     async fn test_force_expiry_uses_custom_duration() {
         let block_size = 4;
         let mut seq_manager =
-            ActiveSequences::new_with_expiry_duration(block_size, Duration::from_secs(60));
+            ActiveSequences::new_with_expiry(block_size, Some(Duration::from_secs(60)));
 
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
@@ -824,12 +814,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "expiry_duration must be greater than zero")]
     fn test_custom_expiry_rejects_zero_duration() {
-        let _ = ActiveSequences::new_with_expiry_duration(4, Duration::ZERO);
+        let _ = ActiveSequences::new_with_expiry(4, Some(Duration::ZERO));
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_force_expiry_reanchors_new_oldest_request() {
-        let mut seq_manager = ActiveSequences::new(4);
+        let mut seq_manager = ActiveSequences::new_with_expiry(4, Some(Duration::from_secs(120)));
         let first_decay_now = Instant::now();
 
         seq_manager.add_request_with_prefill_tracking(
@@ -840,7 +830,7 @@ mod tests {
             Some(prefill_hint(40, 100)),
             first_decay_now,
         );
-        tokio::time::advance(Duration::from_secs(250)).await;
+        tokio::time::advance(Duration::from_secs(90)).await;
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
             Some(vec![2]),
@@ -850,7 +840,7 @@ mod tests {
             Instant::now(),
         );
 
-        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::time::advance(Duration::from_secs(40)).await;
         let expired = seq_manager.force_expiry();
         assert_eq!(
             expired.expired_request_ids,

@@ -112,8 +112,6 @@ args:
 - Qwen/Qwen3-0.6B
 - --disaggregation-mode
 - prefill
-- --bootstrap-ports
-- "50100"
 ```
 
 The decode worker uses:
@@ -130,7 +128,7 @@ Apply the manifest, repeat the port-forward and request steps, and inspect the w
 
 ```bash
 kubectl logs -n "$NAMESPACE" \
-  --selector=nvidia.com/dynamo-graph-deployment=mocker-disagg \
+  --selector=nvidia.com/dynamo-graph-deployment-name=mocker-disagg \
   --all-containers --prefix
 ```
 
