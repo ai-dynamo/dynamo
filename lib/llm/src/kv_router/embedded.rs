@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use dynamo_kv_router::WorkerType;
+use dynamo_kv_router::carrier_routing::{CARRIER_RUNTIME_DATA_KEY, CarrierWorkerConfig};
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
@@ -530,6 +531,14 @@ pub(crate) fn worker_request_from_runtime_config(
             }
         }
     }
+    let carrier = match config.get_engine_specific::<CarrierWorkerConfig>(CARRIER_RUNTIME_DATA_KEY)
+    {
+        Ok(carrier) => carrier,
+        Err(error) => {
+            tracing::warn!(%error, "ignoring malformed carrier runtime data");
+            None
+        }
+    };
     WorkerRequest {
         worker_id,
         model_name: key.model_name.clone(),
@@ -556,6 +565,7 @@ pub(crate) fn worker_request_from_runtime_config(
         router_hint_worker_type,
         router_hint_source_control_endpoints,
         kv_event_source_mode: config.kv_event_source_mode.clone(),
+        carrier,
         ..WorkerRequest::default()
     }
 }
@@ -661,6 +671,43 @@ mod tests {
             request.max_num_batched_tokens,
             Some(DEFAULT_MAX_BATCHED_TOKENS)
         );
+    }
+
+    #[test]
+    fn worker_request_reads_carrier_runtime_data() {
+        let mut config = ModelRuntimeConfig::default();
+        let carrier = CarrierWorkerConfig {
+            hub_url: "http://hub".to_string(),
+            manifest: "00".repeat(32),
+            block_size: 16,
+            instance_ids: HashMap::from([(0, "7".to_string())]),
+        };
+        config
+            .set_engine_specific(CARRIER_RUNTIME_DATA_KEY, &carrier)
+            .unwrap();
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
+        assert_eq!(request.carrier, Some(carrier));
+    }
+
+    #[test]
+    fn worker_request_ignores_malformed_carrier_runtime_data() {
+        let mut config = ModelRuntimeConfig::default();
+        config.runtime_data.insert(
+            CARRIER_RUNTIME_DATA_KEY.to_string(),
+            serde_json::json!("bad"),
+        );
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
+        assert_eq!(request.carrier, None);
+    }
+
+    #[test]
+    fn worker_request_keeps_carrier_absent_without_runtime_data() {
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let request =
+            worker_request_from_runtime_config(7, &ModelRuntimeConfig::default(), &key, 16, false);
+        assert_eq!(request.carrier, None);
     }
 
     /// A data-parallel shrink clears the gauges of the ranks that left; a

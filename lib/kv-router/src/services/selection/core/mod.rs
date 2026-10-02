@@ -18,6 +18,9 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+#[cfg(test)]
+use crate::carrier_routing::CarrierFeedConnector;
+use crate::carrier_routing::CarrierRouter;
 use crate::identity::RoutingPartitionId;
 use crate::indexer::{
     LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
@@ -129,6 +132,7 @@ struct SelectionEntry {
     replica_tx: Option<mpsc::Sender<ActiveSequenceEvent>>,
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,
+    carrier: Arc<CarrierRouter>,
 }
 
 impl SelectionEntry {
@@ -286,6 +290,8 @@ pub struct SelectionCore {
     selection_cache: SelectionCache,
     tracking_hash: Arc<TrackingHashContext>,
     session_affinity: Option<SessionAffinityConfig>,
+    #[cfg(test)]
+    carrier_connector_override: parking_lot::Mutex<Option<Arc<dyn CarrierFeedConnector>>>,
     /// Worker ids whose upsert fails with `Internal` before any catalog
     /// mutation, so membership tests can exercise per-worker error paths.
     #[cfg(test)]
@@ -400,12 +406,43 @@ impl SelectionCore {
             tracking_hash,
             session_affinity,
             #[cfg(test)]
+            carrier_connector_override: parking_lot::Mutex::new(None),
+            #[cfg(test)]
             fail_upsert_for: parking_lot::Mutex::default(),
             #[cfg(test)]
             publish_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             after_affinity_invalidation: None,
         }
+    }
+
+    fn carrier_router(&self) -> Arc<CarrierRouter> {
+        #[cfg(test)]
+        if let Some(connector) = self.carrier_connector_override.lock().clone() {
+            return Arc::new(CarrierRouter::new(Some(connector)));
+        }
+        let enabled = std::env::var("DYN_ROUTER_CARRIER_INDEX")
+            .ok()
+            .and_then(|value| dynamo_truthy::parse_bool_opt(&value))
+            != Some(false);
+        if !enabled {
+            return Arc::new(CarrierRouter::new(None));
+        }
+        #[cfg(feature = "standalone-indexer")]
+        {
+            Arc::new(CarrierRouter::new(Some(Arc::new(
+                crate::carrier_feed_client::ZmqCarrierFeedConnector,
+            ))))
+        }
+        #[cfg(not(feature = "standalone-indexer"))]
+        {
+            Arc::new(CarrierRouter::new(None))
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_carrier_connector(&self, connector: Arc<dyn CarrierFeedConnector>) {
+        *self.carrier_connector_override.lock() = Some(connector);
     }
 
     /// Cancel core-scoped tasks (KV-event listeners, scheduling, replica sync,

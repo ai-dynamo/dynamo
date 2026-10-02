@@ -61,6 +61,7 @@ pub(super) struct PreparedSelectionInputs {
     pub(super) overlap: OverlapSignals,
     pub(super) shared_cache_hits: Option<SharedCacheHits>,
     pub(super) kv_transfer_candidates: Option<KvTransferCandidates>,
+    pub(super) carrier_scored: bool,
 }
 
 impl SelectionCore {
@@ -330,6 +331,7 @@ impl SelectionCore {
             overlap,
             shared_cache_hits,
             kv_transfer_candidates,
+            carrier_scored,
         } = self
             .prepare_selection_inputs(
                 &entry,
@@ -412,7 +414,7 @@ impl SelectionCore {
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: track_active_blocks.then_some(sequence_hashes),
-            block_hashes: Some(block_hashes),
+            block_hashes: (!carrier_scored).then_some(block_hashes),
             isl_tokens,
             overlap,
             kv_transfer_candidates,
@@ -731,6 +733,29 @@ impl SelectionCore {
                 assume_kv_reuse,
             }),
         )?;
+        let carrier_hashes = if !entry.carrier.is_empty()
+            && let Some(tokens) = prompt.token_ids
+            && prompt.mm_routing_info.is_none()
+            && prompt
+                .block_mm_infos
+                .is_none_or(|infos| infos.iter().all(Option::is_none))
+        {
+            match dynamo_kv_hashing::Request::builder()
+                .tokens(tokens.to_vec())
+                .lora_name(prompt.lora_name.map(str::to_owned))
+                .salt(prompt.cache_namespace.map(str::to_owned))
+                .build()
+                .and_then(|request| request.positional_lineage_hashes(entry.block_size))
+            {
+                Ok(hashes) => Some(hashes),
+                Err(error) => {
+                    tracing::warn!(%error, "carrier PLH hashing failed; skipping carrier scoring");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let indexer_lookup = async {
             let started = Instant::now();
             let tiered = if normalized.block_hashes.is_empty() {
@@ -788,8 +813,19 @@ impl SelectionCore {
         // when the index lookup fails.
         *lookup = Some(timings);
         let tiered = tiered?;
-        let overlap =
+        let mut overlap =
             OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered).signals();
+        let mut carrier_scored = false;
+        if let Some(hashes) = carrier_hashes
+            && let Some(matches) = entry.carrier.find_matches(&hashes)
+        {
+            carrier_scored = matches.bound.values().any(Option::is_some);
+            crate::scheduling::overlap::apply_carrier_matches(
+                &mut overlap,
+                &matches,
+                entry.block_size,
+            );
+        }
         let kv_transfer_candidates = retain_kv_transfer_chain
             .then(|| tiered.kv_transfer_candidates().cloned())
             .flatten();
@@ -801,6 +837,7 @@ impl SelectionCore {
             overlap,
             shared_cache_hits,
             kv_transfer_candidates,
+            carrier_scored,
         })
     }
 }
