@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SGLang Engine Group EP1 -> EP2 proof. Apply the Service and DGD first, then
+# run run_sglang_elastic_ep_engine_group_poc.sh to attach the primary Pod to an
+# Engine Group and drive its Scale subresource.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-elastic-ep-poc-rendezvous
+spec:
+  clusterIP: None
+  selector:
+    nvidia.com/dynamo-component: SGLangDecodeWorker
+    nvidia.com/dynamo-graph-deployment-name: sglang-elastic-ep-poc
+  ports:
+  - name: torch-dist
+    port: 24555
+    targetPort: 24555
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-elastic-ep-poc
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${IMAGE}
+    SGLangDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          memory: "30Gi"
+          gpu: "1"
+        limits:
+          memory: "60Gi"
+          gpu: "1"
+      envs:
+      - name: DYN_SYSTEM_ENABLED
+        value: "true"
+      - name: HF_HUB_ENABLE_HF_TRANSFER
+        value: "1"
+      - name: HF_HOME
+        value: "/model-cache"
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        mainContainer:
+          image: ${IMAGE}
+          imagePullPolicy: Always
+          workingDir: /workspace/examples/backends/sglang
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - deepseek-ai/DeepSeek-V2-Lite
+          - --served-model-name
+          - deepseek-ai/DeepSeek-V2-Lite
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --dp
+          - "1"
+          - --nnodes
+          - "1"
+          - --enable-dp-attention
+          - --enable-dp-lm-head
+          - --moe-a2a-backend
+          - nixl
+          - --deepep-mode
+          - low_latency
+          - --elastic-ep-backend
+          - mooncake
+          - --mooncake-ib-device
+          - ${SGLANG_MOONCAKE_IB_DEVICE}
+          - --load-balance-method
+          - round_robin
+          - --enable-eplb
+          - --ep-num-redundant-experts
+          - "24"
+          - --elastic-ep-initial-size
+          - "1"
+          - --max-ep-size
+          - "2"
+          - --disable-cuda-graph
+          - --dist-init-addr
+          - sglang-elastic-ep-poc-rendezvous:24555
