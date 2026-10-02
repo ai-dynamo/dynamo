@@ -72,6 +72,7 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)",message="type is immutable after it is set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.engineGroup) || (has(self.engineGroup) && self.engineGroup.initialSize == oldSelf.engineGroup.initialSize)",message="engineGroup.initialSize is immutable after it is set"
 type DynamoComponentDeploymentSharedSpec struct {
 	// providerOverride configures the primary Grove unit representing this DGD
 	// component. With apiVersion `grove.io/v1alpha1`, target is
@@ -135,13 +136,22 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
-	// replicas is the desired number of Pods for this component. When
+	// replicas is the desired number of Pods for an ordinary component. For an
+	// engineGroup component it counts independent engine worlds. When
 	// `scalingAdapter` is set on this component, this field is managed by
 	// the DynamoGraphDeploymentScalingAdapter and should not be modified
 	// directly.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// engineGroup opts a DGD component into independently resizable engine worlds.
+	// Component replicas then count worlds, not allocations inside a world. Each new
+	// group's spec.replicas is seeded from initialSize and subsequently scaled independently.
+	// DGD-driven Engine Group creation is not enabled yet; admission rejects this
+	// block until that workload pathway is implemented. Standalone DCDs cannot use it.
+	// +optional
+	EngineGroup *ComponentEngineGroupSpec `json:"engineGroup,omitempty"`
 
 	// minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
 	// components rendered as a scaling group (multi-node, inter-pod GMS, or

@@ -41,10 +41,10 @@ func TestDynamoGraphDeploymentEngineGroupPreservesDistinctReplicaStates(t *testi
 	group := &DynamoGraphDeploymentEngineGroup{
 		Spec: DynamoGraphDeploymentEngineGroupSpec{Replicas: 8},
 		Status: DynamoGraphDeploymentEngineGroupStatus{
-			Replicas:          9,
-			AvailableReplicas: 8,
-			ActiveReplicas:    7,
-			Selector:          "nvidia.com/dynamo-scale-representative=true",
+			Replicas:                9,
+			AvailableReplicas:       8,
+			ActiveNativeMemberCount: 7,
+			Selector:                "nvidia.com/dynamo-scale-representative=true",
 		},
 	}
 
@@ -59,8 +59,8 @@ func TestDynamoGraphDeploymentEngineGroupPreservesDistinctReplicaStates(t *testi
 	}
 
 	t.Log("Verify desired, allocated, available, active, and selector state remain independent")
-	if got.Spec.Replicas != 8 || got.Status.Replicas != 9 || got.Status.AvailableReplicas != 8 || got.Status.ActiveReplicas != 7 {
-		t.Fatalf("replica state = desired %d, allocated %d, available %d, active %d", got.Spec.Replicas, got.Status.Replicas, got.Status.AvailableReplicas, got.Status.ActiveReplicas)
+	if got.Spec.Replicas != 8 || got.Status.Replicas != 9 || got.Status.AvailableReplicas != 8 || got.Status.ActiveNativeMemberCount != 7 {
+		t.Fatalf("replica state = desired %d, allocated %d, available %d, active %d", got.Spec.Replicas, got.Status.Replicas, got.Status.AvailableReplicas, got.Status.ActiveNativeMemberCount)
 	}
 	if got.Status.Selector != group.Status.Selector {
 		t.Fatalf("selector = %q, want %q", got.Status.Selector, group.Status.Selector)
@@ -74,29 +74,29 @@ func TestDynamoGraphDeploymentEngineGroupDeepCopyPreservesIdentityIsolation(t *t
 			ReplicaStates: []EngineGroupReplicaStatus{{
 				ReplicaID: "replica-0",
 				SlotID:    "slot-0",
-				Current: &EngineGroupReplicaIncarnation{
+				CurrentAllocation: &EngineGroupReplicaAllocationStatus{
 					RuntimeIncarnation: "runtime-0",
 					CapacityRefs: []EngineGroupCapacityRef{{
 						Name: "worker-0",
 						UID:  types.UID("pod-uid-0"),
 					}},
 				},
-				NativeMembers: []string{"dp-0"},
+				NativeMembers: []EngineGroupNativeMemberStatus{{ID: "dp-0", Membership: EngineGroupReplicaMembershipActive, Traffic: EngineGroupMemberTrafficAdmitted}},
 			}},
 		},
 	}
 
 	t.Log("Deep-copy and mutate the copied identity slices")
 	copy := group.DeepCopy()
-	copy.Status.ReplicaStates[0].Current.CapacityRefs[0].UID = types.UID("replacement-uid")
-	copy.Status.ReplicaStates[0].NativeMembers[0] = "dp-1"
+	copy.Status.ReplicaStates[0].CurrentAllocation.CapacityRefs[0].UID = types.UID("replacement-uid")
+	copy.Status.ReplicaStates[0].NativeMembers[0].ID = "dp-1"
 
 	t.Log("Verify the source retains its original concrete identities")
 	got := group.Status.ReplicaStates[0]
-	if got.Current.CapacityRefs[0].UID != types.UID("pod-uid-0") {
-		t.Fatalf("source Pod UID = %q, want pod-uid-0", got.Current.CapacityRefs[0].UID)
+	if got.CurrentAllocation.CapacityRefs[0].UID != types.UID("pod-uid-0") {
+		t.Fatalf("source Pod UID = %q, want pod-uid-0", got.CurrentAllocation.CapacityRefs[0].UID)
 	}
-	if got.NativeMembers[0] != "dp-0" {
+	if got.NativeMembers[0].ID != "dp-0" {
 		t.Fatalf("source native member = %q, want dp-0", got.NativeMembers[0])
 	}
 }
