@@ -107,6 +107,34 @@ def test_top_n_retention_evicts_the_worst_scoring_candidate(
         assert "DynamoGraphDeployment" in entry["manifest"]
 
 
+def test_retained_candidates_are_ordered_best_first_in_snapshot(
+    monkeypatch, tmp_path
+) -> None:
+    # The DGDR(v2) controller derives each DynamoGraphDeploymentCandidate's
+    # one-based Rank from this list's position, so it must be sorted by
+    # score (descending, fewer GPUs as the tie-break) -- not by dict
+    # insertion/update order, which is merely "most-recently-touched" and
+    # has no relationship to rank.
+    monkeypatch.setattr(adapter_module, "render_dgd", _fake_render)
+    adapter = DGDRAdapter(tmp_path, _options(), workload={}, top_n=5)
+    with adapter:
+        adapter.on_candidate(_Record("c-mid", score=2.0, used_gpus=4))
+        adapter.on_candidate(_Record("c-low", score=1.0, used_gpus=4))
+        adapter.on_candidate(_Record("c-high", score=3.0, used_gpus=4))
+        # Re-touch "c-low" last so it is most-recently-updated in the
+        # dict, while still being the worst score -- this is what would
+        # break a dict-insertion-order read.
+        adapter.on_candidate(_Record("c-low", score=1.0, used_gpus=4))
+        _wait_until(lambda: len(_read_status(tmp_path).get("candidates", [])) == 3)
+
+    status = _read_status(tmp_path)
+    assert [entry["id"] for entry in status["candidates"]] == [
+        "c-high",
+        "c-mid",
+        "c-low",
+    ]
+
+
 def test_non_feasible_candidate_is_never_retained_or_rendered(
     monkeypatch, tmp_path
 ) -> None:

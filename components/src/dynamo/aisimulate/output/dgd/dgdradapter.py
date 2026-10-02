@@ -326,7 +326,16 @@ class DGDRAdapter:
 
     def _write_snapshot(self) -> None:
         entries: list[CandidateStatusEntry] = []
-        for record in self._retained.values():
+        # Best-first: the relayed `candidates` list is what the DGDR(v2)
+        # controller derives each DynamoGraphDeploymentCandidate's
+        # one-based Rank from (list position), so this must be sorted by
+        # the same _retention_key used for eviction, not dict insertion
+        # order (which is merely "most-recently-updated-or-inserted" and
+        # has no relationship to score). `_retained` itself stays an
+        # unordered dict -- only this snapshot pass needs the order.
+        for record in sorted(
+            self._retained.values(), key=_retention_key, reverse=True
+        ):
             try:
                 rendered = render_dgd(
                     record,
