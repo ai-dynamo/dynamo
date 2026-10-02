@@ -176,6 +176,28 @@ async fn replica_sync_routes_are_mounted() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+
+    let disabled = post(
+        app(),
+        "/replica_sync/register_peer",
+        r#"{"endpoint":"tcp://127.0.0.1:19092"}"#,
+    )
+    .await;
+    assert_eq!(disabled.status(), StatusCode::CONFLICT);
+    assert!(response_json(disabled).await["error"].is_string());
+
+    // The shared peer routes must be merged before the JSON fallbacks.
+    let wrong_method = app()
+        .oneshot(
+            Request::builder()
+                .uri("/replica_sync/register_peer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(response_json(wrong_method).await["error"].is_string());
 }
 
 async fn post(app: Router, uri: &str, body: &str) -> Response {
