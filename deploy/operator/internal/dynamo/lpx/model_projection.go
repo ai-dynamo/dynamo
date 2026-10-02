@@ -56,7 +56,8 @@ type ModelProjection struct {
 	pipeline               Pipeline
 	configuredBuild        Build
 	allocationMetadata     json.RawMessage
-	// partitions retains immutable physical build evidence before runtime collapse.
+	// partitions describes the partitions requested from LPX. Packing can combine
+	// several configuredBuild.Partitions into one LPX partition.
 	partitions    []BuildPartition
 	connectors    []lpxv1alpha1.PropSyncConnectorRequest
 	agentReplicas int
@@ -102,7 +103,7 @@ func (p *ModelProjection) RequestSpec(
 			CompilerPartitionID: int64(uint32(partition.SourcePartitionID)),
 		}
 		if p.configuredBuild.Family == BuildFamilyXT {
-			shape, _, _ := xtShape(partition.Topology.ChipCount)
+			shape, _, _ := xtShape(partition)
 			request.XtShape = &shape
 		}
 		if partition.HXExtent != nil {
