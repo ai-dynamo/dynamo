@@ -298,8 +298,8 @@ impl CarrierFeedReplica {
 mod tests {
     use super::{
         CARRIER_FEED_VERSION, CarrierFeedFrame, CarrierFeedOp, CarrierFeedReplica,
-        CarrierFeedSnapshot, FeedApply, FeedKind, HolderSnapshot, ManifestSnapshot,
-        decode_frame, decode_snapshot, encode_frame, encode_snapshot,
+        CarrierFeedSnapshot, FeedApply, FeedKind, HolderSnapshot, ManifestSnapshot, decode_frame,
+        decode_snapshot, encode_frame, encode_snapshot,
     };
     use dynamo_tokens::PositionalLineageHash;
 
@@ -394,9 +394,11 @@ mod tests {
         );
         assert!(!replica.is_synced());
         assert_eq!(replica.deepest(&manifest_key(1), &hashes), None);
-        assert!(replica
-            .deepest_by_holder(&manifest_key(1), &hashes)
-            .is_empty());
+        assert!(
+            replica
+                .deepest_by_holder(&manifest_key(1), &hashes)
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -445,7 +447,9 @@ mod tests {
         );
         assert_eq!(replica.cursor(), Some((2, 2)));
         assert_eq!(
-            replica.deepest(&key, &hashes).map(|hit| (hit.hash, hit.holders)),
+            replica
+                .deepest(&key, &hashes)
+                .map(|hit| (hit.hash, hit.holders)),
             Some((hashes[1], vec![20]))
         );
         Ok(())
@@ -687,7 +691,9 @@ mod tests {
 
         assert_eq!(replica.kind(&key), Some(FeedKind::Carrier));
         assert_eq!(
-            replica.deepest(&key, &hashes).map(|hit| (hit.hash, hit.holders)),
+            replica
+                .deepest(&key, &hashes)
+                .map(|hit| (hit.hash, hit.holders)),
             Some((hashes[1], vec![20]))
         );
         Ok(())
@@ -730,7 +736,9 @@ mod tests {
             FeedApply::Applied
         );
         assert_eq!(
-            replica.deepest(&key, &hashes).map(|hit| (hit.hash, hit.holders)),
+            replica
+                .deepest(&key, &hashes)
+                .map(|hit| (hit.hash, hit.holders)),
             Some((hashes[2], vec![10]))
         );
         assert_eq!(
@@ -746,7 +754,9 @@ mod tests {
             FeedApply::Applied
         );
         assert_eq!(
-            replica.deepest(&key, &hashes).map(|hit| (hit.hash, hit.holders)),
+            replica
+                .deepest(&key, &hashes)
+                .map(|hit| (hit.hash, hit.holders)),
             Some((hashes[0], vec![20]))
         );
         assert_eq!(
