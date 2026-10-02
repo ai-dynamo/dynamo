@@ -69,7 +69,9 @@ dynamo:
   nixl_ucx_ref: v1.21.0
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
-  nixl_libfabric_ref: v2.4.0
+  # NIXL 1.5.0 sets fi_mr_attr.device.rocr, which libfabric added in v2.5.0.
+  # Matches the libfabric that upstream NIXL's .gitlab/build.sh builds with.
+  nixl_libfabric_ref: v2.7.0
   # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.
   hwloc_version: 2.12.2
   enable_kvbm: "true"
