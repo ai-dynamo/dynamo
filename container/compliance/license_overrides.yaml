@@ -375,6 +375,7 @@ overrides:
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu12, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs — CUDA 12 variant split wheel introduced in 4.6.0; same NVIDIA proprietary license as nvidia-cutlass-dsl" }
   - { ecosystem: python, name: nvidia-mathdx,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA MathDx SDK license — https://docs.nvidia.com/cuda/mathdx/license.html" }
   - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
+  - { ecosystem: python, name: oss-harmony,               license: "Apache-2.0", source: "0.0.11 wheel has empty license expression; verified dist-info/licenses/LICENSE and sdist LICENSE — https://files.pythonhosted.org/packages/43/88/ca56e5b17df4763bbb552c7be3abe432b51db3c51f6327a3848b88ad7c08/oss_harmony-0.0.11.tar.gz" }
   - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }
   - { ecosystem: python, name: pathspec,                  license: "MPL-2.0",   source: "pathspec upstream — https://github.com/cpburnz/python-pathspec/blob/master/LICENSE" }
   - { ecosystem: python, name: prompt-toolkit,            license: "BSD-3-Clause",  source: "prompt-toolkit upstream — https://github.com/prompt-toolkit/python-prompt-toolkit/blob/main/LICENSE" }
@@ -996,6 +997,7 @@ overrides:
   - { ecosystem: dpkg, name: libwayland-client0, license: "MIT", source: "Ubuntu 24.04 libwayland-client0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: libwayland-cursor0, license: "MIT", source: "Ubuntu 24.04 libwayland-cursor0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: libwayland-egl1, license: "MIT", source: "Ubuntu 24.04 libwayland-egl1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libwayland-server0, license: "MIT", source: "Verified usr/share/doc/libwayland-server0/copyright in Ubuntu 1.22.0-2.1build1: X.org MIT/Expat text — https://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-server0_1.22.0-2.1build1_amd64.deb" }
   - { ecosystem: dpkg, name: libxcb-dri3-0, license: "MIT", source: "Ubuntu 24.04 libxcb-dri3-0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: libxcb-glx0, license: "MIT", source: "Ubuntu 24.04 libxcb-glx0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: libxcb-present0, license: "MIT", source: "Ubuntu 24.04 libxcb-present0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
