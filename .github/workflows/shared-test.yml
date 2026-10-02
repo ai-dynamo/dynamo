@@ -147,10 +147,15 @@ on:
         type: string
         default: ''
       sidecar_native_artifact:
-        description: 'Native test executable artifact; enables sequential one-GPU integration tests after sidecar E2E'
+        description: 'Native test executable artifact; enables sequential integration tests after sidecar E2E'
         required: false
         type: string
         default: ''
+      sidecar_native_gpu_count:
+        description: 'GPU marker for native sidecar integration tests'
+        required: false
+        type: number
+        default: 1
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -388,7 +393,7 @@ jobs:
         uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
-          pytest_marks: ${{ format('(post_merge or nightly) and sidecar_native and {0} and gpu_1', inputs.framework) }}
+          pytest_marks: ${{ format('(post_merge or nightly) and sidecar_native and {0} and gpu_{1}', inputs.framework, inputs.sidecar_native_gpu_count) }}
           test_suite_name: ${{ inputs.test_suite_name }}
           framework: ${{ inputs.framework }}
           test_type: "sidecar_native_gpu"

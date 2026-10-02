@@ -21,7 +21,11 @@ from tests.serve.common import (
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
-from tests.utils.payload_builder import LONG_PROMPT_FOR_CACHING, chat_payload_default
+from tests.utils.payload_builder import (
+    LONG_PROMPT_FOR_CACHING,
+    chat_payload_default,
+    completion_payload_default,
+)
 from tests.utils.payloads import ChatPayload, DisaggregatedChatPayload
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
@@ -225,6 +229,24 @@ sidecar_configs = {
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
         request_payloads=[_disaggregated_chat_payload()],
     ),
+    "vllm_multi_node_tp_headless": EngineConfig(
+        name="vllm_multi_node_tp_headless",
+        directory=vllm_sidecar_dir,
+        script_name="multi_node_tp_headless.sh",
+        marks=[
+            pytest.mark.vllm,
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.nightly,
+            pytest.mark.timeout(1200),
+            pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        health_check_workers=True,
+        health_check_worker_count=1,
+        env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
+        request_payloads=[chat_payload_default(), completion_payload_default()],
+    ),
     "sglang_disaggregated": EngineConfig(
         name="sglang_disaggregated",
         directory=sglang_sidecar_dir,
@@ -312,6 +334,29 @@ def test_serve_deployment(
                 )
             run_serve_deployment(
                 config, request, ports=dynamo_dynamic_ports, extra_env=engine_env
+            )
+    elif config.name == "vllm_multi_node_tp_headless":
+        devices = map_cuda_visible_devices(
+            [0, 1], os.environ.get("CUDA_VISIBLE_DEVICES")
+        ).split(",")
+        assert (
+            len(set(devices)) == 2 and "-1" not in devices
+        ), "Headless TP requires two distinct GPUs"
+        with reserved_ports(4, start_port=DynamoPortRange.SERVE.value) as engine_ports:
+            run_serve_deployment(
+                config,
+                request,
+                ports=dynamo_dynamic_ports,
+                extra_env={
+                    "MODEL": config.model,
+                    "DYN_NAMESPACE": f"sidecar-headless-{generate_random_suffix()}",
+                    "VLLM_HEAD_GPU": devices[0],
+                    "VLLM_FOLLOWER_GPU": devices[1],
+                    "VLLM_RS_HTTP_PORT": str(engine_ports[0]),
+                    "VLLM_GRPC_PORT": str(engine_ports[1]),
+                    "VLLM_MASTER_PORT": str(engine_ports[2]),
+                    "VLLM_HANDSHAKE_PORT": str(engine_ports[3]),
+                },
             )
     elif config.name == "vllm_aggregated":
         with reserved_ports(2, start_port=DynamoPortRange.SERVE.value) as engine_ports:

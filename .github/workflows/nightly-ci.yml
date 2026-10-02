@@ -950,13 +950,14 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('sidecar and vllm and gpu_{0} and not sidecar_native', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('sidecar and vllm and gpu_{0} and not sidecar_native and not k8s', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
       sidecar_backend: vllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
-      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.result == 'success' && needs.sidecar-native-build.outputs.binary_artifact || '' }}
+      sidecar_native_artifact: ${{ needs.sidecar-native-build.result == 'success' && needs.sidecar-native-build.outputs.binary_artifact || '' }}
+      sidecar_native_gpu_count: ${{ matrix.gpu_count }}
     secrets: inherit
 
   sidecar-sglang-test:
@@ -984,13 +985,14 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('sidecar and sglang and gpu_{0} and not sidecar_native', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('sidecar and sglang and gpu_{0} and not sidecar_native and not k8s', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
       sidecar_backend: sglang
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
-      sidecar_native_artifact: ${{ matrix.gpu_count == 1 && needs.sidecar-native-build.result == 'success' && needs.sidecar-native-build.outputs.binary_artifact || '' }}
+      sidecar_native_artifact: ${{ needs.sidecar-native-build.result == 'success' && needs.sidecar-native-build.outputs.binary_artifact || '' }}
+      sidecar_native_gpu_count: ${{ matrix.gpu_count }}
     secrets: inherit
 
   sidecar-trtllm-test:
