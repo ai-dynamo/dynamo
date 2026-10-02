@@ -21,6 +21,9 @@ use crate::protocols::common::extensions::{
 
 pub mod aggregator;
 mod delta;
+pub(crate) mod glm47_framing;
+pub(crate) mod glm47_guided;
+pub(crate) mod glm47_stream;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
 

@@ -350,41 +350,6 @@ pub(crate) fn first_unquoted_structural_tool_call_marker(
         .min()
 }
 
-/// Return the start of an unquoted native marker, including an unquoted
-/// partial marker suffix that must remain buffered for the next stream chunk.
-pub(crate) fn unquoted_native_tool_call_marker_or_prefix_start(
-    content: &str,
-    parser: &str,
-) -> Option<usize> {
-    let markers = native_tool_call_start_tokens(parser)?;
-    if let Some(marker_start) = markers
-        .iter()
-        .filter_map(|marker| first_unquoted_marker_position(content, marker))
-        .min()
-    {
-        return Some(marker_start);
-    }
-
-    markers
-        .iter()
-        .flat_map(|marker| {
-            marker
-                .char_indices()
-                .skip(1)
-                .map(move |(end, _)| &marker[..end])
-        })
-        .filter(|prefix| {
-            let before = content.strip_suffix(prefix).unwrap_or(content);
-            first_unquoted_marker_position(before, prefix).is_none()
-        })
-        .filter_map(|prefix| {
-            let before = content.strip_suffix(prefix)?;
-            let position = first_unquoted_marker_position(content, prefix)?;
-            (position == before.len()).then_some(position)
-        })
-        .min()
-}
-
 fn native_tool_call_start_tokens(parser: &str) -> Option<Vec<String>> {
     let parser_key = if parser.is_empty() { "default" } else { parser };
     Some(

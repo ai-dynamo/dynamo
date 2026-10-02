@@ -122,6 +122,89 @@ async fn parse_complete_tool_output(
     })
 }
 
+fn apply_glm47_output(choice: &mut DeltaChoice, options: &ParsingOptions) {
+    let constraint = &options.guided_tool_constraint;
+    if constraint.installs_guided_json() && choice.text.trim_start().starts_with(['{', '[']) {
+        let mut guided = super::glm47_guided::GuidedState::new(constraint.clone(), false);
+        let mut next_call = 0;
+        guided.push(&choice.text, &mut next_call);
+        let output = guided.finish(&mut next_call);
+        let calls: Vec<_> = output
+            .calls
+            .into_iter()
+            .filter_map(finalize_merged_tool_chunk)
+            .collect();
+        choice.text.clear();
+        choice.tool_calls = (!calls.is_empty()).then_some(calls);
+        mark_dropped_glm47_output(choice, output.dropped);
+        return;
+    }
+
+    let mut framer = super::glm47_framing::Glm47Framer::default();
+    let mut frames = framer.push(&choice.text);
+    let finish = framer.finish();
+    frames.extend(finish.frames);
+    let (calls, content, dropped_block) = parse_glm47_frames(frames, &options.tools);
+    let calls = filter_calls_to_forced_tool_name(calls, constraint);
+    choice.text = content;
+    if !calls.is_empty() {
+        choice.tool_calls = Some(
+            calls
+                .into_iter()
+                .map(super::tool_call_response_to_protocol)
+                .collect(),
+        );
+    }
+    mark_dropped_glm47_output(choice, finish.incomplete_tool_call || dropped_block);
+}
+
+fn mark_dropped_glm47_output(choice: &mut DeltaChoice, dropped: bool) {
+    if dropped
+        && matches!(
+            choice.finish_reason,
+            None | Some(
+                dynamo_protocols::types::FinishReason::Stop
+                    | dynamo_protocols::types::FinishReason::ToolCalls
+            )
+        )
+    {
+        choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Length);
+        tracing::warn!("glm47 aggregate: reporting incomplete or invalid tool output as length");
+    }
+}
+
+fn parse_glm47_frames(
+    frames: Vec<super::glm47_framing::Glm47Frame>,
+    tools: &[dynamo_parsers::tool_calling::ToolDefinition],
+) -> (
+    Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
+    String,
+    bool,
+) {
+    let mut calls = Vec::new();
+    let mut content = String::new();
+    let mut dropped_block = false;
+    for frame in frames {
+        match frame {
+            super::glm47_framing::Glm47Frame::Text(text) => content.push_str(&text),
+            super::glm47_framing::Glm47Frame::ToolBlock(block) => {
+                match super::glm47_framing::parse_block(&block, Some(tools)) {
+                    Ok((parsed, normal)) if !parsed.is_empty() => {
+                        calls.extend(parsed);
+                        content.push_str(normal.as_deref().unwrap_or_default());
+                    }
+                    Ok(_) => dropped_block = true,
+                    Err(error) => {
+                        dropped_block = true;
+                        tracing::debug!(error = %error, "failed to decode complete glm47 tool block");
+                    }
+                }
+            }
+        }
+    }
+    (calls, content, dropped_block)
+}
+
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
 /// [`NvCreateChatCompletionResponse`]. This struct accumulates incremental responses
 /// from a streaming OpenAI API call into a complete final response.
@@ -742,6 +825,11 @@ impl DeltaAggregator {
                 let Some(parser) = parsing_options.tool_call_parser.as_deref() else {
                     continue;
                 };
+
+                if parser == "glm47" {
+                    apply_glm47_output(choice, &parsing_options);
+                    continue;
+                }
 
                 // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
                 // v2 parser for batch too (no jail / no aggregate-finalize):
@@ -2949,6 +3037,335 @@ mod tests {
     // The parser sees an incomplete XML block and returns no tool call and no
     // content. The non-streaming contract keeps the finish signal and suppresses
     // the incomplete structured candidate rather than leaking parser markup.
+
+    async fn aggregate_glm47_chunks(
+        chunks: &[&str],
+        finish_reason: Option<dynamo_protocols::types::FinishReason>,
+        options: ParsingOptions,
+    ) -> NvCreateChatCompletionResponse {
+        let deltas: Vec<_> = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                create_test_delta(
+                    0,
+                    text,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                    (index + 1 == chunks.len())
+                        .then_some(finish_reason)
+                        .flatten(),
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        DeltaAggregator::apply(stream::iter(deltas), options)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_glm47_quoted_calls_remain_prose_at_every_split() {
+        use dynamo_protocols::types::FinishReason;
+        for text in [
+            "Literal \"<tool_call>\" is prose.",
+            "Literal '<tool_call>bad</tool_call>' is prose.",
+            "Literal `<tool_call>bad</tool_call>` is prose.",
+            "Example:\n```xml\n<tool_call>bad</tool_call>\n```\nEnd.",
+        ] {
+            for reason in [FinishReason::Stop, FinishReason::Length] {
+                for (split, _) in text.char_indices().skip(1) {
+                    let result = aggregate_glm47_chunks(
+                        &[&text[..split], &text[split..]],
+                        Some(reason),
+                        ParsingOptions::new(Some("glm47".to_string()), None),
+                    )
+                    .await;
+                    let choice = &result.inner.choices[0];
+                    assert_eq!(
+                        choice.message.content,
+                        Some(ChatCompletionMessageContent::Text(text.to_string()))
+                    );
+                    assert!(choice.message.tool_calls.is_none());
+                    assert_eq!(choice.finish_reason, Some(reason));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_glm47_stop_and_eof_suppress_partial_native_openers() {
+        use dynamo_protocols::types::FinishReason;
+        for text in [
+            "I'll check. <tool_cal",
+            "I'll check. <tool_call>",
+            "I'll check. <tool_call>weather",
+        ] {
+            for reason in [Some(FinishReason::Stop), None] {
+                let result = aggregate_glm47_chunks(
+                    &[text],
+                    reason,
+                    ParsingOptions::new(Some("glm47".to_string()), None),
+                )
+                .await;
+                let choice = &result.inner.choices[0];
+                assert_eq!(
+                    choice.message.content,
+                    Some(ChatCompletionMessageContent::Text(
+                        "I'll check. ".to_string()
+                    ))
+                );
+                assert!(choice.message.tool_calls.is_none());
+                assert_eq!(choice.finish_reason, Some(FinishReason::Length));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_glm47_complete_then_partial_keeps_call_and_terminal_reason() {
+        use dynamo_protocols::types::FinishReason;
+        let complete =
+            "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>";
+        for reason in [
+            FinishReason::Stop,
+            FinishReason::Length,
+            FinishReason::ContentFilter,
+        ] {
+            let result = aggregate_glm47_chunks(
+                &[complete, "<tool_cal"],
+                Some(reason),
+                ParsingOptions::new(Some("glm47".to_string()), None),
+            )
+            .await;
+            let choice = &result.inner.choices[0];
+            assert!(choice.message.content.is_none());
+            let calls = choice.message.tool_calls.as_ref().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].function.name, "get_weather");
+            assert_eq!(
+                choice.finish_reason,
+                Some(if reason == FinishReason::Stop {
+                    FinishReason::Length
+                } else {
+                    reason
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_glm47_ambiguous_prefixes_are_ordinary_prose() {
+        use dynamo_protocols::types::FinishReason;
+        for text in ["2 <", "Use <t", "HTML starts with <table"] {
+            let result = aggregate_glm47_chunks(
+                &[text],
+                Some(FinishReason::Stop),
+                ParsingOptions::new(Some("glm47".to_string()), None),
+            )
+            .await;
+            let choice = &result.inner.choices[0];
+            assert_eq!(
+                choice.message.content,
+                Some(ChatCompletionMessageContent::Text(text.to_string()))
+            );
+            assert!(choice.message.tool_calls.is_none());
+            assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_glm47_quoted_example_before_real_call_stays_visible() {
+        use dynamo_protocols::types::FinishReason;
+        let prose = "Example `<tool_call>bad</tool_call>`. I'll check. ";
+        let call =
+            "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>";
+        let result = aggregate_glm47_chunks(
+            &[prose, call],
+            Some(FinishReason::Stop),
+            ParsingOptions::new(Some("glm47".to_string()), None),
+        )
+        .await;
+        let choice = &result.inner.choices[0];
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(prose.to_string()))
+        );
+        let calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
+    }
+
+    #[tokio::test]
+    async fn test_glm47_native_arguments_follow_declared_types() {
+        use dynamo_protocols::types::FinishReason;
+        let mut options = ParsingOptions::new(Some("glm47".to_string()), None);
+        options.tools = vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "lookup".to_string(),
+            parameters: Some(
+                serde_json::json!({"type":"object","properties":{"code":{"type":"string"}}}),
+            ),
+            strict: None,
+        }];
+        let result = aggregate_glm47_chunks(
+            &["lookup<arg_key>code</arg_key><arg_value>123</arg_value></tool_call>"],
+            Some(FinishReason::Stop),
+            options,
+        )
+        .await;
+        let choice = &result.inner.choices[0];
+        let calls = choice.message.tool_calls.as_ref().unwrap();
+        let arguments: serde_json::Value =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(arguments["code"], serde_json::json!("123"));
+        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
+        assert!(choice.message.content.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_glm47_guided_json_keeps_quoted_marker_arguments() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use dynamo_protocols::types::FinishReason;
+        for (constraint, text) in [
+            (
+                GuidedToolConstraint::GuidedJsonRequired,
+                r#"[{"name":"lookup","parameters":{"text":"<tool_call>"}}]"#,
+            ),
+            (
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "lookup".to_string(),
+                },
+                r#"{"text":"<tool_call>"}"#,
+            ),
+        ] {
+            let result = aggregate_glm47_chunks(
+                &[text],
+                Some(FinishReason::Stop),
+                ParsingOptions::new(Some("glm47".to_string()), None)
+                    .with_guided_tool_constraint(constraint),
+            )
+            .await;
+            let choice = &result.inner.choices[0];
+            let calls = choice.message.tool_calls.as_ref().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].function.name, "lookup");
+            let arguments: serde_json::Value =
+                serde_json::from_str(&calls[0].function.arguments).unwrap();
+            assert_eq!(arguments["text"], "<tool_call>");
+            assert!(choice.message.content.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_glm47_named_native_fallback_rejects_other_tools() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use dynamo_protocols::types::FinishReason;
+        for (name, expected_calls) in [("lookup", 1), ("other", 0)] {
+            let text = format!(
+                "<tool_call>{name}<arg_key>text</arg_key><arg_value>value</arg_value></tool_call>"
+            );
+            let result = aggregate_glm47_chunks(
+                &[&text],
+                Some(FinishReason::Stop),
+                ParsingOptions::new(Some("glm47".to_string()), None).with_guided_tool_constraint(
+                    GuidedToolConstraint::GuidedJsonNamed {
+                        tool_name: "lookup".to_string(),
+                    },
+                ),
+            )
+            .await;
+            let choice = &result.inner.choices[0];
+            assert_eq!(
+                choice.message.tool_calls.as_ref().map_or(0, Vec::len),
+                expected_calls
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_glm47_guided_fallback_preserves_unclosed_quoted_example() {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use dynamo_protocols::types::FinishReason;
+        let text = "Example \"<tool_call>lookup</tool_call>";
+        for constraint in [
+            GuidedToolConstraint::GuidedJsonRequired,
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "lookup".to_string(),
+            },
+        ] {
+            let result = aggregate_glm47_chunks(
+                &[text],
+                Some(FinishReason::Stop),
+                ParsingOptions::new(Some("glm47".to_string()), None)
+                    .with_guided_tool_constraint(constraint),
+            )
+            .await;
+            let choice = &result.inner.choices[0];
+            assert!(
+                choice.message.tool_calls.is_none(),
+                "an unclosed quoted example must not become executable"
+            );
+            assert_eq!(
+                choice.message.content,
+                Some(ChatCompletionMessageContent::Text(text.to_string()))
+            );
+            assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+        }
+    }
+
+    async fn assert_glm47_invalid_guided_json_is_suppressed(text: &str) {
+        use crate::protocols::openai::GuidedToolConstraint;
+        use dynamo_protocols::types::FinishReason;
+        for reason in [
+            FinishReason::Stop,
+            FinishReason::Length,
+            FinishReason::ContentFilter,
+        ] {
+            let result = aggregate_glm47_chunks(
+                &[text],
+                Some(reason),
+                ParsingOptions::new(Some("glm47".to_string()), None)
+                    .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonRequired),
+            )
+            .await;
+            let choice = &result.inner.choices[0];
+            assert!(
+                choice.message.tool_calls.is_none(),
+                "invalid guided output must not become executable: {text}"
+            );
+            assert!(
+                choice.message.content.is_none(),
+                "invalid JSON/native fallback must not leak as prose: {text}"
+            );
+            assert_eq!(
+                choice.finish_reason,
+                Some(if reason == FinishReason::Stop {
+                    FinishReason::Length
+                } else {
+                    reason
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_glm47_guided_batch_rejects_ambiguous_argument_aliases() {
+        assert_glm47_invalid_guided_json_is_suppressed(
+            r#"[{"name":"lookup","arguments":{"text":"first"},"parameters":{"text":"second"}}]"#,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_glm47_guided_batch_rejects_null_arguments() {
+        assert_glm47_invalid_guided_json_is_suppressed(r#"[{"name":"lookup","parameters":null}]"#)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_glm47_guided_batch_does_not_parse_xml_inside_failed_json() {
+        assert_glm47_invalid_guided_json_is_suppressed("[<tool_call>lookup</tool_call>").await;
+    }
 
     #[tokio::test]
     async fn test_glm47_single_truncated_call_is_suppressed() {

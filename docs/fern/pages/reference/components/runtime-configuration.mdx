@@ -255,6 +255,8 @@ address.
 <ParamField path="--dyn-tool-call-parser" type="string" default="null">
   Tool call parser name for the model. When unset, the backend's default tool call parsing is used. Valid parser names are determined at runtime by the installed `dynamo._core` extension — run `python -m dynamo.vllm --help` to see the available choices on your installation.
 
+  With `glm47`, an incomplete native tool call is suppressed and reported with `finish_reason: "length"`, including when generation ends at EOS or a configured stop rather than exhausting `max_tokens`. Completed calls before an incomplete call are retained. An explicit `content_filter` finish reason is preserved. Quoted and code-formatted tool-call examples remain ordinary content.
+
   Environment variable: `DYN_TOOL_CALL_PARSER`
 </ParamField>
 
