@@ -433,6 +433,17 @@ class RealtimeTextHandler:
         usage = None
         finish_reason = None
         stream = None
+        task = asyncio.current_task()
+        assert task is not None
+        generation_active = True
+
+        def cancel_generation(_: asyncio.Future[bool]) -> None:
+            if generation_active and not task.cancelling():
+                task.cancel()
+
+        # Interrupt pending factory/frame awaits on disconnect, not on input EOF.
+        stopped = context.async_killed_or_stopped()
+        stopped.add_done_callback(cancel_generation)
         try:
             stream = await self._chat_completion_factory(
                 turn.messages, turn.max_output_tokens
@@ -502,6 +513,10 @@ class RealtimeTextHandler:
                 ),
             )
         finally:
+            # A queued stop callback must not cancel the awaited cleanup again.
+            generation_active = False
+            stopped.remove_done_callback(cancel_generation)
+            stopped.cancel()
             # Cancellation may interrupt an output queue put, not stream.__anext__.
             if stream is not None:
                 await stream.aclose()

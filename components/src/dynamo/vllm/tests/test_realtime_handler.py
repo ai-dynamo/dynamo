@@ -31,9 +31,33 @@ MODEL = "test/realtime-asr"
 class _Context:
     def __init__(self) -> None:
         self.stopped = False
+        self.killed = False
+        self._stop_waiters: list[asyncio.Future[bool]] = []
 
     def is_stopped(self) -> bool:
         return self.stopped
+
+    def is_killed(self) -> bool:
+        return self.killed
+
+    def async_killed_or_stopped(self) -> asyncio.Future[bool]:
+        waiter = asyncio.get_running_loop().create_future()
+        if self.stopped:
+            waiter.set_result(True)
+        else:
+            self._stop_waiters.append(waiter)
+        return waiter
+
+    def stop_generating(self) -> None:
+        self.stopped = True
+        for waiter in self._stop_waiters:
+            if not waiter.done():
+                waiter.set_result(True)
+        self._stop_waiters.clear()
+
+    def kill(self) -> None:
+        self.killed = True
+        self.stop_generating()
 
 
 class _RecordingHandler:
@@ -812,10 +836,61 @@ def test_response_cancel_aborts_generation(after_first_delta):
     )
 
 
-def test_cancellation_under_backpressure_closes_chat_stream():
+@pytest.mark.parametrize("signal", ["stop_generating", "kill"])
+@pytest.mark.parametrize("pending", ["factory", "first_frame", "next_frame"])
+def test_context_cancellation_closes_pending_text_generation(signal, pending):
     async def scenario():
         started = asyncio.Event()
         closed = asyncio.Event()
+        context = _Context()
+
+        async def chat_completion(messages, max_output_tokens):
+            del messages, max_output_tokens
+            if pending == "factory":
+                try:
+                    started.set()
+                    await asyncio.Event().wait()
+                finally:
+                    await asyncio.sleep(0)
+                    closed.set()
+
+            async def frames():
+                try:
+                    if pending == "next_frame":
+                        yield 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                    started.set()
+                    await asyncio.Event().wait()
+                finally:
+                    await asyncio.sleep(0)
+                    closed.set()
+
+            return frames()
+
+        handler = RealtimeTextHandler(
+            model_name=TEXT_MODEL, chat_completion_factory=chat_completion
+        )
+
+        async def request_stream():
+            yield {"type": "session.update", "session": _text_session()}
+            yield _text_item("Wait")
+            yield {"type": "response.create"}
+            await started.wait()
+            getattr(context, signal)()
+
+        result = [event async for event in handler.generate(request_stream(), context)]
+        assert closed.is_set()
+        assert any(event["type"] == "response.created" for event in result)
+        assert not any(event["type"] == "response.done" for event in result)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=1))
+
+
+@pytest.mark.parametrize("stop_context", [False, True])
+def test_cancellation_under_backpressure_closes_chat_stream(stop_context):
+    async def scenario():
+        started = asyncio.Event()
+        closed = asyncio.Event()
+        context = _Context()
 
         async def frames():
             try:
@@ -842,9 +917,12 @@ def test_cancellation_under_backpressure_closes_chat_stream():
         )
         while not turn.events.full():
             turn.events.put_nowait({})
-        task = asyncio.create_task(handler._run_turn(turn, _Context()))
+        task = asyncio.create_task(handler._run_turn(turn, context))
         await started.wait()
         task.cancel()
+        if stop_context:
+            # Queue the stop callback behind the already scheduled task cleanup.
+            context.stop_generating()
         await asyncio.gather(task, return_exceptions=True)
         assert closed.is_set()
 
