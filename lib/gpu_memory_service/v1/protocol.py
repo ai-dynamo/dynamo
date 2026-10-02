@@ -23,6 +23,7 @@ class HandshakeRequest(
 ):
     lock_type: RequestedLockType
     expected_identity: tuple[str, str] | None = None
+    process_fence: bool = False
 
 
 class HandshakeResponse(
@@ -58,8 +59,20 @@ class CommitRequest(msgspec.Struct, tag="commit_request", forbid_unknown_fields=
     pass
 
 
+class RetainAllocationsRequest(
+    msgspec.Struct, tag="retain_allocations_request", forbid_unknown_fields=True
+):
+    pass
+
+
 class AbortRequest(msgspec.Struct, tag="abort_request", forbid_unknown_fields=True):
     pass
+
+
+class ReleaseAttachmentRequest(
+    msgspec.Struct, tag="release_attachment_request", forbid_unknown_fields=True
+):
+    """Writer has synchronized and removed every writable CUDA mapping."""
 
 
 class PrepareCheckpointRequest(
@@ -125,6 +138,8 @@ Request: TypeAlias = (
     | FreeRequest
     | ListAllocationsRequest
     | CommitRequest
+    | RetainAllocationsRequest
+    | ReleaseAttachmentRequest
     | AbortRequest
 )
 CheckpointControlRequest: TypeAlias = (
@@ -149,6 +164,8 @@ REQUEST_TYPES = (
     FreeRequest,
     ListAllocationsRequest,
     CommitRequest,
+    RetainAllocationsRequest,
+    ReleaseAttachmentRequest,
     AbortRequest,
 )
 CHECKPOINT_CONTROL_TYPES = (

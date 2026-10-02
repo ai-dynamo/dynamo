@@ -16,9 +16,9 @@ if not HAS_GMS:
 if not HAS_TORCH:
     pytest.skip("PyTorch is required", allow_module_level=True)
 
-import gpu_memory_service.v1.client.mempool as mempool_module  # noqa: E402
+import gpu_memory_service.v1.client.mempool as mempool_module
 import torch
-from gpu_memory_service.v1.client.mempool import TorchMempoolMemoryClient  # noqa: E402
+from gpu_memory_service.v1.client.mempool import TorchMempoolMemoryClient
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -28,10 +28,13 @@ pytestmark = [
 ]
 
 
-def test_weight_and_kv_lifecycle(monkeypatch):
+@pytest.mark.parametrize("persistent", [False, True])
+def test_weight_and_kv_lifecycle(monkeypatch, persistent):
     client = object.__new__(TorchMempoolMemoryClient)
     client._device = 0
     client._state, client._weights_state = "RUNNING", "OPEN"
+    client._persistent_kv = persistent
+    client._kv_backing_recovered = False
     client._weights_pool, client._kv_cache_pool = object(), object()
     client._active_domain = Mock()
     client._weights = Mock(mappings=("mapping",))
@@ -66,6 +69,12 @@ def test_weight_and_kv_lifecycle(monkeypatch):
     client.suspend()
     assert client._state == "SUSPENDED"
     client.resume()
+    if persistent:
+        client._kv_cache.attach_persistent_backing.assert_called_once_with()
+        client._kv_cache.reallocate_all_handles.assert_not_called()
+    else:
+        client._kv_cache.reallocate_all_handles.assert_called_once_with()
+        client._kv_cache.attach_persistent_backing.assert_not_called()
     with client.kv_cache_region():
         assert client._malloc(20, 0, 0) == 22
 

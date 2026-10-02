@@ -65,6 +65,7 @@ def main(argv: list[str] | None = None) -> None:
                 vmm,
                 args.device,
                 checkpoint_lifecycle=checkpoint_lifecycle,
+                allow_retention=domain == "kv_cache",
             )
             for domain in _DOMAINS
         }

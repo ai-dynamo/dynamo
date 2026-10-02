@@ -89,6 +89,8 @@ setup(
         "gpu_memory_service.v1.integrations",
         "gpu_memory_service.v1.integrations.sglang",
         "gpu_memory_service.v1.integrations.vllm",
+        "gpu_memory_service.kv_recovery",
+        "gpu_memory_service.kv_recovery.backends",
     ],
     package_dir={
         "gpu_memory_service": ".",
@@ -115,6 +117,9 @@ setup(
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],
     },
     entry_points={
+        "vllm.general_plugins": [
+            "dynamo_kv_recovery=gpu_memory_service.v1.integrations.vllm.recovery:register",
+        ],
         "console_scripts": [
             "gpu-memory-service=gpu_memory_service.cli.runner:main",
             "gms-storage-client=gpu_memory_service.cli.storage_runner:main",

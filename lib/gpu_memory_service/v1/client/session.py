@@ -22,7 +22,11 @@ from gpu_memory_service.v1.protocol import (
     FreeRequest,
     HandshakeRequest,
     HandshakeResponse,
+    ListAllocationsRequest,
+    ListAllocationsResponse,
     Message,
+    ReleaseAttachmentRequest,
+    RetainAllocationsRequest,
     SuccessResponse,
     receive_message,
     send_message,
@@ -43,6 +47,7 @@ class _GMSClientSession:
         expected_identity: tuple[str, str] | None = None,
         connect_timeout: float | None = 30.0,
         admission_timeout: float | None = None,
+        process_fence: bool = False,
     ):
         if connect_timeout is not None and connect_timeout <= 0:
             raise ValueError("connect_timeout must be positive")
@@ -76,7 +81,16 @@ class _GMSClientSession:
                         if remaining is None
                         else min(_STARTUP_CONNECT_RETRY_INTERVAL, remaining)
                     )
-            send_message(self._socket, HandshakeRequest(lock_type, expected_identity))
+            process_fd = os.pidfd_open(os.getpid()) if process_fence else -1
+            try:
+                send_message(
+                    self._socket,
+                    HandshakeRequest(lock_type, expected_identity, process_fence),
+                    process_fd,
+                )
+            finally:
+                if process_fd >= 0:
+                    os.close(process_fd)
             if admission_timeout is not None:
                 self._socket.settimeout(admission_timeout)
             try:
@@ -130,14 +144,29 @@ class _GMSClientSession:
         self._call(CommitRequest(), SuccessResponse)
         self._granted_lock_type = GrantedLockType.RO
 
-    def close(self) -> None:
+    def list_allocations(self) -> ListAllocationsResponse:
+        return self._call(ListAllocationsRequest(), ListAllocationsResponse)
+
+    def retain_allocations(self) -> None:
+        """Keep this completed KV backing across subsequent writer sessions."""
+        self._call(RetainAllocationsRequest(), SuccessResponse)
+
+    def close(self, *, quiesced: bool = False) -> None:
+        """Release a lease; quiesced requires prior GPU sync and complete unmap.
+
+        Socket closure alone never authorizes reuse of retained writable memory.
+        On an ungraceful disconnect GMS waits for the writer's pidfd to signal death.
+        """
         with self._lock:
             try:
                 if (
                     self._socket is not None
                     and self._granted_lock_type is GrantedLockType.RW
                 ):
-                    self._call(AbortRequest(), SuccessResponse)
+                    self._call(
+                        ReleaseAttachmentRequest() if quiesced else AbortRequest(),
+                        SuccessResponse,
+                    )
             finally:
                 if self._socket is not None:
                     self._socket.close()

@@ -50,11 +50,14 @@ class GMSClientMemoryManager:
         *,
         session_factory: _SessionFactory = _GMSClientSession,
         slab_size: int = DEFAULT_SLAB_SIZE,
+        process_fence: bool = False,
     ):
         self._socket_path = socket_path
         self._vmm = vmm
         self._device = device
         self._session_factory = session_factory
+        self._process_fence = process_fence
+        self._persistent_backing = False
         self._session: _GMSClientSession | None = None
         self._mappings: dict[int, _InstalledMapping] = {}
         self._regions: dict[int, tuple[int, int]] = {}
@@ -74,6 +77,11 @@ class GMSClientMemoryManager:
         with self._lock:
             return self._ordered_mappings()
 
+    @property
+    def identity(self) -> tuple[str, str]:
+        with self._lock:
+            return self._require_session().identity
+
     def owns(self, va: int) -> bool:
         with self._lock:
             return va in self._regions
@@ -86,7 +94,13 @@ class GMSClientMemoryManager:
             try:
                 device_identity.invalidate_device_uuid_cache()
                 device_uuid = device_identity.get_device_uuid(self._device)
-                session = self._session_factory(self._socket_path, lock_type)
+                session = (
+                    self._session_factory(
+                        self._socket_path, lock_type, process_fence=True
+                    )
+                    if self._process_fence
+                    else self._session_factory(self._socket_path, lock_type)
+                )
                 if session.identity[1] != device_uuid:
                     try:
                         session.close()
@@ -205,18 +219,57 @@ class GMSClientMemoryManager:
             except Exception as exc:
                 raise self._latch("GMS remap failed", exc) from exc
 
+    def attach_persistent_backing(self) -> bool:
+        """Attach matching retained slabs, or retain a complete first allocation.
+
+        Return True only when all physical slabs already existed. The caller
+        server fences the predecessor before admitting this writer.
+        """
+        with self._lock:
+            self._check()
+            session = self._require_rw()
+            expected = {
+                mapping.allocation_id: mapping.aligned_size
+                for mapping in self._ordered_mappings()
+            }
+            if not expected:
+                raise RuntimeError("persistent KV backing requires saved mappings")
+            try:
+                existing = {
+                    allocation.allocation_id: allocation.aligned_size
+                    for allocation in session.list_allocations().allocations
+                }
+                if existing and existing != expected:
+                    raise RuntimeError(
+                        "retained KV allocation inventory does not match"
+                    )
+                if not existing:
+                    self.reallocate_all_handles()
+                # Enable retention only after the complete backing exists. A
+                # crash during initial allocation still clears the partial set.
+                session.retain_allocations()
+                self._persistent_backing = True
+                return bool(existing)
+            except Exception as exc:
+                raise self._latch("GMS persistent attachment failed", exc) from exc
+
     def disconnect(self) -> None:
         with self._lock:
             session = self._session
             self._session = None
             if session is not None:
-                session.close()
+                if self._persistent_backing and all(
+                    not mapping.handle for mapping in self._ordered_mappings()
+                ):
+                    session.close(quiesced=True)
+                else:
+                    session.close()
 
     def close(self) -> None:
         """Release local mappings and VAs, then disconnect the socket lease."""
         with self._lock:
             self._check()
-            for va in reversed(sorted(self._regions)):
+            for va in sorted(self._regions, reverse=True):
                 self.destroy_mapping(va)
             self.disconnect()
 

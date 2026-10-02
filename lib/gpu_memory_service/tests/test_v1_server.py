@@ -45,8 +45,12 @@ def _stop(server: GMSRPCServer, thread: threading.Thread) -> None:
 def serve():
     running: list[tuple[GMSRPCServer, threading.Thread]] = []
 
-    def start(path: str, vmm: FakeVMM) -> GMSServerMemoryManager:
-        manager = GMSServerMemoryManager("GPU-0", vmm, 0)
+    def start(
+        path: str, vmm: FakeVMM, *, allow_retention: bool = False
+    ) -> GMSServerMemoryManager:
+        manager = GMSServerMemoryManager(
+            "GPU-0", vmm, 0, allow_retention=allow_retention
+        )
         server = GMSRPCServer(path, manager)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         try:
@@ -61,6 +65,74 @@ def serve():
 
     for server, thread in reversed(running):
         _stop(server, thread)
+
+
+def test_retained_kv_survives_writer_close_and_excludes_mutation(tmp_path, serve):
+    path = str(tmp_path / "kv.sock")
+    vmm = FakeVMM(granularity=64)
+    serve(path, vmm, allow_retention=True)
+    first = _GMSClientSession(path, RequestedLockType.RW, process_fence=True)
+    with pytest.raises(RuntimeError, match="empty KV backing"):
+        first.retain_allocations()
+    first.allocate("kv", 64)
+    first.retain_allocations()
+    original_handles = set(vmm.server_handles)
+    first.close(quiesced=True)
+
+    replacement = _GMSClientSession(path, RequestedLockType.RW, process_fence=True)
+    try:
+        assert vmm.server_handles == original_handles
+        assert [
+            (a.allocation_id, a.aligned_size)
+            for a in replacement.list_allocations().allocations
+        ] == [("kv", 64)]
+        fd = replacement.export("kv")
+        os.close(fd)
+        with pytest.raises(RuntimeError, match="cannot be resized"):
+            replacement.allocate("another", 64)
+        with pytest.raises(RuntimeError, match="until GMS shutdown"):
+            replacement.free("kv")
+        with pytest.raises(RuntimeError, match="exclusive writer"):
+            replacement.commit()
+    finally:
+        replacement.close(quiesced=True)
+    assert vmm.server_handles == original_handles
+
+
+@pytest.mark.timeout(10)
+def test_retained_kv_rejects_unfenced_writer_and_waits_for_live_predecessor(
+    tmp_path, serve
+):
+    path = str(tmp_path / "kv.sock")
+    serve(path, FakeVMM(granularity=64), allow_retention=True)
+    writer = _GMSClientSession(path, RequestedLockType.RW)
+    writer.allocate("kv", 64)
+    with pytest.raises(RuntimeError, match="writer process fence"):
+        writer.retain_allocations()
+    writer.close()
+
+    writer = _GMSClientSession(path, RequestedLockType.RW, process_fence=True)
+    writer.allocate("kv", 64)
+    writer.retain_allocations()
+    writer.close()  # Socket closed, but this process (and any GPU mappings) lives.
+    with pytest.raises(ConnectionError, match="lock admission"):
+        _GMSClientSession(
+            path, RequestedLockType.RW, process_fence=True, admission_timeout=0.1
+        )
+
+
+def test_weights_cannot_enable_retention(tmp_path, serve):
+    path = str(tmp_path / "weights.sock")
+    vmm = FakeVMM(granularity=64)
+    serve(path, vmm)
+    writer = _GMSClientSession(path, RequestedLockType.RW)
+    try:
+        writer.allocate("weights", 64)
+        with pytest.raises(RuntimeError, match="only supported for the KV domain"):
+            writer.retain_allocations()
+    finally:
+        writer.close()
+    assert not vmm.server_handles
 
 
 def _connect_in_thread(path: str, lock_type: RequestedLockType):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -72,6 +73,8 @@ class TorchMempoolMemoryClient:
     def __init__(self) -> None:
         self._state = "RUNNING"
         self._weights_state = "OPEN"
+        self._persistent_kv = os.environ.get("DYN_KV_RECOVERY") == "true"
+        self._kv_backing_recovered = False
         weights: GMSClientMemoryManager | None = None
         kv_cache: GMSClientMemoryManager | None = None
         _reserve_allocator(self)
@@ -87,6 +90,7 @@ class TorchMempoolMemoryClient:
                 get_socket_path(self._device, _KV_CACHE),
                 vmm,
                 self._device,
+                process_fence=self._persistent_kv,
             )
             self._weights = weights
             self._kv_cache = kv_cache
@@ -223,7 +227,10 @@ class TorchMempoolMemoryClient:
             self._state = "RESUMING"
             wake_t0 = monotonic()
             self._kv_cache.connect(RequestedLockType.RW)
-            self._kv_cache.reallocate_all_handles()
+            if self._persistent_kv:
+                self._kv_backing_recovered = self._kv_cache.attach_persistent_backing()
+            else:
+                self._kv_cache.reallocate_all_handles()
             self._kv_cache.remap_all_vas()
             self._weights.connect(RequestedLockType.RO)
             self._weights.remap_all_vas()

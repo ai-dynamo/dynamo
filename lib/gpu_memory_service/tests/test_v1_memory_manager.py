@@ -30,6 +30,45 @@ def _stop(server: GMSRPCServer, thread: threading.Thread) -> None:
     assert not thread.is_alive()
 
 
+def test_persistent_wake_reattaches_original_physical_handles(tmp_path, monkeypatch):
+    path = str(tmp_path / "kv.sock")
+    vmm = FakeVMM(granularity=64)
+    server_manager = GMSServerMemoryManager("GPU-0", vmm, 0, allow_retention=True)
+    monkeypatch.setattr(device_identity, "invalidate_device_uuid_cache", lambda: None)
+    monkeypatch.setattr(device_identity, "get_device_uuid", lambda _device: "GPU-0")
+    with GMSRPCServer(path, server_manager) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = GMSClientMemoryManager(
+                path, vmm, 0, slab_size=64, process_fence=True
+            )
+            client.connect(RequestedLockType.RW)
+            va = client.create_mapping(64)
+            client.unmap_all_vas()
+            client.disconnect()
+            assert not vmm.server_handles  # Capture still discards bootstrap KV.
+
+            client.connect(RequestedLockType.RW)
+            assert client.attach_persistent_backing() is False
+            client.remap_all_vas()
+            retained_handles = set(vmm.server_handles)
+            retained_identity = client.identity
+            client.unmap_all_vas()
+            client.disconnect()
+
+            client.connect(RequestedLockType.RW)
+            assert client.attach_persistent_backing() is True
+            client.remap_all_vas()
+            assert client.identity == retained_identity
+            assert vmm.server_handles == retained_handles
+            assert va in vmm.mapped
+            client.unmap_all_vas()
+            client.disconnect()
+        finally:
+            _stop(server, thread)
+
+
 @pytest.mark.timeout(10)
 def test_same_client_manager_preserves_weights_and_recreates_kv(
     tmp_path,

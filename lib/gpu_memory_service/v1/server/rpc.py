@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import select
+import signal
 import socket
 import socketserver
 import threading
@@ -36,8 +37,10 @@ from gpu_memory_service.v1.protocol import (
     ListAllocationsRequest,
     ListAllocationsResponse,
     Message,
+    ReleaseAttachmentRequest,
     Request,
     Response,
+    RetainAllocationsRequest,
     SuccessResponse,
     receive_message,
     send_message,
@@ -74,6 +77,8 @@ class ServerSession:
     """Opaque token for one admitted socket session."""
 
     mode: GrantedLockType
+    process_fd: int = -1
+    quiesced: bool = False
 
 
 @dataclass(frozen=True)
@@ -109,12 +114,30 @@ class GMSSessionManager:
         self._writer_reserved = False
         self._waiting_writers = 0
         self._committed = False
+        self._retained = False
+        self._previous_writer_fd = -1
+
+    @property
+    def retained(self) -> bool:
+        with self._condition:
+            return self._retained
+
+    def retain(self, session: ServerSession) -> None:
+        with self._condition:
+            if session is not self._rw_session:
+                raise RuntimeError("operation requires an RW session")
+            if session.process_fd < 0:
+                raise RuntimeError(
+                    "retained KV backing requires a writer process fence"
+                )
+            self._retained = True
 
     def acquire(
         self,
         requested: RequestedLockType,
         timeout: float | None = None,
         is_cancelled: Callable[[], bool] | None = None,
+        process_fd: int = -1,
     ) -> ServerSession | None:
         deadline = monotonic() + timeout if timeout is not None else None
         if requested is RequestedLockType.RW:
@@ -131,11 +154,11 @@ class GMSSessionManager:
                     self._require_admission()
                     if is_cancelled is not None and is_cancelled():
                         return None
-                    self._reserve_writer()
+                    self._reserve_writer(process_fd)
                 finally:
                     self._waiting_writers -= 1
                     self._condition.notify_all()
-            return self._start_writer()
+            return self._start_writer(process_fd)
 
         with self._condition:
             self._require_admission()
@@ -161,8 +184,8 @@ class GMSSessionManager:
                 return self._start_reader()
             if is_cancelled is not None and is_cancelled():
                 return None
-            self._reserve_writer()
-        return self._start_writer()
+            self._reserve_writer(process_fd)
+        return self._start_writer(process_fd)
 
     def commit(self, session: ServerSession) -> None:
         with self._condition:
@@ -180,19 +203,37 @@ class GMSSessionManager:
                 self._rw_session = None
                 self._writer_reserved = True
                 self._committed = False
+                if self._retained and not session.quiesced:
+                    self._previous_writer_fd = session.process_fd
+                    session.process_fd = -1
             elif session in self._ro_sessions:
                 self._ro_sessions.remove(session)
+                self._close_process_fd(session)
                 self._condition.notify_all()
                 return
             else:
                 return
 
         try:
-            self._clear_epoch()
+            if not self._retained:
+                self._clear_epoch()
         finally:
             with self._condition:
+                self._close_process_fd(session)
                 self._writer_reserved = False
                 self._condition.notify_all()
+
+    @staticmethod
+    def _close_process_fd(session: ServerSession) -> None:
+        if session.process_fd >= 0:
+            os.close(session.process_fd)
+            session.process_fd = -1
+
+    def close_fence(self) -> None:
+        with self._condition:
+            if self._previous_writer_fd >= 0:
+                os.close(self._previous_writer_fd)
+                self._previous_writer_fd = -1
 
     def is_writer(self, session: ServerSession) -> bool:
         with self._condition:
@@ -217,6 +258,13 @@ class GMSSessionManager:
             raise RuntimeError("GMS admission is fenced for checkpoint")
 
     def _can_grant_rw(self) -> bool:
+        if self._previous_writer_fd >= 0:
+            poller = select.poll()
+            poller.register(self._previous_writer_fd, select.POLLIN)
+            if not any(flags & select.POLLIN for _, flags in poller.poll(0)):
+                return False
+            os.close(self._previous_writer_fd)
+            self._previous_writer_fd = -1
         return (
             not self._writer_reserved
             and self._rw_session is None
@@ -238,13 +286,16 @@ class GMSSessionManager:
             not self._committed and self._waiting_writers == 0 and self._can_grant_rw()
         )
 
-    def _reserve_writer(self) -> None:
+    def _reserve_writer(self, process_fd: int = -1) -> None:
+        if self._retained and process_fd < 0:
+            raise RuntimeError("retained KV backing requires a writer process fence")
         self._writer_reserved = True
         self._committed = False
 
-    def _start_writer(self) -> ServerSession:
+    def _start_writer(self, process_fd: int = -1) -> ServerSession:
         try:
-            self._clear_epoch()
+            if not self._retained:
+                self._clear_epoch()
         except BaseException:
             with self._condition:
                 self._writer_reserved = False
@@ -254,7 +305,7 @@ class GMSSessionManager:
         with self._condition:
             if not self._writer_reserved or self._rw_session is not None:
                 raise AssertionError("GMS writer reservation was lost")
-            session = ServerSession(GrantedLockType.RW)
+            session = ServerSession(GrantedLockType.RW, process_fd)
             self._rw_session = session
             self._writer_reserved = False
             self._condition.notify_all()
@@ -280,7 +331,7 @@ class GMSSessionManager:
             wait = None if deadline is None else deadline - monotonic()
             if wait is not None and wait <= 0:
                 return False
-            if is_cancelled is not None:
+            if is_cancelled is not None or self._previous_writer_fd >= 0:
                 wait = (
                     _CANCELLATION_POLL_SECONDS
                     if wait is None
@@ -299,6 +350,7 @@ class GMSServerMemoryManager:
         device: int,
         *,
         checkpoint_lifecycle: GMSCheckpointLifecycle | None = None,
+        allow_retention: bool = False,
     ):
         if not gpu_uuid:
             raise ValueError("GPU UUID must not be empty")
@@ -306,6 +358,7 @@ class GMSServerMemoryManager:
         self._allocations = GMSAllocationManager(vmm, device)
         self._allocation_sizes: dict[str, int] = {}
         self._checkpoint_lifecycle = checkpoint_lifecycle
+        self._allow_retention = allow_retention
         self._sessions = GMSSessionManager(
             self._clear_allocations,
             condition=(
@@ -332,8 +385,11 @@ class GMSServerMemoryManager:
         self,
         requested: RequestedLockType,
         is_cancelled: Callable[[], bool] | None = None,
+        process_fd: int = -1,
     ) -> ServerSession | None:
-        return self._sessions.acquire(requested, is_cancelled=is_cancelled)
+        return self._sessions.acquire(
+            requested, is_cancelled=is_cancelled, process_fd=process_fd
+        )
 
     def handle_request(
         self,
@@ -343,6 +399,8 @@ class GMSServerMemoryManager:
     ) -> tuple[Response, int]:
         if isinstance(request, AllocateRequest):
             self._require_rw(session)
+            if self._sessions.retained:
+                raise RuntimeError("retained KV backing cannot be resized")
             self._allocations.allocate(
                 request.allocation_id,
                 request.aligned_size,
@@ -355,6 +413,8 @@ class GMSServerMemoryManager:
             return ExportResponse(), self._allocations.export(request.allocation_id)
         if isinstance(request, FreeRequest):
             self._require_rw(session)
+            if self._sessions.retained:
+                raise RuntimeError("retained KV backing lives until GMS shutdown")
             self._allocations.free(request.allocation_id)
             del self._allocation_sizes[request.allocation_id]
             return SuccessResponse(), -1
@@ -367,10 +427,25 @@ class GMSServerMemoryManager:
             return ListAllocationsResponse(allocations), -1
         if isinstance(request, CommitRequest):
             self._require_rw(session)
+            if self._sessions.retained:
+                raise RuntimeError("retained KV backing requires an exclusive writer")
             self._sessions.commit(session)
+            return SuccessResponse(), -1
+        if isinstance(request, RetainAllocationsRequest):
+            self._require_rw(session)
+            if not self._allow_retention:
+                raise RuntimeError("retention is only supported for the KV domain")
+            if not self._allocation_sizes:
+                raise RuntimeError("cannot retain empty KV backing")
+            self._sessions.retain(session)
             return SuccessResponse(), -1
         if isinstance(request, AbortRequest):
             self._require_rw(session)
+            self._sessions.close(session)
+            return SuccessResponse(), -1
+        if isinstance(request, ReleaseAttachmentRequest):
+            self._require_rw(session)
+            session.quiesced = True
             self._sessions.close(session)
             return SuccessResponse(), -1
         raise RuntimeError(f"unsupported GMS request {type(request).__name__}")
@@ -403,8 +478,23 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
 
     def handle(self) -> None:
         session: ServerSession | None = None
+        process_fd = -1
         try:
-            request = self._receive()
+            request, process_fd = receive_message(self.request)
+            expects_fence = (
+                isinstance(request, HandshakeRequest) and request.process_fence
+            )
+            if expects_fence:
+                if request.lock_type is not RequestedLockType.RW or process_fd < 0:
+                    raise RuntimeError(
+                        "writer process fence requires an RW handshake and pidfd"
+                    )
+                try:
+                    signal.pidfd_send_signal(process_fd, 0)
+                except ProcessLookupError:
+                    pass  # A just-exited writer still supplied a valid pidfd.
+            elif process_fd >= 0:
+                raise RuntimeError("unexpected client file descriptor")
             if isinstance(request, CHECKPOINT_CONTROL_TYPES):
                 lifecycle = self.server.checkpoint_lifecycle
                 if lifecycle is None:
@@ -432,12 +522,14 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
                 session = manager.acquire(
                     request.lock_type,
                     lambda: not _socket_is_alive(self.request),
+                    process_fd=process_fd,
                 )
             except RuntimeError as exc:
                 send_message(self.request, ErrorResponse(str(exc)))
                 return
             if session is None:
                 return
+            process_fd = -1  # Ownership transferred to the admitted session.
             nonce, gpu_uuid = manager.identity
             send_message(
                 self.request,
@@ -494,6 +586,8 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
         except Exception:
             logger.exception("Unexpected GMS connection failure")
         finally:
+            if process_fd >= 0:
+                os.close(process_fd)
             if session is not None:
                 self.server.manager.close(session)
 
@@ -542,4 +636,5 @@ class GMSRPCServer(socketserver.ThreadingUnixStreamServer):
 
     def server_close(self) -> None:
         super().server_close()
+        self.manager._sessions.close_fence()
         Path(self.path).unlink(missing_ok=True)
