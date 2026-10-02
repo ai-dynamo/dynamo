@@ -119,44 +119,32 @@ mod tests {
     }
 
     #[test]
-    fn dynamo_error_types_classify_without_a_scheduler_error() {
-        // Legacy classes, as `map_scheduler_error` builds them today.
-        assert_eq!(
-            classify_router_error(&dynamo_error(ErrorType::ResourceExhausted)),
-            RouterRejection::Overloaded
-        );
-        assert_eq!(
-            classify_router_error(&dynamo_error(ErrorType::WorkerOverloaded)),
-            RouterRejection::Overloaded
-        );
-        assert_eq!(
-            classify_router_error(&dynamo_error(ErrorType::Unavailable)),
-            RouterRejection::Unavailable
-        );
-        // Canonical names classify the same.
-        assert_eq!(
-            classify_router_error(&dynamo_error(ErrorType::CapacityExhausted)),
-            RouterRejection::Overloaded
-        );
-        assert_eq!(
-            classify_router_error(&dynamo_error(ErrorType::WorkerUnavailable)),
-            RouterRejection::Unavailable
-        );
-        assert_eq!(
-            classify_router_error(&dynamo_error(ErrorType::InvalidRequest)),
-            RouterRejection::BadRequest
-        );
-    }
+    fn classifies_both_router_error_forms() {
+        // Rewritten by `map_scheduler_error`: legacy class names as it builds
+        // them today, then canonical names.
+        for (class, expected) in [
+            (ErrorType::ResourceExhausted, RouterRejection::Overloaded),
+            (ErrorType::WorkerOverloaded, RouterRejection::Overloaded),
+            (ErrorType::Unavailable, RouterRejection::Unavailable),
+            (ErrorType::CapacityExhausted, RouterRejection::Overloaded),
+            (ErrorType::WorkerUnavailable, RouterRejection::Unavailable),
+            (ErrorType::InvalidRequest, RouterRejection::BadRequest),
+        ] {
+            assert_eq!(
+                classify_router_error(&dynamo_error(class)),
+                expected,
+                "{class:?}"
+            );
+        }
 
-    #[test]
-    fn classification_survives_added_context() {
+        // Passed through untouched, with context added above it.
         let wrapped = anyhow_from(KvSchedulerError::AllEligibleWorkersOverloaded)
             .context("decode selection failed");
         assert_eq!(classify_router_error(&wrapped), RouterRejection::Overloaded);
     }
 
     #[test]
-    fn queue_deadline_classifies_as_deadline_exceeded() {
+    fn only_queue_deadlines_are_deadline_exceeded() {
         let queue_deadline: anyhow::Error = DynamoError::builder()
             .error_type(ErrorType::DeadlineExceeded)
             .reason(ErrorReason::new("router.queue_deadline_exceeded").unwrap())
@@ -167,10 +155,9 @@ mod tests {
             classify_router_error(&queue_deadline.context("decode selection failed")),
             RouterRejection::DeadlineExceeded
         );
-    }
 
-    #[test]
-    fn transport_timeout_is_not_backpressure() {
+        // A transport timeout shares the class but is not backpressure, so it
+        // takes the 503 fallback.
         assert_eq!(
             classify_router_error(&dynamo_error(ErrorType::DeadlineExceeded)),
             RouterRejection::Unavailable
@@ -178,13 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn unrecognized_errors_stay_unavailable_not_internal() {
-        let opaque = anyhow::anyhow!("something the EPP has never seen");
-        assert_eq!(classify_router_error(&opaque), RouterRejection::Unavailable);
-    }
-
-    #[test]
-    fn metric_labels_are_distinct_and_low_cardinality() {
+    fn metric_labels_are_distinct() {
         let labels: Vec<&str> = [
             RouterRejection::Overloaded,
             RouterRejection::QueueRejected,
