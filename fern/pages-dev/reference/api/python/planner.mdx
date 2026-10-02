@@ -762,13 +762,11 @@ GET when the environment also resolves power configs on the same tick).
 get_component_power_configs(require_prefill: bool = True, require_decode: bool = True, prefill_component_name: Optional[str] = None, decode_component_name: Optional[str] = None, deployment: Optional[dict] = None) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]
 ```
 
-Resolve DGD-owned per-role power configs from worker podTemplate annotations.
+Resolve operator-projected per-role power configs from DGD status.
 
 One DGD GET unless ``deployment`` is provided (shared with
 ``get_gpu_shapes`` on the same tick). ``watts_per_replica`` on each
-config uses the replica-wide GPU total (nodeCount × per-pod) via
-``Service.get_total_gpu_count()``. GPU-budget math independently uses
-the operator-projected ``gpusPerReplica``.
+config uses the operator-projected ``gpusPerReplica``.
 
 The typed parser errors (``PowerAnnotationMissingError`` /
 ``PowerAnnotationInvalidError`` / ``SubComponentNotFoundError`` /
@@ -776,7 +774,7 @@ The typed parser errors (``PowerAnnotationMissingError`` /
 propagate so the environment can apply the startup-fail vs
 runtime-conservative policy rather than the planner guessing a cap.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L495)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L482)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-frontend-metrics-url">get_frontend_metrics_url</h4>
 
@@ -794,7 +792,7 @@ http://&#123;dgd_name&#125;-&#123;component_name_lowercase&#125;:&#123;port&#125
 
 - `Optional[str]` — The metrics URL string, or None if no frontend component is found.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L527)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L512)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-wait-for-deployment-ready">wait_for_deployment_ready</h4>
 
@@ -817,7 +815,7 @@ readiness. This lets the planner read MDC from worker pods
 without waiting for itself to be marked ready in the DGD.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L549)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L534)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-wait-for-settled-graph-deployment">wait_for_settled_graph_deployment</h4>
 
@@ -847,7 +845,7 @@ have rolled onto that generation. Active rolling updates
 (``status.rollingUpdate.phase`` Pending/InProgress/Failed) also
 block settlement because old Pods still carry the previous cap.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L568)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L553)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-worker-info">get_worker_info</h4>
 
@@ -866,7 +864,7 @@ PREFILL or DECODE
 Backend framework name (for default fallback)
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L725)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L710)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-worker-inventory">get_worker_inventory</h4>
 
@@ -881,7 +879,7 @@ the power-aware readiness guarantees. An omitted component name reports
 zero counts for that role; pending counts never include draining workers.
 Return None on a Pod-list 403 so callers can retain legacy behavior.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L875)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L860)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-actual-worker-counts">get_actual_worker_counts</h4>
 
@@ -891,7 +889,7 @@ get_actual_worker_counts(prefill_component_name: Optional[str] = None, decode_co
 
 Get ready worker counts from DGD status without listing Pods.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L928)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L913)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-power-aware-worker-counts">get_power_aware_worker_counts</h4>
 
@@ -905,7 +903,7 @@ One thread dispatch contains the synchronous DGD GET and the single
 DGD-scoped Pod LIST. The returned Pod snapshot is partitioned locally by
 component before terminating-Pod checks run.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L941)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L926)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-set-component-replicas">set_component_replicas</h4>
 
@@ -915,7 +913,7 @@ set_component_replicas(target_replicas: list[TargetReplica], blocking: bool = Tr
 
 Set the replicas for multiple components at once
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1053)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1038)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-errors-modelnamenotfounderror" title="ModelNameNotFoundError (class)">
@@ -1446,7 +1444,7 @@ No summary available.
 from dynamo.planner import SubComponentType
 ```
 
-[`components/src/dynamo/planner/config/defaults.py#L133`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L133)
+[`components/src/dynamo/planner/config/defaults.py#L134`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L134)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-config-defaults-targetreplica" title="TargetReplica (class)">
@@ -1456,7 +1454,7 @@ No summary available.
 from dynamo.planner import TargetReplica
 ```
 
-[`components/src/dynamo/planner/config/defaults.py#L138`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L138)
+[`components/src/dynamo/planner/config/defaults.py#L139`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L139)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-types-tickinput" title="TickInput (class)">
