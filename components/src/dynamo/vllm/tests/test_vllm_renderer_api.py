@@ -483,6 +483,18 @@ class TestVllmRendererApi:
             base_output_fields
             + ("mm_cache_miss_hashes", "new_sampling_mask", "spec_decode_metrics"),
         )
+        # Nightly ac9126e appends optional fixed-ID prompt scores. Dynamo's
+        # existing generation path does not request or transport this feature;
+        # keyword construction leaves it at None for OutputProcessor.
+        core_output_fields += (
+            base_output_fields
+            + (
+                "mm_cache_miss_hashes",
+                "new_sampling_mask",
+                "spec_decode_metrics",
+                "prompt_token_id_logprobs",
+            ),
+        )
         valid_output_fields = core_output_fields + tuple(
             fields + omni_output_extra_fields for fields in core_output_fields
         )
@@ -523,6 +535,8 @@ class TestVllmRendererApi:
             assert output.new_sampling_mask is None
         if "spec_decode_metrics" in EngineCoreOutput.__struct_fields__:
             assert output.spec_decode_metrics is None
+        if "prompt_token_id_logprobs" in EngineCoreOutput.__struct_fields__:
+            assert output.prompt_token_id_logprobs is None
         assert output.finish_reason is FinishReason.STOP
         assert output.stop_reason == "eos"
 
