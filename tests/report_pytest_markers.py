@@ -88,6 +88,8 @@ STUB_MODULES = [
     "huggingface_hub",
     "huggingface_hub.constants",
     "huggingface_hub.model_info",
+    "jinja2",
+    "jinja2.exceptions",
     "transformers",
     "transformers.models",
     "transformers.models.qwen2_vl",

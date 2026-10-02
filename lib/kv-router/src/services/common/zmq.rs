@@ -214,6 +214,7 @@ where
     ZmqSocket::new(socket)
 }
 
+#[cfg(any(test, feature = "standalone-indexer"))]
 pub(crate) fn create_sub_socket(topic: &[u8]) -> Result<ZmqSocket> {
     create_sub_socket_topics(&[topic])
 }
