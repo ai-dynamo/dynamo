@@ -31,7 +31,7 @@ def _clean_nixl_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-@pytest.mark.parametrize("value", ["n", "N", "no", " off ", "false", "disable", "0"])
+@pytest.mark.parametrize("value", ["n", "N", "no", "false", "disable", "0"])
 def test_false_enable_switches_to_collect_only(monkeypatch, value):
     monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", value)
     monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
@@ -40,13 +40,13 @@ def test_false_enable_switches_to_collect_only(monkeypatch, value):
 
     assert allow_nixl_telemetry_capture() is True
 
-    assert "NIXL_TELEMETRY_ENABLE" not in os.environ
-    assert "NIXL_TELEMETRY_EXPORTER" not in os.environ
+    assert os.environ["NIXL_TELEMETRY_ENABLE"] == "y"
+    assert os.environ["NIXL_TELEMETRY_EXPORTER"] == "NOP"
     assert "NIXL_TELEMETRY_DIR" not in os.environ
     assert os.environ["NIXL_TELEMETRY_PROMETHEUS_PORT"] == "19090"
 
 
-@pytest.mark.parametrize("value", ["y", "1", "true", "bogus"])
+@pytest.mark.parametrize("value", ["y", "1", "true", "bogus", " off ", "n "])
 def test_truthy_or_garbage_enable_untouched(monkeypatch, value):
     monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", value)
     monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
@@ -113,8 +113,8 @@ def test_headless_clears_false_enable_before_workers(monkeypatch):
             sys.modules.pop("dynamo.vllm.headless", None)
 
     assert seen == {
-        "enable": None,
-        "exporter": None,
+        "enable": "y",
+        "exporter": "NOP",
         "directory": None,
         "port": "19090",
     }
