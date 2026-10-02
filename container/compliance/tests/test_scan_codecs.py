@@ -59,12 +59,24 @@ def test_third_party_suffixed_codec_lib_is_denied(tmp_path: Path):
     # allow_paths re-permits the suffixed names by /usr/local path prefix only.
     # The same soname vendored by a wheel is still a violation — otherwise the
     # suffix would hand anyone a way past the gate just by copying our naming.
-    rel = (
-        "usr/local/lib/python3.12/dist-packages/somewheel/.libs/libavcodec_dynamo.so.63"
+    # auditwheel grafts a library as <name>-<hash>.so.N, so each suffixed family
+    # is planted under both names.
+    libs = "usr/local/lib/python3.12/dist-packages/somewheel/.libs"
+    rels = sorted(
+        f"{libs}/{name}"
+        for name in (
+            "libavcodec_dynamo.so.63",
+            "libavcodec_dynamo-1a2b3c4d.so.63",
+            "libswscale_dynamo.so.10",
+            "libswscale_dynamo-1a2b3c4d.so.10",
+            "libpostproc_dynamo.so.58",
+            "libpostproc_dynamo-1a2b3c4d.so.58",
+        )
     )
-    _touch(tmp_path, rel)
+    for rel in rels:
+        _touch(tmp_path, rel)
     violations, _, _ = scan_filesystem(tmp_path, _POLICY)
-    assert [v["path"] for v in violations] == ["/" + rel]
+    assert sorted(v["path"] for v in violations) == ["/" + rel for rel in rels]
 
 
 def test_dali_bundled_ffmpeg_is_a_logged_exception(tmp_path: Path):
