@@ -383,8 +383,17 @@ A ready pod has passed the readiness probe configured by the operator.
 </Step>
 <Step title="Review the operator defaults" id="review-health-probe-defaults">
 
-The frontend uses an exec readiness probe that calls `/health`. Workers use the system port, which
-defaults to `9090`:
+The frontend uses HTTP probes on the `http` port, which defaults to `8000`:
+
+| Probe | Path | Initial delay | Period | Timeout | Failure threshold |
+| --- | --- | --- | --- | --- | --- |
+| Liveness | `/live` | 15 seconds | 10 seconds | 1 second | 3 |
+| Readiness | `/health` | 10 seconds | 10 seconds | 3 seconds | 3 |
+| Startup (runtime 1.6.0 and later) | `/live` | 0 seconds | 10 seconds | 1 second | 30 |
+
+The frontend startup probe allows five minutes for the sequential NATS and etcd connection waits and initialization. Older runtimes and images whose runtime version cannot be resolved keep the defaults without a startup probe. If you raise `NATS_STARTUP_CONNECT_TIMEOUT_SECONDS` or `ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS`, raise the startup probe allowance to cover the combined connection windows and initialization. See [Runtime Configuration](../../reference/components/runtime-configuration.mdx) for these timeouts.
+
+Workers use the system port, which defaults to `9090`:
 
 | Probe | Path | Period | Timeout | Failure threshold |
 | --- | --- | --- | --- | --- |
