@@ -97,8 +97,8 @@ class LoadScalingMixin:
 
         if (self._pending_num_p or self._pending_num_d) and desired > num_workers:
             return None
-        original_desired = desired
         desired = max(desired, resolve_min_endpoint(self._config, component))
+        original_desired = desired
         if self._config.enable_throughput_scaling:
             bound = (
                 self._throughput_lower_bound_p

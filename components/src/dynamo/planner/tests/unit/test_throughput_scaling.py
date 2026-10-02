@@ -434,6 +434,28 @@ def test_single_unchanged_load_holds_when_floors_are_met(mode):
     assert state.diagnostics().load_decision_reason == "insufficient_data"
 
 
+@pytest.mark.parametrize("mode", ["prefill", "decode"])
+def test_single_endpoint_floor_lift_is_not_reported_as_throughput_capped(mode):
+    state = _disagg_state(
+        5,
+        5,
+        None,
+        None,
+        enable_load_scaling=True,
+        min_gpus=-1,
+        prefill_min_endpoint=4,
+        decode_min_endpoint=4,
+    )
+    state._config.mode = mode
+    state._config.enable_throughput_scaling = False
+
+    decision = _load_decision(state, 2, 2)
+
+    assert decision is not None
+    assert (decision.num_prefill if mode == "prefill" else decision.num_decode) == 4
+    assert state.diagnostics().load_decision_reason == "scale_down"
+
+
 def test_single_endpoint_recovery_overrides_cap_without_minimum_gpu_budget():
     state = _disagg_state(
         1,
