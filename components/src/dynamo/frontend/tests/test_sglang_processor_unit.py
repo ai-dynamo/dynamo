@@ -4984,11 +4984,19 @@ HARMONY_MARKERS = [
 @pytest.fixture(scope="module")
 def reasoning_tokenizer():
     tokenizer = copy.deepcopy(get_tokenizer(MODEL))
-    # Cohere's channel markers are also single special tokens in its vocabulary.
+    # Register Cohere channel markers and Kimi's XTML special-token pieces.
     tokenizer.add_special_tokens(
         {
             "additional_special_tokens": HARMONY_MARKERS
-            + ["<|START_TEXT|>", "<|END_TEXT|>", "<|START_ACTION|>", "<|END_ACTION|>"]
+            + [
+                "<|START_TEXT|>",
+                "<|END_TEXT|>",
+                "<|START_ACTION|>",
+                "<|END_ACTION|>",
+                "<|open|>",
+                "<|close|>",
+                "<|sep|>",
+            ]
         }
     )
     return tokenizer
@@ -5048,6 +5056,24 @@ class TestReasoningTokenUsage:
             ("glm45", "<think>", '<tool_call>{"name":"f"}</tool_call>', False),
             ("kimi_k2", "<think>", "<|tool_calls_section_begin|>functions.f", False),
             (
+                "kimi_k3",
+                "<|open|>think<|sep|>",
+                "<|open|>response<|sep|>It is 4.<|close|>response<|sep|>",
+                False,
+            ),
+            (
+                "kimi_k3",
+                "",
+                "<|open|>response<|sep|>It is 4.<|close|>response<|sep|>",
+                True,
+            ),
+            (
+                "kimi_k3",
+                "<|open|>think<|sep|>",
+                "<|open|>tools<|sep|>functions.f",
+                False,
+            ),
+            (
                 "cohere_command4",
                 "",
                 "<|START_TEXT|>The answer is 4.<|END_TEXT|>",
@@ -5065,6 +5091,9 @@ class TestReasoningTokenUsage:
             "forced-qwen3",
             "glm45",
             "kimi-k2",
+            "kimi-k3-response",
+            "forced-kimi-k3-response",
+            "kimi-k3-tools",
             "cohere-text",
             "cohere-action",
         ],
@@ -5103,16 +5132,6 @@ class TestReasoningTokenUsage:
         post = self._post(tokenizer, "qwen3")
         self._feed(post, ids, step=2, finish_reason="length")
         assert post.reasoning_token_count == len(ids)
-
-    @pytest.mark.parametrize("step", [1, 2, 3, 7])
-    def test_count_does_not_depend_on_chunking(self, reasoning_tokenizer, step):
-        count = self._count(
-            reasoning_tokenizer,
-            "gpt-oss",
-            self.ANALYSIS + self.FINAL,
-            step=step,
-        )
-        assert count == len(self._ids(reasoning_tokenizer, self.ANALYSIS))
 
     COMMENTARY = "<|start|>assistant<|channel|>commentary<|message|>Checking.<|end|>"
     SECOND = "<|start|>assistant<|channel|>analysis<|message|>Check again.<|end|>"

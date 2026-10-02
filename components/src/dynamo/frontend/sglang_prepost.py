@@ -21,12 +21,13 @@ from sglang.srt.entrypoints.openai.protocol import (
 from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
+from sglang.srt.function_call.kimik3_format import RESPONSE_CLOSE, RESPONSE_OPEN
 from sglang.srt.function_call.utils import get_json_schema_constraint
 from sglang.srt.parser.jinja_template_utils import (
     detect_jinja_template_content_format,
     process_content_for_template_format,
 )
-from sglang.srt.parser.reasoning_parser import ReasoningParser
+from sglang.srt.parser.reasoning_parser import KimiK3Detector, ReasoningParser
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
@@ -1047,8 +1048,8 @@ class _ReasoningTokenCounter:
     reasoning and content, counting starts at the opening marker, found by
     token id, or covers the whole segment when there is none. A segment still
     open when generation ends is classified the same way. Detector-defined
-    tool/text/action starts also split segments, but their tokens belong to
-    normal output and are excluded when the parser leaves reasoning.
+    tool/text/action/response starts also split segments; their tokens belong
+    to normal output and are excluded when the parser leaves reasoning.
 
     Both the cut points and what the shadow is fed depend only on the token
     sequence, so the count is the same however the tokens were batched into
@@ -1080,6 +1081,8 @@ class _ReasoningTokenCounter:
             "tool_start_token",
             "TEXT_START_TOKEN",
             "ACTION_START_TOKEN",
+            "RESPONSE_OPEN",
+            "RESPONSE_CLOSE",
         ):
             ids = (
                 end_marker_ids
@@ -1154,9 +1157,11 @@ class _ReasoningTokenCounter:
         count = len(segment)
         if opening >= 0:
             count -= opening - len(self._start_marker_ids)
-        if end_attribute in ("TEXT_START_TOKEN", "ACTION_START_TOKEN") or (
-            end_attribute == "tool_start_token" and normal_text
-        ):
+        if end_attribute in (
+            "TEXT_START_TOKEN",
+            "ACTION_START_TOKEN",
+            "RESPONSE_OPEN",
+        ) or (end_attribute == "tool_start_token" and normal_text):
             # A tool marker may be literal reasoning (e.g. a detector requiring
             # it at line start). Exclude it only when the parser passes it on.
             count -= marker_width
@@ -1168,6 +1173,12 @@ def _reasoning_marker_ids(
 ) -> list[int]:
     detector = getattr(reasoning_parser, "detector", None)
     marker = getattr(detector, attribute, None)
+    if isinstance(detector, KimiK3Detector):
+        # Kimi declares response boundaries at module scope, not on the detector.
+        if attribute == "RESPONSE_OPEN":
+            marker = RESPONSE_OPEN
+        elif attribute == "RESPONSE_CLOSE":
+            marker = RESPONSE_CLOSE
     encode = getattr(tokenizer, "encode", None)
     if not isinstance(marker, str) or not marker or not callable(encode):
         return []

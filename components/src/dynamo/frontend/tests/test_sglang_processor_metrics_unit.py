@@ -79,6 +79,9 @@ def _install_sglang_stubs(install_module):
     class _ReasoningParser:
         pass
 
+    class _KimiK3Detector:
+        pass
+
     _install_module(install_module, "sglang")
     _install_module(install_module, "sglang.srt")
     _install_module(install_module, "sglang.srt.entrypoints")
@@ -112,6 +115,12 @@ def _install_sglang_stubs(install_module):
         "sglang.srt.function_call.utils",
         get_json_schema_constraint=lambda *args, **kwargs: None,
     )
+    _install_module(
+        install_module,
+        "sglang.srt.function_call.kimik3_format",
+        RESPONSE_OPEN="<|open|>response<|sep|>",
+        RESPONSE_CLOSE="<|close|>response<|sep|>",
+    )
     _install_module(install_module, "sglang.srt.parser")
     _install_module(
         install_module,
@@ -128,6 +137,7 @@ def _install_sglang_stubs(install_module):
         install_module,
         "sglang.srt.parser.reasoning_parser",
         ReasoningParser=_ReasoningParser,
+        KimiK3Detector=_KimiK3Detector,
     )
     _install_module(install_module, "sglang.srt.utils")
     _install_module(

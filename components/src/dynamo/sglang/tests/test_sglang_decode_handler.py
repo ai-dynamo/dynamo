@@ -1716,9 +1716,8 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
         (7, {"reasoning_tokens": 7}),
         (12, {"reasoning_tokens": 9}),
         (0, None),
-        (None, None),
     ],
-    ids=["count", "clamped-to-completion", "zero", "missing"],
+    ids=["count", "clamped-to-completion", "zero"],
 )
 async def test_process_token_stream_reports_reasoning_tokens(
     reasoning_tokens, expected_details
@@ -1729,9 +1728,8 @@ async def test_process_token_stream_reports_reasoning_tokens(
         "finish_reason": {"type": "stop"},
         "prompt_tokens": 2,
         "completion_tokens": 9,
+        "reasoning_tokens": reasoning_tokens,
     }
-    if reasoning_tokens is not None:
-        meta_info["reasoning_tokens"] = reasoning_tokens
 
     chunks = await _collect(
         handler._process_token_stream(

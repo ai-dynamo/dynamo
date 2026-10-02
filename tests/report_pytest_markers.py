@@ -169,6 +169,7 @@ STUB_MODULES = [
     "sglang.srt.function_call.core_types",
     "sglang.srt.function_call.function_call_parser",
     "sglang.srt.function_call.json_array_parser",
+    "sglang.srt.function_call.kimik3_format",
     "sglang.srt.function_call.utils",
     "sglang.srt.managers",
     "sglang.srt.managers.io_struct",
