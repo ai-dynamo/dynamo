@@ -75,7 +75,7 @@ mod types;
 
 pub mod concurrent_radix_tree_compressed;
 pub mod cuckoo;
-pub mod lineage;
+pub mod positional_carrier;
 pub mod positional;
 pub mod pruning;
 pub mod radix_tree;
