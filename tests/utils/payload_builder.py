@@ -29,6 +29,7 @@ from tests.utils.payloads import (
     ResponsesStreamPayload,
     RouterNvextChatPayload,
     SGLangMetricsPayload,
+    StreamingChatPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
 )
@@ -743,7 +744,10 @@ def chat_payload_with_logprobs(
     max_tokens: int = 50,
     temperature: float = 0.0,
     top_logprobs: int = 3,
-) -> ChatPayloadWithLogprobs:
+    stream: bool = False,
+    prompt_logprobs: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> ChatPayloadWithLogprobs | StreamingChatPayload:
     """
     Create a chat payload that requests and validates logprobs in the response.
 
@@ -754,6 +758,9 @@ def chat_payload_with_logprobs(
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature
         top_logprobs: Number of top logprobs to return per token
+        stream: Validate SSE content, completion, usage, and token associations
+        prompt_logprobs: Number of prompt candidates to request (streaming only)
+        extra_body: Additional request fields, such as chat_template_kwargs
 
     Returns:
         ChatPayloadWithLogprobs that validates logprobs in response
@@ -771,11 +778,30 @@ def chat_payload_with_logprobs(
         "top_logprobs": top_logprobs,
     }
 
-    return ChatPayloadWithLogprobs(
+    if prompt_logprobs is not None and not stream:
+        raise ValueError("Prompt logprobs validation requires stream=True")
+    if extra_body:
+        body.update(extra_body)
+    payload_class = ChatPayloadWithLogprobs
+    if stream:
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
+        body["return_tokens_as_token_ids"] = True
+        nvext = dict(body.get("nvext") or {})
+        fields = [*nvext.get("extra_fields", []), "completion_token_ids"]
+        nvext["extra_fields"] = fields
+        body["nvext"] = nvext
+        if prompt_logprobs is not None:
+            body["prompt_logprobs"] = prompt_logprobs
+            fields.extend(["prompt_token_ids", "prompt_logprobs"])
+        payload_class = StreamingChatPayload
+    return payload_class(
         body=body,
         repeat_count=repeat_count,
         expected_log=[],
-        expected_response=expected_response or ["AI", "knock", "joke"],
+        expected_response=(
+            ["AI", "knock", "joke"] if expected_response is None else expected_response
+        ),
     )
 
 
