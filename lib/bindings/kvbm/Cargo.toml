@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [patch.crates-io]
-# Keep this independent workspace on the same tokenizer review pin.
-dynamo-tokenizers = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "27ff7047fac0938e02f94e9ad3e3e53c660cb74c" }
+# Keep this independent workspace on the same frontend review pins.
+dynamo-protocols = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "0389e0577664b749dd55f083eec3dff20949ea65" }
+dynamo-tokenizers = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "0389e0577664b749dd55f083eec3dff20949ea65" }
+dynamo-renderer = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "0389e0577664b749dd55f083eec3dff20949ea65" }
 
 [workspace]
 

@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [patch.crates-io]
-# Review pin until the companion tokenizer fix is published. All consuming Cargo roots
-# must use the same source, including transitive renderer/parser dependencies.
-dynamo-tokenizers = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "27ff7047fac0938e02f94e9ad3e3e53c660cb74c" }
+# Review pins until the companion tokenizer/renderer releases are published. Keep their
+# shared protocol types on the same source in every consuming Cargo root.
+dynamo-protocols = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "0389e0577664b749dd55f083eec3dff20949ea65" }
+dynamo-tokenizers = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "0389e0577664b749dd55f083eec3dff20949ea65" }
+dynamo-renderer = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "0389e0577664b749dd55f083eec3dff20949ea65" }
 
 [workspace]
 members = [
@@ -70,8 +72,8 @@ aisimulate-core = { version = "=0.13.0-dev.202609300000000061" }
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
 dynamo-llm = { path = "lib/llm", version = "1.6.0" }
 dynamo-rl = { path = "lib/rl", version = "1.6.0" }
-dynamo-tokenizers = { version = "=2.0.0" }
-dynamo-renderer = { version = "=6.0.0" }
+dynamo-tokenizers = { version = "=3.0.0" }
+dynamo-renderer = { version = "=7.0.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.6.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.6.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.6.0" }
