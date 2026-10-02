@@ -19,12 +19,14 @@ func TestTerminalDeletionEvidenceRequiresEmptyAcceptedAndObservedLevels(t *testi
 			name: "admitted traffic remains",
 			mutate: func(_ *GroupStatus, _ *CapacityObservation, traffic *TrafficObservation, _ *MembershipObservation) {
 				traffic.Admitted = []ReplicaMembership{member}
+				traffic.Drained = nil
 			},
 		},
 		{
 			name: "traffic is still draining",
 			mutate: func(_ *GroupStatus, _ *CapacityObservation, traffic *TrafficObservation, _ *MembershipObservation) {
 				traffic.Draining = []ReplicaMembership{member}
+				traffic.Drained = nil
 			},
 		},
 		{
