@@ -5336,10 +5336,19 @@ class InstrumentedScheduler(AsyncScheduler):
                         {
                             "benchmark_id": point.benchmark_id,
                             "batch": point.batch_size,
+                            "total_kv_read_tokens": point.total_kv_read_tokens,
                             "depth": depth,
                             "required_blocks": required,
                             "usable_blocks": usable,
                         }
+                    )
+                    logger.warning(
+                        "KVWARM: native point batch=%d kv=%d needs %d blocks, "
+                        "pool has %d; using fake-KV fallback",
+                        point.batch_size,
+                        point.total_kv_read_tokens,
+                        required,
+                        usable,
                     )
         else:
             repeats = self._kvwarm_giant_repeats()
@@ -5649,10 +5658,11 @@ class InstrumentedScheduler(AsyncScheduler):
     def _kvwarm_native_required_blocks(self, context_lengths: list[int]) -> int:
         """Native fleet peak, including admission and repeated steady writes.
 
-        An align-mode state group adds one block per stage: a prefill that ends
-        on a hash boundary inside a Mamba block registers its own partial tail,
-        and the first decode's admission check then asks for one block more
-        than it allocates.
+        Each align-mode state group adds one block per stage: a prefill that
+        ends on a hash boundary inside a Mamba block registers its own partial
+        tail in that group's manager, and the first decode's admission check
+        then asks the group for one block more than it allocates. The
+        coordinator sums the asks over groups.
         """
         repeats = min(
             self._kvwarm_giant_repeats(),
@@ -5661,11 +5671,9 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_capacity_limit("max_model_len") - 2 - max(context_lengths),
             ),
         )
-        align_headroom = int(
-            any(
-                getattr(manager, "mamba_cache_mode", None) == "align"
-                for manager in self.kv_cache_manager.coordinator.single_type_managers
-            )
+        align_headroom = sum(
+            getattr(manager, "mamba_cache_mode", None) == "align"
+            for manager in self.kv_cache_manager.coordinator.single_type_managers
         )
         return align_headroom + sum(
             self._bench_blocks_per_req(

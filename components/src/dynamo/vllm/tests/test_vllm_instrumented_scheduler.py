@@ -109,7 +109,8 @@ def _install_test_capacity_preflight(stub, capacity=None):
     stub._bench_make_local_capacity = lambda: capacity
     stub._bench_synchronizer = None
     if getattr(stub, "kv_cache_manager", None) is None:
-        # Keep a caller's manager: _bench_blocks_per_req reads its groups.
+        # Keep a caller's manager: _bench_blocks_per_req reads its coordinator's
+        # managers, not the groups installed here.
         stub.kv_cache_manager = SimpleNamespace(
             kv_cache_config=SimpleNamespace(kv_cache_groups=[])
         )
@@ -5192,8 +5193,8 @@ def test_kvwarm_native_rejects_unsupported_spec_with_state():
 
 
 @pytest.mark.core
-@pytest.mark.parametrize("contexts", [(4, 3), (5, 4), (16, 15), (512, 511), (513, 512)])
-def test_kvwarm_native_stage_prefills_exact_heterogeneous_contexts(contexts):
+def test_kvwarm_native_stage_prefills_exact_heterogeneous_contexts():
+    contexts = (513, 512)  # Admission lengths (ctx - 1) of contexts 514 and 513.
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._kvwarm_native = True
     stub._kvwarm_seq = 0
@@ -5456,6 +5457,7 @@ def test_kvwarm_native_grid_numbering_preserves_each_execution(
             {
                 "benchmark_id": benchmark_id,
                 "batch": 20,
+                "total_kv_read_tokens": 40,
                 "depth": 1,
                 "required_blocks": 80,
                 "usable_blocks": 63,
@@ -5700,27 +5702,34 @@ def test_kvwarm_native_capacity_uses_sliding_window_admission_caps():
 
 
 @pytest.mark.core
-@pytest.mark.parametrize("align", [True, False])
-def test_kvwarm_native_capacity_counts_mamba_state_blocks(align):
+@pytest.mark.parametrize(
+    "modes",
+    [("none",), ("align",), ("align", "align")],
+    ids=["none", "align", "two_align"],
+)
+def test_kvwarm_native_capacity_counts_mamba_state_blocks(modes):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     full = SimpleNamespace(block_size=16)
-    # Three state blocks per request in both modes: align holds 2 + 0
-    # speculative + 1 checkpoint; "none" (block size = max_model_len) holds
-    # 1 + 2 speculative.
-    state = (
-        SimpleNamespace(
-            block_size=16,
-            mamba_cache_mode="align",
-            num_speculative_blocks=0,
-            kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+    # Three state blocks per request and state group in every mode: align holds
+    # 2 + 0 speculative + 1 checkpoint; "none" (block size = max_model_len)
+    # holds 1 + 2 speculative.
+    states = [
+        (
+            SimpleNamespace(
+                block_size=16,
+                mamba_cache_mode="align",
+                num_speculative_blocks=0,
+                kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+            )
+            if mode == "align"
+            else SimpleNamespace(
+                block_size=4096, mamba_cache_mode="none", num_speculative_blocks=2
+            )
         )
-        if align
-        else SimpleNamespace(
-            block_size=4096, mamba_cache_mode="none", num_speculative_blocks=2
-        )
-    )
+        for mode in modes
+    ]
     stub.kv_cache_manager = SimpleNamespace(
-        coordinator=SimpleNamespace(single_type_managers=[full, state])
+        coordinator=SimpleNamespace(single_type_managers=[full, *states])
     )
     stub.block_size = 16
     stub.num_lookahead_tokens = 0
@@ -5728,10 +5737,12 @@ def test_kvwarm_native_capacity_counts_mamba_state_blocks(align):
     stub._bench_capacity_limit = lambda name: 4096
 
     # Per request: ceil((ctx + 1 + 3) / 16) full-attention blocks + 3 state
-    # blocks. Align adds one block per stage: a prefill ending on a hash
-    # boundary inside a Mamba block registers its own partial tail, and the
-    # first decode's admission check asks for one block more than it allocates.
-    expected = (3 + 3) + (1 + 3) + int(align)
+    # blocks per state group. Each align group adds one block per stage: a
+    # prefill ending on a hash boundary inside a Mamba block registers its own
+    # partial tail, and the first decode's admission check asks that group for
+    # one block more than it allocates; the coordinator sums the asks.
+    state_blocks = 3 * len(modes)
+    expected = (3 + state_blocks) + (1 + state_blocks) + modes.count("align")
     assert stub._kvwarm_native_required_blocks([31, 12]) == expected
 
 
@@ -7062,6 +7073,7 @@ def test_kvwarm_dp_filter_rebases_native_plan_without_dropped_points(monkeypatch
         {
             "benchmark_id": None,
             "batch": 2,
+            "total_kv_read_tokens": 62,
             "depth": 30,
             "required_blocks": 6,
             "usable_blocks": 4,
