@@ -1122,22 +1122,27 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             cached_prefix_tokens = Some(cached);
                         }
 
-                        // Generate a token (with thinking boundaries if configured)
-                        let token_id = if has_planned_output_tokens {
-                            signal.token_id.unwrap_or_else(generate_random_token)
-                        } else if token_count == 0 && think_len > 0 {
-                            reasoning.as_ref().unwrap().start_thinking_token_id
-                        } else if think_len > 0 && token_count == think_len - 1 {
-                            reasoning.as_ref().unwrap().end_thinking_token_id
+                        let token_ids = if effective_max_output_tokens == 0 {
+                            Vec::new()
                         } else {
-                            generate_random_token()
+                            let token_id = if has_planned_output_tokens {
+                                signal.token_id.unwrap_or_else(generate_random_token)
+                            } else if token_count == 0 && think_len > 0 {
+                                reasoning.as_ref().unwrap().start_thinking_token_id
+                            } else if think_len > 0 && token_count == think_len - 1 {
+                                reasoning.as_ref().unwrap().end_thinking_token_id
+                            } else {
+                                generate_random_token()
+                            };
+                            token_count += 1;
+                            vec![token_id]
                         };
-                        token_count += 1;
+                        let emitted_token_count = token_ids.len();
 
                         // The first chunk carries the admission cache truth; the
                         // final chunk repeats cumulative totals (OpenAI convention).
                         let output = LLMEngineOutput {
-                            token_ids: vec![token_id],
+                            token_ids,
                             disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
                             completion_usage: signal.cached_tokens.map(|cached| {
                                 usage_with_cached_tokens(prompt_tokens_count, token_count, cached)
@@ -1163,7 +1168,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
                                 }
-                                native_timing.record_tokens(1);
+                                native_timing.record_tokens(emitted_token_count);
                                 None
                             };
 
@@ -1224,10 +1229,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             }
 
                             if native_sglang_terminal {
-                                // Native SGLang carries terminal metadata on the final token.
+                                // Native SGLang carries terminal metadata on the final chunk.
                                 let mut output = terminal_output
                                     .take()
-                                    .expect("native SGLang request has a terminal token");
+                                    .expect("native SGLang request has a terminal chunk");
                                 output.finish_reason = Some(FinishReason::Length);
                                 if let Some(cached) = cached_prefix_tokens {
                                     output.completion_usage = Some(usage_with_cached_tokens(
@@ -1239,7 +1244,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
                                 }
-                                native_timing.record_tokens(1);
+                                native_timing.record_tokens(emitted_token_count);
                             } else {
                                 let mut final_output = LLMEngineOutput::length();
                                 if let Some(cached) = cached_prefix_tokens {
@@ -1260,7 +1265,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             if !send_response(&stream_tx, output, &async_context) {
                                 break;
                             }
-                            native_timing.record_tokens(1);
+                            native_timing.record_tokens(emitted_token_count);
                         }
                     }
 
@@ -1527,6 +1532,43 @@ mod tests {
             response["meta_info"]["finish_reason"],
             serde_json::json!({"type": "length"})
         );
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_sglang_zero_output_preserves_prefill_only_scores() {
+        let args = MockEngineArgs::builder()
+            .engine_type(dynamo_mocker::common::protocols::EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = decode_request(3, 0);
+        request.extra_args = Some(serde_json::json!({"sglang_tito": {
+            "rid": "score",
+            "return_logprob": true,
+            "token_ids_logprob": [17, 4]
+        }}));
+
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let output = stream.next().await.unwrap().data.unwrap();
+        assert!(output.token_ids.is_empty());
+        assert_eq!(output.finish_reason, Some(FinishReason::Length));
+        assert!(
+            output
+                .completion_usage
+                .as_ref()
+                .is_none_or(|usage| usage.completion_tokens == 0)
+        );
+        let response = &output.engine_data.as_ref().unwrap()["sglang_response"];
+        assert_eq!(response["output_ids"], serde_json::json!([]));
+        assert_eq!(response["meta_info"]["completion_tokens"], 0);
+        crate::protocols::systemone::parse_candidate_scores(response, &[17, 4]).unwrap();
         assert!(stream.next().await.is_none());
     }
 

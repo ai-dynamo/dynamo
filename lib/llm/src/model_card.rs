@@ -1290,6 +1290,13 @@ impl ModelDeploymentCard {
                         .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
                 }
 
+                // A serial representative must never admit mixed-batch workers.
+                if self.runtime_config.supports_runtime_capability(
+                    crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1,
+                ) && self.runtime_config.max_num_seqs == Some(1) {
+                    bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true");
+                }
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -3356,6 +3363,41 @@ mod ownership_tests {
 
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn systemone_serial_contract_isolates_worker_sets() {
+        use crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1;
+
+        fn card(
+            capability: Option<serde_json::Value>,
+            capacity: Option<u64>,
+        ) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config.max_num_seqs = capacity;
+            if let Some(capability) = capability {
+                card.runtime_config
+                    .runtime_data
+                    .insert(SGLANG_SYSTEMONE_SERIAL_V1.to_string(), capability);
+            }
+            card
+        }
+
+        let enabled = card(Some(true.into()), Some(1));
+        for unsupported in [
+            card(None, Some(1)),
+            card(Some(false.into()), Some(1)),
+            card(Some(serde_json::json!({"enabled": true})), Some(1)),
+            card(Some(true.into()), None),
+            card(Some(true.into()), Some(2)),
+        ] {
+            assert_ne!(enabled.mdcsum(), unsupported.mdcsum());
+            assert_eq!(card(None, None).mdcsum(), unsupported.mdcsum());
+        }
+        assert_eq!(
+            enabled.mdcsum(),
+            card(Some("true".into()), Some(1)).mdcsum()
+        );
     }
 
     #[test]

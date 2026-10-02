@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
-    DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+    DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use crate::engine::{LiveEngineScheduler, create_engine_with_rank_sink};
 #[cfg(test)]
@@ -420,13 +420,18 @@ impl LiveEngine {
 
     pub(crate) fn start_grouped_with_options(
         args: MockEngineArgs,
-        options: Vec<LiveEngineOptions>,
+        mut options: Vec<LiveEngineOptions>,
     ) -> anyhow::Result<Vec<Self>> {
         let runtime = Handle::try_current()
             .context("LiveEngine::start_grouped_with_options requires an active Tokio runtime")?;
         let args = args
             .normalized()
             .context("invalid Mocker engine arguments")?;
+        if args.engine_type == EngineType::Sglang {
+            for options_for_rank in &mut options {
+                options_for_rank.allow_zero_output = true;
+            }
+        }
         anyhow::ensure!(
             options.len() == args.dp_size as usize,
             "grouped live Mocker requires one options value per DP rank: expected {}, got {}",
@@ -509,13 +514,16 @@ impl LiveEngine {
     fn start_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        options: LiveEngineOptions,
+        mut options: LiveEngineOptions,
     ) -> anyhow::Result<Self> {
         let runtime =
             Handle::try_current().context("LiveEngine::start requires an active Tokio runtime")?;
         let args = args
             .normalized()
             .context("invalid Mocker engine arguments")?;
+        if args.engine_type == EngineType::Sglang {
+            options.allow_zero_output = true;
+        }
         let group_cancel = CancellationToken::new();
         let routes = Arc::new(RequestRoutes::default());
         let LiveEngineScheduler {
@@ -609,7 +617,8 @@ impl LiveEngine {
         );
         let output_length = request.effective_max_output_tokens();
         anyhow::ensure!(
-            self.inner.allow_zero_output || output_length > 0,
+            output_length > 0
+                || (self.inner.allow_zero_output && request.output_token_ids.is_none()),
             "live requests must generate at least one output token"
         );
         request.max_output_tokens = output_length;

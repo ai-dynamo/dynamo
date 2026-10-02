@@ -2193,6 +2193,7 @@ dependencies = [
  "hf-hub",
  "http-body-util",
  "image",
+ "indexmap 2.14.0",
  "ipnet",
  "json-five",
  "libc",

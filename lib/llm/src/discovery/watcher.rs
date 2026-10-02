@@ -31,8 +31,9 @@ use crate::{
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
     local_model::runtime_config::{
-        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY, TokenizerBackend,
-        VLLM_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        SGLANG_GENERATE_CAPABILITY, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -205,6 +206,7 @@ pub struct ModelWatcher {
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
+    systemone_enabled: bool,
     plugins: RouterPluginBuilder,
 }
 
@@ -315,6 +317,7 @@ impl ModelWatcher {
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
+            systemone_enabled: false,
             plugins,
         }
     }
@@ -337,6 +340,10 @@ impl ModelWatcher {
 
     pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
         self.generate_engine_capabilities = capabilities;
+    }
+
+    pub(crate) fn set_systemone_enabled(&mut self, enabled: bool) {
+        self.systemone_enabled = enabled;
     }
     /// Compatibility wrapper for callers that enable the vLLM Generate route.
     pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
@@ -535,10 +542,35 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let tokenizer = if (needs_local_chat_pipeline || needs_local_completions_pipeline)
-                && card.has_tokenizer()
-            {
+            let needs_systemone_preprocessor = self.systemone_enabled
+                && card
+                    .runtime_config
+                    .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
+                && card.runtime_config.supports_runtime_capability(
+                    crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1,
+                )
+                && card.runtime_config.max_num_seqs == Some(1)
+                && card.worker_type == Some(WorkerType::Aggregated)
+                && card.needs.is_empty()
+                && card.lora.is_none()
+                && card.migration_limit == 0
+                && !card.runtime_config.runtime_data.contains_key("spec_decode");
+            let needs_local_tokenizer =
+                needs_local_chat_pipeline || needs_local_completions_pipeline;
+            let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
                 Some(card.tokenizer().context("tokenizer")?)
+            } else if needs_systemone_preprocessor && card.has_tokenizer() {
+                match card.tokenizer().context("System One tokenizer") {
+                    Ok(tokenizer) => Some(tokenizer),
+                    Err(cause) => {
+                        tracing::warn!(
+                            model_name = card.name(),
+                            error = %format!("{cause:#}"),
+                            "System One tokenizer is unavailable; keeping other model surfaces active"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -661,6 +693,31 @@ impl ModelWatcher {
             });
             worker_set.encoder_router = encoder_chooser.clone();
 
+            if needs_systemone_preprocessor {
+                worker_set.systemone_preprocessor = match tokenizer.clone() {
+                    Some(tokenizer) => {
+                        match worker_set_chat_preprocessor(card, tokenizer, &cancellation) {
+                            Ok(preprocessor) => Some(preprocessor),
+                            Err(error) => {
+                                tracing::warn!(
+                                    model = card.name(),
+                                    error = %format!("{error:#}"),
+                                    "System One preprocessor is unavailable"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            model = card.name(),
+                            "System One preprocessor is unavailable: model has no supported Rust tokenizer"
+                        );
+                        None
+                    }
+                };
+            }
+
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
                     entrypoint::input::build_preprocessed_routing_with_session_affinity_mode(
@@ -705,8 +762,10 @@ impl ModelWatcher {
                     )
                 } else if let Some(tk) = tokenizer.clone() {
                     // Only chat pipelines use speculative prefill.
-                    let preprocessor =
-                        worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?;
+                    let preprocessor = match worker_set.systemone_preprocessor.clone() {
+                        Some(preprocessor) => preprocessor,
+                        None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
+                    };
                     Some(
                         routing
                             .build_pipeline::<

@@ -251,6 +251,7 @@ async fn run_with_router_plugins(
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();
+            let systemone_enabled = http_service.state().systemone_enabled();
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
@@ -266,6 +267,7 @@ async fn run_with_router_plugins(
                 model.runtime_config().tokenizer_backend,
                 model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
+                systemone_enabled,
                 plugins,
             )
             .await?;
@@ -330,7 +332,7 @@ async fn run_with_router_plugins(
 
 fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Result<()> {
     for endpoint_type in EndpointType::all() {
-        if endpoint_type != EndpointType::Batch {
+        if !matches!(endpoint_type, EndpointType::Batch | EndpointType::SystemOne) {
             http_service.enable_model_endpoint(endpoint_type, true)?;
         }
     }
@@ -355,6 +357,7 @@ async fn run_watcher(
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
+    systemone_enabled: bool,
     plugins: RouterPluginBuilder,
 ) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled. The
@@ -380,6 +383,7 @@ async fn run_watcher(
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
     watch_obj.set_generate_engine_capabilities(generate_engine_capabilities);
+    watch_obj.set_systemone_enabled(systemone_enabled);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
