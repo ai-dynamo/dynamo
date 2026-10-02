@@ -38,6 +38,25 @@ def acquire_writer_guard(path: Path) -> int:
         raise
 
 
+def retired_writer_cohort_has_no_processes(path: Path) -> bool:
+    """Check the immutable tombstone while excluding all cohort guard holders.
+
+    This proves that the registered CPU/CUDA worker processes have released
+    their lifetime guards. It is deliberately not a substitute for MPS client
+    termination: an MPS server can retain outstanding GPU work after a client
+    process exits.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return os.pread(fd, 1, 0) == b"R"
+    finally:
+        os.close(fd)
+
+
 async def retire_writer_cohort(path: Path) -> None:
     """Exclude current and future CPU submitters; NOT a CUDA completion fence.
 

@@ -370,7 +370,7 @@ def test_two_phase_recovery_releases_only_idle_before_gpu_quiescence(tmp_path):
         shadow.close()
 
 
-def test_two_phase_recovery_preserves_protected_interrupted_transition(tmp_path):
+def test_two_phase_recovery_drops_protected_interrupted_transition(tmp_path):
     path = str(tmp_path / "leases-protected-transition.shm")
     primary = SharedMemoryKVLeaseClient(
         path, namespace="protected-transition", owner_id="primary", total_blocks=4
@@ -396,16 +396,114 @@ def test_two_phase_recovery_preserves_protected_interrupted_transition(tmp_path)
         released, quarantined = shadow.quarantine_foreign(protected_blocks={1})
         assert released == 0
         assert quarantined == 1
-        assert shadow.exact_recoverable(old)
+        assert not shadow.exact_recoverable(old)
         assert not shadow.exact_recoverable([KVLease(1, old[0].generation + 1)])
         assert shadow.adopt(old) == []
 
-        assert shadow.reclaim_quarantined() == 0
+        assert shadow.reclaim_quarantined() == 1
+        assert not shadow.exact_recoverable(old)
+        assert shadow.adopt(old) == []
+        replacement = shadow.acquire(1, preferred_blocks=[1], strict_preferred=True)
+        assert replacement == [KVLease(1, old[0].generation + 1)]
+        shadow.release(replacement)
+        assert shadow.raw_free_count() == 4
+    finally:
+        primary.close()
+        shadow.close()
+
+
+def test_two_phase_recovery_preserves_interrupted_reseal(tmp_path):
+    path = str(tmp_path / "leases-protected-reseal.shm")
+    primary = SharedMemoryKVLeaseClient(
+        path, namespace="protected-reseal", owner_id="primary", total_blocks=3
+    )
+    shadow = SharedMemoryKVLeaseClient(
+        path, namespace="protected-reseal", owner_id="shadow", total_blocks=3
+    )
+    try:
+        old = primary.acquire(1, preferred_blocks=[1], strict_preferred=True)
+        primary.seal(old)
+        with open(path, "r+b", buffering=0) as lease_file:
+            buf = mmap.mmap(lease_file.fileno(), 0)
+            try:
+                # An idempotent seal of an already-immutable record uses the
+                # otherwise-unused reader bit to identify this crash window.
+                struct.pack_into(
+                    "<I", buf, _LEASE_RECORD_OFFSET + _LEASE_RECORD_SIZE, 12
+                )
+            finally:
+                buf.close()
+
+        assert shadow.quarantine_foreign(protected_blocks={1}) == (0, 0)
         assert shadow.exact_recoverable(old)
+        pin = shadow.pin_read(old)
+        assert pin is not None
+        shadow.unpin_read(pin)
+        assert shadow.adopt(old) == [KVLease(1, old[0].generation + 1)]
+    finally:
+        primary.close()
+        shadow.close()
+
+
+def test_frozen_sealed_allows_successor_reads_but_never_early_adoption(tmp_path):
+    path = str(tmp_path / "leases-frozen-read.shm")
+    primary = SharedMemoryKVLeaseClient(
+        path, namespace="frozen-read", owner_id="primary", total_blocks=3
+    )
+    shadow = SharedMemoryKVLeaseClient(
+        path, namespace="frozen-read", owner_id="shadow", total_blocks=3
+    )
+    try:
+        old = primary.acquire(1, preferred_blocks=[1], strict_preferred=True)
+        primary.seal(old)
+        old_read = primary.pin_read(old)
+        assert old_read is not None
+        assert shadow.quarantine_foreign(protected_blocks={1}) == (0, 1)
+        assert shadow.exact_recoverable(old)
+        assert shadow.adopt(old) == []
+        new_read = shadow.pin_read(old)
+        assert new_read is not None
+        with pytest.raises(RuntimeError):
+            shadow.acquire(1, preferred_blocks=[1], strict_preferred=True)
+
+        # Proof retires only predecessor work. The successor's pin remains
+        # live, so ownership and writable reuse are still blocked.
+        assert shadow.reclaim_quarantined() == 0
+        assert shadow.adopt(old) == []
+        shadow.unpin_read(new_read)
         adopted = shadow.adopt(old)
         assert adopted == [KVLease(1, old[0].generation + 1)]
         shadow.release(adopted)
-        assert shadow.raw_free_count() == 4
+        assert shadow.raw_free_count() == 3
+    finally:
+        primary.close()
+        shadow.close()
+
+
+def test_phase_two_never_steals_a_live_successor_mutation(tmp_path):
+    path = str(tmp_path / "leases-busy-phase-two.shm")
+    primary = SharedMemoryKVLeaseClient(
+        path, namespace="busy-phase-two", owner_id="primary", total_blocks=2
+    )
+    shadow = SharedMemoryKVLeaseClient(
+        path, namespace="busy-phase-two", owner_id="shadow", total_blocks=2
+    )
+    try:
+        primary.acquire(1, preferred_blocks=[1], strict_preferred=True)
+        assert shadow.quarantine_foreign() == (0, 1)
+        with open(path, "r+b", buffering=0) as lease_file:
+            buf = mmap.mmap(lease_file.fileno(), 0)
+            try:
+                # Simulate a successor operation that acquired the mutation
+                # guard just as asynchronous GPU proof completed.
+                struct.pack_into("<Q", buf, 24, 1)
+                with pytest.raises(RuntimeError, match="live successor mutations"):
+                    shadow.reclaim_quarantined()
+                assert struct.unpack_from("<Q", buf, 24)[0] == 1
+                struct.pack_into("<Q", buf, 24, 0)
+            finally:
+                buf.close()
+        assert shadow.reclaim_quarantined() == 1
     finally:
         primary.close()
         shadow.close()
@@ -451,7 +549,79 @@ def test_delayed_phase_two_cannot_reclaim_a_newer_recovery_generation(tmp_path):
         second_shadow.close()
 
 
-def test_directory_phase_two_does_not_classify_newer_owner_pages(tmp_path, monkeypatch):
+def test_successor_inherits_quarantine_stranded_by_dead_successor(tmp_path):
+    path = str(tmp_path / "leases-repeated-failover.shm")
+    clients = [
+        SharedMemoryKVLeaseClient(
+            path, namespace="repeated", owner_id=owner, total_blocks=4
+        )
+        for owner in ("primary", "first-shadow", "second-shadow")
+    ]
+    primary, first_shadow, second_shadow = clients
+    try:
+        primary.acquire(1, preferred_blocks=[1], strict_preferred=True)
+        sealed = primary.acquire(1, preferred_blocks=[2], strict_preferred=True)
+        primary.seal(sealed)
+        assert primary.pin_read(sealed) is not None
+        assert first_shadow.quarantine_foreign(protected_blocks={2}) == (0, 2)
+        # The first successor reads the frozen page, then dies before its
+        # phase two; its pin and its owner stamp are both orphaned.
+        assert first_shadow.pin_read(sealed) is not None
+
+        assert second_shadow.quarantine_foreign(protected_blocks={2}) == (0, 0)
+        assert second_shadow.reclaim_quarantined() == 0
+
+        assert second_shadow.quarantine_foreign(
+            protected_blocks={2}, inherit_quarantine=True
+        ) == (0, 2)
+        assert second_shadow.exact_recoverable(sealed)
+        assert second_shadow.reclaim_quarantined() == 1
+        adopted = second_shadow.adopt(sealed)
+        assert adopted == [KVLease(2, sealed[0].generation + 1)]
+        recovered = second_shadow.acquire(
+            1, preferred_blocks=[1], strict_preferred=True
+        )
+        second_shadow.release(adopted + recovered)
+        assert second_shadow.raw_free_count() == 4
+    finally:
+        for client in clients:
+            client.close()
+
+
+def test_inherited_unprotected_frozen_page_becomes_writable_quarantine(tmp_path):
+    path = str(tmp_path / "leases-repeated-unprotected.shm")
+    clients = [
+        SharedMemoryKVLeaseClient(
+            path, namespace="repeated-unprotected", owner_id=owner, total_blocks=2
+        )
+        for owner in ("primary", "first-shadow", "second-shadow")
+    ]
+    primary, first_shadow, second_shadow = clients
+    try:
+        sealed = primary.acquire(1, preferred_blocks=[1], strict_preferred=True)
+        primary.seal(sealed)
+        assert primary.pin_read(sealed) is not None
+        assert first_shadow.quarantine_foreign(protected_blocks={1}) == (0, 1)
+        # The directory no longer advertises the page after the second takeover.
+        assert second_shadow.quarantine_foreign(inherit_quarantine=True) == (0, 1)
+        assert not second_shadow.exact_recoverable(sealed)
+        assert second_shadow.reclaim_quarantined() == 1
+        assert second_shadow.raw_free_count() == 2
+    finally:
+        for client in clients:
+            client.close()
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        {"gpu_quiesced": True},
+        {"process_death_timeout_elapsed": True},
+    ],
+)
+def test_directory_phase_two_does_not_classify_newer_owner_pages(
+    tmp_path, monkeypatch, authorization
+):
     from gpu_memory_service.integrations.common.kv_lease_client import (
         recover_foreign_kv_leases_in_shm_dir,
     )
@@ -476,7 +646,7 @@ def test_directory_phase_two_does_not_classify_newer_owner_pages(tmp_path, monke
         current = second_shadow.acquire(1, preferred_blocks=[2], strict_preferred=True)
 
         phase_two = recover_foreign_kv_leases_in_shm_dir(
-            "vllm", 0, owner_id="first-shadow", gpu_quiesced=True
+            "vllm", 0, owner_id="first-shadow", **authorization
         )
 
         assert phase_two.reclaimed_blocks == 1

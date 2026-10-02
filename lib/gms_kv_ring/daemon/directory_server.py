@@ -36,6 +36,8 @@ class DirectoryState:
         self.epoch = time.time_ns()
         self._content_directory: dict[tuple[str, bytes], dict] = {}
         self._content_directory_by_slot: dict[tuple[str, str, int], bytes] = {}
+        self._content_directory_pools: dict[tuple[str, str], dict] = {}
+        self._content_directory_pool_bindings: dict[tuple[str, str], dict] = {}
         self._content_directory_claims: dict[str, dict] = {}
         self._content_directory_access_seq = 0
         self._content_directory_epoch = 1

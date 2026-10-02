@@ -40,6 +40,10 @@ def test_gpu_quiescence_marker_is_scoped_to_current_boot():
 
     assert lifecycle.gms_recovery_ready() is False
     assert lifecycle.gpu_quiescence_ready() is False
+    assert lifecycle.gms_reclaim_ready() is False
+    lifecycle.mark_gms_reclaim_ready()
+    assert lifecycle.gms_reclaim_ready() is True
+    assert lifecycle.gpu_quiescence_ready() is False
     lifecycle.mark_gms_recovery_ready()
     lifecycle.mark_gpu_quiescence_ready()
     assert lifecycle.gms_recovery_ready() is True

@@ -11,6 +11,7 @@ import math
 import os
 import re
 import signal
+import socket
 import struct
 import time
 from contextlib import suppress
@@ -53,6 +54,7 @@ class GPUClient:
     process_start_time: str
     rank: int
     failure_notify_addr: str = ""
+    mps_pipe_directory: str = ""
 
 
 def signal_client(client: GPUClient, sig: int) -> None:
@@ -105,6 +107,9 @@ class GPUQuiescenceManager:
         self._crashed: set[tuple[str, str, int]] = set()
         self._interlock_eof: set[tuple[str, str, int]] = set()
         self._failure_notifiers: dict[str, object] = {}
+        # Protected by _lock during cohort termination. It binds every MPS
+        # control command to the server that registered the crashed client.
+        self._active_mps_pipe_directory: str | None = None
 
     def register(
         self,
@@ -115,6 +120,7 @@ class GPUQuiescenceManager:
         process_start_time_value: str,
         rank: int,
         failure_notify_addr: str = "",
+        mps_pipe_directory: str = "",
         crash_interlock: bool = False,
     ) -> int:
         backend = backend.strip().lower()
@@ -127,6 +133,17 @@ class GPUQuiescenceManager:
             raise ValueError("GPU client pid and rank must be non-negative")
         if not process_start_time_value:
             raise ValueError("GPU client process start time must be non-empty")
+        if mps_pipe_directory and not os.path.isabs(mps_pipe_directory):
+            raise ValueError("GPU client MPS pipe directory must be absolute")
+        frozen = os.environ.get(
+            "DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        strict_mps_isolation = frozen and self.configured(backend)
+        if strict_mps_isolation and not mps_pipe_directory:
+            raise ValueError(
+                "frozen GPU failover requires an explicit MPS pipe directory "
+                "for each writer cohort"
+            )
         observed = process_start_time(pid)
         if observed is None:
             raise ValueError(
@@ -135,6 +152,8 @@ class GPUQuiescenceManager:
             )
         if observed != process_start_time_value:
             raise ValueError("GPU client PID birth identity does not match")
+        if strict_mps_isolation:
+            self._admit_shared_mps_pipe(backend, cohort, mps_pipe_directory)
         for registered in self._clients.values():
             if (
                 registered.backend == backend
@@ -151,6 +170,7 @@ class GPUQuiescenceManager:
             process_start_time=process_start_time_value,
             rank=rank,
             failure_notify_addr=failure_notify_addr.strip(),
+            mps_pipe_directory=mps_pipe_directory.strip(),
         )
         previous = self._clients.get(key)
         if previous is not None and previous != client:
@@ -177,7 +197,14 @@ class GPUQuiescenceManager:
             self._proofs.pop((backend, cohort), None)
             return -1
 
-        read_fd, write_fd = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        # A duplex socket lets GMS request the native interlock without
+        # delivering SIGABRT to an arbitrary CUDA/MPS service thread.
+        daemon_socket, client_socket = socket.socketpair(
+            socket.AF_UNIX, socket.SOCK_SEQPACKET
+        )
+        daemon_socket.setblocking(False)
+        client_socket.setblocking(False)
+        read_fd, write_fd = daemon_socket.detach(), client_socket.detach()
         watcher = self._watch_crash_interlock(client, read_fd)
         try:
             task = asyncio.create_task(
@@ -214,6 +241,54 @@ class GPUQuiescenceManager:
 
         task.add_done_callback(finish)
         return write_fd
+
+    def _admit_shared_mps_pipe(
+        self, backend: str, cohort: str, mps_pipe_directory: str
+    ) -> None:
+        """Allow a replacement into an earlier cohort's MPS server only safely.
+
+        Registrations survive host exit. A positively retired cohort must not
+        prevent a replacement from reusing its MPS server. CPU retirement or a
+        failed proof cannot authorize that reuse, except under the opt-in
+        process-death-timeout policy once every client of the earlier cohort is
+        dead; its stale registrations on that pipe are then dropped.
+        """
+        pipe = os.path.realpath(mps_pipe_directory)
+        conflicting: dict[tuple[str, str], list[tuple[str, str, int]]] = {}
+        for key, registered in self._clients.items():
+            if (registered.backend, registered.cohort) != (backend, cohort) and (
+                os.path.realpath(registered.mps_pipe_directory) == pipe
+            ):
+                conflicting.setdefault(
+                    (registered.backend, registered.cohort), []
+                ).append(key)
+        best_effort = (
+            os.environ.get("DYN_GMS_FAILOVER_RECLAIM_POLICY", "gpu-proof").strip()
+            == "process-death-timeout"
+        )
+        for previous_cohort, keys in conflicting.items():
+            previous_proof = self._proofs.get(previous_cohort)
+            if previous_proof is not None and previous_proof.quiesced:
+                continue
+            dead = all(
+                process_start_time(self._clients[key].pid)
+                != self._clients[key].process_start_time
+                for key in keys
+            )
+            if not (best_effort and dead):
+                raise ValueError(
+                    "frozen predecessor and successor must use separate MPS "
+                    "servers; their pipe directories are the same"
+                )
+            logger.warning(
+                "[GMS MPS] cohort %s reuses the MPS server of dead cohort %s "
+                "under the process-death-timeout policy; GPU quiescence of "
+                "the earlier cohort is unproven",
+                cohort,
+                previous_cohort[1],
+            )
+            for key in keys:
+                self._clients.pop(key, None)
 
     def _ensure_failure_notifier(self, address: str) -> None:
         """Connect a persistent crash-hint socket while the client is healthy."""
@@ -279,7 +354,7 @@ class GPUQuiescenceManager:
         """Quiesce a cohort when its native handler reports a catchable crash.
 
         EOF is also actionable: it means the registered process closed its last
-        write descriptor. MPS may still know the exiting client, so the daemon
+        socket descriptor. MPS may still know the exiting client, so the daemon
         makes one strict termination attempt. Failure never becomes proof.
         """
         loop = asyncio.get_running_loop()
@@ -305,7 +380,7 @@ class GPUQuiescenceManager:
 
         signal_number: int | None = None
         native_record = bool(data)
-        source = "pipe-eof"
+        source = "socket-eof"
         if data:
             if len(data) != _CRASH_RECORD.size:
                 logger.error(
@@ -367,11 +442,9 @@ class GPUQuiescenceManager:
             self._retired.add(key)
             if native_record:
                 self._crashed.add((client.backend, client.cohort, client.pid))
-                # Only the reporting process ran the native handler. Other
-                # local TP ranks can still be live; terminate them through MPS.
-                if not await self._wait_native_stop(client):
-                    logger.critical("GPU crash client did not stop pid=%d", client.pid)
-                    return
+                # The reporting thread is parked, but the process stays live
+                # so MPS can terminate its CUDA client. Other local TP ranks
+                # are also terminated through MPS before takeover.
             result = await self._quiesce_locked(
                 backend=client.backend,
                 predecessor_cohort=client.cohort,
@@ -380,7 +453,7 @@ class GPUQuiescenceManager:
         if not result.quiesced:
             logger.critical(
                 "GPU crash interlock failed closed backend=%s cohort=%s pid=%d "
-                "detail=%s; process remains stopped when the native handler fired",
+                "detail=%s; shared HBM remains unavailable to the successor",
                 client.backend,
                 client.cohort,
                 client.pid,
@@ -397,17 +470,6 @@ class GPUQuiescenceManager:
             result.elapsed_ms,
         )
 
-    async def _wait_native_stop(self, client: GPUClient) -> bool:
-        deadline = time.monotonic() + self._timeout(client.backend)
-        while True:
-            if process_start_time(client.pid) != client.process_start_time:
-                return False
-            if process_state(client.pid) in {"T", "t"}:
-                return True
-            if time.monotonic() >= deadline:
-                return False
-            await asyncio.sleep(min(0.001, max(0.0, deadline - time.monotonic())))
-
     @staticmethod
     def configured(backend: str) -> bool:
         backend_env = backend.upper().replace("-", "_")
@@ -420,9 +482,28 @@ class GPUQuiescenceManager:
     @staticmethod
     def _timeout(backend: str) -> float:
         backend_env = backend.upper().replace("-", "_")
+        # Surviving ranks attempt MPS termination before releasing their
+        # writer locks. In frozen mode a stalled control command must not
+        # turn a safe, early SEALED/free takeover into multi-second downtime.
+        # A failed short attempt remains unproven and quarantined; operators
+        # may explicitly choose a longer capacity-recovery attempt.
+        frozen = backend in {"sglang", "vllm"} and os.environ.get(
+            "DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        # vLLM's surviving CUDA worker has needed more than one second for
+        # MPS terminate_client under TP=2 load. Killing its launcher after a
+        # 0.4-second timeout loses the only opportunity for strict proof;
+        # subsequent calls observe CUDA 201 and must retain quarantine.
+        # SGLang's shorter proven path keeps the low-latency default.
+        default_timeout = (
+            "1.5" if frozen and backend == "vllm" else ("0.4" if frozen else "2.0")
+        )
         raw = os.environ.get(
             f"DYN_{backend_env}_GMS_GPU_QUIESCENCE_TIMEOUT_SECS",
-            os.environ.get("DYN_GMS_GPU_QUIESCENCE_TIMEOUT_SECS", "2.0"),
+            os.environ.get(
+                "DYN_GMS_GPU_QUIESCENCE_TIMEOUT_SECS",
+                default_timeout,
+            ),
         )
         try:
             value = float(raw)
@@ -456,7 +537,16 @@ class GPUQuiescenceManager:
         return os.environ.get("DYN_GMS_MPS_CONTROL_BINARY", "nvidia-cuda-mps-control")
 
     async def _control(self, backend: str, *command: str) -> tuple[int, str]:
+        started = time.monotonic()
+        terminating_client = bool(command) and command[0] == "terminate_client"
         control_env = os.environ.copy()
+        # The memory-owning GMS CUDA context need not join the engine's MPS
+        # server. Only its control subprocess needs that server's pipe path.
+        if mps_pipe := (
+            self._active_mps_pipe_directory
+            or control_env.get("DYN_GMS_MPS_PIPE_DIRECTORY")
+        ):
+            control_env["CUDA_MPS_PIPE_DIRECTORY"] = mps_pipe
         # The protocol is numeric ASCII. Do not let a missing deployment
         # locale make the wrapper emit a diagnostic on stderr and invalidate
         # an otherwise authoritative response.
@@ -477,11 +567,25 @@ class GPUQuiescenceManager:
             with suppress(ProcessLookupError):
                 process.kill()
             await process.wait()
+            if terminating_client:
+                logger.info(
+                    "MPS terminate_client cancelled backend=%s elapsed_ms=%.2f",
+                    backend,
+                    (time.monotonic() - started) * 1000.0,
+                )
             raise
         except asyncio.TimeoutError as exc:
             with suppress(ProcessLookupError):
                 process.kill()
             await process.wait()
+            if terminating_client:
+                logger.warning(
+                    "MPS terminate_client timed out backend=%s elapsed_ms=%.2f "
+                    "timeout_s=%.2f",
+                    backend,
+                    (time.monotonic() - started) * 1000.0,
+                    self._timeout(backend),
+                )
             raise RuntimeError("MPS control command timed out") from exc
         # Parse the complete stdout. Truncation can hide the target client or
         # turn a diagnostic into a plausible numeric success prefix.
@@ -489,9 +593,18 @@ class GPUQuiescenceManager:
         stderr_detail = stderr.decode("utf-8", errors="replace").strip()
         if stderr_detail:
             raise RuntimeError(f"MPS control diagnostic: {stderr_detail[:512]}")
+        if terminating_client:
+            logger.info(
+                "MPS terminate_client completed backend=%s elapsed_ms=%.2f "
+                "control_rc=%d cuda_result=%s",
+                backend,
+                (time.monotonic() - started) * 1000.0,
+                int(process.returncode),
+                stdout_detail[:128] or "<empty>",
+            )
         return int(process.returncode), stdout_detail
 
-    async def _server_pid(self, backend: str) -> str:
+    async def _server_pid(self, backend: str, client_pid: int) -> str:
         backend_env = backend.upper().replace("-", "_")
         configured = os.environ.get(
             f"DYN_{backend_env}_GMS_MPS_SERVER_PID",
@@ -506,12 +619,26 @@ class GPUQuiescenceManager:
         if rc != 0:
             raise RuntimeError(f"MPS server discovery failed: {detail}")
         servers = sorted(_inventory_pids(detail))
-        if len(servers) != 1:
-            raise RuntimeError(
-                "MPS server discovery requires exactly one server; configure "
-                "DYN_GMS_MPS_SERVER_PID when multiple servers are active"
+        if len(servers) == 1:
+            return servers[0]
+        # MPS can briefly report both the old and newly started server during
+        # a crash. Select only the server which *currently* owns this exact
+        # registered client; guessing would turn a failed terminate_client
+        # into a false proof that the predecessor GPU has stopped.
+        owners = []
+        for server in servers:
+            inventory_rc, inventory = await self._control(
+                backend, "get_client_list", server
             )
-        return servers[0]
+            if inventory_rc == 0 and str(client_pid) in _inventory_pids(inventory):
+                owners.append(server)
+        if len(owners) != 1:
+            raise RuntimeError(
+                f"MPS server discovery found {len(owners)} owners for client "
+                f"{client_pid} among {len(servers)} servers; configure "
+                "DYN_GMS_MPS_SERVER_PID if the client has already retired"
+            )
+        return owners[0]
 
     async def _wait_client_absent(
         self, backend: str, server_pid: str, client_pid: int
@@ -644,6 +771,21 @@ class GPUQuiescenceManager:
         """Keep resume, MPS proof, and failure restop under the same lock."""
         resumed: list[GPUClient] = []
         result = None
+        pipe_directories = {
+            client.mps_pipe_directory
+            for client in self._clients.values()
+            if client.backend == backend and client.cohort == predecessor_cohort
+        }
+        if len(pipe_directories) > 1:
+            return QuiescenceResult(
+                False,
+                "gms-mps",
+                len(pipe_directories),
+                "CUDA clients in one cohort registered different MPS servers",
+                0.0,
+            )
+        previous_pipe_directory = self._active_mps_pipe_directory
+        self._active_mps_pipe_directory = next(iter(pipe_directories), None)
         try:
             result = await self._terminate_locked(
                 backend=backend,
@@ -655,6 +797,7 @@ class GPUQuiescenceManager:
             )
             return result
         finally:
+            self._active_mps_pipe_directory = previous_pipe_directory
             if result is None or not result.quiesced:
                 for client in resumed:
                     try:
@@ -699,46 +842,10 @@ class GPUQuiescenceManager:
             )
 
         started = time.monotonic()
-        server_pid = await self._server_pid(backend)
+        server_pid = await self._server_pid(backend, clients[0].pid)
         details: list[str] = []
         for client in clients:
             client_identity = (client.backend, client.cohort, client.pid)
-            stopped_before_termination = process_state(client.pid) in {"T", "t"}
-            if trigger_interlock and not stopped_before_termination:
-                # Cooperative rank-loss fencing reaches otherwise healthy TP
-                # workers while they may be blocked in a broken NCCL kernel.
-                # Trip the same native fail-closed interlock used for a real
-                # crash before asking MPS to retire the CUDA client. Merely
-                # killing the launcher can make MPS forget the client before
-                # it returns an authoritative termination result.
-                if client_identity not in self._crash_tasks:
-                    return QuiescenceResult(
-                        False,
-                        "gms-mps",
-                        len(clients),
-                        f"client {client.pid} has no armed crash interlock",
-                        (time.monotonic() - started) * 1000.0,
-                    )
-                try:
-                    signal_client(client, signal.SIGABRT)
-                except ProcessLookupError:
-                    return QuiescenceResult(
-                        False,
-                        "gms-mps",
-                        len(clients),
-                        f"client {client.pid} exited before interlock fencing",
-                        (time.monotonic() - started) * 1000.0,
-                    )
-                if not await self._wait_native_stop(client):
-                    return QuiescenceResult(
-                        False,
-                        "gms-mps",
-                        len(clients),
-                        f"client {client.pid} did not stop in its crash interlock",
-                        (time.monotonic() - started) * 1000.0,
-                    )
-                self._crashed.add(client_identity)
-                stopped_before_termination = True
             observed = process_start_time(client.pid)
             if observed is not None and observed != client.process_start_time:
                 return QuiescenceResult(
@@ -755,6 +862,39 @@ class GPUQuiescenceManager:
                 client.process_start_time,
                 server_pid,
             )
+            stopped_before_termination = process_state(client.pid) in {"T", "t"}
+            if (
+                trigger_interlock
+                and not stopped_before_termination
+                and client_key not in self._terminated_clients
+            ):
+                # Request the native handler on its dedicated thread, but do
+                # not SIGSTOP the process. MPS may need the CUDA client's
+                # service threads to run to certify terminate_client. Shared
+                # HBM remains unavailable while the writer lock is held.
+                if (
+                    client_identity not in self._crashed
+                    and client_identity not in self._crash_tasks
+                ):
+                    return QuiescenceResult(
+                        False,
+                        "gms-mps",
+                        len(clients),
+                        f"client {client.pid} has no armed crash interlock",
+                        (time.monotonic() - started) * 1000.0,
+                    )
+                if client_identity not in self._crashed:
+                    try:
+                        os.write(self._crash_read_fds[client_identity], b"\x01")
+                    except (OSError, KeyError) as exc:
+                        return QuiescenceResult(
+                            False,
+                            "gms-mps",
+                            len(clients),
+                            f"client {client.pid} interlock command failed: {exc}",
+                            (time.monotonic() - started) * 1000.0,
+                        )
+                    self._crashed.add(client_identity)
             if allow_inventory_retirement:
                 # Healthy ranks are cooperatively fenced after a peer failure.
                 # Avoid terminate_client here: TP=8 validation showed it can
@@ -805,6 +945,35 @@ class GPUQuiescenceManager:
                 # followed by inventory absence and then an illegal access in
                 # the successor immediately after remapping the shared pool.
                 if rc != 0 or detail.strip() != "0":
+                    # On an actual process crash MPS can lose its client before
+                    # this control call. Capture the post-failure inventory and
+                    # host state to distinguish that race from a wrong server or
+                    # PID namespace; neither is permission to reuse old HBM.
+                    try:
+                        inventory_rc, inventory = await self._control(
+                            backend, "get_client_list", server_pid
+                        )
+                        inventory_state = (
+                            f"rc={inventory_rc} present="
+                            f"{str(client.pid) in _inventory_pids(inventory)}"
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        inventory_state = f"unavailable: {exc}"
+                    logger.error(
+                        "MPS termination uncertified backend=%s rank=%d "
+                        "server_pid=%s client_pid=%d control_rc=%d "
+                        "cuda_result=%s host_state=%s birth_matches=%s "
+                        "inventory=%s",
+                        backend,
+                        client.rank,
+                        server_pid,
+                        client.pid,
+                        rc,
+                        detail or "<empty>",
+                        process_state(client.pid),
+                        process_start_time(client.pid) == client.process_start_time,
+                        inventory_state,
+                    )
                     return QuiescenceResult(
                         False,
                         "gms-mps",
@@ -819,8 +988,8 @@ class GPUQuiescenceManager:
                 # though the first command already supplied authoritative proof.
                 self._terminated_clients.add(client_key)
             # CUDA_SUCCESS authorizes host teardown. A crash-interlocked client
-            # cannot disappear from MPS inventory while its signal handler is
-            # stopped/paused outside CUDA, so kill the exact birth-checked PID
+            # keeps its reporting thread parked while the other threads can
+            # serve MPS control, so kill the exact birth-checked PID
             # before waiting for inventory retirement. This is not a fallback:
             # an uncorroborated unsuccessful terminate_client never reaches this branch.
             if (

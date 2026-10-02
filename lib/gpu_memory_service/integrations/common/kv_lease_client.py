@@ -776,13 +776,17 @@ class SharedMemoryKVLeaseClient:
         )
 
     def quarantine_foreign(
-        self, *, protected_blocks: set[int] | None = None
+        self,
+        *,
+        protected_blocks: set[int] | None = None,
+        inherit_quarantine: bool = False,
     ) -> tuple[int, int]:
         """Release safe IDLE headroom and quarantine ambiguous foreign pages."""
         released_idle, quarantined = self._rust.kv_lease_quarantine_foreign(
             self._mmap,
             sorted(int(block_id) for block_id in (protected_blocks or set())),
             int(self._owner_hash),
+            bool(inherit_quarantine),
         )
         return int(released_idle), int(quarantined)
 
@@ -1112,6 +1116,8 @@ def recover_foreign_kv_leases_in_shm_dir(
     protected_leases: set[tuple[int, int]] | None = None,
     namespace_suffix: str = "kv",
     gpu_quiesced: bool = False,
+    process_death_timeout_elapsed: bool = False,
+    inherit_quarantine: bool = False,
 ) -> KVLeaseRecoveryResult:
     """Classify predecessor leases, then optionally reclaim quarantine.
 
@@ -1120,6 +1126,13 @@ def recover_foreign_kv_leases_in_shm_dir(
     and every page that may still have predecessor GPU work is quarantined.
     Phase two is requested with ``gpu_quiesced=True`` only after a capability
     has proved that the predecessor CUDA context can no longer access memory.
+    The explicit ``process_death_timeout_elapsed`` alternative authorizes
+    best-effort reclamation after the caller checks cohort death and its grace
+    interval. It is not CUDA quiescence proof and must never be inferred from
+    an MPS error alone. ``inherit_quarantine`` re-stamps quarantine left by an
+    earlier recovery owner that died before its phase two, so this owner's
+    phase two can reclaim it; use it only with the process-death policy, since
+    a strict proof covers just the immediate predecessor.
     """
 
     rust = _load_optional_rust_ring()
@@ -1157,7 +1170,7 @@ def recover_foreign_kv_leases_in_shm_dir(
                 file_idle = 0
                 file_quarantined = 0
                 file_reclaimed = 0
-                if gpu_quiesced:
+                if gpu_quiesced or process_death_timeout_elapsed:
                     # Phase two must never classify current ring contents. A
                     # delayed proof may belong to an older takeover, so it may
                     # only reclaim quarantine stamped by that recovery owner.
@@ -1175,6 +1188,7 @@ def recover_foreign_kv_leases_in_shm_dir(
                         buf,
                         exact,
                         int(owner_hash),
+                        bool(inherit_quarantine),
                     )
             finally:
                 buf.close()

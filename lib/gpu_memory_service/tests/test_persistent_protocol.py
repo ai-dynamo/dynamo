@@ -101,6 +101,7 @@ pytestmark = [
             client_pid=123,
             process_start_time="456",
             rank=1,
+            mps_pipe_directory="/run/nvidia/mps/shadow/pipe",
         ),
         RegisterGPUClientResponse(registered=True),
         QuiesceGPUCohortRequest(

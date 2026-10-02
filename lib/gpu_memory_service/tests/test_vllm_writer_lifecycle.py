@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import fcntl
 import multiprocessing
 import os
 import select
 import signal
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -68,6 +71,43 @@ def test_headless_rank_joins_leader_boot_identity():
     joined = lifecycle.join_prepared_writer_cohort(timeout=0.1)
     assert joined == leader
     assert os.environ["GMS_VLLM_WRITER_COHORT_PATH"] == str(leader)
+
+
+def test_concurrent_cohort_publication_uses_distinct_pending_files(monkeypatch):
+    current = lifecycle.prepare_writer_cohort()
+    barrier = threading.Barrier(2)
+    replaced = []
+    real_replace = os.replace
+
+    def replace(source, destination):
+        if Path(destination).name == "active":
+            replaced.append(Path(source))
+            barrier.wait(timeout=3)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(lifecycle.os, "replace", replace)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [
+            pool.submit(
+                lambda: asyncio.run(lifecycle._fence_predecessor_writers_for(current))
+            )
+            for _ in range(2)
+        ]
+        assert [call.result(timeout=5) for call in calls] == [None, None]
+    assert len(set(replaced)) == 2
+
+
+def test_late_tp_rank_retains_predecessor_identity():
+    current = lifecycle.prepare_writer_cohort()
+    predecessor = current.parent / uuid.uuid4().hex
+    predecessor.touch()
+    (current.parent / "active").write_text(predecessor.name)
+
+    first = asyncio.run(lifecycle._fence_predecessor_writers_for(current))
+    late_rank = asyncio.run(lifecycle._fence_predecessor_writers_for(current))
+
+    assert first == predecessor
+    assert late_rank == predecessor
 
 
 def test_process_join_rechecks_same_parent_after_guard(monkeypatch):
@@ -307,3 +347,16 @@ def test_takeover_waits_for_orphaned_engine_core_writer():
         if supervisor:
             os.kill(supervisor, signal.SIGKILL)
             os.waitpid(supervisor, 0)
+
+
+def test_joined_worker_fences_without_creating_a_second_cohort(monkeypatch):
+    current = lifecycle.prepare_writer_cohort()
+    marker = current.parent / "active"
+    marker.write_text(current.name)
+    monkeypatch.setattr(
+        lifecycle,
+        "prepare_writer_cohort",
+        lambda: pytest.fail("worker must not create a new writer cohort"),
+    )
+    assert asyncio.run(lifecycle.fence_joined_writer_cohort()) is None
+    assert marker.read_text() == current.name

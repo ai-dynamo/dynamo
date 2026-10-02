@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import os
 import signal
+import socket
 import struct
 
 import pytest
@@ -15,6 +17,16 @@ from gpu_memory_service.server.gpu_quiescence import (
 )
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.none]
+
+
+@pytest.fixture
+def command_logs(monkeypatch, caplog):
+    # Engine imports may install Dynamo's native logging bridge, which bypasses
+    # pytest's root handler. Test message production independently of that sink.
+    logger = logging.Logger("quiescence-command-test", level=logging.INFO)
+    logger.addHandler(caplog.handler)
+    monkeypatch.setattr(quiescence, "logger", logger)
+    return caplog
 
 
 class _Process:
@@ -61,6 +73,177 @@ async def test_control_exit_race_preserves_timeout_or_cancellation(
     expected = asyncio.CancelledError if cancelled else RuntimeError
     with pytest.raises(expected):
         await GPUQuiescenceManager()._control("vllm", "get_server_list")
+
+
+@pytest.mark.asyncio
+async def test_mps_control_uses_rank_local_pipe_without_changing_gms_cuda_env(
+    monkeypatch,
+):
+    observed = {}
+
+    async def create(*_args, **kwargs):
+        observed.update(kwargs["env"])
+        return _Process()
+
+    monkeypatch.setenv("CUDA_MPS_PIPE_DIRECTORY", "/tmp/unrelated")
+    monkeypatch.setenv("DYN_GMS_MPS_PIPE_DIRECTORY", "/tmp/rank-local")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+
+    await GPUQuiescenceManager()._control("sglang", "get_server_list")
+
+    assert observed["CUDA_MPS_PIPE_DIRECTORY"] == "/tmp/rank-local"
+    assert os.environ["CUDA_MPS_PIPE_DIRECTORY"] == "/tmp/unrelated"
+
+    manager = GPUQuiescenceManager()
+    manager._active_mps_pipe_directory = "/tmp/shadow"
+    await manager._control("sglang", "get_server_list")
+    assert observed["CUDA_MPS_PIPE_DIRECTORY"] == "/tmp/shadow"
+    assert os.environ["CUDA_MPS_PIPE_DIRECTORY"] == "/tmp/unrelated"
+
+
+@pytest.mark.asyncio
+async def test_mps_proof_uses_registered_cohort_server_and_restores_default(
+    monkeypatch,
+):
+    manager = GPUQuiescenceManager()
+    manager._clients[("sglang", "shadow", 123)] = GPUClient(
+        "sglang", "shadow", 123, "birth", 0, mps_pipe_directory="/tmp/shadow"
+    )
+
+    async def terminate(**_kwargs):
+        assert manager._active_mps_pipe_directory == "/tmp/shadow"
+        return QuiescenceResult(True, "gms-mps", 1, "certified", 1.0)
+
+    monkeypatch.setattr(manager, "_terminate_locked", terminate)
+    result = await manager._quiesce_locked(
+        backend="sglang", predecessor_cohort="shadow"
+    )
+    assert result.quiesced
+    assert manager._active_mps_pipe_directory is None
+
+
+@pytest.mark.asyncio
+async def test_mps_proof_rejects_mixed_server_cohort():
+    manager = GPUQuiescenceManager()
+    for pid, directory in [(123, "/tmp/primary"), (124, "/tmp/shadow")]:
+        manager._clients[("sglang", "mixed", pid)] = GPUClient(
+            "sglang", "mixed", pid, "birth", 0, mps_pipe_directory=directory
+        )
+    result = await manager._quiesce_locked(backend="sglang", predecessor_cohort="mixed")
+    assert not result.quiesced
+    assert "different MPS servers" in result.detail
+
+
+def test_frozen_cohorts_require_separate_mps_servers(monkeypatch, tmp_path):
+    manager = GPUQuiescenceManager()
+    monkeypatch.setenv("DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", "1")
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setattr(quiescence, "process_start_time", lambda _pid: "birth")
+    primary_pipe = str(tmp_path / "primary")
+    shadow_pipe = str(tmp_path / "shadow")
+
+    with pytest.raises(ValueError, match="explicit MPS pipe directory"):
+        manager.register(
+            backend="vllm",
+            cohort="primary",
+            pid=1001,
+            process_start_time_value="birth",
+            rank=0,
+        )
+    manager.register(
+        backend="vllm",
+        cohort="primary",
+        pid=1001,
+        process_start_time_value="birth",
+        rank=0,
+        mps_pipe_directory=primary_pipe,
+    )
+    with pytest.raises(ValueError, match="separate MPS servers"):
+        manager.register(
+            backend="vllm",
+            cohort="shadow",
+            pid=1002,
+            process_start_time_value="birth",
+            rank=0,
+            mps_pipe_directory=primary_pipe,
+        )
+    manager.register(
+        backend="vllm",
+        cohort="shadow",
+        pid=1002,
+        process_start_time_value="birth",
+        rank=0,
+        mps_pipe_directory=shadow_pipe,
+    )
+
+
+@pytest.mark.parametrize("replacement_backend", ["vllm", "sglang"])
+@pytest.mark.parametrize("certified", [False, True])
+def test_replacement_reuses_mps_pipe_only_after_positive_proof(
+    monkeypatch, tmp_path, replacement_backend, certified
+):
+    manager = GPUQuiescenceManager()
+    monkeypatch.setenv("DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", "1")
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setattr(quiescence, "process_start_time", lambda _pid: "birth")
+    pipe = str(tmp_path / "primary")
+    manager.register(
+        backend="vllm",
+        cohort="old",
+        pid=1001,
+        process_start_time_value="birth",
+        rank=0,
+        mps_pipe_directory=pipe,
+    )
+    manager._retired.add(("vllm", "old"))
+    manager._proofs[("vllm", "old")] = QuiescenceResult(
+        certified, "gms-mps", 1, "termination result", 1.0
+    )
+    replacement = dict(
+        backend=replacement_backend,
+        cohort="replacement",
+        pid=1002,
+        process_start_time_value="birth",
+        rank=0,
+        mps_pipe_directory=pipe,
+    )
+    if certified:
+        assert manager.register(**replacement) == -1
+    else:
+        with pytest.raises(ValueError, match="separate MPS servers"):
+            manager.register(**replacement)
+
+
+@pytest.mark.asyncio
+async def test_mps_server_discovery_selects_exact_client_among_multiple(monkeypatch):
+    manager = GPUQuiescenceManager()
+    monkeypatch.delenv("DYN_GMS_MPS_SERVER_PID", raising=False)
+    monkeypatch.delenv("DYN_VLLM_GMS_MPS_SERVER_PID", raising=False)
+
+    async def control(_backend, *command):
+        if command[0] == "get_server_list":
+            return 0, "111\n222"
+        assert command[0] == "get_client_list"
+        return 0, "123\n" if command[1] == "222" else "456\n"
+
+    monkeypatch.setattr(manager, "_control", control)
+    assert await manager._server_pid("vllm", 123) == "222"
+    with pytest.raises(RuntimeError, match="0 owners"):
+        await manager._server_pid("vllm", 999)
+
+
+@pytest.mark.asyncio
+async def test_mps_server_discovery_rejects_ambiguous_client(monkeypatch):
+    manager = GPUQuiescenceManager()
+    monkeypatch.delenv("DYN_GMS_MPS_SERVER_PID", raising=False)
+    monkeypatch.delenv("DYN_VLLM_GMS_MPS_SERVER_PID", raising=False)
+
+    async def control(_backend, *command):
+        return (0, "111\n222") if command[0] == "get_server_list" else (0, "123")
+
+    monkeypatch.setattr(manager, "_control", control)
+    with pytest.raises(RuntimeError, match="2 owners"):
+        await manager._server_pid("vllm", 123)
 
 
 def _register_current(manager, cohort="old", rank=0):
@@ -122,7 +305,8 @@ async def test_proactive_teardown_kills_host_only_after_cuda_success(monkeypatch
     client = GPUClient("vllm", "old", pid, "birth", 0)
     manager._clients[("vllm", "old", pid)] = client
     manager._crash_tasks[("vllm", "old", pid)] = object()
-    stopped = False
+    daemon, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    manager._crash_read_fds[("vllm", "old", pid)] = daemon.fileno()
     events = []
 
     async def control(_backend, *command):
@@ -142,15 +326,10 @@ async def test_proactive_teardown_kills_host_only_after_cuda_success(monkeypatch
         "process_start_time",
         lambda candidate: "birth" if candidate == pid else None,
     )
-    monkeypatch.setattr(
-        quiescence, "process_state", lambda _pid: "T" if stopped else "R"
-    )
+    monkeypatch.setattr(quiescence, "process_state", lambda _pid: "R")
 
     def send(client, sig):
-        nonlocal stopped
         signals.append((client.pid, sig))
-        if sig == signal.SIGABRT:
-            stopped = True
 
     monkeypatch.setattr(quiescence, "signal_client", send)
 
@@ -161,12 +340,11 @@ async def test_proactive_teardown_kills_host_only_after_cuda_success(monkeypatch
         terminate_host=True,
     )
 
+    assert peer.recv(1) == b"\x01"
+    daemon.close()
+    peer.close()
     assert result.quiesced
-    assert signals == [
-        (pid, signal.SIGABRT),
-        (pid, signal.SIGCONT),
-        (pid, signal.SIGKILL),
-    ]
+    assert signals == [(pid, signal.SIGKILL)]
 
 
 @pytest.mark.asyncio
@@ -357,7 +535,9 @@ async def test_mps_rejects_absent_client_without_cuda_success(monkeypatch):
 
     assert not result.quiesced
     assert "cuda_result=201" in result.detail
-    assert calls == 1
+    # Failure-only diagnostics query MPS inventory once after the rejected
+    # termination; they never turn the error into a quiescence proof.
+    assert calls == 2
 
 
 @pytest.mark.asyncio
@@ -385,11 +565,11 @@ async def test_interlock_eof_and_inventory_absence_are_not_gpu_proof(monkeypatch
 
     assert not result.quiesced
     assert "cuda_result=201" in result.detail
-    assert calls == 1
+    assert calls == 2
 
 
 @pytest.mark.asyncio
-async def test_mps_timeout_kills_control_process(monkeypatch):
+async def test_mps_timeout_kills_control_process(monkeypatch, command_logs):
     manager = GPUQuiescenceManager()
     _register_current(manager)
     process = _Process(hangs=True)
@@ -407,6 +587,28 @@ async def test_mps_timeout_kills_control_process(monkeypatch):
             backend="vllm", predecessor_cohort="old", successor_cohort="new"
         )
     assert process.killed
+    assert (
+        "MPS terminate_client timed out backend=vllm elapsed_ms=" in command_logs.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_mps_termination_records_direct_command_latency(
+    monkeypatch, command_logs
+):
+    async def create(*_args, **_kwargs):
+        return _Process(output=b"0")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    result = await GPUQuiescenceManager()._control(
+        "vllm", "terminate_client", "444", "1001"
+    )
+
+    assert result == (0, "0")
+    assert (
+        "MPS terminate_client completed backend=vllm elapsed_ms=" in command_logs.text
+    )
+    assert "control_rc=0 cuda_result=0" in command_logs.text
 
 
 @pytest.mark.asyncio
@@ -448,6 +650,75 @@ async def test_mps_partial_multi_rank_proof_is_retry_safe(monkeypatch):
     assert not first.quiesced
     assert second.quiesced
     assert attempts == {1001: 1, 1002: 2}
+
+
+@pytest.mark.asyncio
+async def test_mps_cached_proof_survives_host_exit_before_inventory_retry(monkeypatch):
+    manager = GPUQuiescenceManager()
+    pid = 1001
+    birth = "original-birth"
+    alive = True
+    monkeypatch.setattr(
+        quiescence, "process_start_time", lambda _pid: birth if alive else None
+    )
+    manager.register(
+        backend="vllm",
+        cohort="old",
+        pid=pid,
+        process_start_time_value=birth,
+        rank=0,
+    )
+    manager._crashed.add(("vllm", "old", pid))
+    signals = []
+    controls = []
+    inventory_calls = 0
+
+    def fake_signal(_client, sig):
+        nonlocal alive
+        signals.append(sig)
+        if not alive:
+            raise ProcessLookupError
+        if sig == signal.SIGKILL:
+            alive = False
+
+    async def control(_backend, *command):
+        controls.append(command)
+        return 0, "0"
+
+    async def inventory(_backend, _server_pid, _pid):
+        nonlocal inventory_calls
+        inventory_calls += 1
+        return (inventory_calls > 1, "1001" if inventory_calls == 1 else "")
+
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setenv("DYN_GMS_MPS_SERVER_PID", "444")
+    monkeypatch.setattr(
+        quiescence, "process_state", lambda _pid: "T" if alive else None
+    )
+    monkeypatch.setattr(quiescence, "signal_client", fake_signal)
+    monkeypatch.setattr(manager, "_control", control)
+    monkeypatch.setattr(manager, "_wait_client_absent", inventory)
+
+    first = await manager.quiesce(
+        backend="vllm",
+        predecessor_cohort="old",
+        successor_cohort="new",
+        terminate_host=True,
+    )
+    signals_after_first = list(signals)
+    second = await manager.quiesce(
+        backend="vllm",
+        predecessor_cohort="old",
+        successor_cohort="new",
+        terminate_host=True,
+    )
+
+    assert not first.quiesced
+    assert second.quiesced
+    assert controls == [("terminate_client", "444", str(pid))]
+    assert signals.count(signal.SIGKILL) == 1
+    # No further host signals are needed after a scoped CUDA_SUCCESS proof.
+    assert signals == signals_after_first
 
 
 @pytest.mark.asyncio
@@ -556,22 +827,16 @@ async def test_terminate_all_predecessors_trips_native_interlock(monkeypatch):
     pid = os.getpid()
     start = quiescence.process_start_time(pid)
     assert start is not None
-    stopped = False
     signals = []
 
     async def control(_backend, *command):
         return (0, "") if command[0] == "get_client_list" else (0, "0")
 
     def send(client, sig):
-        nonlocal stopped
         signals.append((client.pid, sig))
-        if sig == signal.SIGABRT:
-            stopped = True
 
     monkeypatch.setattr(manager, "_control", control)
-    monkeypatch.setattr(
-        quiescence, "process_state", lambda _pid: "T" if stopped else "S"
-    )
+    monkeypatch.setattr(quiescence, "process_state", lambda _pid: "S")
     monkeypatch.setattr(quiescence, "signal_client", send)
     write_fd = manager.register(
         backend="vllm",
@@ -587,14 +852,11 @@ async def test_terminate_all_predecessors_trips_native_interlock(monkeypatch):
         successor_cohort="new",
         terminate_host=True,
     )
+    assert os.read(write_fd, 1) == b"\x01"
     os.close(write_fd)
 
     assert result.quiesced
-    assert signals == [
-        (pid, signal.SIGABRT),
-        (pid, signal.SIGCONT),
-        (pid, signal.SIGKILL),
-    ]
+    assert signals == [(pid, signal.SIGKILL)]
 
 
 @pytest.mark.asyncio
@@ -632,6 +894,60 @@ async def test_crash_interlock_leaves_process_stopped_without_mps_proof(monkeypa
 
     assert killed == [(pid, signal.SIGCONT), (pid, signal.SIGSTOP)]
     assert ("sglang", "old") not in manager._proofs
+
+
+@pytest.mark.asyncio
+async def test_failed_crash_proof_retry_keeps_client_live_without_rearming(monkeypatch):
+    manager = GPUQuiescenceManager()
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setenv("DYN_GMS_MPS_SERVER_PID", "444")
+    pid = os.getpid()
+    start = quiescence.process_start_time(pid)
+    assert start is not None
+    state = "S"
+    signals = []
+    attempts = 0
+
+    async def control(_backend, *command):
+        nonlocal attempts
+        if command[0] == "terminate_client":
+            attempts += 1
+            return 0, "201" if attempts == 1 else "0"
+        return 0, ""
+
+    def record_signal(_client, sig):
+        nonlocal state
+        signals.append(sig)
+        if sig == signal.SIGSTOP:
+            state = "T"
+        elif sig == signal.SIGCONT:
+            state = "S"
+
+    monkeypatch.setattr(manager, "_control", control)
+    monkeypatch.setattr(quiescence, "process_state", lambda _pid: state)
+    monkeypatch.setattr(quiescence, "signal_client", record_signal)
+    manager._clients[("sglang", "old", pid)] = GPUClient("sglang", "old", pid, start, 0)
+    # A validated native crash record survives the one-shot watcher.
+    manager._crashed.add(("sglang", "old", pid))
+
+    first = await manager.quiesce(
+        backend="sglang",
+        predecessor_cohort="old",
+        successor_cohort="new",
+        terminate_host=True,
+    )
+    assert not first.quiesced
+    assert signals == []
+    second = await manager.quiesce(
+        backend="sglang",
+        predecessor_cohort="old",
+        successor_cohort="new",
+        terminate_host=True,
+    )
+    assert second.quiesced
+    assert attempts == 2
+    assert signals == [signal.SIGKILL]
+    assert signal.SIGABRT not in signals
 
 
 @pytest.mark.asyncio
@@ -851,6 +1167,23 @@ def test_timeout_is_finite(monkeypatch, raw):
     assert GPUQuiescenceManager._timeout("vllm") == 1.0
 
 
+def test_frozen_engines_bound_foreground_mps_control(monkeypatch):
+    monkeypatch.delenv("DYN_GMS_GPU_QUIESCENCE_TIMEOUT_SECS", raising=False)
+    monkeypatch.delenv("DYN_SGLANG_GMS_GPU_QUIESCENCE_TIMEOUT_SECS", raising=False)
+    monkeypatch.delenv("DYN_VLLM_GMS_GPU_QUIESCENCE_TIMEOUT_SECS", raising=False)
+    monkeypatch.setenv("DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", "1")
+    assert GPUQuiescenceManager._timeout("sglang") == 0.4
+    assert GPUQuiescenceManager._timeout("vllm") == 1.5
+
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_TIMEOUT_SECS", "1.2")
+    assert GPUQuiescenceManager._timeout("sglang") == 1.2
+    assert GPUQuiescenceManager._timeout("vllm") == 1.2
+    monkeypatch.setenv("DYN_SGLANG_GMS_GPU_QUIESCENCE_TIMEOUT_SECS", "0.8")
+    assert GPUQuiescenceManager._timeout("sglang") == 0.8
+    monkeypatch.setenv("DYN_VLLM_GMS_GPU_QUIESCENCE_TIMEOUT_SECS", "0.9")
+    assert GPUQuiescenceManager._timeout("vllm") == 0.9
+
+
 @pytest.mark.asyncio
 async def test_all_predecessors_rejects_a_new_cohort_during_proof(monkeypatch):
     manager = GPUQuiescenceManager()
@@ -908,21 +1241,21 @@ async def test_cancel_before_watcher_starts_closes_notification_reader(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_registration_failure_rolls_back_pipe_and_client(monkeypatch):
+async def test_registration_failure_rolls_back_socketpair_and_client(monkeypatch):
     manager = GPUQuiescenceManager()
     monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
     opened: list[int] = []
-    real_pipe2 = os.pipe2
+    real_socketpair = socket.socketpair
 
-    def pipe2(flags):
-        pair = real_pipe2(flags)
-        opened.extend(pair)
+    def create_socketpair(*args, **kwargs):
+        pair = real_socketpair(*args, **kwargs)
+        opened.extend(sock.fileno() for sock in pair)
         return pair
 
     def fail_create(*_args, **_kwargs):
         raise RuntimeError("no loop")
 
-    monkeypatch.setattr(os, "pipe2", pipe2)
+    monkeypatch.setattr(socket, "socketpair", create_socketpair)
     monkeypatch.setattr(asyncio, "create_task", fail_create)
     pid = os.getpid()
     with pytest.raises(RuntimeError, match="no loop"):
@@ -936,6 +1269,7 @@ async def test_registration_failure_rolls_back_pipe_and_client(monkeypatch):
         )
     assert not manager._clients
     assert not manager._crash_tasks
+    assert len(opened) == 2
     for fd in opened:
         with pytest.raises(OSError):
             os.fstat(fd)
@@ -1096,3 +1430,48 @@ def test_failure_notifier_is_connected_before_crash_and_sends_hint(monkeypatch):
             b"signal-11",
         ]
     ]
+
+
+@pytest.mark.parametrize(
+    ("policy", "old_alive", "admitted"),
+    [
+        ("process-death-timeout", False, True),
+        ("process-death-timeout", True, False),
+        ("gpu-proof", False, False),
+    ],
+)
+def test_replacement_reuses_dead_cohort_mps_pipe_only_under_process_death_policy(
+    monkeypatch, tmp_path, policy, old_alive, admitted
+):
+    manager = GPUQuiescenceManager()
+    monkeypatch.setenv("DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", "1")
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_RECLAIM_POLICY", policy)
+    alive = {1001: True, 1002: True}
+    monkeypatch.setattr(
+        quiescence, "process_start_time", lambda pid: "birth" if alive[pid] else None
+    )
+    pipe = str(tmp_path / "primary")
+    manager.register(
+        backend="sglang",
+        cohort="old",
+        pid=1001,
+        process_start_time_value="birth",
+        rank=0,
+        mps_pipe_directory=pipe,
+    )
+    alive[1001] = old_alive
+    replacement = dict(
+        backend="sglang",
+        cohort="replacement",
+        pid=1002,
+        process_start_time_value="birth",
+        rank=0,
+        mps_pipe_directory=pipe,
+    )
+    if admitted:
+        assert manager.register(**replacement) == -1
+        assert ("sglang", "old", 1001) not in manager._clients
+    else:
+        with pytest.raises(ValueError, match="separate MPS servers"):
+            manager.register(**replacement)

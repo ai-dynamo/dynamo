@@ -79,12 +79,12 @@ struct CrashRecord {
     pid: i32,
 }
 
-/// Notify the persistent GMS daemon and freeze this process.
+/// Notify the persistent GMS daemon and park only the reporting thread.
 ///
 /// This handler deliberately uses only async-signal-safe libc calls and atomic
-/// operations. It never returns: GMS either proves MPS client termination and
-/// SIGKILLs the process, or leaves it stopped so unsafe shared HBM cannot be
-/// reused.
+/// operations. It never returns. The process remains responsive to MPS
+/// control until GMS proves client termination and SIGKILLs it. The successor
+/// cannot access shared HBM before that proof and the writer-lock handoff.
 extern "C" fn gpu_crash_handler(
     signal_number: libc::c_int,
     _info: *mut libc::siginfo_t,
@@ -122,9 +122,6 @@ extern "C" fn gpu_crash_handler(
             }
         }
     }
-    unsafe {
-        libc::kill(pid, libc::SIGSTOP);
-    }
     loop {
         unsafe { libc::pause() };
     }
@@ -145,6 +142,26 @@ fn install_gpu_crash_interlock(notification_fd: i32, signals: Vec<i32>) -> PyRes
     }
     if unsafe { libc::fcntl(notification_fd, libc::F_GETFD) } < 0 {
         return Err(std::io::Error::last_os_error().into());
+    }
+    let mut socket_type: libc::c_int = 0;
+    let mut socket_type_len = std::mem::size_of_val(&socket_type) as libc::socklen_t;
+    let has_command_socket = unsafe {
+        libc::getsockopt(
+            notification_fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut socket_type as *mut libc::c_int).cast(),
+            &mut socket_type_len,
+        )
+    } == 0;
+    if !has_command_socket && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOTSOCK)
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if has_command_socket && socket_type != libc::SOCK_SEQPACKET {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "GPU crash command socket must be SOCK_SEQPACKET",
+        ));
     }
     if let Some(signal_number) = signals.iter().find(|signal_number| {
         **signal_number <= 0 || **signal_number == libc::SIGKILL || **signal_number == libc::SIGSTOP
@@ -201,7 +218,7 @@ fn install_gpu_crash_interlock(notification_fd: i32, signals: Vec<i32>) -> PyRes
         return Err(std::io::Error::last_os_error().into());
     }
 
-    for (installed, signal_number) in signals.into_iter().enumerate() {
+    for (installed, signal_number) in signals.iter().copied().enumerate() {
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         action.sa_sigaction = gpu_crash_handler as *const () as usize;
         // Keep the handler installed: a second fatal signal on another thread
@@ -216,6 +233,54 @@ fn install_gpu_crash_interlock(notification_fd: i32, signals: Vec<i32>) -> PyRes
         if unsafe { libc::sigaction(signal_number, &action, std::ptr::null_mut()) } != 0 {
             let error = std::io::Error::last_os_error();
             for (number, previous) in previous_actions[..installed].iter().rev() {
+                unsafe { libc::sigaction(*number, previous, std::ptr::null_mut()) };
+            }
+            unsafe {
+                libc::sigaltstack(&previous_stack, std::ptr::null_mut());
+                libc::munmap(stack, stack_size);
+            }
+            CRASH_FD.store(-1, Ordering::Release);
+            return Err(error.into());
+        }
+    }
+    if has_command_socket {
+        // Proactive peer-loss fencing must not suspend whichever CUDA/MPS
+        // service thread happens to receive a process-directed SIGABRT.
+        // Enter the same native fail-closed handler on this dedicated thread.
+        if let Err(error) = std::thread::Builder::new()
+            .name("gms-gpu-crash-command".into())
+            .spawn(move || loop {
+                let mut command = 0u8;
+                let n = unsafe { libc::read(notification_fd, (&mut command as *mut u8).cast(), 1) };
+                if n == 1 {
+                    if command == 1 {
+                        gpu_crash_handler(
+                            libc::SIGABRT,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    continue;
+                }
+                if n == 0 {
+                    break;
+                }
+                let errno = std::io::Error::last_os_error().raw_os_error();
+                if errno == Some(libc::EINTR) {
+                    continue;
+                }
+                if errno != Some(libc::EAGAIN) {
+                    break;
+                }
+                let mut poll_fd = libc::pollfd {
+                    fd: notification_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                unsafe { libc::poll(&mut poll_fd, 1, -1) };
+            })
+        {
+            for (number, previous) in previous_actions.iter().rev() {
                 unsafe { libc::sigaction(*number, previous, std::ptr::null_mut()) };
             }
             unsafe {
@@ -281,6 +346,11 @@ const LEASE_STATE_LEASED: u32 = 1;
 const LEASE_STATE_SEALED: u32 = 2;
 const LEASE_STATE_RESERVED: u32 = 3;
 const LEASE_STATE_TRANSITION: u32 = 4;
+// Re-sealing an already immutable, unpinned page cannot make its bytes
+// writable. Bit 3 is unused while a record is in TRANSITION, so this marker
+// distinguishes an interrupted idempotent seal from an interrupted adoption
+// or release without widening the shared-memory record ABI.
+const LEASE_STATE_RESEALING: u32 = LEASE_STATE_TRANSITION | LEASE_READER_ONE;
 // An owner-retained allocator page whose last GPU access is complete. IDLE is
 // excluded from the shared free count, but a fenced successor may return a
 // foreign IDLE page to FREE without waiting for whole-context quiescence.
@@ -288,9 +358,10 @@ const LEASE_STATE_IDLE: u32 = 5;
 // A predecessor page that may still be referenced by already-submitted GPU
 // work. Only an explicit GPU-quiescence proof may reclaim this state.
 const LEASE_STATE_QUARANTINED: u32 = 6;
-// A directory-protected SEALED page whose writer died while its record was in
-// TRANSITION. Its bytes and generation must not be exposed until quiescence,
-// but unlike an unprotected quarantine it must be restored rather than freed.
+// A directory-protected immutable SEALED page with predecessor readers. The
+// predecessor's read count is discarded at the CPU fence; the quarantined
+// state itself prohibits writable reuse while its GPU reads may still run.
+// New successor read pins are counted here and survive phase-two restoration.
 const LEASE_STATE_QUARANTINED_SEALED: u32 = 7;
 // Preserve the 16-byte record ABI by packing the reader count above the
 // three-bit base state. A writer may leave SEALED only when the packed count is
@@ -400,7 +471,10 @@ impl Drop for LeaseRecoveryGuard {
 /// live mutators instead of racing them, and (b) reclaims a barrier stranded by
 /// a crashed recovery owner (recorded via its PID) rather than failing forever.
 /// Only genuine same-process re-entry is rejected.
-unsafe fn enter_lease_recovery(ptr: *mut u8) -> PyResult<LeaseRecoveryGuard> {
+unsafe fn enter_lease_recovery(
+    ptr: *mut u8,
+    allow_stranded_count: bool,
+) -> PyResult<LeaseRecoveryGuard> {
     let active = ptr.add(L_ACTIVE_MUTATIONS) as *const AtomicU64;
     let pid_ptr = ptr.add(L_RECOVERY_OWNER_PID) as *const AtomicU64;
     let me = std::process::id() as u64;
@@ -438,6 +512,11 @@ unsafe fn enter_lease_recovery(ptr: *mut u8) -> PyResult<LeaseRecoveryGuard> {
                     });
                 }
                 if budget == 0 {
+                    if !allow_stranded_count {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "KV lease recovery is busy with live successor mutations",
+                        ));
+                    }
                     // A non-zero count that never drains means prior writers
                     // crashed mid-mutation and stranded their counts. Force the
                     // barrier; guarded mutator drops will not corrupt it.
@@ -1169,9 +1248,14 @@ fn kv_lease_seal(
             let mut state = (*state_ptr).load(Ordering::Acquire);
             let mut acquired = false;
             while state == LEASE_STATE_LEASED || state == LEASE_STATE_SEALED {
+                let transition = if state == LEASE_STATE_SEALED {
+                    LEASE_STATE_RESEALING
+                } else {
+                    LEASE_STATE_TRANSITION
+                };
                 match (*state_ptr).compare_exchange(
                     state,
-                    LEASE_STATE_TRANSITION,
+                    transition,
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
@@ -1416,8 +1500,10 @@ fn kv_lease_pin_read(
             let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
             let mut state = (*state_ptr).load(Ordering::Acquire);
             loop {
-                if lease_state_kind(state) != LEASE_STATE_SEALED
-                    || lease_reader_count(state) == LEASE_READER_MAX
+                if !matches!(
+                    lease_state_kind(state),
+                    LEASE_STATE_SEALED | LEASE_STATE_QUARANTINED_SEALED
+                ) || lease_reader_count(state) == LEASE_READER_MAX
                 {
                     release_read_pins(ptr, &pinned);
                     return Ok(false);
@@ -1454,7 +1540,11 @@ unsafe fn release_read_pins(ptr: *mut u8, pins: &[(u32, u32)]) -> u32 {
         let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
         let mut state = (*state_ptr).load(Ordering::Acquire);
         loop {
-            if lease_state_kind(state) != LEASE_STATE_SEALED || lease_reader_count(state) == 0 {
+            if !matches!(
+                lease_state_kind(state),
+                LEASE_STATE_SEALED | LEASE_STATE_QUARANTINED_SEALED
+            ) || lease_reader_count(state) == 0
+            {
                 break;
             }
             match (*state_ptr).compare_exchange_weak(
@@ -1514,9 +1604,9 @@ fn kv_lease_unpin_read(
 
 /// Return whether every exact generation still names recoverable immutable KV.
 ///
-/// SEALED includes active reader counts. QUARANTINED_SEALED is not readable
-/// yet, but its directory record must survive until phase-two quiescence turns
-/// it back into SEALED. Other states are mutable, reusable, or stale.
+/// SEALED includes active readers. QUARANTINED_SEALED is immutable and
+/// read-pinnable, but cannot be adopted for writing until GPU proof turns it
+/// back into SEALED. Other states are mutable, reusable, or stale.
 #[pyfunction]
 #[pyo3(signature = (buf, block_ids, generations))]
 fn kv_lease_exact_recoverable(
@@ -1741,7 +1831,7 @@ unsafe fn reclaim_foreign_lease_blocks(
 ) -> PyResult<u32> {
     let mut released = 0u32;
     let total_blocks = validate_lease_buffer(ptr, buf_len)?;
-    let _recovery = enter_lease_recovery(ptr)?;
+    let _recovery = enter_lease_recovery(ptr, true)?;
     let free_count_ptr = ptr.add(L_FREE_COUNT) as *const AtomicU64;
     for block_id in 0..total_blocks {
         let base = lease_record_off(block_id);
@@ -1866,20 +1956,21 @@ fn kv_lease_reclaim_foreign_except(
 /// Classify foreign records without reusing pages that may have GPU work.
 ///
 /// Foreign IDLE pages are safe to return to FREE because their owner published
-/// IDLE only after GPU completion. Exact protected SEALED pages remain readable
-/// with their reader counts intact. Every other foreign mutable/ambiguous page
-/// becomes QUARANTINED and is excluded from allocation until explicit
-/// quiescence-driven reclaim.
+/// IDLE only after GPU completion. Exact protected SEALED pages remain readable;
+/// predecessor reader counts are replaced by a read-only quarantine state.
+/// Every foreign mutable/ambiguous page becomes QUARANTINED and is excluded
+/// from allocation until explicit quiescence-driven reclaim.
 unsafe fn quarantine_foreign_lease_blocks(
     ptr: *mut u8,
     buf_len: usize,
     owner_hash: u64,
     protected_blocks: &[u32],
+    inherit_quarantine: bool,
 ) -> PyResult<(u32, u32)> {
     let mut released_idle = 0u32;
     let mut quarantined = 0u32;
     let total_blocks = validate_lease_buffer(ptr, buf_len)?;
-    let _recovery = enter_lease_recovery(ptr)?;
+    let _recovery = enter_lease_recovery(ptr, true)?;
     let free_count_ptr = ptr.add(L_FREE_COUNT) as *const AtomicU64;
     for block_id in 0..total_blocks {
         let base = lease_record_off(block_id);
@@ -1892,12 +1983,18 @@ unsafe fn quarantine_foreign_lease_blocks(
         let state = (*state_ptr).load(Ordering::Acquire);
         let kind = lease_state_kind(state);
         if kind == LEASE_STATE_TRANSITION {
+            if state == LEASE_STATE_RESEALING && protected_blocks.binary_search(&block_id).is_ok() {
+                // The crashed operation was an idempotent seal of an already
+                // immutable page. No writer ever regained this generation.
+                (*state_ptr).store(LEASE_STATE_SEALED, Ordering::Release);
+                continue;
+            }
             if protected_blocks.binary_search(&block_id).is_ok() {
-                // A protected transition may be an interrupted SEALED writer
-                // mutation. Preserve the bytes, but keep them unreadable until
-                // phase two proves that predecessor GPU work is quiescent.
+                // A transition may be an interrupted mutation. Its bytes are
+                // not a valid immutable cache hit, even if a stale directory
+                // entry still names it. Recompute rather than exposing it.
                 (*owner_ptr).store(owner_hash, Ordering::Release);
-                (*state_ptr).store(LEASE_STATE_QUARANTINED_SEALED, Ordering::Release);
+                (*state_ptr).store(LEASE_STATE_QUARANTINED, Ordering::Release);
                 quarantined = quarantined.wrapping_add(1);
             } else if observed_owner == 0 {
                 // Both owner-zero transition windows are safe to free: an
@@ -1921,15 +2018,35 @@ unsafe fn quarantine_foreign_lease_blocks(
             released_idle = released_idle.wrapping_add(1);
             continue;
         }
+        if kind == LEASE_STATE_QUARANTINED || kind == LEASE_STATE_QUARANTINED_SEALED {
+            // Quarantine stamped by an earlier recovery owner that died before
+            // its phase two. Phase two only reclaims its own stamp, so without
+            // inheritance these pages would never become allocatable again.
+            // That owner's read pins died with its fenced cohort.
+            if !inherit_quarantine {
+                continue;
+            }
+            let next = if kind == LEASE_STATE_QUARANTINED_SEALED
+                && protected_blocks.binary_search(&block_id).is_ok()
+            {
+                LEASE_STATE_QUARANTINED_SEALED
+            } else {
+                LEASE_STATE_QUARANTINED
+            };
+            (*owner_ptr).store(owner_hash, Ordering::Release);
+            (*state_ptr).store(next, Ordering::Release);
+            quarantined = quarantined.wrapping_add(1);
+            continue;
+        }
         if protected_blocks.binary_search(&block_id).is_ok() && kind == LEASE_STATE_SEALED {
             if lease_reader_count(state) == 0 {
                 // A completed immutable generation with no in-flight readers
                 // is safe to expose immediately.
                 continue;
             }
-            // Reader claims mean predecessor GPU reads may still be queued.
-            // Keep the exact generation but make it unreadable until phase
-            // two, rather than later clearing arbitrary foreign SEALED counts.
+            // Predecessor GPU reads may still be queued, but the sealed bytes
+            // are immutable. The quarantine blocks writable reuse; its reader
+            // bits now count only successor pins, not orphaned old pins.
             (*owner_ptr).store(owner_hash, Ordering::Release);
             (*state_ptr).store(LEASE_STATE_QUARANTINED_SEALED, Ordering::Release);
             quarantined = quarantined.wrapping_add(1);
@@ -1953,12 +2070,13 @@ unsafe fn quarantine_foreign_lease_blocks(
 }
 
 #[pyfunction]
-#[pyo3(signature = (buf, protected_blocks, owner_hash = 0))]
+#[pyo3(signature = (buf, protected_blocks, owner_hash = 0, inherit_quarantine = false))]
 fn kv_lease_quarantine_foreign(
     py: Python<'_>,
     buf: PyBuffer<u8>,
     mut protected_blocks: Vec<u32>,
     owner_hash: u64,
+    inherit_quarantine: bool,
 ) -> PyResult<(u32, u32)> {
     let _ = py;
     protected_blocks.sort_unstable();
@@ -1969,6 +2087,7 @@ fn kv_lease_quarantine_foreign(
             buf.len_bytes(),
             owner_hash,
             &protected_blocks,
+            inherit_quarantine,
         )
     }
 }
@@ -1986,7 +2105,10 @@ fn kv_lease_reclaim_quarantined(
     let buf_len = buf.len_bytes();
     unsafe {
         let total_blocks = validate_lease_buffer(ptr, buf_len)?;
-        let _recovery = enter_lease_recovery(ptr)?;
+        // Phase two runs while the successor is already serving. Unlike the
+        // post-crash phase-one fence, an outstanding count can be a live
+        // successor operation, so never steal its mutation guard.
+        let _recovery = enter_lease_recovery(ptr, false)?;
         let mut reclaimed = 0u32;
         for block_id in 0..total_blocks {
             let base = lease_record_off(block_id);
@@ -2004,10 +2126,21 @@ fn kv_lease_reclaim_quarantined(
                     reclaimed = reclaimed.wrapping_add(1);
                 }
                 LEASE_STATE_QUARANTINED_SEALED => {
-                    // The directory still names this exact block generation.
-                    // Quiescence makes the interrupted writer harmless, so
-                    // restore it to readable SEALED rather than freeing it.
-                    (*state_ptr).store(LEASE_STATE_SEALED, Ordering::Release);
+                    // Only successor read pins remain in this state. Preserve
+                    // their count while making the now-quiesced page adoptable.
+                    let mut observed = state;
+                    while lease_state_kind(observed) == LEASE_STATE_QUARANTINED_SEALED {
+                        let sealed = (observed & !LEASE_STATE_MASK) | LEASE_STATE_SEALED;
+                        match (*state_ptr).compare_exchange_weak(
+                            observed,
+                            sealed,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => break,
+                            Err(next) => observed = next,
+                        }
+                    }
                 }
                 _ => {}
             }

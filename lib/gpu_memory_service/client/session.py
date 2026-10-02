@@ -308,6 +308,7 @@ class _GMSClientSession:
         process_start_time: str,
         rank: int = 0,
         failure_notify_addr: str = "",
+        mps_pipe_directory: str = "",
     ) -> bool:
         response, fd = self._transport.request_with_fd(
             RegisterGPUClientRequest(
@@ -317,6 +318,7 @@ class _GMSClientSession:
                 process_start_time=process_start_time,
                 rank=rank,
                 failure_notify_addr=failure_notify_addr,
+                mps_pipe_directory=mps_pipe_directory,
                 crash_interlock=False,
             ),
             RegisterGPUClientResponse,
@@ -337,6 +339,7 @@ class _GMSClientSession:
         process_start_time: str,
         rank: int = 0,
         failure_notify_addr: str = "",
+        mps_pipe_directory: str = "",
     ) -> int:
         """Register a CUDA client and return its one-shot crash notification FD.
 
@@ -351,6 +354,7 @@ class _GMSClientSession:
                 process_start_time=process_start_time,
                 rank=rank,
                 failure_notify_addr=failure_notify_addr,
+                mps_pipe_directory=mps_pipe_directory,
                 crash_interlock=True,
             ),
             RegisterGPUClientResponse,
@@ -376,6 +380,7 @@ class _GMSClientSession:
         predecessor_cohort: str | None,
         successor_cohort: str,
         terminate_host: bool = False,
+        response_timeout_ms: int | None = None,
     ) -> QuiesceGPUCohortResponse:
         return self._transport.request(
             QuiesceGPUCohortRequest(
@@ -385,6 +390,7 @@ class _GMSClientSession:
                 terminate_host=terminate_host,
             ),
             QuiesceGPUCohortResponse,
+            response_timeout_ms=response_timeout_ms,
         )
 
     # ------------------------------------------------------------------

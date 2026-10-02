@@ -217,6 +217,114 @@ class DaemonClient:
             None if writer_id is None else str(writer_id),
         )
 
+    def directory_pool_geometry(
+        self,
+        manifest_id: str,
+        engine_id: str,
+    ) -> tuple[dict | None, int, Optional[str]]:
+        """Read immutable logical capacity for a persistent KV pool."""
+        resp = self._ok(
+            {
+                "op": "directory_pool_geometry",
+                "manifest_id": str(manifest_id),
+                "engine_id": str(engine_id),
+            }
+        )
+        epoch = int(resp.get("directory_epoch", 0))
+        self._directory_epoch = epoch
+        writer_id = resp.get("writer_id")
+        geometry = resp.get("geometry")
+        return (
+            None if geometry is None else dict(geometry),
+            epoch,
+            None if writer_id is None else str(writer_id),
+        )
+
+    def directory_register_pool(
+        self,
+        manifest_id: str,
+        writer_id: str,
+        engine_id: str,
+        total_blocks: int,
+        *,
+        expected_epoch: int,
+        layout_digest: str = "",
+    ) -> tuple[bool, bool, int]:
+        """Register immutable pool geometry under the current writer epoch."""
+        resp = self._ok(
+            {
+                "op": "directory_register_pool",
+                "manifest_id": str(manifest_id),
+                "writer_id": str(writer_id),
+                "engine_id": str(engine_id),
+                "total_blocks": int(total_blocks),
+                "layout_digest": str(layout_digest),
+                "expected_epoch": int(expected_epoch),
+            }
+        )
+        epoch = int(resp.get("directory_epoch", 0))
+        self._directory_epoch = epoch
+        return (
+            bool(resp.get("registered", False)),
+            bool(resp.get("rejected_stale_writer", False)),
+            epoch,
+        )
+
+    def directory_pool_binding(
+        self, manifest_id: str, engine_id: str
+    ) -> tuple[dict | None, int, Optional[str]]:
+        """Read the immutable per-rank physical allocation binding."""
+        resp = self._ok(
+            {
+                "op": "directory_pool_binding",
+                "manifest_id": str(manifest_id),
+                "engine_id": str(engine_id),
+            }
+        )
+        epoch = int(resp.get("directory_epoch", 0))
+        self._directory_epoch = epoch
+        binding = resp.get("binding")
+        writer_id = resp.get("writer_id")
+        return (
+            None if binding is None else dict(binding),
+            epoch,
+            None if writer_id is None else str(writer_id),
+        )
+
+    def directory_register_pool_rank(
+        self,
+        manifest_id: str,
+        writer_id: str,
+        engine_id: str,
+        rank: int,
+        expected_tp_size: int,
+        layout_digest: str,
+        allocations: list[dict],
+        *,
+        expected_epoch: int,
+    ) -> tuple[bool, bool, int]:
+        """Bind one rank to its concrete persistent allocations."""
+        resp = self._ok(
+            {
+                "op": "directory_register_pool_rank",
+                "manifest_id": str(manifest_id),
+                "writer_id": str(writer_id),
+                "engine_id": str(engine_id),
+                "rank": int(rank),
+                "expected_tp_size": int(expected_tp_size),
+                "layout_digest": str(layout_digest),
+                "allocations": list(allocations),
+                "expected_epoch": int(expected_epoch),
+            }
+        )
+        epoch = int(resp.get("directory_epoch", 0))
+        self._directory_epoch = epoch
+        return (
+            bool(resp.get("registered", False)),
+            bool(resp.get("rejected_stale_writer", False)),
+            epoch,
+        )
+
     def directory_snapshot(
         self,
         manifest_id: str,

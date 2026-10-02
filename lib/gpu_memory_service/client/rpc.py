@@ -131,8 +131,12 @@ class _GMSRPCTransport:
         )
         return response
 
-    def request(self, request, response_type: Type[T]) -> T:
-        response, fd = self.request_with_fd(request, response_type)
+    def request(
+        self, request, response_type: Type[T], *, response_timeout_ms: int | None = None
+    ) -> T:
+        response, fd = self.request_with_fd(
+            request, response_type, response_timeout_ms=response_timeout_ms
+        )
         if fd >= 0:
             os.close(fd)
             raise RuntimeError(
@@ -146,8 +150,13 @@ class _GMSRPCTransport:
         response_type: Type[T],
         *,
         error_prefix: Optional[str] = None,
+        response_timeout_ms: int | None = None,
     ) -> Tuple[T, int]:
-        response, fd = self._send_recv(request, error_prefix=error_prefix)
+        response, fd = self._send_recv(
+            request,
+            error_prefix=error_prefix,
+            response_timeout_ms=response_timeout_ms,
+        )
         if not isinstance(response, response_type):
             prefix = error_prefix or f"GMS request {type(request).__name__}"
             if fd >= 0:
@@ -158,7 +167,11 @@ class _GMSRPCTransport:
         return response, fd
 
     def _send_recv(
-        self, request, *, error_prefix: Optional[str] = None
+        self,
+        request,
+        *,
+        error_prefix: Optional[str] = None,
+        response_timeout_ms: int | None = None,
     ) -> Tuple[object, int]:
         if self._socket is None:
             if self._inherited:
@@ -169,18 +182,25 @@ class _GMSRPCTransport:
             raise RuntimeError("Attempted GMS request on disconnected transport")
 
         prefix = error_prefix or f"GMS request {type(request).__name__}"
+        connection = self._socket
+        previous_timeout = connection.gettimeout()
         try:
-            send_message_sync(self._socket, request)
+            if response_timeout_ms is not None:
+                connection.settimeout(max(1, response_timeout_ms) / 1000)
+            send_message_sync(connection, request)
             response, fd, self._recv_buffer = recv_message_sync(
-                self._socket, self._recv_buffer
+                connection, self._recv_buffer
             )
         except Exception as exc:
             try:
-                self._socket.close()
+                connection.close()
             except Exception:
                 pass
             self._socket = None
             raise ConnectionError(f"{prefix} failed: {exc}") from exc
+        finally:
+            if self._socket is connection:
+                connection.settimeout(previous_timeout)
 
         if isinstance(response, ErrorResponse):
             if fd >= 0:

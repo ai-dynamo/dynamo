@@ -638,14 +638,16 @@ class ContentDirectory:
         of the external failover lock fences the process; it is not expected to
         become a standby again in place.
         """
-        if not self.read_view_is_current_writer or not self._view_ready.is_set():
-            return False
-        self._async_read = False
-        self._view_stop.set()
-        thread = self._view_thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(1.0, self._poll_seconds * 2))
-        return thread is None or not thread.is_alive()
+        # The reader can be blocked in a daemon long poll. Joining it here
+        # puts that poll on the first replay request's critical path. Freeze
+        # under the view lock instead: a late reply may finish its RPC but is
+        # not allowed to change the snapshot or writer-ready bit afterward.
+        with self._view_lock:
+            if not self._view_current_writer or not self._view_ready.is_set():
+                return False
+            self._async_read = False
+            self._view_stop.set()
+        return True
 
     def wait_until_synced(self, timeout: Optional[float] = None) -> bool:
         self.start_async_read()
@@ -656,10 +658,12 @@ class ContentDirectory:
         return bool(self._view_current_writer)
 
     def _invalidate_read_view(self) -> None:
-        # Revoke the lock-free status before clearing any view state.
-        self._view_current_writer = False
-        self._view_ready.clear()
         with self._view_lock:
+            if self._view_stop.is_set():
+                return
+            # Revoke the lock-free status before clearing any view state.
+            self._view_current_writer = False
+            self._view_ready.clear()
             self._view = {}
             self._view_revision = 0
             self._view_epoch = None
@@ -674,19 +678,23 @@ class ContentDirectory:
         writer_id: Optional[str],
     ) -> None:
         with self._view_lock:
+            if self._view_stop.is_set():
+                return
             self._view = entries
             self._view_revision = int(revision)
             self._view_epoch = int(epoch)
             self._view_writer = writer_id
             self._view_caught_up = True
             self._view_current_writer = writer_id == self.writer_id
-        self._view_ready.set()
+            self._view_ready.set()
 
     def _apply_changes(self, response: dict) -> None:
         if response["reset_required"]:
             self._invalidate_read_view()
             return
         with self._view_lock:
+            if self._view_stop.is_set():
+                return
             for change in response["changes"]:
                 content_hash = change["content_hash"]
                 entry = change["entry"]
@@ -702,7 +710,7 @@ class ContentDirectory:
             self._view_current_writer = (
                 self._view_caught_up and self._view_writer == self.writer_id
             )
-        self._view_ready.set()
+            self._view_ready.set()
 
     def _read_view_loop(self) -> None:
         client: Optional[DaemonClient] = None
@@ -776,6 +784,27 @@ class ContentDirectory:
                     break
             return result
 
+    def snapshot_authoritative(self) -> dict[bytes, dict]:
+        """Return one daemon-committed READY inventory image.
+
+        Takeover code uses this after writer promotion. Unlike the async read
+        view, the returned image is tied to a single daemon lock acquisition
+        and cannot be partially hydrated while deltas arrive.
+        """
+        entries, _revision, epoch, writer = self._call(
+            lambda client: client.directory_snapshot(
+                self.manifest_id,
+                scope=self.engine,
+            )
+        )
+        self._writer_epoch = int(epoch)
+        if writer != self.writer_id:
+            raise RuntimeError(
+                "GMS KV directory snapshot is not owned by this writer: "
+                f"expected={self.writer_id!r} observed={writer!r}"
+            )
+        return entries
+
     def may_have_hbm_candidate(self, content_hashes: list[bytes]) -> bool:
         """Cheaply test whether an authoritative HBM claim may be useful.
 
@@ -841,6 +870,15 @@ class ContentDirectory:
         )
         self._writer_epoch = int(epoch)
         return epoch, writer_id
+
+    def pool_binding(self, engine_id: str) -> dict | None:
+        """Return the daemon-owned physical allocation binding for a pool."""
+        binding, _epoch, _writer = self._call(
+            lambda client: client.directory_pool_binding(
+                self.manifest_id, str(engine_id)
+            )
+        )
+        return binding
 
     def _writer_call(
         self,
