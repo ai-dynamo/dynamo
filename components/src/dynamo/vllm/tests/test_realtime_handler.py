@@ -15,7 +15,7 @@ from dynamo.vllm.realtime import (
     RealtimeTextHandler,
     RealtimeTranscriptionHandler,
 )
-from dynamo.vllm.realtime.handler import _TextPrefill, _TextTurn
+from dynamo.vllm.realtime.handler import _text_prompt, _TextPrefill, _TextTurn
 
 pytestmark = [
     pytest.mark.unit,
@@ -198,14 +198,12 @@ def _text_response(**updates) -> dict:
 
 def test_text_turn_finalization_is_idempotent():
     items = []
-    messages = []
     turn = _TextTurn(
         messages=[],
         max_output_tokens=32,
         wire_max_output_tokens=32,
         add_to_conversation=True,
         items=items,
-        conversation_messages=messages,
     )
 
     first = turn.final_events(status="completed")
@@ -214,7 +212,7 @@ def test_text_turn_finalization_is_idempotent():
     assert first[-1]["response"]["status"] == "completed"
     assert second == []
     assert len(items) == 1
-    assert messages == [{"role": "assistant", "content": ""}]
+    assert _text_prompt(items, "") == [{"role": "assistant", "content": ""}]
 
 
 def test_text_session_streams_canonical_response_and_preserves_usage():
@@ -841,7 +839,6 @@ def test_cancellation_under_backpressure_closes_chat_stream():
             wire_max_output_tokens=32,
             add_to_conversation=False,
             items=[],
-            conversation_messages=[],
         )
         while not turn.events.full():
             turn.events.put_nowait({})
@@ -945,15 +942,36 @@ def test_generation_failure_closes_announced_response_item():
     assert result[-1]["response"]["metadata"] == metadata
 
 
-def test_text_session_starts_next_turn_immediately_after_response_done():
+@pytest.mark.parametrize(
+    "cancelled_text, response_options",
+    [
+        pytest.param(None, {}, id="completed"),
+        pytest.param("", {}, id="cancelled-empty"),
+        pytest.param("partial", {}, id="cancelled-partial"),
+        pytest.param(None, {"conversation": "none"}, id="out-of-band"),
+        pytest.param(None, {"input": []}, id="empty-input"),
+        pytest.param(
+            None, {"conversation": "none", "input": []}, id="out-of-band-empty-input"
+        ),
+    ],
+)
+def test_text_session_starts_next_turn_immediately_after_response_done(
+    cancelled_text, response_options
+):
     async def scenario():
         calls = []
+        started = asyncio.Event()
 
         async def chat_completion(messages, max_output_tokens):
             del max_output_tokens
             calls.append(messages)
+            started.set()
 
             async def frames():
+                if len(calls) == 1 and cancelled_text is not None:
+                    if cancelled_text:
+                        yield f'data: {{"choices":[{{"delta":{{"content":"{cancelled_text}"}}}}]}}\n\n'
+                    await asyncio.Event().wait()
                 reply = f"reply {len(calls)}"
                 yield f'data: {{"choices":[{{"delta":{{"content":"{reply}"}},"finish_reason":"stop"}}]}}\n\n'
                 yield "data: [DONE]\n\n"
@@ -971,12 +989,28 @@ def test_text_session_starts_next_turn_immediately_after_response_done():
             chat_completion_factory=chat_completion,
         ).generate(request_stream(), _Context())
         await requests.put({"type": "session.update", "session": _text_session()})
-        await requests.put(_text_item("First", item_id="user_1"))
-        await requests.put({"type": "response.create"})
+        item = _text_item("Fi", item_id="user_1")
+        item["item"]["content"].append({"type": "input_text", "text": "rst"})
+        await requests.put(item)
+        await requests.put(
+            _text_response(
+                conversation=response_options.get("conversation", "auto"),
+                input=response_options.get("input"),
+                instructions="Answer clearly.",
+            )
+            if response_options
+            else {"type": "response.create"}
+        )
 
         first = []
         while not first or first[-1]["type"] != "response.done":
             first.append(await anext(responses))
+            cancel_after = (
+                "response.output_text.delta" if cancelled_text else "response.created"
+            )
+            if cancelled_text is not None and first[-1]["type"] == cancel_after:
+                await started.wait()
+                await requests.put({"type": "response.cancel"})
 
         await requests.put(_text_item("Second", item_id="user_2"))
         await requests.put({"type": "response.create"})
@@ -987,16 +1021,35 @@ def test_text_session_starts_next_turn_immediately_after_response_done():
 
     calls, events = asyncio.run(asyncio.wait_for(scenario(), timeout=1))
 
-    assert len([event for event in events if event["type"] == "response.done"]) == 2
+    done = [event for event in events if event["type"] == "response.done"]
+    assert len(done) == 2
+    assert done[0]["response"]["status"] == (
+        "completed" if cancelled_text is None else "cancelled"
+    )
+    first_input = (
+        []
+        if response_options.get("input") == []
+        else [{"role": "user", "content": "First"}]
+    )
+    assistant_history = (
+        []
+        if response_options.get("conversation") == "none"
+        else [
+            {
+                "role": "assistant",
+                "content": "reply 1" if cancelled_text is None else cancelled_text,
+            }
+        ]
+    )
     assert calls == [
         [
             {"role": "system", "content": "Answer clearly."},
-            {"role": "user", "content": "First"},
+            *first_input,
         ],
         [
             {"role": "system", "content": "Answer clearly."},
             {"role": "user", "content": "First"},
-            {"role": "assistant", "content": "reply 1"},
+            *assistant_history,
             {"role": "user", "content": "Second"},
         ],
     ]

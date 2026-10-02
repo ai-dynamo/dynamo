@@ -127,7 +127,20 @@ def _max_output_tokens(value: Any) -> tuple[int | None, int | str]:
     return value, value
 
 
-def _normalize_text_item(value: Any) -> tuple[dict[str, Any], dict[str, str]]:
+def _validate_text_options(options: dict[str, Any], name: str) -> None:
+    if options.get("output_modalities") not in (None, ["text"]):
+        raise ValueError("only text output is supported")
+    if options.get("tools") not in (None, []):
+        raise ValueError("tools are not supported")
+    if options.get("tool_choice") not in (None, "none"):
+        raise ValueError("tool_choice is not supported")
+    if any(options.get(field) is not None for field in ("prompt", "reasoning")):
+        raise ValueError("prompt and reasoning configuration are not supported")
+    if not isinstance(options.get("instructions", ""), str):
+        raise ValueError(f"{name}.instructions must be a string")
+
+
+def _normalize_text_item(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("type") != "message":
         raise ValueError("only message conversation items are supported")
     role = value.get("role")
@@ -156,10 +169,22 @@ def _normalize_text_item(value: Any) -> tuple[dict[str, Any], dict[str, str]]:
     }
     if not isinstance(item["id"], str):
         raise ValueError("conversation item id must be a string")
-    return item, {
-        "role": role,
-        "content": "".join(part["text"] for part in content),
-    }
+    return item
+
+
+def _text_prompt(
+    items: list[dict[str, Any]], instructions: str
+) -> list[dict[str, str]]:
+    messages = [
+        {
+            "role": item["role"],
+            "content": "".join(part["text"] for part in item["content"]),
+        }
+        for item in items
+    ]
+    if instructions:
+        messages.insert(0, {"role": "system", "content": instructions})
+    return messages
 
 
 def _realtime_usage(usage: dict[str, Any] | None) -> dict[str, int] | None:
@@ -188,7 +213,6 @@ class _TextTurn(RealtimeTurn):
         wire_max_output_tokens: int | str,
         add_to_conversation: bool,
         items: list[dict[str, Any]],
-        conversation_messages: list[dict[str, str]],
         metadata: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
@@ -199,7 +223,6 @@ class _TextTurn(RealtimeTurn):
         self.wire_max_output_tokens = wire_max_output_tokens
         self.add_to_conversation = add_to_conversation
         self.items = items
-        self.conversation_messages = conversation_messages
         self.metadata = metadata
         self.previous_item_id = items[-1]["id"] if items else None
         self.text = ""
@@ -263,9 +286,6 @@ class _TextTurn(RealtimeTurn):
         ]
         if self.add_to_conversation:
             self.items.append(item)
-            self.conversation_messages.append(
-                {"role": "assistant", "content": self.text}
-            )
             events.append(conversation_item_done_event(item, self.previous_item_id))
         events.append(
             response_done_event(
@@ -363,34 +383,14 @@ class RealtimeTextHandler:
     def _validate_session(self, session: Any) -> str | None:
         if not isinstance(session, dict) or session.get("type") != "realtime":
             return "session.type must be 'realtime'"
-        checks = (
-            (session.get("model") in (None, self.model_name), "session model mismatch"),
-            (
-                session.get("output_modalities") in (None, ["text"]),
-                "only text output is supported",
-            ),
-            (
-                session.get("audio") is None,
-                "audio input and output are not supported by this worker",
-            ),
-            (session.get("tools") in (None, []), "tools are not supported"),
-            (
-                session.get("tool_choice") in (None, "none"),
-                "tool_choice is not supported",
-            ),
-            (
-                session.get("truncation") in (None, "disabled"),
-                "automatic truncation is not supported; use truncation='disabled'",
-            ),
-        )
-        for supported, message in checks:
-            if not supported:
-                return message
-        if any(session.get(field) is not None for field in ("prompt", "reasoning")):
-            return "prompt and reasoning configuration are not supported"
-        if not isinstance(session.get("instructions", ""), str):
-            return "session.instructions must be a string"
+        if session.get("model") not in (None, self.model_name):
+            return "session model mismatch"
+        if session.get("audio") is not None:
+            return "audio input and output are not supported by this worker"
+        if session.get("truncation") not in (None, "disabled"):
+            return "automatic truncation is not supported; use truncation='disabled'"
         try:
+            _validate_text_options(session, "session")
             _max_output_tokens(session.get("max_output_tokens"))
         except ValueError as exc:
             return str(exc)
@@ -402,18 +402,11 @@ class RealtimeTextHandler:
         response = {} if value is None else value
         if not isinstance(response, dict):
             raise ValueError("response must be an object")
-        if response.get("output_modalities") not in (None, ["text"]):
-            raise ValueError("only text output is supported")
-        if response.get("tools") not in (None, []):
-            raise ValueError("tools are not supported")
-        if response.get("tool_choice") not in (None, "none"):
-            raise ValueError("tool_choice is not supported")
+        _validate_text_options(response, "response")
         if response.get("input") not in (None, []):
             raise ValueError("response.input items are not supported")
         if response.get("conversation") not in (None, "auto", "none"):
             raise ValueError("response.conversation must be 'auto' or 'none'")
-        if any(response.get(field) is not None for field in ("prompt", "reasoning")):
-            raise ValueError("prompt and reasoning configuration are not supported")
         metadata = response.get("metadata")
         if metadata is not None and (
             not isinstance(metadata, dict)
@@ -425,8 +418,6 @@ class RealtimeTextHandler:
             raise ValueError("response.metadata must be an object with string values")
 
         instructions = response.get("instructions", session["instructions"])
-        if not isinstance(instructions, str):
-            raise ValueError("response.instructions must be a string")
         max_tokens = response.get("max_output_tokens", session["max_output_tokens"])
         max_output_tokens, wire_max_output_tokens = _max_output_tokens(max_tokens)
         return (
@@ -529,13 +520,18 @@ class RealtimeTextHandler:
             "truncation": "disabled",
         }
         items: list[dict[str, Any]] = []
-        messages: list[dict[str, str]] = []
         connection = RealtimeConnection[_TextTurn](
             context=context, run_turn=self._run_turn, max_concurrent_turns=1
         )
         active_response: _TextTurn | None = None
         active_prefill: _TextPrefill | None = None
         committed_prefill: _TextPrefill | None = None
+
+        def append_item(item: dict[str, Any]) -> None:
+            previous_item_id = items[-1]["id"] if items else None
+            items.append(item)
+            connection.emit(conversation_item_added_event(item, previous_item_id))
+            connection.emit(conversation_item_done_event(item, previous_item_id))
 
         def emit_error(event: dict[str, Any], code: str, message: str) -> None:
             connection.emit(
@@ -608,7 +604,7 @@ class RealtimeTextHandler:
                     )
                     return
                 try:
-                    item, message = _normalize_text_item(event.get("item"))
+                    item = _normalize_text_item(event.get("item"))
                     if any(existing["id"] == item["id"] for existing in items):
                         raise ValueError(
                             f"conversation item {item['id']!r} already exists"
@@ -616,11 +612,7 @@ class RealtimeTextHandler:
                 except ValueError as exc:
                     emit_error(event, "invalid_item", str(exc))
                     return
-                previous_item_id = items[-1]["id"] if items else None
-                items.append(item)
-                messages.append(message)
-                connection.emit(conversation_item_added_event(item, previous_item_id))
-                connection.emit(conversation_item_done_event(item, previous_item_id))
+                append_item(item)
             elif event_type == "input_text.append":
                 if running is not None:
                     emit_error(
@@ -648,14 +640,8 @@ class RealtimeTextHandler:
                     )
                     return
                 if active_prefill is None:
-                    prompt = list(messages)
-                    if session["instructions"]:
-                        prompt.insert(
-                            0,
-                            {"role": "system", "content": session["instructions"]},
-                        )
                     active_prefill = _TextPrefill(
-                        messages=prompt,
+                        messages=_text_prompt(items, session["instructions"]),
                         factory=self._text_prefill_factory,
                     )
                 try:
@@ -674,18 +660,14 @@ class RealtimeTextHandler:
                 committed_prefill = active_prefill
                 text = active_prefill.text
                 active_prefill = None
-                item, message = _normalize_text_item(
+                item = _normalize_text_item(
                     {
                         "type": "message",
                         "role": "user",
                         "content": [{"type": "input_text", "text": text}],
                     }
                 )
-                previous_item_id = items[-1]["id"] if items else None
-                items.append(item)
-                messages.append(message)
-                connection.emit(conversation_item_added_event(item, previous_item_id))
-                connection.emit(conversation_item_done_event(item, previous_item_id))
+                append_item(item)
             elif event_type == "input_text.clear":
                 if active_prefill is not None:
                     await active_prefill.cancel()
@@ -712,9 +694,9 @@ class RealtimeTextHandler:
                         use_conversation,
                         metadata,
                     ) = self._response_options(event.get("response"), session)
-                    prompt = list(messages) if use_conversation else []
-                    if instructions:
-                        prompt.insert(0, {"role": "system", "content": instructions})
+                    prompt = _text_prompt(
+                        items if use_conversation else [], instructions
+                    )
                     if not prompt:
                         raise ValueError(
                             "response requires conversation input or instructions"
@@ -731,7 +713,6 @@ class RealtimeTextHandler:
                         wire_max_output_tokens=wire_max_output_tokens,
                         add_to_conversation=add_to_conversation,
                         items=items,
-                        conversation_messages=messages,
                         metadata=metadata,
                     )
                 )
