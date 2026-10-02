@@ -21,6 +21,7 @@ from tests.serve.common import (
 from tests.serve.sidecar_checks import (
     assert_cancellation_and_recovery,
     assert_kv_transfer,
+    assert_sglang_transfer_wait_cancelled,
 )
 from tests.serve.sidecar_handoff_checks import assert_native_handoff
 from tests.utils.constants import DynamoPortRange
@@ -196,17 +197,17 @@ sidecar_configs = {
         name="sglang_aggregated",
         directory=sglang_sidecar_dir,
         script_name="agg.sh",
+        script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
+            pytest.mark.requested_sglang_kv_tokens(8192),
         ],
         model="Qwen/Qwen3-0.6B",
         env={"PYTHONUNBUFFERED": "1"},
-        request_payloads=[
-            chat_payload_default(),
-        ],
+        request_payloads=_compatibility_payloads(),
     ),
     "trtllm_aggregated": EngineConfig(
         name="trtllm_aggregated",
@@ -303,7 +304,12 @@ sidecar_configs = {
         name="sglang_disaggregated",
         directory=sglang_sidecar_dir,
         script_name="disagg.sh",
-        script_args=["--disable-cuda-graph"],
+        script_args=[
+            "--disable-cuda-graph",
+            "--enable-metrics",
+            "--decode-log-interval",
+            "1",
+        ],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
@@ -393,33 +399,54 @@ def test_serve_deployment(
                 )
 
             def validate_transfer():
-                payload = _disaggregated_chat_payload().with_model(config.model)
-                payload.port = config.frontend_port
-                assert_kv_transfer(
-                    backend=backend,
-                    payload=payload,
-                    prefill_http_port=int(engine_env["VLLM_PREFILL_HTTP_PORT"]),
-                    decode_http_port=int(engine_env["VLLM_DECODE_HTTP_PORT"]),
-                    probe_path=probe_path,
-                )
-                assert_native_handoff(
-                    backend=backend,
-                    namespace=engine_env["DYN_NAMESPACE"],
-                    model=config.model,
-                    prefill_http_port=int(engine_env["VLLM_PREFILL_HTTP_PORT"]),
-                    decode_http_port=int(engine_env["VLLM_DECODE_HTTP_PORT"]),
-                    probe_path=probe_path,
-                    discovery_backend=discovery_backend,
-                )
+                def transfer():
+                    payload = _disaggregated_chat_payload().with_model(config.model)
+                    payload.port = config.frontend_port
+                    assert_kv_transfer(
+                        backend=backend,
+                        payload=payload,
+                        prefill_http_port=int(
+                            engine_env[f"{backend.upper()}_PREFILL_HTTP_PORT"]
+                        ),
+                        decode_http_port=int(
+                            engine_env[f"{backend.upper()}_DECODE_HTTP_PORT"]
+                        ),
+                        probe_path=probe_path if backend == "vllm" else None,
+                    )
+
+                transfer()
+                if backend == "sglang":
+                    assert_sglang_transfer_wait_cancelled(
+                        namespace=engine_env["DYN_NAMESPACE"],
+                        model=config.model,
+                        decode_http_port=int(engine_env["SGLANG_DECODE_HTTP_PORT"]),
+                        bootstrap_port=int(
+                            engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"]
+                        ),
+                        discovery_backend=discovery_backend,
+                    )
+                    transfer()
+                if backend == "vllm":
+                    assert_native_handoff(
+                        backend=backend,
+                        namespace=engine_env["DYN_NAMESPACE"],
+                        model=config.model,
+                        prefill_http_port=int(engine_env["VLLM_PREFILL_HTTP_PORT"]),
+                        decode_http_port=int(engine_env["VLLM_DECODE_HTTP_PORT"]),
+                        probe_path=probe_path,
+                        discovery_backend=discovery_backend,
+                    )
 
             run_serve_deployment(
                 config,
                 request,
                 ports=dynamo_dynamic_ports,
                 extra_env=engine_env,
-                post_validation=validate_transfer if backend == "vllm" else None,
+                post_validation=validate_transfer
+                if backend in ("vllm", "sglang")
+                else None,
             )
-    elif config.name == "vllm_aggregated":
+    elif config.name in ("vllm_aggregated", "sglang_aggregated"):
         backend = config.name.removesuffix("_aggregated")
         namespace = f"sidecar-agg-{generate_random_suffix()}"
         monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
@@ -431,7 +458,9 @@ def test_serve_deployment(
                 ports=dynamo_dynamic_ports,
                 extra_env={
                     "DYN_NAMESPACE": namespace,
-                    "VLLM_RS_HTTP_PORT": str(engine_ports[0]),
+                    "VLLM_RS_HTTP_PORT"
+                    if backend == "vllm"
+                    else "SGLANG_HTTP_PORT": str(engine_ports[0]),
                     f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
                 },
                 post_validation=lambda: assert_cancellation_and_recovery(

@@ -176,7 +176,7 @@ clients. That makes peer-loss tests deterministic.
 | --- | --- | --- |
 | `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
 | `router_sidecar_mocker_integration.rs` | Both backends: registration/error recovery, model alias publication, health-gated readiness, unhealthy startup, cancellation, SIGTERM and real PrefillRouter handoff; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
-| `tests/serve/test_sidecar.py` | Real vLLM logprobs, structured output, cancellation and recovery, completed KV transfer, and routing | GPU, existing sidecar E2E jobs in post-merge and nightly |
+| `tests/serve/test_sidecar.py` | Real engine logprobs, structured output, cancellation and recovery, completed KV transfer, and routing | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 Both vLLM and SGLang register the shared wire and process scenarios.
@@ -205,8 +205,8 @@ establish complete parity with the legacy Python backend.
 ### Relationship to serving E2E tests
 
 `tests/serve/test_sidecar.py` starts the frontend, production sidecar executable
-and real engines through the existing launch scripts. vLLM payloads validate
-HTTP streaming, logprobs, structured output, distinct prefill/decode workers and
+and real engines through the existing launch scripts. Payloads validate HTTP
+streaming, logprobs, structured output, distinct prefill/decode workers and
 KV-aware routing, including exact token/usage accounting. Post-validation checks
 scheduler cleanup after client disconnection, recovery on the same deployment,
 and completed KV transfers.
@@ -287,14 +287,15 @@ cargo test --locked -p dynamo-sidecar-testkit --test router_sidecar_mocker_integ
 
 ### Running GPU E2E tests
 
-Run the sidecar serving tests in the vLLM backend image, with the production
-sidecar binary available:
+Run the sidecar serving tests in the corresponding backend image, with the
+production sidecar binary available:
 
 ```sh
 python3 -m pytest tests/serve/test_sidecar.py -m "vllm and gpu_1" -v
+python3 -m pytest tests/serve/test_sidecar.py -m "sglang and gpu_1" -v
 ```
 
-The disaggregated case runs both engines on one GPU. The usual
+Both aggregated and disaggregated cases use one GPU. The usual
 `predownload_models` fixture prepares model weights, and the serve runner owns
 engine startup, readiness and cleanup. Post-merge and nightly CI execute these
 assertions through the existing sidecar E2E jobs. No separate GPU test executable
