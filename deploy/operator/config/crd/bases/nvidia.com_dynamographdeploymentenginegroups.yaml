@@ -401,12 +401,6 @@ spec:
                               - Failed
                               - Unknown
                             type: string
-                          runtimeIncarnation:
-                            description: |-
-                              runtimeIncarnation identifies one concrete engine process incarnation.
-                              A dormant candidate may not yet have a runtime incarnation.
-                            minLength: 1
-                            type: string
                         required:
                           - availability
                           - capacityRefs
@@ -453,12 +447,6 @@ spec:
                               - Failed
                               - Unknown
                             type: string
-                          runtimeIncarnation:
-                            description: |-
-                              runtimeIncarnation identifies one concrete engine process incarnation.
-                              A dormant candidate may not yet have a runtime incarnation.
-                            minLength: 1
-                            type: string
                         required:
                           - availability
                           - capacityRefs
@@ -481,6 +469,10 @@ spec:
                                 - Joining
                                 - Retiring
                                 - Unknown
+                              type: string
+                            runtimeIncarnation:
+                              description: runtimeIncarnation identifies the process to which membership and traffic evidence apply.
+                              minLength: 1
                               type: string
                             traffic:
                               description: traffic is admission or terminal drain evidence from the runtime traffic authority.
@@ -601,24 +593,37 @@ spec:
                         description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
                         properties:
                           nativeMembers:
-                            description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                            description: |-
+                              nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may
+                              retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime.
                             items:
-                              minLength: 1
-                              type: string
+                              description: EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+                              properties:
+                                id:
+                                  description: id is the engine-native member identity.
+                                  minLength: 1
+                                  type: string
+                                runtimeIncarnation:
+                                  description: runtimeIncarnation changes on every restart of this member's process.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - id
+                                - runtimeIncarnation
+                              type: object
                             minItems: 1
                             type: array
+                            x-kubernetes-list-map-keys:
+                              - id
+                              - runtimeIncarnation
+                            x-kubernetes-list-type: map
                           replicaID:
                             description: replicaID is the stable logical identity.
-                            minLength: 1
-                            type: string
-                          runtimeIncarnation:
-                            description: runtimeIncarnation identifies the concrete engine process in this topology.
                             minLength: 1
                             type: string
                         required:
                           - nativeMembers
                           - replicaID
-                          - runtimeIncarnation
                         type: object
                       type: array
                       x-kubernetes-list-map-keys:
@@ -636,24 +641,37 @@ spec:
                         description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
                         properties:
                           nativeMembers:
-                            description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                            description: |-
+                              nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may
+                              retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime.
                             items:
-                              minLength: 1
-                              type: string
+                              description: EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+                              properties:
+                                id:
+                                  description: id is the engine-native member identity.
+                                  minLength: 1
+                                  type: string
+                                runtimeIncarnation:
+                                  description: runtimeIncarnation changes on every restart of this member's process.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - id
+                                - runtimeIncarnation
+                              type: object
                             minItems: 1
                             type: array
+                            x-kubernetes-list-map-keys:
+                              - id
+                              - runtimeIncarnation
+                            x-kubernetes-list-type: map
                           replicaID:
                             description: replicaID is the stable logical identity.
-                            minLength: 1
-                            type: string
-                          runtimeIncarnation:
-                            description: runtimeIncarnation identifies the concrete engine process in this topology.
                             minLength: 1
                             type: string
                         required:
                           - nativeMembers
                           - replicaID
-                          - runtimeIncarnation
                         type: object
                       type: array
                     drained:
@@ -662,24 +680,37 @@ spec:
                         description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
                         properties:
                           nativeMembers:
-                            description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                            description: |-
+                              nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may
+                              retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime.
                             items:
-                              minLength: 1
-                              type: string
+                              description: EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+                              properties:
+                                id:
+                                  description: id is the engine-native member identity.
+                                  minLength: 1
+                                  type: string
+                                runtimeIncarnation:
+                                  description: runtimeIncarnation changes on every restart of this member's process.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - id
+                                - runtimeIncarnation
+                              type: object
                             minItems: 1
                             type: array
+                            x-kubernetes-list-map-keys:
+                              - id
+                              - runtimeIncarnation
+                            x-kubernetes-list-type: map
                           replicaID:
                             description: replicaID is the stable logical identity.
-                            minLength: 1
-                            type: string
-                          runtimeIncarnation:
-                            description: runtimeIncarnation identifies the concrete engine process in this topology.
                             minLength: 1
                             type: string
                         required:
                           - nativeMembers
                           - replicaID
-                          - runtimeIncarnation
                         type: object
                       type: array
                     draining:
@@ -688,24 +719,37 @@ spec:
                         description: EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
                         properties:
                           nativeMembers:
-                            description: nativeMembers are the backend-specific ranks or member identities committed for the replica.
+                            description: |-
+                              nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may
+                              retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime.
                             items:
-                              minLength: 1
-                              type: string
+                              description: EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+                              properties:
+                                id:
+                                  description: id is the engine-native member identity.
+                                  minLength: 1
+                                  type: string
+                                runtimeIncarnation:
+                                  description: runtimeIncarnation changes on every restart of this member's process.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - id
+                                - runtimeIncarnation
+                              type: object
                             minItems: 1
                             type: array
+                            x-kubernetes-list-map-keys:
+                              - id
+                              - runtimeIncarnation
+                            x-kubernetes-list-type: map
                           replicaID:
                             description: replicaID is the stable logical identity.
-                            minLength: 1
-                            type: string
-                          runtimeIncarnation:
-                            description: runtimeIncarnation identifies the concrete engine process in this topology.
                             minLength: 1
                             type: string
                         required:
                           - nativeMembers
                           - replicaID
-                          - runtimeIncarnation
                         type: object
                       type: array
                     operationID:
