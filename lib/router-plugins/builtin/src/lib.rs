@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Worker-selection policies Dynamo ships.
+//! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom
-//! catalog adds the named default and two-tier providers through `register`. The default
+//! catalog adds the named default, two-tier, and ThunderAgent providers through `register`. The default
 //! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
+mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{DefaultWorkerSelector, default_factory, default_policy};
 
@@ -17,22 +18,23 @@ pub fn default_registry() -> RouterPluginRegistry {
     RouterPluginRegistry::default().with_default_factory(default_factory())
 }
 
-use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
+use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
 
 /// Register the named providers Dynamo ships, without changing the host's default factory.
 ///
 /// `default` is reserved by the registry for Dynamo's built-in worker selector, so no policy here
 /// can shadow it. A later catalog that reuses one of these type names fails registration rather
 /// than overriding it.
-pub fn register(
-    registry: &mut RouterPluginRegistry,
-) -> Result<(), WorkerSelectionPolicyRegistryError> {
+pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
-    two_tier_cost_fn::register(registry)
+    two_tier_cost_fn::register(registry)?;
+    thunderagent::register(registry)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
     use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
     use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 

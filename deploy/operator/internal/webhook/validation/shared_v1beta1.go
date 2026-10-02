@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -27,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
@@ -38,6 +40,85 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
+
+// validatePodTemplateSpec checks LPX role templates beyond the admitted Pod schema.
+// template and fldPath are non-nil.
+func (v *sharedValidation) validatePodTemplateSpec(template *corev1.PodTemplateSpec, fldPath *field.Path, role string) field.ErrorList {
+	allErrs := apivalidation.ValidateAnnotations(template.Annotations, fldPath.Child("metadata", "annotations"))
+	return append(allErrs, v.validatePodSpec(&template.Spec, fldPath.Child("spec"), role)...)
+}
+
+// validatePodSpec protects LPX-owned container names, addressing, and placement.
+// spec and fldPath are non-nil; Kubernetes schema validation runs before this method.
+func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.Path, role string) field.ErrorList {
+	var allErrs field.ErrorList
+	agent := role == nvidiacomv1beta1.ComponentRoleLPXAgent
+	if !hasContainerNamed(spec.Containers, consts.MainContainerName) {
+		allErrs = append(allErrs, field.Required(fldPath.Child("containers"), fmt.Sprintf("LPX %s component requires a %q runtime container", role, consts.MainContainerName)))
+	}
+
+	// Agent names are build-independent; conductor names depend on the compiled execution mode.
+	for _, group := range []struct {
+		name       string
+		containers []corev1.Container
+	}{
+		{"containers", spec.Containers},
+		{"initContainers", spec.InitContainers},
+	} {
+		for index, container := range group.containers {
+			if strings.TrimSpace(container.Image) == "" {
+				allErrs = append(allErrs, field.Required(fldPath.Child(group.name).Index(index).Child("image"), "must specify a non-empty image"))
+			}
+			if agent && container.Name == nvidiacomv1beta1.ComponentRoleLPXAgent {
+				allErrs = append(allErrs, field.Forbidden(fldPath.Child(group.name).Index(index).Child("name"), fmt.Sprintf("LPX reserves %q for the materialized role container", container.Name)))
+			}
+		}
+	}
+
+	// Every LPX role uses controller-owned addressing and scheduler selection.
+	if spec.SchedulerName != "" && spec.SchedulerName != corev1.DefaultSchedulerName {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("schedulerName"), "LPX owns role scheduler selection"))
+	}
+	for _, entry := range []struct{ name, value string }{
+		{"hostname", spec.Hostname}, {"subdomain", spec.Subdomain}, {"nodeName", spec.NodeName},
+	} {
+		if entry.value != "" {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child(entry.name), "LPX owns role addressing and placement"))
+		}
+	}
+	if len(spec.TopologySpreadConstraints) != 0 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("topologySpreadConstraints"), "LPX owns role placement"))
+	}
+	if !agent {
+		return allErrs
+	}
+
+	// Required node affinity is the only authored Agent placement constraint.
+	if len(spec.NodeSelector) != 0 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("nodeSelector"), "LPX exclusively owns Agent node selection"))
+	}
+	if a := spec.Affinity; a != nil &&
+		((a.NodeAffinity != nil && len(a.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0) ||
+			(a.PodAffinity != nil && (len(a.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 || len(a.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0)) ||
+			(a.PodAntiAffinity != nil && (len(a.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 || len(a.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0))) {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("affinity"), "node-local LPX supports only required nodeAffinity"))
+	}
+	if len(spec.SchedulingGates) != 0 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("schedulingGates"), "Grove and LPX own Agent scheduling gates"))
+	}
+	if len(spec.ResourceClaims) != 0 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("resourceClaims"), "node-local LPX Agents cannot use ResourceClaims"))
+	}
+	return allErrs
+}
+
+// validateLPXConfig validates the build reference. config and fldPath must be non-nil.
+func (v *sharedValidation) validateLPXConfig(config *nvidiacomv1beta1.LPXConfig, fldPath *field.Path) field.ErrorList {
+	if strings.TrimSpace(config.BuildID) == "" {
+		return field.ErrorList{field.Required(fldPath.Child("buildId"), "LPX component requires a buildId")}
+	}
+	return nil
+}
 
 // sharedValidation carries request-wide dependencies and accumulation used by
 // validation for API types shared by multiple resources.
@@ -68,6 +149,8 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
 // Options are supplied by the owning resource.
+//
+//nolint:gocyclo // Shared validation reports the combined upstream and LPX contracts in one pass.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
@@ -76,7 +159,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	allErrs := field.ErrorList{}
 
 	// Validate the provider-native fragment in this component context.
-	if spec.ProviderOverride != nil {
+	if spec.ProviderOverride != nil && spec.IsLPX() {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "LPX component does not support Grove topology overrides"))
+	} else if spec.ProviderOverride != nil {
 		allErrs = append(allErrs, v.validateProviderOverride(
 			spec.ProviderOverride,
 			fldPath.Child("providerOverride"),
@@ -89,6 +174,17 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 
+	// Preserve the LPX role-template boundary after conversion from the alpha schema.
+	if spec.IsLPX() && spec.PodTemplate != nil {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("podTemplate"), "LPX Pod templates belong to roles"))
+	}
+	if spec.IsLPX() && spec.TopologyConstraint != nil {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("topologyConstraint"), "LPX does not support Grove topologyConstraint"))
+	}
+	if spec.LPX != nil {
+		allErrs = append(allErrs, v.validateLPXConfig(spec.LPX, fldPath.Child("lpx"))...)
+	}
+
 	// Enforce Grove-only availability semantics before validating later fields.
 	if spec.MinAvailable != nil && !options.grovePathway {
 		allErrs = append(allErrs, field.Forbidden(
@@ -98,7 +194,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	// Validate the complete role schema against the enclosing component shape.
-	if spec.Roles != nil {
+	if spec.Roles != nil || spec.IsLPX() {
 		allErrs = append(allErrs, v.validateComponentRoles(
 			spec,
 			fldPath.Child("roles"),
@@ -106,6 +202,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			options.workloadProvider,
 		)...)
 	}
+	allErrs = append(allErrs, validateComponentPodTemplateMode(spec, fldPath)...)
 
 	// Reject invalid shared-memory quantities before resource-specific validation.
 	if spec.SharedMemorySize != nil && spec.SharedMemorySize.Sign() < 0 {
@@ -125,7 +222,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
 			}
 		}
-		if spec.Replicas != nil && *spec.Replicas != 1 {
+		// Rust EPP supports load replication while the Go EPP does not.
+		if epp.IsLegacyGoEPP(spec.EPPConfig) && spec.Replicas != nil && *spec.Replicas != 1 {
 			allErrs = append(allErrs, field.Invalid(
 				fldPath.Child("replicas"),
 				*spec.Replicas,
@@ -140,13 +238,24 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 
 	if spec.FrontendSidecar != nil {
 		frontendSidecarPath := fldPath.Child("frontendSidecar")
-		if spec.PodTemplate == nil {
+		if *spec.FrontendSidecar == "" {
+			allErrs = append(allErrs, field.Invalid(frontendSidecarPath, *spec.FrontendSidecar, "must not be empty"))
+		} else if dynamo.HasRolePodTemplates(spec) {
+			for i := range spec.Roles {
+				role := &spec.Roles[i]
+				if role.PodTemplate != nil && !hasContainerNamed(role.PodTemplate.Spec.Containers, *spec.FrontendSidecar) {
+					allErrs = append(allErrs, field.Invalid(
+						fldPath.Child("roles").Index(i).Child("podTemplate", "spec", "containers"),
+						*spec.FrontendSidecar,
+						"must contain the container named by frontendSidecar",
+					))
+				}
+			}
+		} else if spec.PodTemplate == nil {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("podTemplate", "spec", "containers"),
 				"is required when frontendSidecar is set",
 			))
-		} else if *spec.FrontendSidecar == "" {
-			allErrs = append(allErrs, field.Invalid(frontendSidecarPath, *spec.FrontendSidecar, "must not be empty"))
 		} else if !hasContainerNamed(spec.PodTemplate.Spec.Containers, *spec.FrontendSidecar) {
 			allErrs = append(allErrs, field.Invalid(
 				frontendSidecarPath,
@@ -156,21 +265,10 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	if spec.Experimental != nil {
-		allErrs = append(allErrs, v.validateExperimentalSpec(
-			spec.Experimental,
-			fldPath.Child("experimental"),
-			experimentalSpecValidationOptions{
-				componentType: spec.ComponentType,
-				resources:     dynamo.GetMainContainerResources(spec),
-				containers:    podTemplateContainers(spec.PodTemplate),
-				grovePathway:  options.grovePathway,
-			},
-		)...)
-	}
+	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 
 	// Validate runtime compatibility against the source-version fields.
-	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) && !spec.IsLPX() {
 		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
 		if err := eppRuntimeCompatibilityError(
 			eppRuntimeContractV1Beta1(spec, image),
@@ -178,7 +276,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		); err != nil {
 			allErrs = append(allErrs, err)
 		}
-		if image == "" {
+		if dynamo.HasRolePodTemplates(spec) {
+			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersion(spec, fldPath)...)
+		} else if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(string(spec.ComponentType)) &&
 			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
@@ -190,6 +290,46 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	return allErrs
+}
+
+func (v *sharedValidation) validateSharedExperimentalSpec(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+	grovePathway bool,
+) field.ErrorList {
+	if spec.Experimental == nil {
+		return nil
+	}
+
+	allErrs := field.ErrorList{}
+	experimentalPath := fldPath.Child("experimental")
+	rolePodTemplates := dynamo.HasRolePodTemplates(spec)
+
+	// Reject layouts whose launch contract still requires operator-generated role commands.
+	if rolePodTemplates && spec.Experimental.GPUMemoryService != nil {
+		allErrs = append(allErrs, field.Forbidden(
+			experimentalPath.Child("gpuMemoryService"),
+			"cannot be combined with role PodTemplates because this layout requires operator-managed launch wiring",
+		))
+	}
+	if rolePodTemplates && spec.Experimental.Failover != nil {
+		allErrs = append(allErrs, field.Forbidden(
+			experimentalPath.Child("failover"),
+			"cannot be combined with role PodTemplates because this layout requires operator-managed launch wiring",
+		))
+	}
+
+	return append(allErrs, v.validateExperimentalSpec(
+		spec.Experimental,
+		experimentalPath,
+		experimentalSpecValidationOptions{
+			componentType:    spec.ComponentType,
+			resources:        dynamo.GetMainContainerResources(spec),
+			containers:       podTemplateContainers(spec.PodTemplate),
+			grovePathway:     grovePathway,
+			rolePodTemplates: rolePodTemplates,
+		},
+	)...)
 }
 
 func supportsMultinodeComponentType(componentType nvidiacomv1beta1.ComponentType) bool {
@@ -208,7 +348,7 @@ func hasUnsupportedMultinode(spec *nvidiacomv1beta1.DynamoComponentDeploymentSha
 }
 
 // validateMultinodeComponentType rejects unsupported new combinations and
-// ratchets identical legacy violations on update. fldPath points to multinode.
+// ratchets identical non-LPX legacy violations on update. fldPath points to multinode.
 func validateMultinodeComponentType(
 	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -217,7 +357,7 @@ func validateMultinodeComponentType(
 	if !hasUnsupportedMultinode(newSpec) {
 		return nil
 	}
-	if oldSpec != nil && oldSpec.ComponentType == newSpec.ComponentType &&
+	if !newSpec.IsLPX() && oldSpec != nil && oldSpec.ComponentType == newSpec.ComponentType &&
 		hasUnsupportedMultinode(oldSpec) &&
 		apiequality.Semantic.DeepEqual(oldSpec.Multinode, newSpec.Multinode) {
 		return nil
@@ -235,6 +375,26 @@ func removesUnsupportedMultinode(
 	return hasUnsupportedMultinode(oldSpec) &&
 		newSpec.Multinode == nil &&
 		newSpec.ComponentType == oldSpec.ComponentType
+}
+
+// validateComponentPodTemplateMode enforces the two complete template-source
+// modes: one component template or one template on every required role.
+func validateComponentPodTemplateMode(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if component.IsLPX() || !dynamo.HasRolePodTemplates(component) {
+		return nil
+	}
+
+	allErrs := field.ErrorList{}
+	if component.PodTemplate != nil {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("podTemplate"),
+			"cannot be combined with roles[].podTemplate; choose one complete PodTemplate source mode",
+		))
+	}
+	return allErrs
 }
 
 type providerOverrideValidationOptions struct {
@@ -341,24 +501,41 @@ func (v *sharedValidation) validateComponentRoles(
 	workloadProvider string,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if component.Multinode == nil {
+	if !component.IsLPX() && component.Multinode == nil {
 		return field.ErrorList{field.Forbidden(
 			fldPath,
-			"roles are supported only for component shapes that define a role schema; this release supports multinode components",
+			"roles are supported only for component shapes that define a role schema; this release supports multinode and LPX components",
 		)}
 	}
 
-	// Multinode explicit mode is a closed schema: exactly one leader and worker.
+	// Each component shape defines its supported roles and required subset.
+	supportedRoles := []string{nvidiacomv1beta1.ComponentRoleLeader, nvidiacomv1beta1.ComponentRoleWorker}
+	requiredRoles := supportedRoles
+	if component.IsLPX() {
+		supportedRoles = []string{nvidiacomv1beta1.ComponentRoleLPXConductor, nvidiacomv1beta1.ComponentRoleLPXAgent}
+		requiredRoles = []string{nvidiacomv1beta1.ComponentRoleLPXAgent}
+	}
+
+	// Validate each authored role once, preserving its index in every error path.
 	seen := make(map[string]struct{}, len(component.Roles))
 	for i := range component.Roles {
 		role := &component.Roles[i]
 		rolePath := fldPath.Index(i)
+		if !component.IsLPX() && dynamo.HasRolePodTemplates(component) && role.PodTemplate == nil {
+			allErrs = append(allErrs, field.Required(
+				rolePath.Child("podTemplate"),
+				"is required on every role when role-specific PodTemplates are used",
+			))
+		}
 		scope, knownRole := provideroverride.ScopeForComponentRole(role.Name)
+		if component.IsLPX() {
+			knownRole = slices.Contains(supportedRoles, role.Name)
+		}
 		if !knownRole {
 			allErrs = append(allErrs, field.NotSupported(
 				rolePath.Child("name"),
 				role.Name,
-				[]string{nvidiacomv1beta1.ComponentRoleLeader, nvidiacomv1beta1.ComponentRoleWorker},
+				supportedRoles,
 			))
 		} else if _, exists := seen[role.Name]; exists {
 			allErrs = append(allErrs, field.Duplicate(rolePath.Child("name"), role.Name))
@@ -366,7 +543,7 @@ func (v *sharedValidation) validateComponentRoles(
 			seen[role.Name] = struct{}{}
 		}
 
-		if role.Replicas != nil && knownRole {
+		if !component.IsLPX() && role.Replicas != nil && knownRole {
 			expected := int32(1)
 			if role.Name == nvidiacomv1beta1.ComponentRoleWorker {
 				expected = component.Multinode.NodeCount - 1
@@ -380,7 +557,7 @@ func (v *sharedValidation) validateComponentRoles(
 			}
 		}
 
-		if knownRole {
+		if knownRole || component.IsLPX() {
 			allErrs = append(allErrs, v.validateComponentRoleSpec(
 				role,
 				rolePath,
@@ -389,15 +566,13 @@ func (v *sharedValidation) validateComponentRoles(
 					workloadProvider:           workloadProvider,
 					scope:                      scope,
 					component:                  component,
+					podTemplateAllowed:         true,
 				},
 			)...)
 		}
 	}
 
-	for _, requiredRole := range []string{
-		nvidiacomv1beta1.ComponentRoleLeader,
-		nvidiacomv1beta1.ComponentRoleWorker,
-	} {
+	for _, requiredRole := range requiredRoles {
 		if _, exists := seen[requiredRole]; !exists {
 			allErrs = append(allErrs, field.Required(
 				fldPath,
@@ -417,34 +592,95 @@ type componentRoleSpecValidationOptions struct {
 }
 
 // validateComponentRoleSpec validates role. role and fldPath must not be nil;
-// the optional provider override and PodTemplate may be nil.
+// options.component and optional role fields may be nil.
 func (v *sharedValidation) validateComponentRoleSpec(
 	role *nvidiacomv1beta1.ComponentRoleSpec,
 	fldPath *field.Path,
 	options componentRoleSpecValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if role.PodTemplate != nil && !options.podTemplateAllowed {
-		allErrs = append(allErrs, field.Forbidden(
-			fldPath.Child("podTemplate"),
-			"is not supported for this component role",
-		))
-	}
-	if role.ProviderOverride == nil {
+
+	// LPX renders role templates directly and has no provider-override lowering.
+	if options.component != nil && options.component.IsLPX() {
+		if role.PodTemplate != nil {
+			allErrs = append(allErrs, v.validatePodTemplateSpec(role.PodTemplate, fldPath.Child("podTemplate"), role.Name)...)
+		} else if role.Name == nvidiacomv1beta1.ComponentRoleLPXAgent {
+			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate"), "the LPX agent role requires a podTemplate"))
+		}
+		if role.ProviderOverride != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "LPX roles do not support provider overrides"))
+		}
 		return allErrs
 	}
 
+	if role.PodTemplate != nil {
+		podTemplatePath := fldPath.Child("podTemplate")
+		if !options.podTemplateAllowed {
+			allErrs = append(allErrs, field.Forbidden(
+				podTemplatePath,
+				"is not supported for this component role",
+			))
+		} else {
+			allErrs = append(allErrs, apivalidation.ValidateAnnotations(
+				role.PodTemplate.Annotations,
+				podTemplatePath.Child("metadata", "annotations"),
+			)...)
+			if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(role.PodTemplate.Annotations); invalid {
+				allErrs = append(allErrs, field.Invalid(
+					podTemplatePath.Child("metadata", "annotations").Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
+					value,
+					`must be "mp" or "ray"`,
+				))
+			}
+			if _, exists := role.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit]; exists {
+				allErrs = append(allErrs, field.Forbidden(
+					podTemplatePath.Child("metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
+					"role-specific power limits are not supported by power-aware planning",
+				))
+			}
+
+			containersPath := podTemplatePath.Child("spec", "containers")
+			for i := range role.PodTemplate.Spec.Containers {
+				container := &role.PodTemplate.Spec.Containers[i]
+				if container.Name != consts.MainContainerName && container.Image == "" {
+					allErrs = append(allErrs, field.Required(
+						containersPath.Index(i).Child("image"),
+						"is required for sidecar containers",
+					))
+				}
+			}
+			for i := range role.PodTemplate.Spec.InitContainers {
+				if role.PodTemplate.Spec.InitContainers[i].Image == "" {
+					allErrs = append(allErrs, field.Required(
+						podTemplatePath.Child("spec", "initContainers").Index(i).Child("image"),
+						"is required for init containers",
+					))
+				}
+			}
+			mainIndex := mainContainerIndex(role.PodTemplate.Spec.Containers)
+			if mainIndex < 0 {
+				allErrs = append(allErrs, field.Required(containersPath, `must contain a container named "main"`))
+			} else if role.PodTemplate.Spec.Containers[mainIndex].Image == "" {
+				allErrs = append(allErrs, field.Required(containersPath.Index(mainIndex).Child("image"), "is required"))
+			}
+		}
+	}
+
 	// Validate the provider fragment against this exact multinode role.
-	return append(allErrs, v.validateProviderOverride(
-		role.ProviderOverride,
-		fldPath.Child("providerOverride"),
-		providerOverrideValidationOptions{
-			supported:        options.providerOverridesSupported,
-			workloadProvider: options.workloadProvider,
-			scope:            options.scope,
-			component:        options.component,
-		},
-	)...)
+	if role.ProviderOverride != nil {
+		allErrs = append(allErrs, v.validateProviderOverride(
+			role.ProviderOverride,
+			fldPath.Child("providerOverride"),
+			providerOverrideValidationOptions{
+				supported:        options.providerOverridesSupported,
+				workloadProvider: options.workloadProvider,
+				scope:            options.scope,
+				component:        options.component,
+			},
+		)...)
+	}
+
+	return allErrs
 }
 
 // validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
@@ -494,10 +730,11 @@ func (v *sharedValidation) validateTopologyConstraint(
 }
 
 type experimentalSpecValidationOptions struct {
-	componentType nvidiacomv1beta1.ComponentType
-	resources     corev1.ResourceRequirements
-	containers    []corev1.Container
-	grovePathway  bool
+	componentType    nvidiacomv1beta1.ComponentType
+	resources        corev1.ResourceRequirements
+	containers       []corev1.Container
+	grovePathway     bool
+	rolePodTemplates bool
 }
 
 // validateExperimentalSpec validates experimental. experimental and fldPath must not be nil.
@@ -507,7 +744,7 @@ func (v *sharedValidation) validateExperimentalSpec(
 	options experimentalSpecValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if experimental.GPUMemoryService != nil {
+	if experimental.GPUMemoryService != nil && !options.rolePodTemplates {
 		allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
 			experimental.GPUMemoryService,
 			fldPath.Child("gpuMemoryService"),
@@ -516,7 +753,7 @@ func (v *sharedValidation) validateExperimentalSpec(
 			options.containers,
 		)...)
 	}
-	if experimental.Failover != nil {
+	if experimental.Failover != nil && !options.rolePodTemplates {
 		allErrs = append(allErrs, v.validateFailoverSpec(
 			experimental.Failover,
 			fldPath.Child("failover"),
@@ -692,7 +929,8 @@ func (v *sharedValidation) validateComponentCheckpointConfig(
 			fldPath,
 			"checkpoint functionality requires component type to be explicitly set to worker, prefill, or decode",
 		))
-	} else if checkpointConfig.Enabled && !dynamo.IsWorkerComponent(string(componentType)) {
+	} else if checkpointConfig.Enabled &&
+		!dynamo.IsWorkerComponent(string(componentType)) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,
 			"checkpoint functionality is supported only for worker, prefill, and decode components",
@@ -731,6 +969,8 @@ func (v *sharedValidation) validateComponentCheckpointJobConfig(
 
 // validateDynamoComponentDeploymentSharedSpecUpdate validates a component update.
 // newComponent, oldComponent, and fldPath must not be nil; ownerKind.Kind must not be empty.
+//
+//nolint:gocyclo // Update validation reports the combined upstream and LPX contracts in one pass.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -770,11 +1010,21 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 				apivalidation.FieldImmutableErrorMsg,
 			))
 		}
-		allErrs = append(allErrs, validateComponentRolesUpdate(
-			newComponent,
-			oldComponent,
-			fldPath.Child("roles"),
-		)...)
+		if !newComponent.IsLPX() && !oldComponent.IsLPX() {
+			allErrs = append(allErrs, validateComponentRolesUpdate(
+				newComponent,
+				oldComponent,
+				fldPath.Child("roles"),
+			)...)
+		}
+	}
+
+	if newComponent.IsLPX() != oldComponent.IsLPX() {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("type"),
+			newComponent.ComponentType,
+			"cannot change node topology between LPX and non-LPX after creation",
+		))
 	}
 
 	// Protect replica ownership when a scaling adapter is present in either state.
@@ -842,12 +1092,18 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	}
 
 	// Ratchet only complete, unchanged source-version runtime contract violations.
-	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) {
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) && !newComponent.IsLPX() {
 		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
 		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
 		overrideChanged := newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride
 
-		if newImage == "" && oldImage != "" {
+		if dynamo.HasRolePodTemplates(newComponent) {
+			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersionUpdate(
+				newComponent,
+				oldComponent,
+				fldPath,
+			)...)
+		} else if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(string(newComponent.ComponentType)) &&
 			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
@@ -870,6 +1126,63 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	return allErrs
 }
 
+func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdate(
+	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if v.toleratesMissingRuntimeVersionOverride(string(newComponent.ComponentType)) || newComponent.RuntimeVersionOverride != "" {
+		return nil
+	}
+
+	oldImages := make(map[string]string, len(oldComponent.Roles))
+	for i := range oldComponent.Roles {
+		oldImages[oldComponent.Roles[i].Name] = rolePodTemplateMainImage(&oldComponent.Roles[i])
+	}
+	for i := range newComponent.Roles {
+		role := &newComponent.Roles[i]
+		newImage := rolePodTemplateMainImage(role)
+		if newImage != "" && runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
+			(newImage != oldImages[role.Name] || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			return field.ErrorList{field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			)}
+		}
+	}
+	return nil
+}
+
+func rolePodTemplateMainImage(role *nvidiacomv1beta1.ComponentRoleSpec) string {
+	if role == nil || role.PodTemplate == nil {
+		return ""
+	}
+	index := mainContainerIndex(role.PodTemplate.Spec.Containers)
+	if index < 0 {
+		return ""
+	}
+	return role.PodTemplate.Spec.Containers[index].Image
+}
+
+func (v *sharedValidation) validateRolePodTemplateRuntimeVersion(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if v.toleratesMissingRuntimeVersionOverride(string(component.ComponentType)) || component.RuntimeVersionOverride != "" {
+		return nil
+	}
+	for i := range component.Roles {
+		image := rolePodTemplateMainImage(&component.Roles[i])
+		if image != "" && runtimeVersionOverrideRequired(image, component.RuntimeVersionOverride) {
+			return field.ErrorList{field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			)}
+		}
+	}
+	return nil
+}
+
 // validateComponentRolesUpdate permits equivalent role-mode migrations and
 // otherwise keeps explicit role names stable. Inputs must not be nil.
 func validateComponentRolesUpdate(
@@ -877,17 +1190,23 @@ func validateComponentRolesUpdate(
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
-	// Permit representation-only implicit/explicit migrations, but require
-	// role-specific configuration changes to happen in a subsequent update.
+	// Permit implicit/explicit migrations with the same role cardinality.
+	// Role PodTemplates may be introduced in the same update and create a
+	// component rollout; provider identity changes remain separate.
 	if (newComponent.Roles == nil) != (oldComponent.Roles == nil) {
 		explicitComponent := newComponent
 		implicitComponent := oldComponent
 		if explicitComponent.Roles == nil {
 			explicitComponent, implicitComponent = implicitComponent, explicitComponent
 		}
-		if explicitComponent.Multinode != nil && implicitComponent.Multinode != nil &&
-			dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
-			return nil
+		if explicitComponent.Multinode != nil && implicitComponent.Multinode != nil {
+			roleShape := explicitComponent.DeepCopy()
+			for i := range roleShape.Roles {
+				roleShape.Roles[i].PodTemplate = nil
+			}
+			if dynamo.ExplicitMultinodeRolesMatchImplicit(roleShape) {
+				return nil
+			}
 		}
 		return field.ErrorList{field.Forbidden(
 			fldPath,

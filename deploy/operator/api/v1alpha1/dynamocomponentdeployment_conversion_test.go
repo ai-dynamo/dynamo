@@ -112,14 +112,14 @@ func TestDCD_RoundTrip_ExplicitMultinodeRoles(t *testing.T) {
 						Name:     v1beta1.ComponentRoleLeader,
 						Replicas: ptr.To(int32(1)),
 						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-							Name: "main", Image: "leader:latest",
+							Name: "main", Image: "leader:1.5.0", Args: []string{"--node-rank", "0"},
 						}}}},
 					},
 					{
 						Name:     v1beta1.ComponentRoleWorker,
 						Replicas: ptr.To(int32(3)),
 						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-							Name: "main", Image: "worker:latest",
+							Name: "main", Image: "worker:1.5.0", Args: []string{"--node-rank", "$(RANK)"},
 						}}}},
 						ProviderOverride: &v1beta1.ProviderOverride{
 							APIVersion: "grove.io/v1alpha1",
@@ -800,13 +800,16 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 				{Type: "Available", Status: metav1.ConditionTrue, Reason: "AllReady", Message: "ok"},
 			},
 			Component: &v1beta1.ComponentReplicaStatus{
-				ComponentKind:   v1beta1.ComponentKindDeployment,
-				ComponentNames:  []string{"dcd-0"},
-				GPUsPerEngine:   ptr.To(int64(2)),
-				GPUsPerReplica:  ptr.To(int64(3)),
-				Replicas:        3,
-				UpdatedReplicas: 3,
-				ReadyReplicas:   ptr.To(int32(3)),
+				ComponentKind:        v1beta1.ComponentKindDeployment,
+				ComponentNames:       []string{"dcd-0"},
+				ServedModelName:      "Qwen/Qwen3-8B",
+				RuntimeComponentName: "custom-decode",
+				GPUPowerLimitWatts:   ptr.To(int64(300)),
+				GPUsPerEngine:        ptr.To(int64(2)),
+				GPUsPerReplica:       ptr.To(int64(3)),
+				Replicas:             3,
+				UpdatedReplicas:      3,
+				ReadyReplicas:        ptr.To(int32(3)),
 			},
 		},
 	}
