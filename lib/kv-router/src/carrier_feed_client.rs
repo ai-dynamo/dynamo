@@ -19,6 +19,7 @@ use crate::services::common::zmq::create_sub_socket_topics;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 const WARNING_INTERVAL: Duration = Duration::from_secs(1);
+const RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Default)]
 pub struct ZmqCarrierFeedConnector;
@@ -32,7 +33,7 @@ impl CarrierFeedConnector for ZmqCarrierFeedConnector {
     ) {
         let hub_url = hub_url.to_string();
         tokio::spawn(async move {
-            run_feed_client(hub_url, replica, cancel).await;
+            run_feed_client(hub_url, replica, cancel, RECEIVE_IDLE_TIMEOUT).await;
         });
     }
 }
@@ -47,29 +48,32 @@ async fn run_feed_client(
     hub_url: String,
     replica: std::sync::Arc<CarrierFeedReplica>,
     cancel: CancellationToken,
+    idle_timeout: Duration,
 ) {
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "failed to configure carrier feed HTTP client");
-            reqwest::Client::new()
-        });
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(%error, hub_url, "failed to configure carrier feed HTTP client");
+            return;
+        }
+    };
     let mut backoff = INITIAL_BACKOFF;
     let mut last_warning = None;
     while !cancel.is_cancelled() {
         let result = tokio::select! {
             _ = cancel.cancelled() => break,
-            result = run_session(&client, &hub_url, &replica, &cancel, backoff) => result,
+            result = run_session(&client, &hub_url, &replica, &cancel, backoff, idle_timeout) => result,
         };
         match result {
             Ok(()) => break,
             Err(_error) if cancel.is_cancelled() => break,
             Err(error) => {
-                warn_rate_limited(
-                    &mut last_warning,
-                    &format!("carrier feed connection failed for {hub_url}: {error}"),
-                );
+                if should_warn(&mut last_warning) {
+                    tracing::warn!(%error, hub_url, "carrier feed connection failed");
+                }
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = tokio::time::sleep(backoff) => {}
@@ -86,6 +90,7 @@ async fn run_session(
     replica: &CarrierFeedReplica,
     cancel: &CancellationToken,
     backoff: Duration,
+    idle_timeout: Duration,
 ) -> Result<()> {
     let feed_endpoint = fetch_feed_endpoint(client, hub_url).await?;
     let mut socket = create_sub_socket_topics(&[CARRIER_FEED_TOPIC])
@@ -99,34 +104,49 @@ async fn run_session(
     let mut last_warning = None;
 
     loop {
-        let frames = tokio::select! {
+        let receive = tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            result = socket.recv_multipart() => result.context("receive carrier feed frame")?,
+            result = tokio::time::timeout(idle_timeout, socket.recv_multipart()) => result,
+        };
+        let frames = match receive {
+            Ok(result) => result.context("receive carrier feed frame")?,
+            Err(_) => {
+                let current_endpoint = fetch_feed_endpoint(client, hub_url).await?;
+                if current_endpoint != feed_endpoint {
+                    return Err(anyhow!(
+                        "carrier feed endpoint changed from {feed_endpoint} to {current_endpoint}"
+                    ));
+                }
+                continue;
+            }
         };
         let payload = match frames.as_slice() {
             [topic, payload] if topic == CARRIER_FEED_TOPIC => payload,
             _ => {
-                warn_rate_limited(
-                    &mut last_warning,
-                    "carrier feed received an unexpected multipart message",
-                );
+                if should_warn(&mut last_warning) {
+                    tracing::warn!(
+                        hub_url,
+                        "carrier feed received an unexpected multipart message"
+                    );
+                }
                 continue;
             }
         };
         let frame = match decode_frame(payload) {
             Ok(frame) => frame,
             Err(error) => {
-                warn_rate_limited(
-                    &mut last_warning,
-                    &format!("failed to decode carrier feed frame: {error}"),
-                );
+                if should_warn(&mut last_warning) {
+                    tracing::warn!(%error, hub_url, "failed to decode carrier feed frame");
+                }
                 continue;
             }
         };
         match replica.apply(frame) {
             FeedApply::Applied | FeedApply::Stale => {}
             FeedApply::UnsupportedVersion => {
-                warn_rate_limited(&mut last_warning, "unsupported carrier feed frame version");
+                if should_warn(&mut last_warning) {
+                    tracing::warn!(hub_url, "unsupported carrier feed frame version");
+                }
             }
             FeedApply::NeedsSnapshot => {
                 let wait = backoff.saturating_sub(last_snapshot.elapsed());
@@ -199,10 +219,12 @@ fn hub_url_path(hub_url: &str, path: &str) -> String {
     format!("{}{}", hub_url.trim_end_matches('/'), path)
 }
 
-fn warn_rate_limited(last_warning: &mut Option<Instant>, message: &str) {
+fn should_warn(last_warning: &mut Option<Instant>) -> bool {
     if last_warning.is_none_or(|last| last.elapsed() >= WARNING_INTERVAL) {
-        tracing::warn!("{message}");
         *last_warning = Some(Instant::now());
+        true
+    } else {
+        false
     }
 }
 
@@ -226,12 +248,14 @@ mod tests {
 
     #[derive(Clone)]
     struct TestHttpState {
-        feed_endpoint: String,
+        feed_endpoint: Arc<Mutex<String>>,
         snapshots: Arc<Mutex<VecDeque<Vec<u8>>>>,
     }
 
     async fn config(State(state): State<TestHttpState>) -> impl IntoResponse {
-        Json(serde_json::json!({ "feed_endpoint": state.feed_endpoint }))
+        Json(serde_json::json!({
+            "feed_endpoint": state.feed_endpoint.lock().unwrap().clone()
+        }))
     }
 
     async fn snapshot_handler(State(state): State<TestHttpState>) -> impl IntoResponse {
@@ -265,6 +289,13 @@ mod tests {
             }],
         })
         .unwrap()
+    }
+
+    fn unused_tcp_endpoint() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
+        drop(listener);
+        endpoint
     }
 
     async fn publish_until(
@@ -304,7 +335,7 @@ mod tests {
             .route("/v1/features/indexer/config", get(config))
             .route("/v1/features/indexer/feed/snapshot", get(snapshot_handler))
             .with_state(TestHttpState {
-                feed_endpoint: endpoint,
+                feed_endpoint: Arc::new(Mutex::new(endpoint)),
                 snapshots,
             });
         let server = tokio::spawn(async move {
@@ -326,6 +357,7 @@ mod tests {
                 &session_replica,
                 &session_cancel,
                 INITIAL_BACKOFF,
+                RECEIVE_IDLE_TIMEOUT,
             )
             .await
         });
@@ -369,6 +401,77 @@ mod tests {
         );
         cancel.cancel();
         session.await.unwrap().unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn changed_endpoint_reconnects_to_new_publisher() {
+        let old_endpoint = unused_tcp_endpoint();
+        let _old_publisher = create_bound_pub_socket(&old_endpoint).unwrap();
+        let new_endpoint = unused_tcp_endpoint();
+        let mut new_publisher = create_bound_pub_socket(&new_endpoint).unwrap();
+
+        let feed_endpoint = Arc::new(Mutex::new(old_endpoint));
+        let snapshot = snapshot_bytes(0, plhs(1));
+        let snapshots = Arc::new(Mutex::new(VecDeque::from([snapshot.clone(), snapshot])));
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_addr = http_listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/features/indexer/config", get(config))
+            .route("/v1/features/indexer/feed/snapshot", get(snapshot_handler))
+            .with_state(TestHttpState {
+                feed_endpoint: Arc::clone(&feed_endpoint),
+                snapshots,
+            });
+        let server = tokio::spawn(async move {
+            axum::serve(http_listener, app).await.unwrap();
+        });
+
+        let replica = Arc::new(CarrierFeedReplica::new(16));
+        let cancel = CancellationToken::new();
+        let session_cancel = cancel.clone();
+        let session_replica = Arc::clone(&replica);
+        let hub_url = format!("http://{http_addr}");
+        let session = tokio::spawn(async move {
+            run_feed_client(
+                hub_url,
+                session_replica,
+                session_cancel,
+                Duration::from_millis(50),
+            )
+            .await;
+        });
+
+        for _ in 0..100 {
+            if replica.cursor() == Some((1, 0)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(replica.cursor(), Some((1, 0)));
+        *feed_endpoint.lock().unwrap() = new_endpoint;
+
+        let hashes = plhs(2);
+        publish_until(
+            &mut new_publisher,
+            &CarrierFeedFrame {
+                version: CARRIER_FEED_VERSION,
+                epoch: 1,
+                seq: 1,
+                manifest: [1; 32],
+                kind: crate::carrier_feed::FeedKind::Carrier,
+                max_positions: 8,
+                holder: 5,
+                op: CarrierFeedOp::ReplaceHolder(hashes),
+            },
+            &replica,
+            (1, 1),
+        )
+        .await;
+        assert_eq!(replica.cursor(), Some((1, 1)));
+
+        cancel.cancel();
+        session.await.unwrap();
         server.abort();
     }
 }

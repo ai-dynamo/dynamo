@@ -106,9 +106,9 @@ impl CarrierRouter {
         config: Option<&CarrierWorkerConfig>,
         partition_block_size: u32,
     ) -> Result<(), String> {
-        if self.connector.is_none() {
+        let Some(connector) = self.connector.as_ref() else {
             return Ok(());
-        }
+        };
 
         let Some(config) = config else {
             self.remove_worker(worker_id);
@@ -131,26 +131,16 @@ impl CarrierRouter {
             self.remove_worker_locked(&mut state, worker_id);
         }
 
-        if !state.hubs.contains_key(&parsed.hub_url) {
+        let hub = state.hubs.entry(parsed.hub_url.clone()).or_insert_with(|| {
             let replica = Arc::new(CarrierFeedReplica::new(4096));
             let cancel = CancellationToken::new();
-            self.connector
-                .as_ref()
-                .expect("connector checked above")
-                .connect(&parsed.hub_url, Arc::clone(&replica), cancel.clone());
-            state.hubs.insert(
-                parsed.hub_url.clone(),
-                HubConnection {
-                    replica,
-                    cancel,
-                    ref_count: 0,
-                },
-            );
-        }
-        let hub = state
-            .hubs
-            .get_mut(&parsed.hub_url)
-            .expect("hub inserted or retained");
+            connector.connect(&parsed.hub_url, Arc::clone(&replica), cancel.clone());
+            HubConnection {
+                replica,
+                cancel,
+                ref_count: 0,
+            }
+        });
         if !same_hub {
             hub.ref_count += 1;
         }
