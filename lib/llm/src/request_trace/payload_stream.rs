@@ -137,7 +137,12 @@ async fn aggregate_with_partial_recovery(
     parsing_options: ParsingOptions,
 ) -> PayloadOutcome {
     let Some(error_at) = chunks.iter().position(|chunk| chunk.is_error()) else {
-        return match DeltaAggregator::apply(futures::stream::iter(chunks), parsing_options).await {
+        return match DeltaAggregator::apply_for_selected_unified_parser(
+            futures::stream::iter(chunks),
+            parsing_options,
+        )
+        .await
+        {
             Ok(final_resp) => PayloadOutcome::complete(final_resp),
             Err(e) => {
                 tracing::warn!("request payload: aggregation failed: {e}");
@@ -159,9 +164,12 @@ async fn aggregate_with_partial_recovery(
     if chunks.is_empty() {
         return PayloadOutcome::dropped(None, reason);
     }
-    let partial = DeltaAggregator::apply(futures::stream::iter(chunks), parsing_options)
-        .await
-        .ok();
+    let partial = DeltaAggregator::apply_for_selected_unified_parser(
+        futures::stream::iter(chunks),
+        parsing_options,
+    )
+    .await
+    .ok();
     PayloadOutcome::dropped(partial, reason)
 }
 
@@ -318,6 +326,7 @@ pub fn final_response_to_one_chunk_stream(
         },
         nvext: resp.nvext.clone(),
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     };
 
     let annotated = Annotated {
@@ -373,6 +382,7 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         Annotated {
@@ -414,6 +424,7 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         Annotated {
@@ -457,6 +468,7 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         Annotated {
@@ -500,6 +512,7 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
 
         Annotated {
@@ -761,6 +774,7 @@ mod tests {
                 },
                 nvext: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             id: Some("correlation-123".to_string()),
             event: Some("test-event".to_string()),

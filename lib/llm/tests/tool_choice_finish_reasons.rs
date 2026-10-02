@@ -101,6 +101,7 @@ async fn apply_jail_transformation(
         inner: out.data.unwrap(),
         nvext: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 

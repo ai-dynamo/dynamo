@@ -1095,6 +1095,7 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -1138,6 +1139,7 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -1564,6 +1566,7 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 
@@ -2260,6 +2263,7 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         }
     }
 

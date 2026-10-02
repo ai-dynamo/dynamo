@@ -678,6 +678,7 @@ mod tests {
                 },
                 nvext: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
                 inner: CreateChatCompletionStreamResponse {
@@ -704,6 +705,7 @@ mod tests {
                 },
                 nvext: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
         ];
         for response in &responses {

@@ -19,7 +19,7 @@ use dynamo_protocols::types::{
     ChatCompletionToolChoiceOption, ChatCompletionToolType, FinishReason, FunctionName,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
-use futures::{StreamExt, stream};
+use futures::{FutureExt, StreamExt, channel::mpsc, stream};
 use serde_json::Value;
 
 const REQUEST_JSON: &str = r#"{"messages":[{"role":"user","content":"What is the capital of Tuvalu?"}],"model":"Qwen/Qwen3-0.6B","max_completion_tokens":3000,"stream":true,"stream_options":{"include_usage":true,"continuous_usage_stats":false},"temperature":1.0,"top_p":1.0}"#;
@@ -335,6 +335,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
         },
         nvext: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -378,6 +379,7 @@ fn mock_multi_choice_content_chunk(
         },
         nvext: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -418,6 +420,7 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
         },
         nvext: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -453,6 +456,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
         },
         nvext: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -481,6 +485,7 @@ fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
         },
         nvext: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -521,6 +526,7 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
         },
         nvext: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -533,7 +539,7 @@ async fn postprocessor_parsing_stream_normalizes_repeated_tool_metadata_across_m
 
     let preprocessor = build_preprocessor(Some("deepseek_v41"), Some("deepseek_v41"));
     let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
-    let mixed_delta = |content: Option<&str>| {
+    let mixed_delta = |content: Option<&str>, arguments: &str| {
         let mut chunk = mock_content_chunk(content.unwrap_or_default());
         let choice = &mut chunk.inner.choices[0];
         choice.delta.content = content.map(|text| ChatCompletionMessageContent::Text(text.into()));
@@ -543,18 +549,18 @@ async fn postprocessor_parsing_stream_normalizes_repeated_tool_metadata_across_m
             r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_weather".to_string()),
-                arguments: Some("{}".to_string()),
+                arguments: Some(arguments.to_string()),
             }),
         }]);
         chunk
     };
 
-    let mut terminal_mixed_delta = mixed_delta(Some("raw text after detour"));
+    let mut terminal_mixed_delta = mixed_delta(Some("raw text after detour"), "\"}");
     terminal_mixed_delta.inner.choices[0].finish_reason = Some(FinishReason::Stop);
     let input_chunks = vec![
-        mixed_delta(Some("first raw text")),
-        mixed_delta(Some("second raw text")),
-        mixed_delta(None),
+        mixed_delta(Some("first raw text"), "{\"city\": "),
+        mixed_delta(Some("second raw text"), "\"Pa"),
+        mixed_delta(None, "ris"),
         terminal_mixed_delta,
     ];
     let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
@@ -580,6 +586,11 @@ async fn postprocessor_parsing_stream_normalizes_repeated_tool_metadata_across_m
     assert_eq!(calls[0].r#type, Some(FunctionType::Function));
     assert!(calls[1..].iter().all(|call| call.id.is_none()));
     assert!(calls[1..].iter().all(|call| call.r#type.is_none()));
+    let arguments: String = calls
+        .iter()
+        .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+        .collect();
+    assert_eq!(arguments, "{\"city\": \"Paris\"}");
 
     let content: String = choices
         .iter()
@@ -5570,5 +5581,254 @@ async fn research_per_chunk_interleaving() {
         assert_eq!(choice.content, "text1  text2  end");
         assert_eq!(choice.reasoning, "reason1reason2");
         assert_eq!(choice.tool_calls.len(), 2);
+    }
+}
+
+fn kimi_native_chunk(
+    text: &str,
+    finish: Option<&str>,
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
+    Annotated::from_data(
+        serde_json::from_value(serde_json::json!({
+            "id":"kimi-regression", "object":"chat.completion.chunk", "created":0, "model":"test",
+            "choices":[{"index":0,"delta":{"content":text},"finish_reason":finish,"logprobs":null}]
+        }))
+        .unwrap(),
+    )
+}
+
+fn kimi_native_calls(
+    chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+) -> BTreeMap<u32, MergedToolCall> {
+    let mut calls: BTreeMap<u32, MergedToolCall> = BTreeMap::new();
+    for response in chunks.iter().filter_map(|chunk| chunk.data.as_ref()) {
+        for choice in &response.inner.choices {
+            if let Some(deltas) = &choice.delta.tool_calls {
+                for delta in deltas {
+                    calls.entry(delta.index).or_default().merge_from(delta);
+                }
+            }
+        }
+    }
+    calls
+}
+
+// This asserts the serving adapter's pre-close progress and transport evidence;
+// parser-only conformance cannot express an open downstream stream or OpenAI IDs.
+#[tokio::test]
+async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings() {
+    let flag = dynamo_runtime::config::env_is_truthy(
+        dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
+    );
+    let q = "q".repeat(4096);
+    let shapes = [
+        (
+            "kimi_k2",
+            "kimi_k25",
+            "reasoning</think>",
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.write_file:0<|tool_call_argument_begin|>{\"count\":7,\"content\":\"",
+            "\"}",
+            "<|tool_call_end|>",
+            "<|tool_calls_section_end|>",
+            "functions.write_file:0",
+        ),
+        (
+            "kimi_k3",
+            "kimi_k3",
+            "<|open|>think<|sep|>reasoning<|close|>think<|sep|>",
+            "<|open|>tools<|sep|><|open|>call tool=\"write_file\" index=\"1\"<|sep|><|open|>argument key=\"count\" type=\"number\"<|sep|>7<|close|>argument<|sep|><|open|>argument key=\"content\" type=\"string\"<|sep|>",
+            "<|close|>argument<|sep|>",
+            "<|close|>call<|sep|>",
+            "<|close|>tools<|sep|>",
+            "write_file:0",
+        ),
+        (
+            "kimi-k3",
+            "kimi-k3",
+            "<|open|>think<|sep|>reasoning<|close|>think<|sep|>",
+            "<|open|>tools<|sep|><|open|>call tool=\"write_file\" index=\"1\"<|sep|><|open|>json type=\"object\"<|sep|>{\"count\":7,\"content\":\"",
+            "\"}<|close|>json<|sep|>",
+            "<|close|>call<|sep|>",
+            "<|close|>tools<|sep|>",
+            "write_file:0",
+        ),
+    ];
+    for (tool, reason, warmup, header, value_end, call_end, section_end, expected_id) in shapes {
+        for size in [7, 1024] {
+            for thinking in ["default", "disabled", "prefill"] {
+                for tail in ["complete", "truncated", "sibling", "unclosed_valid_json"] {
+                    if !flag && (thinking == "prefill" || !matches!(tail, "complete" | "truncated"))
+                    {
+                        continue;
+                    }
+                    // Structural tags use the same native bytes; generation-time backend installation is tested separately.
+                    for structural in [false, true] {
+                        let preprocessor = build_preprocessor(Some(reason), Some(tool));
+                        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                            "model":"test", "messages":[{"role":"user","content":"write"}], "stream":true,
+                            "tools":[{"type":"function","function":{"name":"write_file","parameters":{"type":"object","properties":{"count":{"type":"integer"},"content":{"type":"string"}}}}}]
+                        })).unwrap();
+                        if thinking == "disabled" {
+                            request.chat_template_args = Some(
+                                serde_json::from_value(
+                                    serde_json::json!({"enable_thinking":false}),
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        let (tx, rx) = mpsc::unbounded();
+                        let output = preprocessor
+                            .postprocessor_parsing_stream(
+                                rx,
+                                &request,
+                                thinking == "prefill",
+                                structural,
+                            )
+                            .unwrap();
+                        futures::pin_mut!(output);
+                        let warmup = if thinking == "disabled" {
+                            ""
+                        } else if thinking == "prefill" && tool != "kimi_k2" {
+                            "reasoning<|close|>think<|sep|>"
+                        } else {
+                            warmup
+                        };
+                        tx.unbounded_send(kimi_native_chunk(warmup, None)).unwrap();
+                        tx.unbounded_send(kimi_native_chunk(header, None)).unwrap();
+                        for bytes in q.as_bytes()[..3072].chunks(size) {
+                            tx.unbounded_send(kimi_native_chunk(
+                                std::str::from_utf8(bytes).unwrap(),
+                                None,
+                            ))
+                            .unwrap();
+                        }
+                        let mut chunks = Vec::new();
+                        while let Some(item) = output.next().now_or_never() {
+                            chunks.push(item.expect("source remains open"));
+                        }
+                        let early = kimi_native_calls(&chunks);
+                        if flag {
+                            assert_eq!(early.len(), 1, "{tool}/{size}/{thinking}");
+                            let call = early.get(&0).unwrap();
+                            assert_eq!(call.id.as_deref(), Some(expected_id));
+                            assert_eq!(call.name.as_deref(), Some("write_file"));
+                            assert_eq!(
+                                call.arguments.bytes().filter(|byte| *byte == b'q').count(),
+                                3072
+                            );
+                        } else {
+                            assert!(early.is_empty(), "legacy calls remain buffered");
+                        }
+                        if tail != "truncated" {
+                            tx.unbounded_send(kimi_native_chunk(
+                                &format!("{}{value_end}", &q[3072..]),
+                                None,
+                            ))
+                            .unwrap();
+                            if tail != "unclosed_valid_json" {
+                                tx.unbounded_send(kimi_native_chunk(call_end, None))
+                                    .unwrap();
+                                if tail == "sibling" {
+                                    // Remove the section opener, retaining an incomplete second native call.
+                                    let sibling_header = header
+                                        .strip_prefix(if tool == "kimi_k2" {
+                                            "<|tool_calls_section_begin|>"
+                                        } else {
+                                            "<|open|>tools<|sep|>"
+                                        })
+                                        .unwrap();
+                                    let sibling_header = if tool == "kimi_k2" {
+                                        sibling_header.replace(":0", ":1")
+                                    } else {
+                                        sibling_header.replace("index=\"1\"", "index=\"2\"")
+                                    };
+                                    tx.unbounded_send(kimi_native_chunk(
+                                        &format!("{sibling_header}unfinished"),
+                                        None,
+                                    ))
+                                    .unwrap();
+                                } else {
+                                    tx.unbounded_send(kimi_native_chunk(section_end, None))
+                                        .unwrap();
+                                }
+                            }
+                        }
+                        let finish = if tail == "complete" { "stop" } else { "length" };
+                        tx.unbounded_send(kimi_native_chunk("", Some(finish)))
+                            .unwrap();
+                        drop(tx);
+                        chunks.extend(output.collect::<Vec<_>>().await);
+                        // Internal serialization must retain evidence through a serving hop.
+                        let chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = chunks
+                            .into_iter()
+                            .map(|chunk| {
+                                serde_json::from_value(serde_json::to_value(chunk).unwrap())
+                                    .unwrap()
+                            })
+                            .collect();
+                        let calls = kimi_native_calls(&chunks);
+                        if flag && tail != "truncated" {
+                            assert_eq!(calls[&0].id.as_deref(), Some(expected_id));
+                            assert_eq!(
+                                serde_json::from_str::<Value>(&calls[&0].arguments).unwrap(),
+                                serde_json::json!({"count":7,"content":q})
+                            );
+                        }
+                        let options = ParsingOptions::new(Some(tool.into()), Some(reason.into()));
+                        let aggregate = NvCreateChatCompletionResponse::from_annotated_stream(
+                            stream::iter(chunks),
+                            options,
+                        )
+                        .await
+                        .unwrap();
+                        let choice = &aggregate.inner.choices[0];
+                        let final_calls = choice.message.tool_calls.as_deref().unwrap_or_default();
+                        // Reviewed Kimi parsers recover complete argument bodies at EOF;
+                        // mid-string truncation still leaves the call incomplete.
+                        let expected_count = usize::from(
+                            tail == "complete"
+                                || (flag && tail == "sibling")
+                                || (flag && tail == "unclosed_valid_json"),
+                        );
+                        assert_eq!(
+                            final_calls.len(),
+                            expected_count,
+                            "{tool}/{tail}/{thinking}/{structural}"
+                        );
+                        if !final_calls.is_empty() {
+                            assert_eq!(
+                                serde_json::from_str::<Value>(&final_calls[0].function.arguments)
+                                    .unwrap(),
+                                serde_json::json!({"count":7,"content":q})
+                            );
+                            if flag {
+                                assert_eq!(final_calls[0].id, expected_id);
+                            }
+                        }
+                        assert_eq!(
+                            choice
+                                .message
+                                .reasoning_content
+                                .as_deref()
+                                .unwrap_or_default(),
+                            if thinking == "disabled" {
+                                ""
+                            } else {
+                                "reasoning"
+                            }
+                        );
+                        assert!(
+                            choice
+                                .message
+                                .content
+                                .as_ref()
+                                .map(get_text)
+                                .unwrap_or_default()
+                                .is_empty()
+                        );
+                    }
+                }
+            }
+        }
     }
 }
