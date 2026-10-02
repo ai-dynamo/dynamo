@@ -36,6 +36,16 @@ async fn healthy<F: ProcessFixture>(
     control: &Controller<F::Protocol>,
     id: &str,
 ) -> RequestHandle<F::Protocol> {
+    healthy_with_model::<F>(env, router, control, id, &env.model).await
+}
+
+async fn healthy_with_model<F: ProcessFixture>(
+    env: &Environment,
+    router: &crate::process::Router,
+    control: &Controller<F::Protocol>,
+    id: &str,
+    model: &str,
+) -> RequestHandle<F::Protocol> {
     bounded("router fault recovery", async {
         while router.selectable_worker_ids().is_err() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -44,6 +54,7 @@ async fn healthy<F: ProcessFixture>(
     .await;
     let handle = control.request(id, RequestPlan::default());
     let mut request = env.request(id, 3);
+    request.model = model.into();
     F::configure_request(&mut request);
     let expected = request.content().clone();
     let stream = bounded("Dynamo request ingress", router.generate(request))
@@ -786,6 +797,26 @@ async fn sglang_prefill_router_preserves_handoff_failure_and_cancellation() {
 }
 
 #[tokio::test]
+async fn vllm_served_model_alias_is_published() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        served_model_alias_is_published::<vllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_served_model_alias_is_published() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        served_model_alias_is_published::<sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
 async fn sglang_distinct_model_tokenizer_and_alias_are_published() {
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
@@ -796,23 +827,82 @@ async fn sglang_distinct_model_tokenizer_and_alias_are_published() {
 }
 
 #[tokio::test]
-async fn sglang_health_readiness_precedes_publication() {
+async fn vllm_health_readiness_precedes_publication() {
     tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        health_readiness_precedes_publication(),
+        Duration::from_secs(60),
+        health_readiness_precedes_publication::<vllm::Fixture>(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");
 }
 
 #[tokio::test]
-async fn sglang_unhealthy_or_changed_role_never_registers() {
+async fn sglang_health_readiness_precedes_publication() {
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        unhealthy_or_changed_role_never_registers(),
+        health_readiness_precedes_publication::<sglang::Fixture>(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn vllm_unhealthy_worker_never_registers() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        unhealthy_worker_never_registers::<vllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_unhealthy_worker_never_registers() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        unhealthy_worker_never_registers::<sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_changed_role_never_registers() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        changed_role_never_registers(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+async fn served_model_alias_is_published<F: ProcessFixture>() {
+    let env = Environment::new().await;
+    let control = Controller::default();
+    let mut peer = F::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    peer.set_served_model_name("public-alias");
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    let cards = env.cards().await;
+    assert_eq!(cards.len(), 1);
+    let card = &cards[0];
+    assert_eq!(card.name(), "public-alias");
+    assert_eq!(card.source_path(), env.model);
+    assert_eq!(card.worker_type, Some(WorkerType::Aggregated));
+    assert!(card.tokenizer.is_some());
+    assert!(card.prompt_formatter.is_some());
+    F::assert_registration(card);
+    healthy_with_model::<F>(&env, &router, &control, "alias-request", "public-alias").await;
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    peer.shutdown().await;
 }
 
 async fn distinct_model_tokenizer_and_alias_are_published() {
@@ -888,10 +978,10 @@ async fn distinct_model_tokenizer_and_alias_are_published() {
     peer.shutdown().await;
 }
 
-async fn health_readiness_precedes_publication() {
+async fn health_readiness_precedes_publication<F: ProcessFixture>() {
     let env = Environment::new().await;
     let control = Controller::default();
-    let mut peer = sglang::Fixture::start(
+    let mut peer = F::start(
         control.clone(),
         FixtureConfig {
             model: env.model.clone(),
@@ -900,50 +990,62 @@ async fn health_readiness_precedes_publication() {
     )
     .await;
     peer.set_health(None);
-    let mut child =
-        env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
     peer.health_check_received().await;
     assert!(env.cards().await.is_empty());
     assert!(env.registrations("backend").await.is_empty());
     peer.set_health(Some(true));
     let router = env.ready("backend").await;
-    healthy::<sglang::Fixture>(&env, &router, &control, "after-health-readiness").await;
+    healthy::<F>(&env, &router, &control, "after-health-readiness").await;
     child.shutdown().await;
     env.withdrawn("backend", &router).await;
     peer.shutdown().await;
 }
 
-async fn unhealthy_or_changed_role_never_registers() {
-    for is_role_change in [false, true] {
-        let env = Environment::new().await;
-        let mut peer = sglang::Fixture::start(
-            Controller::default(),
-            FixtureConfig {
-                model: env.model.clone(),
-                ..Default::default()
-            },
-        )
-        .await;
-        if is_role_change {
-            peer.override_discovery(
-                Value::Null,
-                vec![json!({}), json!({"disaggregation_mode": "prefill"})],
-            );
-        } else {
-            peer.set_health(Some(false));
-        }
-        let mut child =
-            env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
-        peer.health_check_received().await;
-        assert!(!child.exit().await.success(), "{}", child.logs());
-        assert!(env.cards().await.is_empty());
-        assert!(env.registrations("backend").await.is_empty());
-        let expected = if is_role_change {
-            "role changed since bootstrap"
-        } else {
-            "did not become healthy"
-        };
-        assert!(child.logs().contains(expected), "{}", child.logs());
-        peer.shutdown().await;
-    }
+async fn unhealthy_worker_never_registers<F: ProcessFixture>() {
+    let env = Environment::new().await;
+    let mut peer = F::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    peer.set_health(Some(false));
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
+    peer.health_check_received().await;
+    assert!(!child.exit().await.success(), "{}", child.logs());
+    assert!(env.cards().await.is_empty());
+    assert!(env.registrations("backend").await.is_empty());
+    F::assert_unhealthy_startup(&child.logs());
+    peer.shutdown().await;
+}
+
+async fn changed_role_never_registers() {
+    let env = Environment::new().await;
+    let mut peer = sglang::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    peer.override_discovery(
+        Value::Null,
+        vec![json!({}), json!({"disaggregation_mode": "prefill"})],
+    );
+    let mut child =
+        env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
+    peer.health_check_received().await;
+    assert!(!child.exit().await.success(), "{}", child.logs());
+    assert!(env.cards().await.is_empty());
+    assert!(env.registrations("backend").await.is_empty());
+    assert!(
+        child.logs().contains("role changed since bootstrap"),
+        "{}",
+        child.logs()
+    );
+    peer.shutdown().await;
 }

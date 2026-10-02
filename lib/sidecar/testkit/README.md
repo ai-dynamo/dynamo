@@ -54,7 +54,7 @@ lib/sidecar/
     │   ├── router_sidecar_mocker_integration.rs  # Sidecar children, discovery, routing and shutdown
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
-    │       ├── vllm.rs        # vLLM protocol, Mocker and child-command adapter
+    │       ├── vllm.rs        # vLLM protocol, discovery, health and child-command adapter
     │       ├── sglang.rs      # SGLang protocol, discovery, health and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
     └── README.md              # This guide
@@ -174,12 +174,19 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | Both backends: registration/error recovery, readiness, startup failure, cancellation, SIGTERM and real PrefillRouter handoff; SGLang discovery identity, HealthCheck and changed-role startup | CPU, ordinary pre-merge Cargo tests |
+| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | Both backends: registration/error recovery, model alias publication, health-gated readiness, unhealthy startup, cancellation, SIGTERM and real PrefillRouter handoff; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 Both vLLM and SGLang register the shared wire and process scenarios.
 TensorRT-LLM is not enrolled here.
+
+The alias and health-publication scenarios use `ProcessFixture` controls for
+both backends. vLLM keeps Control healthy while the fixture controls Inference
+readiness; SGLang uses its native HealthCheck RPC. Separate tokenizer discovery,
+parser settings inherited from engine metadata, changed engine roles and native
+trace headers remain SGLang-specific because vLLM has different contracts for
+those values.
 
 CPU handoff checks opaque vLLM metadata and SGLang concurrent bootstrap
 coordination. CPU handoff cancellation holds the peers before Mocker admission;
@@ -214,7 +221,9 @@ The legacy Python backend suite is also distributed by behavior, including
 2. For shared behavior, write a scenario accepting only its fixture type. Use
    `SidecarFixture` for the common engine lifecycle, `WireFixture` when a test
    must observe active scheduler work, and `ProcessFixture` when it launches a
-   sidecar child. Keep protocol messages in the backend's support file.
+   sidecar child. Its alias and readiness controls keep protocol messages in the
+   backend's support file, so another backend can enroll without copying the
+   scenario body.
 3. Register common baseline scenarios once in the small enrollment macro. Both
    backends invoke the same macro, producing a separate ordinary Tokio test for
    every scenario. The macro only declares tests; it does not run or select them

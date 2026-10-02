@@ -55,20 +55,6 @@ impl Fixture {
         *self.model_info.lock().unwrap() = model_info;
         *self.server_info.lock().unwrap() = server_info.into();
     }
-
-    pub fn set_health(&self, readiness: Option<bool>) {
-        self.health.send_replace(readiness);
-    }
-
-    pub async fn health_check_received(&self) {
-        let mut calls = self.health_calls.clone();
-        dynamo_sidecar_testkit::bounded(
-            "SGLang HealthCheck received",
-            calls.wait_for(|count| *count > 0),
-        )
-        .await
-        .unwrap();
-    }
 }
 
 impl SidecarFixture for Fixture {
@@ -494,6 +480,31 @@ impl Protocol for Adapter {
 }
 
 impl ProcessFixture for Fixture {
+    fn set_served_model_name(&self, name: &str) {
+        self.override_discovery(
+            Value::Null,
+            vec![serde_json::json!({"served_model_name": name})],
+        );
+    }
+
+    fn set_health(&self, is_healthy: Option<bool>) {
+        self.health.send_replace(is_healthy);
+    }
+
+    async fn health_check_received(&self) {
+        let mut calls = self.health_calls.clone();
+        dynamo_sidecar_testkit::bounded(
+            "SGLang HealthCheck received",
+            calls.wait_for(|count| *count > 0),
+        )
+        .await
+        .unwrap();
+    }
+
+    fn assert_unhealthy_startup(logs: &str) {
+        assert!(logs.contains("did not become healthy"), "{logs}");
+    }
+
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }

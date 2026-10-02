@@ -18,12 +18,18 @@ use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
 use dynamo_vllm_sidecar::proto::{
     self as pb,
-    control_server::ControlServer,
+    control_server::{Control, ControlServer},
     inference_server::{Inference, InferenceServer},
 };
 use futures::stream::BoxStream;
+use tokio::sync::watch;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::server::NamedService;
 use tonic::{Request, Response, Status};
+use tonic_health::pb::{
+    HealthCheckRequest, HealthCheckResponse,
+    health_server::{Health, HealthServer},
+};
 
 use super::{
     FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
@@ -35,6 +41,9 @@ pub struct Fixture {
     pub service: VllmMockerService,
     pub server: TestServer,
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+    served_model_name: Arc<Mutex<Option<String>>>,
+    readiness: watch::Sender<Option<bool>>,
+    health_received: watch::Receiver<bool>,
 }
 
 impl Fixture {
@@ -72,19 +81,28 @@ impl SidecarFixture for Fixture {
         )
         .unwrap();
         let scripted = Arc::new(Mutex::new(HashMap::new()));
+        let served_model_name = Arc::new(Mutex::new(None));
         let controlled = ControlledService {
             inner: service.clone(),
             control,
             scripted: scripted.clone(),
+            served_model_name: served_model_name.clone(),
         };
-        let control_service = service.clone();
-        let (health, health_service) = tonic_health::server::health_reporter();
+        let control_service = controlled.clone();
+        let health = tonic_health::server::HealthReporter::new();
         health
-            .set_serving::<ControlServer<VllmMockerService>>()
+            .set_serving::<ControlServer<ControlledService>>()
             .await;
         health
             .set_serving::<InferenceServer<ControlledService>>()
             .await;
+        let (readiness, is_healthy) = watch::channel(Some(true));
+        let (health_requested, health_received) = watch::channel(false);
+        let health_service = HealthServer::new(ControlledHealth {
+            inner: tonic_health::server::HealthService::from_health_reporter(health),
+            is_healthy,
+            health_requested,
+        });
         let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
                 .add_service(InferenceServer::new(controlled))
@@ -103,6 +121,9 @@ impl SidecarFixture for Fixture {
             service,
             server,
             scripted,
+            served_model_name,
+            readiness,
+            health_received,
         }
     }
 
@@ -323,6 +344,15 @@ struct ControlledService {
     inner: VllmMockerService,
     control: Controller<Adapter>,
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
+    served_model_name: Arc<Mutex<Option<String>>>,
+}
+
+impl ControlledService {
+    fn normalize_model_alias(&self, request: &mut pb::GenerateRequest) {
+        if self.served_model_name.lock().unwrap().as_deref() == Some(request.model.as_str()) {
+            request.model.clone_from(&self.inner.config().model);
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -331,14 +361,15 @@ impl Inference for ControlledService {
 
     async fn generate(
         &self,
-        request: Request<pb::GenerateRequest>,
+        mut request: Request<pb::GenerateRequest>,
     ) -> Result<Response<pb::GenerateResponse>, Status> {
+        self.normalize_model_alias(request.get_mut());
         self.inner.generate(request).await
     }
 
     async fn generate_stream(
         &self,
-        request: Request<pb::GenerateRequest>,
+        mut request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
         let opened = self.control.open(request.get_ref()).await?;
         let scripted = self
@@ -351,8 +382,100 @@ impl Inference for ControlledService {
                 responses.into_iter().map(Ok),
             )))));
         }
+        self.normalize_model_alias(request.get_mut());
         let response = self.inner.generate_stream(request).await?;
         Ok(Response::new(opened.wrap(response.into_inner())))
+    }
+}
+
+macro_rules! delegate_control {
+    ($($method:ident($request:ty) -> $response:ty;)*) => {
+        #[tonic::async_trait]
+        impl Control for ControlledService {
+            async fn get_model_info(
+                &self,
+                request: Request<pb::GetModelInfoRequest>,
+            ) -> Result<Response<pb::ModelInfo>, Status> {
+                let mut response = self.inner.get_model_info(request).await?;
+                if let Some(name) = self.served_model_name.lock().unwrap().as_ref() {
+                    response.get_mut().served_model_name.clone_from(name);
+                }
+                Ok(response)
+            }
+
+            $(
+                async fn $method(
+                    &self,
+                    request: Request<$request>,
+                ) -> Result<Response<$response>, Status> {
+                    self.inner.$method(request).await
+                }
+            )*
+        }
+    };
+}
+
+delegate_control! {
+    get_server_info(pb::GetServerInfoRequest) -> pb::ServerInfo;
+    abort(pb::AbortRequest) -> pb::AbortResponse;
+    load_lora(pb::LoadLoraRequest) -> pb::LoadLoraResponse;
+    unload_lora(pb::UnloadLoraRequest) -> pb::UnloadLoraResponse;
+    list_loras(pb::ListLorasRequest) -> pb::ListLorasResponse;
+    get_kv_event_sources(pb::GetKvEventSourcesRequest) -> pb::GetKvEventSourcesResponse;
+    pause_generation(pb::PauseGenerationRequest) -> pb::PauseGenerationResponse;
+    resume_generation(pb::ResumeGenerationRequest) -> pb::ResumeGenerationResponse;
+    is_paused(pb::IsPausedRequest) -> pb::IsPausedResponse;
+    sleep(pb::SleepRequest) -> pb::SleepResponse;
+    wake_up(pb::WakeUpRequest) -> pb::WakeUpResponse;
+    is_sleeping(pb::IsSleepingRequest) -> pb::IsSleepingResponse;
+    init_weight_transfer_engine(pb::InitWeightTransferEngineRequest) -> pb::InitWeightTransferEngineResponse;
+    start_weight_update(pb::StartWeightUpdateRequest) -> pb::StartWeightUpdateResponse;
+    start_draft_weight_update(pb::StartDraftWeightUpdateRequest) -> pb::StartDraftWeightUpdateResponse;
+    update_weights(pb::UpdateWeightsRequest) -> pb::UpdateWeightsResponse;
+    finish_weight_update(pb::FinishWeightUpdateRequest) -> pb::FinishWeightUpdateResponse;
+    update_weight_version(pb::UpdateWeightVersionRequest) -> pb::UpdateWeightVersionResponse;
+    get_weight_version(pb::GetWeightVersionRequest) -> pb::GetWeightVersionResponse;
+}
+
+struct ControlledHealth {
+    inner: tonic_health::server::HealthService,
+    is_healthy: watch::Receiver<Option<bool>>,
+    health_requested: watch::Sender<bool>,
+}
+
+#[tonic::async_trait]
+impl Health for ControlledHealth {
+    async fn check(
+        &self,
+        request: Request<HealthCheckRequest>,
+    ) -> Result<Response<HealthCheckResponse>, Status> {
+        if request.get_ref().service != InferenceServer::<ControlledService>::NAME {
+            return self.inner.check(request).await;
+        }
+        self.health_requested.send_replace(true);
+        let mut readiness = self.is_healthy.clone();
+        let is_healthy = readiness
+            .wait_for(|is_healthy| is_healthy.is_some())
+            .await
+            .map_err(|_| Status::unavailable("health fixture stopped"))?
+            .unwrap();
+        let status = if is_healthy {
+            tonic_health::pb::health_check_response::ServingStatus::Serving
+        } else {
+            tonic_health::pb::health_check_response::ServingStatus::NotServing
+        };
+        Ok(Response::new(HealthCheckResponse {
+            status: status as i32,
+        }))
+    }
+
+    type WatchStream = <tonic_health::server::HealthService as Health>::WatchStream;
+
+    async fn watch(
+        &self,
+        request: Request<HealthCheckRequest>,
+    ) -> Result<Response<Self::WatchStream>, Status> {
+        self.inner.watch(request).await
     }
 }
 
@@ -389,6 +512,28 @@ impl Protocol for Adapter {
 }
 
 impl ProcessFixture for Fixture {
+    fn set_served_model_name(&self, name: &str) {
+        *self.served_model_name.lock().unwrap() = Some(name.to_owned());
+    }
+
+    fn set_health(&self, is_healthy: Option<bool>) {
+        self.readiness.send_replace(is_healthy);
+    }
+
+    async fn health_check_received(&self) {
+        let mut received = self.health_received.clone();
+        dynamo_sidecar_testkit::bounded(
+            "vLLM Inference health check received",
+            received.wait_for(|has_received| *has_received),
+        )
+        .await
+        .unwrap();
+    }
+
+    fn assert_unhealthy_startup(logs: &str) {
+        assert!(logs.contains("did not become SERVING"), "{logs}");
+    }
+
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }

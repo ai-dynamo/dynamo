@@ -466,6 +466,35 @@ async fn teardown_with_live_clients<F: WireFixture>() -> (Outputs, Vec<u32>) {
     (outputs, handle.tokens())
 }
 
+#[tokio::test]
+async fn sglang_shutdown_releases_pending_health_check() {
+    use dynamo_sglang_sidecar::proto::{
+        HealthCheckRequest, sglang_service_client::SglangServiceClient,
+    };
+
+    let mut fixture =
+        support::sglang::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    fixture.set_health(None);
+    let mut client = bounded(
+        "connect health client",
+        SglangServiceClient::connect(fixture.endpoint()),
+    )
+    .await
+    .unwrap();
+    let health = client.health_check(HealthCheckRequest {});
+    tokio::pin!(health);
+    tokio::select! {
+        result = &mut health => panic!("health check completed before shutdown: {result:?}"),
+        _ = fixture.health_check_received() => {},
+    }
+    fixture.shutdown().await;
+    assert!(
+        bounded("pending health check terminated", health)
+            .await
+            .is_err()
+    );
+}
+
 macro_rules! enroll_baseline {
     ($backend:ident, $fixture:ty) => {
         mod $backend {
