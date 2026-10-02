@@ -545,7 +545,6 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
     min-width: 0;
 }
 
-/* Cards without a provider logo or mark use the full header width. */
 .dynamo-model-card-top > div:only-child {
     grid-column: 1 / -1;
 }
