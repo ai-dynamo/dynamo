@@ -19,7 +19,7 @@ crd-ref-docs generates anchors solely from type names, so types that exist in bo
 API versions get identical anchors (e.g. #dynamographdeploymentrequest). In standard
 Markdown renderers the first occurrence wins, meaning v1beta1 links resolve to the
 v1alpha1 section. This script prepends "v1beta1 " to the affected headings in the
-v1beta1 section and updates all intra-section links to match the new anchors.
+v1beta1 section. crd-ref-docs-config.yaml supplies package-aware links to them.
 
 crd-ref-docs also renders links for some external dangerous types that are referenced
 from the CRD but not emitted as sections. Strip those links so the published
@@ -31,6 +31,7 @@ DCD documentation so the generated reference matches the installed CRDs.
 """
 import re
 import sys
+from pathlib import Path
 
 TYPE_HEADING_RE = re.compile(r"^####\s+(?:v1beta1\s+)?(?P<name>\S+)\s*$")
 DCD_SPEC = "DynamoComponentDeploymentSpec"
@@ -38,6 +39,7 @@ DGD_ONLY_DCD_REFERENCES = {
     "DynamoComponentDeploymentSharedSpec",
     "ComponentRoleSpec",
     "ProviderOverride",
+    "LPXConfig",
 }
 DCD_REFERENCE_RE = re.compile(r"^- \[DynamoComponentDeploymentSpec\]\(#[^)]+\)\s*$")
 
@@ -52,7 +54,9 @@ def project_standalone_dcd_schema(markdown: str) -> str:
         if heading:
             current_type = heading.group("name")
 
-        if current_type == DCD_SPEC and line.startswith("| `providerOverride` "):
+        if current_type == DCD_SPEC and line.startswith(
+            ("| `providerOverride` ", "| `lpx` ")
+        ):
             continue
 
         if current_type == DCD_SPEC and line.startswith("| `roles` "):
@@ -79,8 +83,8 @@ if len(sys.argv) != 2:
     print(f"Usage: {sys.argv[0]} <api-reference.md>", file=sys.stderr)
     sys.exit(1)
 
-path = sys.argv[1]
-content = open(path).read()
+path = Path(sys.argv[1])
+content = path.read_text()
 
 marker = "## nvidia.com/v1beta1"
 idx = content.find(marker)
@@ -91,16 +95,17 @@ if idx == -1:
 alpha_part = content[:idx]
 beta_part = content[idx:]
 
-# Types whose names collide between v1alpha1 and v1beta1.
-# Add to this list if future versions introduce additional same-named types.
+# Match the package-qualified links in crd-ref-docs-config.yaml.
 duplicate_types = [
     "DynamoGraphDeploymentRequest",
     "DynamoGraphDeploymentRequestSpec",
     "DynamoGraphDeploymentRequestStatus",
+    "DynamoGraphDeploymentStatus",
+    "DynamoGraphDeploymentSpec",
+    "DynamoComponentDeploymentSharedSpec",
 ]
 
 for t in duplicate_types:
-    anchor = t.lower()
     # Rename section headings: #### TypeName → #### v1beta1 TypeName
     beta_part = re.sub(
         r"(####\s+)" + re.escape(t) + r"(\s*$)",
@@ -108,8 +113,6 @@ for t in duplicate_types:
         beta_part,
         flags=re.MULTILINE,
     )
-    # Update markdown links: (#anchor) → (#v1beta1-anchor)
-    beta_part = beta_part.replace(f"(#{anchor})", f"(#v1beta1-{anchor})")
 
 content = alpha_part + beta_part
 content = project_standalone_dcd_schema(content)
@@ -122,5 +125,5 @@ for t in external_types_without_sections:
     anchor = t.lower()
     content = content.replace(f"[{t}](#{anchor})", t)
 
-open(path, "w").write(content)
+path.write_text(content)
 print(f"✅ Post-processed API reference in {path}")

@@ -30,6 +30,56 @@ support the current version plus 1 version back (N and N-1). The pattern:
 component files. Do not version-check with `sglang.__version__` -- import probing is
 more reliable since SGLang's internal layout doesn't always match the version string.
 
+## Multi-process gateway (`--gateway-workers N`)
+
+`gateway.py`. One `dynamo.sglang` process fronts every DP rank of its engine: SGLang's
+`TokenizerManager` intake and the Dynamo handler's token relay run on one GIL. With
+`--tokenizer-worker-num N > 1` SGLang puts a `MultiTokenizerRouter` in the engine process; it
+has no `generate_request`, so the leader (node rank 0) does not serve. Instead it publishes
+the launch data with SGLang's shared-memory contract (`write_data_for_multi_tokenizer`) and
+spawns N children, `python -m dynamo.sglang <same argv>` with `DYN_SGLANG_GATEWAY_PARENT_PID`
+and `DYN_SGLANG_GATEWAY_CHILD_INDEX` set. A child builds a `TokenizerWorker` registered with
+the router (`build_gateway_engine`), wraps it in `GatewayEngine` (what the handlers use of an
+`sgl.Engine`: `tokenizer_manager`, `server_args`, `port_args`, `async_generate`, scheduler
+info) and runs the ordinary `init_decode`/`init_prefill` path as its own endpoint instance
+(`attached_engine=`, distinct from `snapshot_engine=`), so the router sees N instances per
+engine. If SGLang exposes `Engine.attach_tokenizer_worker`, children use it instead of the
+facade.
+
+Configuration (`effective_gateway_workers`, `validate_gateway_mode`, applied in `main.py`
+before snapshot preparation and runtime creation): `--gateway-workers N` sets
+`tokenizer_worker_num` to N; `--tokenizer-worker-num N` alone means N gateways; a tokenizer count
+above 1 that differs from `--gateway-workers` is an error. Gateway mode is rejected for the direct-engine workers
+(embedding, rerank, multimodal, diffusion), with `--enable-lora` (dynamic LoRA state would
+live in one child), with `--enable-forward-pass-metrics` (the schedulers stamp FPM with the
+non-serving leader's identity) and in snapshot mode.
+
+Ports and metrics: the leader gives `DYN_SYSTEM_PORT` to child 0 and runs without a system
+status server; the other children bind a random system port (`DYN_SYSTEM_PORT=0`, logged by the
+runtime), because any fixed offset can collide with another worker group's configured port.
+Engine-target `--engine-routes` need `Engine.attach_tokenizer_worker`; the facade only exposes
+the tokenizer manager.
+The schedulers push KV metrics to one PULL socket: child 0 (`owns_engine_metrics()`) binds it
+and re-publishes every `KvMetrics` on an ipc PUB (`metrics_fanout_endpoint()`) that the other
+children subscribe to, so every gateway identity reports the engine's real KV usage. Every
+child republishes KV events under its own worker id, otherwise the router would see prefixes
+on instance 0 only; the cost is N copies of each KV event. On multi-node engines the
+non-leader nodes resolve all N leader instances by worker group id
+(`Client.wait_for_instances_by_runtime_data`) and attribute their remote-rank KV events to
+each. Only the metrics owner publishes the engine-level gauges (total blocks, cache
+usage, load time), so a scrape across children counts the engine once; every child still publishes
+its own routing usage. Each child's model card carries `dynamo.sglang.gateway_engine`
+(`host:leader_pid`) and `dynamo.sglang.gateway_workers`, so anything that counts workers or sums
+per-worker capacity from discovery can collapse the N instances of one engine. Only child 0's
+system port is fixed; sibling health lives on random ports, so fixed probes see one of N processes.
+
+Lifecycle: the leader owns the engine subprocesses and the shared memory, runs the deferred
+shutdown handlers, and terminates and reaps the children with the worker's own shutdown budget
+(`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` + drain + cleanup); a child exiting during shutdown is
+not an error. Children run a parent watchdog (`PR_SET_PDEATHSIG` plus a liveness poll) and
+SIGTERM themselves when the leader dies, since without the schedulers they would stay registered
+and fail every request.
+
 ## Entry Point
 
 `__main__.py` -> `main.py:main()` -> `main.py:worker()`

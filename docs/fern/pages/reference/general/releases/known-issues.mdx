@@ -12,9 +12,37 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 Known issues are mirrored verbatim from each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
 
+<a id="v150"></a>
+
+## v1.5.0 — current release
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **SGLang Sidecar Inference 500 Errors:** Every inference request sent to the SGLang sidecar fails with HTTP 500 and the error `'GenerateReqInput' object has no attribute 'batch_size'`. Startup, registration and discovery succeed on the same binaries, so only the generate path is affected; the cause is a protocol mismatch between the sidecar's request handling and the bundled SGLang version, which is corrected in upstream SGLang v0.5.19. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Missing Prompt Logprobs under Disaggregation:** With the SGLang backend in disaggregated (prefill/decode) serving, requests to the engine-native `/generate` endpoint that set `return_logprob` are accepted but come back with no prompt logprobs. No error or warning explains the omission, while the same request in aggregated serving returns them. The prompt logprobs are produced on the prefill worker and are not propagated through the decode path. The request handler does not surface a diagnostic when they are absent, so callers cannot tell an unsupported option from an empty result. The missing logprobs are a known gap in the current engine-native generate path and are not scheduled for a fix in this release. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **SGLang DCP Worker Request Crash:** SGLang workers launched with `--dcp-size` crash on every real completion request with `RuntimeError: shape '[-1, 1024]' is invalid for input of size 5632`. The attention tensor-parallel size does not account for `dcp_size`, so it mismatches the DCP-aware head split of the KV pool. The root cause is in SGLang. **Workaround:** do not set `--dcp-size` on SGLang workers in v1.5.0. The fix is targeted for v1.6.0 with the next SGLang bump.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **RL Weight Version Tracking Drift:** In reinforcement learning workflows on the vLLM backend, the reported weight version can disagree with the weights actually loaded in the engine, so downstream consumers may treat stale weights as current.
+
+<span className="dynref-badge dynref-badge--blue">CLI</span> **Replay Module Entrypoint Removal:** Scripts and test suites that invoke `python -m dynamo.replay` now fail because the module no longer provides a CLI entry point. The replay CLI moved into the AISimulate wheel with no compatibility shim. **Workaround:** migrate to `aisimulate predict --stack dynamo --config <file>`. It takes a YAML config instead of the previous command-line arguments and does not support online mode. See [the replay guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/cli/operations/simulation-with-dynosim/dynosim-replay.mdx) for usage.
+
+<span className="dynref-badge dynref-badge--blue">Frontend</span> **Bare 500 on Request Errors:** When a request-level error is returned by the backend, clients receive a bare HTTP 500 with no explanatory message, so the actual failure reason is not visible in the response.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Thorough-Mode MoE GPU Overrun:** When the deployment recommender is run in thorough mode against a Mixture-of-Experts model, for example Qwen/Qwen3-30B-A3B, the enumerated profiling candidates can require more GPUs than the cluster GPU budget, so candidate configurations that cannot be deployed are still produced.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Mocker Thorough Profiling GPU Crash:** When a DynamoGraphDeploymentRequest sets `features.mocker.enabled=true` together with `pre_deployment_sweeping_mode=thorough`, the SLA profiler still launches a real GPU worker deployment. That pod enters `CrashLoopBackOff` for lack of GPUs after about 40 seconds and the profiling job aborts. The interpolation path is missing the mocker check, so a GPU-free run still creates a GPU deployment. **Workaround:** use `pre_deployment_sweeping_mode=rapid` for GPU-free profiling with the mocker.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Mocker Perf Model Startup Crash:** Launching `dynamo.mocker` with `--aic-perf-model` crashes on startup instead of serving mock requests. **Workaround:** launch the mocker without `--aic-perf-model`, or run performance modeling through `aisimulate predict`.
+
+<span className="dynref-badge dynref-badge--blue">Router</span> **Explicit Prefill Pin Request Failure:** Requests that specify an explicit prefill target fail hard when that target is locally inhibited: the router neither dispatches the request to the pinned worker nor falls back to another prefill worker.
+
+<span className="dynref-badge dynref-badge--blue">Upstream</span> **FP8 MoE Weight Load Crash:** Serving Qwen3-30B-A3B in its FP8 MoE variant on the vLLM backend crashes during model weight loading, with a shape mismatch raised from the expert weight loader (`routed_experts._load_w13`, tensor a(6) vs b(8)). The failure reproduces on H100, B200, and GB200. The crash reproduces on bare vLLM at the pinned version, so the fix is upstream. This FP8 variant is not covered by any Dynamo recipe, test, or model catalog entry. The non-FP8 Qwen3-30B-A3B checkpoint is unaffected. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Upstream</span> **Disagg Prefill Worker Sleep Failure:** In vLLM disaggregated deployments, putting a prefill worker to sleep fails after it has served inference traffic, so the worker cannot be freed or scaled down.
+
 <a id="v140"></a>
 
-## v1.4.0 — current release
+## v1.4.0
 
 <span className="dynref-badge dynref-badge--blue">vLLM</span> **Omni Cases Fail On GB200:** On ARM64 (GB200) hosts, every vLLM Omni case fails at startup with `ModuleNotFoundError: No module named vllm_omni`, covering the aggregated text, audio, image, video, and image-to-video paths as well as disaggregated GLM image serving. The cause is that the `vllm_omni` module is not shipped in the ARM64 container image; ARM is not a supported platform for vLLM Omni, as noted in the installation section of the [vLLM-Omni installation guidance](../../../use-cases/diffusion/overview.md). No workaround is available yet; Omni workloads must run on x86_64 images.
 
