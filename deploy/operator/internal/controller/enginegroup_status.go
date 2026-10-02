@@ -55,10 +55,11 @@ func engineGroupRegistryFromAPI(values []nvidiacomv1beta1.EngineGroupReplicaReco
 	replicas := make([]enginegroup.ReplicaRecord, 0, len(values))
 	for _, value := range values {
 		record := enginegroup.ReplicaRecord{
-			ReplicaID: enginegroup.ReplicaID(value.ReplicaID),
-			SlotID:    enginegroup.CapacitySlotID(value.SlotID),
-			Current:   engineGroupIncarnationPointerFromAPI(value.Current),
-			History:   make([]enginegroup.ReplicaHistoryEntry, 0, len(value.History)),
+			DesiredNativeMembers: engineGroupNativeMembersFromAPI(value.DesiredNativeMembers),
+			ReplicaID:            enginegroup.ReplicaID(value.ReplicaID),
+			SlotID:               enginegroup.CapacitySlotID(value.SlotID),
+			Current:              engineGroupIncarnationPointerFromAPI(value.Current),
+			History:              make([]enginegroup.ReplicaHistoryEntry, 0, len(value.History)),
 		}
 
 		// Preserve every excluded incarnation and its historical native-member correlation.
@@ -78,10 +79,11 @@ func engineGroupRegistryToAPI(value enginegroup.ReplicaRegistry) []nvidiacomv1be
 	replicas := make([]nvidiacomv1beta1.EngineGroupReplicaRecordStatus, 0, len(value.Replicas))
 	for _, value := range value.Replicas {
 		record := nvidiacomv1beta1.EngineGroupReplicaRecordStatus{
-			ReplicaID: string(value.ReplicaID),
-			SlotID:    string(value.SlotID),
-			Current:   engineGroupIncarnationPointerToAPI(value.Current),
-			History:   make([]nvidiacomv1beta1.EngineGroupReplicaHistoryStatus, 0, len(value.History)),
+			DesiredNativeMembers: engineGroupNativeMembersToAPI(value.DesiredNativeMembers),
+			ReplicaID:            string(value.ReplicaID),
+			SlotID:               string(value.SlotID),
+			Current:              engineGroupIncarnationPointerToAPI(value.Current),
+			History:              make([]nvidiacomv1beta1.EngineGroupReplicaHistoryStatus, 0, len(value.History)),
 		}
 
 		// Preserve every excluded incarnation and its historical native-member correlation.
@@ -141,17 +143,15 @@ func engineGroupTopologyToAPI(value enginegroup.MembershipTopology) nvidiacomv1b
 
 func engineGroupMembershipFromAPI(value nvidiacomv1beta1.EngineGroupMemberStatus) enginegroup.ReplicaMembership {
 	return enginegroup.ReplicaMembership{
-		ReplicaID:          enginegroup.ReplicaID(value.ReplicaID),
-		RuntimeIncarnation: enginegroup.RuntimeIncarnationID(value.RuntimeIncarnation),
-		NativeMembers:      engineGroupNativeMembersFromAPI(value.NativeMembers),
+		ReplicaID: enginegroup.ReplicaID(value.ReplicaID),
+		Members:   engineGroupMemberIncarnationsFromAPI(value.NativeMembers),
 	}
 }
 
 func engineGroupMembershipToAPI(value enginegroup.ReplicaMembership) nvidiacomv1beta1.EngineGroupMemberStatus {
 	return nvidiacomv1beta1.EngineGroupMemberStatus{
-		ReplicaID:          string(value.ReplicaID),
-		RuntimeIncarnation: string(value.RuntimeIncarnation),
-		NativeMembers:      engineGroupNativeMembersToAPI(value.NativeMembers),
+		ReplicaID:     string(value.ReplicaID),
+		NativeMembers: engineGroupMemberIncarnationsToAPI(value.Members),
 	}
 }
 
@@ -182,10 +182,10 @@ func engineGroupIncarnationFromAPI(
 		})
 	}
 	return enginegroup.ReplicaIncarnation{
-		ReplicaID:          enginegroup.ReplicaID(value.ReplicaID),
-		SlotID:             enginegroup.CapacitySlotID(value.SlotID),
-		RuntimeIncarnation: enginegroup.RuntimeIncarnationID(value.RuntimeIncarnation),
-		CapacityRefs:       capacityRefs,
+		ReplicaID:    enginegroup.ReplicaID(value.ReplicaID),
+		SlotID:       enginegroup.CapacitySlotID(value.SlotID),
+		CapacityRefs: capacityRefs,
+		Members:      engineGroupMemberIncarnationsFromAPI(value.NativeMembers),
 	}
 }
 
@@ -200,10 +200,10 @@ func engineGroupIncarnationToAPI(
 		})
 	}
 	return nvidiacomv1beta1.EngineGroupControlIncarnationStatus{
-		ReplicaID:          string(value.ReplicaID),
-		SlotID:             string(value.SlotID),
-		RuntimeIncarnation: string(value.RuntimeIncarnation),
-		CapacityRefs:       capacityRefs,
+		ReplicaID:     string(value.ReplicaID),
+		SlotID:        string(value.SlotID),
+		CapacityRefs:  capacityRefs,
+		NativeMembers: engineGroupMemberIncarnationsToAPI(value.Members),
 	}
 }
 
@@ -231,6 +231,22 @@ func engineGroupNativeMembersFromAPI(values []string) []enginegroup.NativeMember
 	members := make([]enginegroup.NativeMemberID, 0, len(values))
 	for _, value := range values {
 		members = append(members, enginegroup.NativeMemberID(value))
+	}
+	return members
+}
+
+func engineGroupMemberIncarnationsFromAPI(values []nvidiacomv1beta1.EngineGroupNativeMemberIncarnationStatus) []enginegroup.NativeMemberIncarnation {
+	members := make([]enginegroup.NativeMemberIncarnation, 0, len(values))
+	for _, value := range values {
+		members = append(members, enginegroup.NativeMemberIncarnation{ID: enginegroup.NativeMemberID(value.ID), RuntimeIncarnation: enginegroup.RuntimeIncarnationID(value.RuntimeIncarnation)})
+	}
+	return members
+}
+
+func engineGroupMemberIncarnationsToAPI(values []enginegroup.NativeMemberIncarnation) []nvidiacomv1beta1.EngineGroupNativeMemberIncarnationStatus {
+	members := make([]nvidiacomv1beta1.EngineGroupNativeMemberIncarnationStatus, 0, len(values))
+	for _, value := range values {
+		members = append(members, nvidiacomv1beta1.EngineGroupNativeMemberIncarnationStatus{ID: string(value.ID), RuntimeIncarnation: string(value.RuntimeIncarnation)})
 	}
 	return members
 }
@@ -557,8 +573,8 @@ func engineGroupMembershipTargetFromAPI(
 	joining := make([]enginegroup.JoiningReplica, 0, len(value.Joining))
 	for _, replica := range value.Joining {
 		joining = append(joining, enginegroup.JoiningReplica{
-			ReplicaID:          enginegroup.ReplicaID(replica.ReplicaID),
-			RuntimeIncarnation: enginegroup.RuntimeIncarnationID(replica.RuntimeIncarnation),
+			ReplicaID: enginegroup.ReplicaID(replica.ReplicaID),
+			Members:   engineGroupMemberIncarnationsFromAPI(replica.NativeMembers),
 		})
 	}
 	return &enginegroup.MembershipTarget{
@@ -581,8 +597,8 @@ func engineGroupMembershipTargetToAPI(
 	joining := make([]nvidiacomv1beta1.EngineGroupJoiningReplicaStatus, 0, len(value.Joining))
 	for _, replica := range value.Joining {
 		joining = append(joining, nvidiacomv1beta1.EngineGroupJoiningReplicaStatus{
-			ReplicaID:          string(replica.ReplicaID),
-			RuntimeIncarnation: string(replica.RuntimeIncarnation),
+			ReplicaID:     string(replica.ReplicaID),
+			NativeMembers: engineGroupMemberIncarnationsToAPI(replica.Members),
 		})
 	}
 	return &nvidiacomv1beta1.EngineGroupMembershipTargetStatus{
@@ -600,6 +616,7 @@ func engineGroupMembershipObservationFromAPI(
 	value nvidiacomv1beta1.EngineGroupMembershipObservationStatus,
 ) enginegroup.MembershipObservation {
 	return enginegroup.MembershipObservation{
+		UnavailableMembers:    engineGroupMembershipsFromAPI(value.UnavailableMembers),
 		CommittedTopology:     engineGroupTopologyFromAPI(value.CommittedTopology),
 		RequestedTransitionID: value.RequestedTransitionID,
 		Transition:            engineGroupMembershipTransitionFromAPI(value.Transition),
@@ -610,6 +627,7 @@ func engineGroupMembershipObservationToAPI(
 	value enginegroup.MembershipObservation,
 ) nvidiacomv1beta1.EngineGroupMembershipObservationStatus {
 	return nvidiacomv1beta1.EngineGroupMembershipObservationStatus{
+		UnavailableMembers:    engineGroupMembershipsToAPI(value.UnavailableMembers),
 		CommittedTopology:     engineGroupTopologyToAPI(value.CommittedTopology),
 		RequestedTransitionID: value.RequestedTransitionID,
 		Transition:            engineGroupMembershipTransitionToAPI(value.Transition),
@@ -847,7 +865,7 @@ func engineGroupChangeFromAPI(value nvidiacomv1beta1.EngineGroupResolvedChangeSt
 	}
 	if value.ReduceToSurvivors != nil {
 		change.ReduceToSurvivors = &enginegroup.ReduceToSurvivorsChange{
-			Survivors: engineGroupReplicaIDsFromAPI(value.ReduceToSurvivors.Survivors),
+			Survivors: engineGroupNativeMembershipsFromAPI(value.ReduceToSurvivors.Survivors),
 		}
 	}
 	if value.Restore != nil {
@@ -885,7 +903,7 @@ func engineGroupChangeToAPI(value enginegroup.ResolvedChange) nvidiacomv1beta1.E
 	}
 	if value.ReduceToSurvivors != nil {
 		change.ReduceToSurvivors = &nvidiacomv1beta1.EngineGroupReduceToSurvivorsChangeStatus{
-			Survivors: engineGroupReplicaIDsToAPI(value.ReduceToSurvivors.Survivors),
+			Survivors: engineGroupNativeMembershipsToAPI(value.ReduceToSurvivors.Survivors),
 		}
 	}
 	if value.Restore != nil {

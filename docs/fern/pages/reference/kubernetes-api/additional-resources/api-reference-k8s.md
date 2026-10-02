@@ -2522,9 +2522,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `nativeMembers` _[EngineGroupNativeMemberIncarnationStatus](#enginegroupnativememberincarnationstatus) array_ | nativeMembers binds the hosted members to their independent process lifetimes. |  | MinItems: 1 <br /> |
 | `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
 | `slotID` _string_ | slotID is the stable workload-manager position. |  | MinLength: 1 <br /> |
-| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the concrete engine process incarnation. |  | MinLength: 1 <br /> |
 | `capacityRefs` _[EngineGroupCapacityRef](#enginegroupcapacityref) array_ | capacityRefs contains every concrete Pod in this replica allocation. |  | MinItems: 1 <br /> |
 
 
@@ -2583,21 +2583,6 @@ _Appears in:_
 | `replicas` _[EngineGroupReplicaTargetStatus](#enginegroupreplicatargetstatus) array_ | replicas contains every new logical, slot, bootstrap, and native identity. |  | MinItems: 1 <br /> |
 
 
-#### EngineGroupJoiningReplicaStatus
-
-
-
-EngineGroupJoiningReplicaStatus identifies one concrete process joining engine membership.
-
-
-
-_Appears in:_
-- [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
-| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the concrete engine process. |  | MinLength: 1 <br /> |
 
 
 #### EngineGroupMemberStatus
@@ -2609,6 +2594,7 @@ EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member 
 
 
 _Appears in:_
+- [EngineGroupMembershipObservationStatus](#enginegroupmembershipobservationstatus)
 - [EngineGroupTopologyStatus](#enginegrouptopologystatus)
 - [EngineGroupTrafficDrainTargetStatus](#enginegrouptrafficdraintargetstatus)
 - [EngineGroupTrafficObservationStatus](#enginegrouptrafficobservationstatus)
@@ -2655,6 +2641,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `unavailableMembers` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | unavailableMembers is engine-authoritative non-serving evidence, independent of Pod readiness. |  | Optional: \{\} <br /> |
 | `committedTopology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | committedTopology is the engine's current authoritative complete topology. |  |  |
 | `requestedTransitionID` _string_ | requestedTransitionID records the exact identity requested from the adapter observer. |  | Optional: \{\} <br /> |
 | `transition` _[EngineGroupMembershipTransitionObservationStatus](#enginegroupmembershiptransitionobservationstatus)_ | transition is the adapter's durable state for the requested transition; absence is authoritative. |  | Optional: \{\} <br /> |
@@ -2749,6 +2736,7 @@ EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent p
 
 
 _Appears in:_
+- [EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus)
 - [EngineGroupMemberStatus](#enginegroupmemberstatus)
 
 | Field | Description | Default | Validation |
@@ -2785,6 +2773,7 @@ EngineGroupNativeMembershipStatus is one stable logical-to-native membership map
 
 
 _Appears in:_
+- [EngineGroupReduceToSurvivorsChangeStatus](#enginegroupreducetosurvivorschangestatus)
 - [EngineGroupRemapChangeStatus](#enginegroupremapchangestatus)
 
 | Field | Description | Default | Validation |
@@ -2912,7 +2901,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `survivors` _string array_ | survivors is the exact authoritative survivor set. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
+| `survivors` _[EngineGroupNativeMembershipStatus](#enginegroupnativemembershipstatus) array_ | survivors is the exact authoritative survivor set. |  | MinItems: 1 <br /> |
 
 
 #### EngineGroupReleaseAuthorization
@@ -3042,6 +3031,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `desiredNativeMembers` _string array_ | desiredNativeMembers is the stable assignment restored after member failure or allocation replacement. |  | items:MinLength: 1 <br /> |
 | `replicaID` _string_ | replicaID is stable across physical and runtime replacement. |  | MinLength: 1 <br /> |
 | `slotID` _string_ | slotID identifies the stable workload-manager position backing this replica. |  | MinLength: 1 <br /> |
 | `current` _[EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus)_ | current is the concrete physical and runtime incarnation currently assigned to the slot. |  | Optional: \{\} <br /> |

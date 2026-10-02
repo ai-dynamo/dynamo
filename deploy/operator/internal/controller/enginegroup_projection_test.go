@@ -6,6 +6,7 @@
 package controller
 
 import (
+	"fmt"
 	"testing"
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -20,8 +21,12 @@ func TestEngineGroupPackedMemberProjectionPreservesDesiredEP8ThroughEP7Recovery(
 	t.Log("Form an EP8 world from two physically disjoint four-member allocations")
 	status := healthyEngineGroupProjectionStatus(2)
 	base := status.Membership.Observed.CommittedTopology
-	base.Replicas[0].NativeMembers = []enginegroup.NativeMemberID{"dp-0", "dp-1", "dp-2", "dp-3"}
-	base.Replicas[1].NativeMembers = []enginegroup.NativeMemberID{"dp-4", "dp-5", "dp-6", "dp-7"}
+	base.Replicas[0].Members = packedProjectionMembers(0)
+	base.Replicas[1].Members = packedProjectionMembers(4)
+	for i := range status.Registry.Replicas {
+		status.Registry.Replicas[i].Current.Members = append([]enginegroup.NativeMemberIncarnation(nil), base.Replicas[i].Members...)
+		status.Capacity.Observed.Allocations[i].Incarnation.Members = append([]enginegroup.NativeMemberIncarnation(nil), base.Replicas[i].Members...)
+	}
 	status.Membership.Observed.CommittedTopology = base
 	status.Topologies.Snapshots = []enginegroup.MembershipTopology{base}
 	status.Traffic.Observed.Admitted = base.Replicas
@@ -51,8 +56,7 @@ func TestEngineGroupPackedMemberProjectionPreservesDesiredEP8ThroughEP7Recovery(
 		Generation: 2,
 		Replicas: []enginegroup.ReplicaMembership{
 			base.Replicas[0],
-			{ReplicaID: base.Replicas[1].ReplicaID, RuntimeIncarnation: base.Replicas[1].RuntimeIncarnation,
-				NativeMembers: []enginegroup.NativeMemberID{"dp-4", "dp-6", "dp-7"}},
+			{ReplicaID: base.Replicas[1].ReplicaID, Members: []enginegroup.NativeMemberIncarnation{base.Replicas[1].Members[0], base.Replicas[1].Members[2], base.Replicas[1].Members[3]}},
 		},
 	}
 	status.Membership.Observed.CommittedTopology = survivors
@@ -60,8 +64,7 @@ func TestEngineGroupPackedMemberProjectionPreservesDesiredEP8ThroughEP7Recovery(
 	status.Topologies.Snapshots = append(status.Topologies.Snapshots, survivors)
 	status.Traffic.Observed.Admitted = survivors.Replicas
 	status.Traffic.Observed.Drained = []enginegroup.ReplicaMembership{{
-		ReplicaID: base.Replicas[1].ReplicaID, RuntimeIncarnation: base.Replicas[1].RuntimeIncarnation,
-		NativeMembers: []enginegroup.NativeMemberID{"dp-5"},
+		ReplicaID: base.Replicas[1].ReplicaID, Members: base.Replicas[1].Members[1:2],
 	}}
 	status.Capacity.Observed.Allocations[1].Health = enginegroup.AllocationHealthDegraded
 	reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
@@ -81,8 +84,8 @@ func TestEngineGroupPackedMemberProjectionPreservesDesiredEP8ThroughEP7Recovery(
 	require.NotNil(t, partial.CurrentAllocation)
 	assert.Equal(t, api.EngineGroupReplicaAvailabilityAvailable, partial.CurrentAllocation.Availability)
 	assert.Equal(t, api.EngineGroupAllocationHealthDegraded, partial.CurrentAllocation.Health)
-	assert.Contains(t, partial.NativeMembers, api.EngineGroupNativeMemberStatus{ID: "dp-5", Membership: api.EngineGroupReplicaMembershipMasked, Traffic: api.EngineGroupMemberTrafficDrained})
-	assert.Contains(t, partial.NativeMembers, api.EngineGroupNativeMemberStatus{ID: "dp-6", Membership: api.EngineGroupReplicaMembershipActive, Traffic: api.EngineGroupMemberTrafficAdmitted})
+	assert.Contains(t, partial.NativeMembers, api.EngineGroupNativeMemberStatus{ID: "dp-5", RuntimeIncarnation: "process-5", Membership: api.EngineGroupReplicaMembershipMasked, Traffic: api.EngineGroupMemberTrafficDrained})
+	assert.Contains(t, partial.NativeMembers, api.EngineGroupNativeMemberStatus{ID: "dp-6", RuntimeIncarnation: "process-6", Membership: api.EngineGroupReplicaMembershipActive, Traffic: api.EngineGroupMemberTrafficAdmitted})
 
 	t.Log("Round-trip the degraded resource before restoring the same desired membership")
 	group = group.DeepCopy()
@@ -99,6 +102,63 @@ func TestEngineGroupPackedMemberProjectionPreservesDesiredEP8ThroughEP7Recovery(
 	assert.Equal(t, int32(2), group.Status.AvailableReplicas)
 	assert.Equal(t, metav1.ConditionTrue, meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionTargetReached).Status)
 	assert.Equal(t, metav1.ConditionFalse, meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionDegraded).Status)
+}
+
+func packedProjectionMembers(first int) []enginegroup.NativeMemberIncarnation {
+	members := make([]enginegroup.NativeMemberIncarnation, 0, 4)
+	for rank := first; rank < first+4; rank++ {
+		members = append(members, enginegroup.NativeMemberIncarnation{ID: enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", rank)), RuntimeIncarnation: enginegroup.RuntimeIncarnationID(fmt.Sprintf("process-%d", rank))})
+	}
+	return members
+}
+
+func TestEngineGroupPackedRetirementPreservesRepairAssignment(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		target   int32
+		expected []string
+	}{
+		{name: "temporary repair", target: 2, expected: []string{"dp-0", "dp-1", "dp-2", "dp-3", "dp-4", "dp-5", "dp-6", "dp-7"}},
+		{name: "desired scale down", target: 1, expected: []string{"dp-0", "dp-1", "dp-2", "dp-3"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Persist the full desired slot assignment before dp-5 is masked")
+			status := healthyEngineGroupProjectionStatus(2)
+			base := status.Membership.Observed.CommittedTopology
+			for i := range base.Replicas {
+				base.Replicas[i].Members = packedProjectionMembers(i * 4)
+				status.Registry.Replicas[i].DesiredNativeMembers = nil
+				for _, member := range base.Replicas[i].Members {
+					status.Registry.Replicas[i].DesiredNativeMembers = append(status.Registry.Replicas[i].DesiredNativeMembers, member.ID)
+				}
+			}
+			group := &api.DynamoGraphDeploymentEngineGroup{
+				ObjectMeta: metav1.ObjectMeta{Generation: 1},
+				Spec:       api.DynamoGraphDeploymentEngineGroupSpec{Replicas: 2},
+			}
+			profile := api.EngineGroupProfileStatus{NativeMembersPerReplica: 4}
+			status.Topologies.Snapshots = []enginegroup.MembershipTopology{base}
+			reconcileEngineGroupDesiredAssignment(group, profile, status, nil)
+
+			t.Log("Retire the damaged allocation from EP7 without losing the masked rank's desired identity")
+			base.Generation = 2
+			base.Replicas[1].Members = append(base.Replicas[1].Members[:1:1], base.Replicas[1].Members[2:]...)
+			status.Topologies.CurrentGeneration = 2
+			status.Topologies.Snapshots = append(status.Topologies.Snapshots, base)
+			status.Transition = &enginegroup.TransitionStatus{
+				Spec: enginegroup.TransitionSpec{ID: "retire", BaseTopologyGeneration: 2,
+					Plan: enginegroup.ResolvedPlan{ID: "retire-plan", Change: enginegroup.ResolvedChange{
+						Kind: enginegroup.PlanKindRetire, Retire: &enginegroup.RetireChange{Replicas: []enginegroup.ReplicaID{"replica-1"}},
+					}},
+				},
+				Outcome: enginegroup.TransitionOutcomeProgressing,
+			}
+			group = group.DeepCopy()
+			group.Spec.Replicas = test.target
+			reconcileEngineGroupDesiredAssignment(group, profile, status, &status.Transition.Spec.Plan)
+			assert.Equal(t, test.expected, group.Status.DesiredNativeMembers)
+		})
+	}
 }
 
 func TestEngineGroupCancelsRolledBackDesiredAssignment(t *testing.T) {
@@ -168,7 +228,7 @@ func TestEngineGroupCancelsRolledBackDesiredAssignment(t *testing.T) {
 func TestEngineGroupPackedTargetRequiresExactMemberIdentities(t *testing.T) {
 	t.Log("Create authoritative serving membership with the correct count but the wrong rank identity")
 	status := healthyEngineGroupProjectionStatus(1)
-	status.Membership.Observed.CommittedTopology.Replicas[0].NativeMembers = []enginegroup.NativeMemberID{"dp-9"}
+	status.Membership.Observed.CommittedTopology.Replicas[0].Members[0].ID = "dp-9"
 	status.Topologies.Snapshots = []enginegroup.MembershipTopology{status.Membership.Observed.CommittedTopology}
 	status.Traffic.Observed.Admitted = status.Membership.Observed.CommittedTopology.Replicas
 	group := &api.DynamoGraphDeploymentEngineGroup{

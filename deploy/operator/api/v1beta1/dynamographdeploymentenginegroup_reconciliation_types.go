@@ -50,6 +50,10 @@ type EngineGroupReconciliationStatus struct {
 
 // EngineGroupReplicaRecordStatus is the canonical durable record for one logical replica and stable slot.
 type EngineGroupReplicaRecordStatus struct {
+	// desiredNativeMembers is the stable assignment restored after member failure or allocation replacement.
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	DesiredNativeMembers []string `json:"desiredNativeMembers,omitempty"`
 	// replicaID is stable across physical and runtime replacement.
 	// +kubebuilder:validation:MinLength=1
 	ReplicaID string `json:"replicaID"`
@@ -84,6 +88,11 @@ type EngineGroupReplicaHistoryStatus struct {
 
 // EngineGroupControlIncarnationStatus binds stable logical and slot identities to concrete capacity.
 type EngineGroupControlIncarnationStatus struct {
+	// nativeMembers binds the hosted members to their independent process lifetimes.
+	// +kubebuilder:validation:MinItems=1
+	// +listType=map
+	// +listMapKey=id
+	NativeMembers []EngineGroupNativeMemberIncarnationStatus `json:"nativeMembers"`
 	// replicaID is the stable logical identity.
 	// +kubebuilder:validation:MinLength=1
 	ReplicaID string `json:"replicaID"`
@@ -91,10 +100,6 @@ type EngineGroupControlIncarnationStatus struct {
 	// slotID is the stable workload-manager position.
 	// +kubebuilder:validation:MinLength=1
 	SlotID string `json:"slotID"`
-
-	// runtimeIncarnation identifies the concrete engine process incarnation.
-	// +kubebuilder:validation:MinLength=1
-	RuntimeIncarnation string `json:"runtimeIncarnation"`
 
 	// capacityRefs contains every concrete Pod in this replica allocation.
 	// +kubebuilder:validation:MinItems=1
@@ -329,19 +334,16 @@ type EngineGroupMembershipTargetStatus struct {
 	Joining []EngineGroupJoiningReplicaStatus `json:"joining,omitempty"`
 }
 
-// EngineGroupJoiningReplicaStatus identifies one concrete process joining engine membership.
-type EngineGroupJoiningReplicaStatus struct {
-	// replicaID is the stable logical identity.
-	// +kubebuilder:validation:MinLength=1
-	ReplicaID string `json:"replicaID"`
-
-	// runtimeIncarnation identifies the concrete engine process.
-	// +kubebuilder:validation:MinLength=1
-	RuntimeIncarnation string `json:"runtimeIncarnation"`
-}
+// EngineGroupJoiningReplicaStatus identifies the exact native processes joining one allocation.
+type EngineGroupJoiningReplicaStatus = EngineGroupMemberStatus
 
 // EngineGroupMembershipObservationStatus separates current topology from one correlated transaction result.
 type EngineGroupMembershipObservationStatus struct {
+	// unavailableMembers is engine-authoritative non-serving evidence, independent of Pod readiness.
+	// +optional
+	// +listType=map
+	// +listMapKey=replicaID
+	UnavailableMembers []EngineGroupMemberStatus `json:"unavailableMembers,omitempty"`
 	// committedTopology is the engine's current authoritative complete topology.
 	CommittedTopology EngineGroupTopologyStatus `json:"committedTopology"`
 
@@ -497,9 +499,9 @@ type EngineGroupRetireChangeStatus struct {
 type EngineGroupReduceToSurvivorsChangeStatus struct {
 	// survivors is the exact authoritative survivor set.
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:items:MinLength=1
-	// +listType=set
-	Survivors []string `json:"survivors"`
+	// +listType=map
+	// +listMapKey=replicaID
+	Survivors []EngineGroupNativeMembershipStatus `json:"survivors"`
 }
 
 // EngineGroupRestoreChangeStatus restores stable logical and native-member identities.

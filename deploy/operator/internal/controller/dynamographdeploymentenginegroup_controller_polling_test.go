@@ -144,7 +144,7 @@ func TestEngineGroupControllerPollsSettledWorldsWithoutPodUpdates(t *testing.T) 
 
 			t.Log("observe a new process in the same slot without adopting its incarnation or admitting it")
 			backend.mu.Lock()
-			backend.capacity.Allocations[0].Incarnation.RuntimeIncarnation = "runtime-restarted"
+			backend.capacity.Allocations[0].Incarnation.Members[0].RuntimeIncarnation = "runtime-restarted"
 			backend.mu.Unlock()
 			result, err = reconciler.Reconcile(ctx, req)
 			if test.outcome != "" {

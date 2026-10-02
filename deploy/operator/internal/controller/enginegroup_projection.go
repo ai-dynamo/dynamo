@@ -27,7 +27,7 @@ func reconcileEngineGroupDesiredAssignment(group *api.DynamoGraphDeploymentEngin
 	// A superseded or rejected plan cannot rewrite the new target's assignment.
 	transition := status.Transition
 	if desiredPlan != nil && transition != nil && desiredPlan.ID == transition.Spec.Plan.ID {
-		desired = engineGroupPlanNativeMembers(desired, status)
+		desired = engineGroupPlanNativeMembers(desired, status, group.Spec.Replicas)
 	} else if desiredPlan == nil && (transition == nil ||
 		transition.Outcome == enginegroup.TransitionOutcomeRolledBack ||
 		transition.Outcome == enginegroup.TransitionOutcomeCompleted) {
@@ -47,7 +47,7 @@ func reconcileEngineGroupDesiredAssignment(group *api.DynamoGraphDeploymentEngin
 	}
 }
 
-func engineGroupPlanNativeMembers(desired []string, status enginegroup.GroupStatus) []string {
+func engineGroupPlanNativeMembers(desired []string, status enginegroup.GroupStatus, desiredReplicas int32) []string {
 	// Derive the exact assignment from the immutable plan, never from an uncorrelated observation.
 	desired = slices.Clone(desired)
 	change := status.Transition.Spec.Plan.Change
@@ -58,13 +58,16 @@ func engineGroupPlanNativeMembers(desired []string, status enginegroup.GroupStat
 		}
 	case enginegroup.PlanKindRetire:
 		base, found := status.Topologies.Snapshot(status.Transition.Spec.BaseTopologyGeneration)
-		if found {
-			for _, replica := range base.Replicas {
-				if slices.Contains(change.Retire.Replicas, replica.ReplicaID) {
-					for _, member := range replica.NativeMembers {
-						desired = slices.DeleteFunc(desired, func(id string) bool { return id == string(member) })
-					}
-				}
+		// Temporary retirement during repair preserves the slot's full desired assignment. A scale-down to the spec
+		// target removes that assignment, including members already masked out of the base topology.
+		if !found || base.ReplicaCount()-int32(len(change.Retire.Replicas)) != desiredReplicas {
+			return desired
+		}
+		for _, record := range status.Registry.Replicas {
+			if slices.Contains(change.Retire.Replicas, record.ReplicaID) {
+				desired = slices.DeleteFunc(desired, func(id string) bool {
+					return slices.Contains(record.DesiredNativeMembers, enginegroup.NativeMemberID(id))
+				})
 			}
 		}
 	case enginegroup.PlanKindRemap:
@@ -80,7 +83,9 @@ func engineGroupPlanNativeMembers(desired []string, status enginegroup.GroupStat
 func engineGroupTopologyNativeMembers(topology enginegroup.MembershipTopology) []string {
 	var members []string
 	for _, replica := range topology.Replicas {
-		members = append(members, engineGroupNativeMembersToAPI(replica.NativeMembers)...)
+		for _, member := range replica.Members {
+			members = append(members, string(member.ID))
+		}
 	}
 	sort.Strings(members)
 	return slices.Compact(members)
@@ -102,8 +107,8 @@ func projectEngineGroupReplicaStates(status enginegroup.GroupStatus, previous []
 		// Keep excluded identities visible so a partial allocation cannot become a smaller healthy replica.
 		for _, snapshot := range status.Topologies.Snapshots {
 			if membership, found := engineGroupTopologyMembership(snapshot, record.ReplicaID); found {
-				for _, member := range membership.NativeMembers {
-					members[string(member)] = struct{}{}
+				for _, member := range membership.Members {
+					members[string(member.ID)] = struct{}{}
 				}
 			}
 		}
@@ -114,8 +119,8 @@ func projectEngineGroupReplicaStates(status enginegroup.GroupStatus, previous []
 		}
 		active, found := engineGroupTopologyMembership(status.Membership.Observed.CommittedTopology, record.ReplicaID)
 		if found {
-			for _, member := range active.NativeMembers {
-				members[string(member)] = struct{}{}
+			for _, member := range active.Members {
+				members[string(member.ID)] = struct{}{}
 			}
 		}
 		if record.Current != nil {
@@ -125,10 +130,21 @@ func projectEngineGroupReplicaStates(status enginegroup.GroupStatus, previous []
 		// Correlate each traffic record with the committed runtime incarnation, not merely its rank ID.
 		for id := range members {
 			member := api.EngineGroupNativeMemberStatus{ID: id, Membership: api.EngineGroupReplicaMembershipUnknown, Traffic: api.EngineGroupMemberTrafficUnknown}
+			if record.Current != nil {
+				for _, process := range record.Current.Members {
+					if string(process.ID) == id {
+						member.RuntimeIncarnation = string(process.RuntimeIncarnation)
+					}
+				}
+			}
 			if status.Membership.Observed.CommittedTopology.Generation > 0 {
 				member.Membership = api.EngineGroupReplicaMembershipMasked
-				if found && slices.Contains(active.NativeMembers, enginegroup.NativeMemberID(id)) {
+				index := slices.IndexFunc(active.Members, func(member enginegroup.NativeMemberIncarnation) bool {
+					return member.ID == enginegroup.NativeMemberID(id)
+				})
+				if found && index >= 0 {
 					member.Membership = api.EngineGroupReplicaMembershipActive
+					member.RuntimeIncarnation = string(active.Members[index].RuntimeIncarnation)
 				}
 			}
 			if record.Current != nil {
@@ -145,10 +161,9 @@ func projectEngineGroupReplicaStates(status enginegroup.GroupStatus, previous []
 
 func projectEngineGroupAllocation(incarnation enginegroup.ReplicaIncarnation, capacity enginegroup.CapacityObservation) *api.EngineGroupReplicaAllocationStatus {
 	allocation := &api.EngineGroupReplicaAllocationStatus{
-		RuntimeIncarnation: string(incarnation.RuntimeIncarnation),
-		CapacityRefs:       engineGroupIncarnationToAPI(incarnation).CapacityRefs,
-		Availability:       api.EngineGroupReplicaAvailabilityUnknown,
-		Health:             api.EngineGroupAllocationHealthUnknown,
+		CapacityRefs: engineGroupIncarnationToAPI(incarnation).CapacityRefs,
+		Availability: api.EngineGroupReplicaAvailabilityUnknown,
+		Health:       api.EngineGroupAllocationHealthUnknown,
 	}
 	observed, found := engineGroupAllocationByReplica(capacity, incarnation.ReplicaID)
 	if !found || !enginegroup.SameIncarnation(observed.Incarnation, incarnation) {
@@ -175,8 +190,13 @@ func projectEngineGroupMemberTraffic(record enginegroup.ReplicaRecord, id engine
 	}
 	for _, state := range states {
 		for _, member := range state.members {
-			if member.ReplicaID == record.ReplicaID && member.RuntimeIncarnation == record.Current.RuntimeIncarnation && slices.Contains(member.NativeMembers, id) {
-				return state.state
+			if member.ReplicaID != record.ReplicaID {
+				continue
+			}
+			for _, process := range member.Members {
+				if process.ID == id && slices.Contains(record.Current.Members, process) {
+					return state.state
+				}
 			}
 		}
 	}

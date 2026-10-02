@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 234 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 233 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">137 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">136 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">28 types</Card>
 </CardGroup>
 
@@ -3733,6 +3733,12 @@ EngineGroupControlIncarnationStatus binds stable logical and slot identities to 
 **Kind:** `type`
 **Appears in:** [EngineGroupCapacityAllocationStatus](#enginegroupcapacityallocationstatus), [EngineGroupCapacityReplicaTargetStatus](#enginegroupcapacityreplicatargetstatus), [EngineGroupReplicaHistoryStatus](#enginegroupreplicahistorystatus), [EngineGroupReplicaRecordStatus](#enginegroupreplicarecordstatus)
 
+<ParamField path="nativeMembers" type="EngineGroupNativeMemberIncarnationStatus array">
+nativeMembers binds the hosted members to their independent process lifetimes.
+See [EngineGroupNativeMemberIncarnationStatus](#enginegroupnativememberincarnationstatus).
+**Validation:** MinItems: 1
+</ParamField>
+
 <ParamField path="replicaID" type="string">
 replicaID is the stable logical identity.
 **Validation:** MinLength: 1
@@ -3740,11 +3746,6 @@ replicaID is the stable logical identity.
 
 <ParamField path="slotID" type="string">
 slotID is the stable workload-manager position.
-**Validation:** MinLength: 1
-</ParamField>
-
-<ParamField path="runtimeIncarnation" type="string">
-runtimeIncarnation identifies the concrete engine process incarnation.
 **Validation:** MinLength: 1
 </ParamField>
 
@@ -3808,30 +3809,12 @@ See [EngineGroupReplicaTargetStatus](#enginegroupreplicatargetstatus).
 </ParamField>
 </Accordion>
 
-<Accordion id="enginegroupjoiningreplicastatus" title="EngineGroupJoiningReplicaStatus">
-EngineGroupJoiningReplicaStatus identifies one concrete process joining engine membership.
-
-
-**Kind:** `type`
-**Appears in:** [EngineGroupMembershipTargetStatus](#enginegroupmembershiptargetstatus)
-
-<ParamField path="replicaID" type="string">
-replicaID is the stable logical identity.
-**Validation:** MinLength: 1
-</ParamField>
-
-<ParamField path="runtimeIncarnation" type="string">
-runtimeIncarnation identifies the concrete engine process.
-**Validation:** MinLength: 1
-</ParamField>
-</Accordion>
-
 <Accordion id="enginegroupmemberstatus" title="EngineGroupMemberStatus">
 EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
 
 
 **Kind:** `type`
-**Appears in:** [EngineGroupTopologyStatus](#enginegrouptopologystatus), [EngineGroupTrafficDrainTargetStatus](#enginegrouptrafficdraintargetstatus), [EngineGroupTrafficObservationStatus](#enginegrouptrafficobservationstatus), [EngineGroupTrafficStatus](#enginegrouptrafficstatus), [EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus)
+**Appears in:** [EngineGroupMembershipObservationStatus](#enginegroupmembershipobservationstatus), [EngineGroupTopologyStatus](#enginegrouptopologystatus), [EngineGroupTrafficDrainTargetStatus](#enginegrouptrafficdraintargetstatus), [EngineGroupTrafficObservationStatus](#enginegrouptrafficobservationstatus), [EngineGroupTrafficStatus](#enginegrouptrafficstatus), [EngineGroupTrafficTargetStatus](#enginegrouptraffictargetstatus)
 
 <ParamField path="replicaID" type="string">
 replicaID is the stable logical identity.
@@ -3869,6 +3852,12 @@ EngineGroupMembershipObservationStatus separates current topology from one corre
 
 **Kind:** `type`
 **Appears in:** [EngineGroupMembershipReconciliationStatus](#enginegroupmembershipreconciliationstatus)
+
+<ParamField path="unavailableMembers" type="EngineGroupMemberStatus array">
+unavailableMembers is engine-authoritative non-serving evidence, independent of Pod readiness.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 
 <ParamField path="committedTopology" type="EngineGroupTopologyStatus">
 committedTopology is the engine's current authoritative complete topology.
@@ -3945,7 +3934,6 @@ See [EngineGroupResolvedPlanStatus](#enginegroupresolvedplanstatus).
 
 <ParamField path="joining" type="EngineGroupJoiningReplicaStatus array">
 joining freezes exact runtime identities supplied to the membership transaction.
-See [EngineGroupJoiningReplicaStatus](#enginegroupjoiningreplicastatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -4013,7 +4001,7 @@ EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent p
 
 
 **Kind:** `type`
-**Appears in:** [EngineGroupMemberStatus](#enginegroupmemberstatus)
+**Appears in:** [EngineGroupControlIncarnationStatus](#enginegroupcontrolincarnationstatus), [EngineGroupMemberStatus](#enginegroupmemberstatus)
 
 <ParamField path="id" type="string">
 id is the engine-native member identity.
@@ -4061,7 +4049,7 @@ EngineGroupNativeMembershipStatus is one stable logical-to-native membership map
 
 
 **Kind:** `type`
-**Appears in:** [EngineGroupRemapChangeStatus](#enginegroupremapchangestatus)
+**Appears in:** [EngineGroupReduceToSurvivorsChangeStatus](#enginegroupreducetosurvivorschangestatus), [EngineGroupRemapChangeStatus](#enginegroupremapchangestatus)
 
 <ParamField path="replicaID" type="string">
 replicaID is the stable logical identity.
@@ -4247,9 +4235,10 @@ EngineGroupReduceToSurvivorsChangeStatus removes every base member absent from s
 **Kind:** `type`
 **Appears in:** [EngineGroupResolvedChangeStatus](#enginegroupresolvedchangestatus)
 
-<ParamField path="survivors" type="string array">
+<ParamField path="survivors" type="EngineGroupNativeMembershipStatus array">
 survivors is the exact authoritative survivor set.
-**Validation:** MinItems: 1  items:MinLength: 1
+See [EngineGroupNativeMembershipStatus](#enginegroupnativemembershipstatus).
+**Validation:** MinItems: 1
 </ParamField>
 </Accordion>
 
@@ -4390,6 +4379,11 @@ EngineGroupReplicaRecordStatus is the canonical durable record for one logical r
 
 **Kind:** `type`
 **Appears in:** [EngineGroupReconciliationStatus](#enginegroupreconciliationstatus)
+
+<ParamField path="desiredNativeMembers" type="string array">
+desiredNativeMembers is the stable assignment restored after member failure or allocation replacement.
+**Validation:** items:MinLength: 1
+</ParamField>
 
 <ParamField path="replicaID" type="string">
 replicaID is stable across physical and runtime replacement.

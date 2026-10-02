@@ -280,17 +280,16 @@ func newEngineGroupControllerTestBackend(replicas int) *engineGroupControllerTes
 		slotID := enginegroup.CapacitySlotID(fmt.Sprintf("slot-%d", index))
 		runtimeID := enginegroup.RuntimeIncarnationID(fmt.Sprintf("runtime-%d", index))
 		membership := enginegroup.ReplicaMembership{
-			ReplicaID:          replicaID,
-			RuntimeIncarnation: runtimeID,
-			NativeMembers:      []enginegroup.NativeMemberID{enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", index))},
+			ReplicaID: replicaID,
+			Members:   []enginegroup.NativeMemberIncarnation{{ID: enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", index)), RuntimeIncarnation: runtimeID}},
 		}
 		backend.topology.Replicas = append(backend.topology.Replicas, membership)
 		backend.traffic.Admitted = append(backend.traffic.Admitted, membership)
 		backend.capacity.Allocations = append(backend.capacity.Allocations, enginegroup.CapacityAllocation{
 			Incarnation: enginegroup.ReplicaIncarnation{
-				ReplicaID:          replicaID,
-				SlotID:             slotID,
-				RuntimeIncarnation: runtimeID,
+				ReplicaID: replicaID,
+				SlotID:    slotID,
+				Members:   append([]enginegroup.NativeMemberIncarnation(nil), membership.Members...),
 				CapacityRefs: []enginegroup.CapacityRef{{
 					Name: fmt.Sprintf("worker-%d", index),
 					UID:  enginegroup.PodUID(fmt.Sprintf("uid-%d", index)),
@@ -388,9 +387,9 @@ func (a engineGroupControllerTestCapacityAdapter) Apply(
 		index := len(existing)
 		allocations = append(allocations, enginegroup.CapacityAllocation{
 			Incarnation: enginegroup.ReplicaIncarnation{
-				ReplicaID:          replica.ReplicaID,
-				SlotID:             replica.SlotID,
-				RuntimeIncarnation: enginegroup.RuntimeIncarnationID(fmt.Sprintf("runtime-%d", index)),
+				ReplicaID: replica.ReplicaID,
+				SlotID:    replica.SlotID,
+				Members:   []enginegroup.NativeMemberIncarnation{{ID: enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", index)), RuntimeIncarnation: enginegroup.RuntimeIncarnationID(fmt.Sprintf("runtime-%d", index))}},
 				CapacityRefs: []enginegroup.CapacityRef{{
 					Name: fmt.Sprintf("worker-%d", index),
 					UID:  enginegroup.PodUID(fmt.Sprintf("uid-%d", index)),
@@ -675,9 +674,8 @@ func (b *engineGroupControllerTestBackend) commitMembershipLocked(target engineg
 			for _, planned := range target.Plan.Change.Grow.Replicas {
 				if joining.ReplicaID == planned.ReplicaID {
 					result.Replicas = append(result.Replicas, enginegroup.ReplicaMembership{
-						ReplicaID:          joining.ReplicaID,
-						RuntimeIncarnation: joining.RuntimeIncarnation,
-						NativeMembers:      append([]enginegroup.NativeMemberID(nil), planned.NativeMembers...),
+						ReplicaID: joining.ReplicaID,
+						Members:   append([]enginegroup.NativeMemberIncarnation(nil), joining.Members...),
 					})
 				}
 			}
@@ -744,7 +742,7 @@ func cloneEngineGroupControllerTestMemberships(
 func cloneEngineGroupControllerTestMembership(
 	value enginegroup.ReplicaMembership,
 ) enginegroup.ReplicaMembership {
-	value.NativeMembers = append([]enginegroup.NativeMemberID(nil), value.NativeMembers...)
+	value.Members = append([]enginegroup.NativeMemberIncarnation(nil), value.Members...)
 	return value
 }
 

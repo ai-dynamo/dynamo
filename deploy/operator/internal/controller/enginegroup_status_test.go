@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,7 +58,7 @@ func TestEngineGroupPlanAPIRoundTrip(t *testing.T) {
 			change: enginegroup.ResolvedChange{
 				Kind: enginegroup.PlanKindReduceToSurvivors,
 				ReduceToSurvivors: &enginegroup.ReduceToSurvivorsChange{
-					Survivors: []enginegroup.ReplicaID{"replica-0"},
+					Survivors: []enginegroup.ReplicaNativeMembership{{ReplicaID: "replica-0", SlotID: "slot-0", NativeMembers: []enginegroup.NativeMemberID{"dp-0"}}},
 				},
 			},
 		},
@@ -273,7 +274,7 @@ func TestProjectEngineGroupReplicaStatesKeepsHistoryInTheDurableJournal(t *testi
 	t.Log("verify recovery history retains the exact previous runtime and Pod incarnation")
 	require.Len(t, replicas, 2)
 	require.Len(t, status.Registry.Replicas[1].History, 1)
-	assert.Equal(t, enginegroup.RuntimeIncarnationID("runtime-old"), status.Registry.Replicas[1].History[0].Incarnation.RuntimeIncarnation)
+	assert.Equal(t, enginegroup.RuntimeIncarnationID("runtime-old"), status.Registry.Replicas[1].History[0].Incarnation.Members[0].RuntimeIncarnation)
 	assert.Equal(t, enginegroup.PodUID("uid-old"), status.Registry.Replicas[1].History[0].Incarnation.CapacityRefs[0].UID)
 }
 
@@ -466,9 +467,8 @@ func TestProjectEngineGroupStatusUsesObservedTopologyWithoutAcceptingItAsStable(
 func TestProjectEngineGroupStatusRequiresExactAdmittedMembership(t *testing.T) {
 	status := healthyEngineGroupProjectionStatus(1)
 	status.Traffic.Observed.Admitted = append(status.Traffic.Observed.Admitted, enginegroup.ReplicaMembership{
-		ReplicaID:          "replica-joining",
-		RuntimeIncarnation: "runtime-joining",
-		NativeMembers:      []enginegroup.NativeMemberID{"dp-joining"},
+		ReplicaID: "replica-joining",
+		Members:   []enginegroup.NativeMemberIncarnation{{ID: "dp-joining", RuntimeIncarnation: "runtime-joining"}},
 	})
 	group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{
 		ObjectMeta: metav1.ObjectMeta{Generation: 1},
@@ -587,8 +587,8 @@ func engineGroupTestStatus() enginegroup.GroupStatus {
 		BaseTopology:    baseTopology,
 		Plan:            plan,
 		Joining: []enginegroup.JoiningReplica{{
-			ReplicaID:          "replica-1",
-			RuntimeIncarnation: "runtime-1",
+			ReplicaID: "replica-1",
+			Members:   []enginegroup.NativeMemberIncarnation{{ID: "dp-1", RuntimeIncarnation: "runtime-1"}},
 		}},
 	}
 	capacityTarget := &enginegroup.CapacityTarget{
@@ -703,14 +703,13 @@ func healthyEngineGroupProjectionStatus(replicas int) enginegroup.GroupStatus {
 		slotID := enginegroup.CapacitySlotID(fmt.Sprintf("slot-%d", index))
 		runtimeID := enginegroup.RuntimeIncarnationID(fmt.Sprintf("runtime-%d", index))
 		member := enginegroup.ReplicaMembership{
-			ReplicaID:          replicaID,
-			RuntimeIncarnation: runtimeID,
-			NativeMembers:      []enginegroup.NativeMemberID{enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", index))},
+			ReplicaID: replicaID,
+			Members:   []enginegroup.NativeMemberIncarnation{{ID: enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", index)), RuntimeIncarnation: runtimeID}},
 		}
 		incarnation := enginegroup.ReplicaIncarnation{
-			ReplicaID:          replicaID,
-			SlotID:             slotID,
-			RuntimeIncarnation: runtimeID,
+			ReplicaID: replicaID,
+			SlotID:    slotID,
+			Members:   append([]enginegroup.NativeMemberIncarnation(nil), member.Members...),
 			CapacityRefs: []enginegroup.CapacityRef{{
 				Name: fmt.Sprintf("worker-%d", index),
 				UID:  enginegroup.PodUID(fmt.Sprintf("uid-%d", index)),
@@ -718,9 +717,10 @@ func healthyEngineGroupProjectionStatus(replicas int) enginegroup.GroupStatus {
 		}
 		topology.Replicas = append(topology.Replicas, member)
 		status.Registry.Replicas = append(status.Registry.Replicas, enginegroup.ReplicaRecord{
-			ReplicaID: replicaID,
-			SlotID:    slotID,
-			Current:   &incarnation,
+			ReplicaID:            replicaID,
+			SlotID:               slotID,
+			DesiredNativeMembers: []enginegroup.NativeMemberID{member.Members[0].ID},
+			Current:              &incarnation,
 		})
 		status.Capacity.Observed.Allocations = append(status.Capacity.Observed.Allocations,
 			enginegroup.CapacityAllocation{Incarnation: incarnation, Available: true})
@@ -767,7 +767,7 @@ func survivorReductionProjectionStatus(t *testing.T) enginegroup.GroupStatus {
 	status.Transition.Spec.Plan.Change = enginegroup.ResolvedChange{
 		Kind: enginegroup.PlanKindReduceToSurvivors,
 		ReduceToSurvivors: &enginegroup.ReduceToSurvivorsChange{
-			Survivors: []enginegroup.ReplicaID{status.Membership.Observed.CommittedTopology.Replicas[0].ReplicaID},
+			Survivors: []enginegroup.ReplicaNativeMembership{{ReplicaID: status.Membership.Observed.CommittedTopology.Replicas[0].ReplicaID, SlotID: "slot-0", NativeMembers: []enginegroup.NativeMemberID{"dp-0"}}},
 		},
 	}
 	return status
@@ -868,9 +868,8 @@ func engineGroupTestReplicaTarget(replicaID, slotID, nativeMember string) engine
 
 func engineGroupTestMembership(replicaID, runtimeID, nativeMember string) enginegroup.ReplicaMembership {
 	return enginegroup.ReplicaMembership{
-		ReplicaID:          enginegroup.ReplicaID(replicaID),
-		RuntimeIncarnation: enginegroup.RuntimeIncarnationID(runtimeID),
-		NativeMembers:      []enginegroup.NativeMemberID{enginegroup.NativeMemberID(nativeMember)},
+		ReplicaID: enginegroup.ReplicaID(replicaID),
+		Members:   []enginegroup.NativeMemberIncarnation{{ID: enginegroup.NativeMemberID(nativeMember), RuntimeIncarnation: enginegroup.RuntimeIncarnationID(runtimeID)}},
 	}
 }
 
@@ -882,9 +881,9 @@ func engineGroupTestIncarnation(
 	podUID string,
 ) enginegroup.ReplicaIncarnation {
 	return enginegroup.ReplicaIncarnation{
-		ReplicaID:          enginegroup.ReplicaID(replicaID),
-		SlotID:             enginegroup.CapacitySlotID(slotID),
-		RuntimeIncarnation: enginegroup.RuntimeIncarnationID(runtimeID),
-		CapacityRefs:       []enginegroup.CapacityRef{{Name: podName, UID: enginegroup.PodUID(podUID)}},
+		ReplicaID:    enginegroup.ReplicaID(replicaID),
+		SlotID:       enginegroup.CapacitySlotID(slotID),
+		Members:      []enginegroup.NativeMemberIncarnation{{ID: enginegroup.NativeMemberID("dp-" + strings.TrimPrefix(replicaID, "replica-")), RuntimeIncarnation: enginegroup.RuntimeIncarnationID(runtimeID)}},
+		CapacityRefs: []enginegroup.CapacityRef{{Name: podName, UID: enginegroup.PodUID(podUID)}},
 	}
 }

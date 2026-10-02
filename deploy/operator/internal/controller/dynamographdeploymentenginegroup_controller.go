@@ -620,7 +620,7 @@ func allEngineGroupMembersAvailable(
 ) bool {
 	for _, member := range topology.Replicas {
 		record, found := engineGroupReplicaRecord(registry, member.ReplicaID)
-		if !found || record.Current == nil || record.Current.RuntimeIncarnation != member.RuntimeIncarnation {
+		if !found || record.Current == nil || !enginegroup.MembershipMatchesIncarnation(member, *record.Current) {
 			return false
 		}
 		allocation, found := engineGroupAllocationByReplica(capacity, member.ReplicaID)

@@ -314,6 +314,31 @@ func requirePackedEngineGroupStatusRoundTrip(t *testing.T, ctx context.Context, 
 		t.Fatalf("per-member state did not survive status round-trip: %+v", packed.Status.ReplicaStates[0].NativeMembers)
 	}
 
+	t.Log("Retain drain tombstones for two process lifetimes that reused the same native rank")
+	packed.Status.Reconciliation = &EngineGroupReconciliationStatus{
+		TopologyHistory: EngineGroupTopologyHistoryStatus{
+			CurrentGeneration: 2,
+			Snapshots:         []EngineGroupTopologyStatus{{Generation: 2}},
+		},
+		Membership: EngineGroupMembershipReconciliationStatus{Observed: EngineGroupMembershipObservationStatus{
+			CommittedTopology: EngineGroupTopologyStatus{Generation: 2},
+		}},
+		Traffic: EngineGroupTrafficReconciliationStatus{Observed: EngineGroupTrafficObservationStatus{
+			Drained: []EngineGroupMemberStatus{{ReplicaID: "replica-1", NativeMembers: []EngineGroupNativeMemberIncarnationStatus{
+				{ID: "dp-5", RuntimeIncarnation: "process-5-v1"},
+				{ID: "dp-5", RuntimeIncarnation: "process-5-v2"},
+			}}},
+		}},
+	}
+	if err := kubeClient.Status().Update(ctx, packed); err != nil {
+		t.Fatal(err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(packed), packed); err != nil {
+		t.Fatal(err)
+	}
+	if len(packed.Status.Reconciliation.Traffic.Observed.Drained[0].NativeMembers) != 2 {
+		t.Fatal("status conflated drain evidence from different process lifetimes")
+	}
 }
 
 func requireDGDInitialSizeSchema(t *testing.T, ctx context.Context, kubeClient client.Client, namespace string) {
