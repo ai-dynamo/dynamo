@@ -86,8 +86,8 @@ spec:
               env:
                 - name: UCX_TLS
                   # Avoid RDMA/IB transports whose kernel/device state is not
-                  # restored by CRIU.
-                  value: tcp,self
+                  # restored by CRIU. NIXL 1.5.0+ requires cuda_copy on GPUs.
+                  value: tcp,self,cuda_copy
               resources:
                 requests:
                   cpu: "4"

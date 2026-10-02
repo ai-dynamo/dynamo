@@ -175,12 +175,13 @@ CHECKPOINT_BACKENDS = {
             "--free-gpu-memory-fraction",
             "0.10",
         ),
-        # UCX_TLS is always set. HF_HOME uses writable container storage so the
+        # UCX_TLS is always set; NIXL 1.5.0+ rejects a GPU UCX_TLS list without
+        # cuda_copy. HF_HOME uses writable container storage so the
         # runtime image does not need a root-owned /checkpoints directory; the
         # restored rootfs carries it into the target pod. When CI passes
         # --model-cache-pvc, _new_checkpoint_spec skips this HF_HOME so the
         # shared cache mount can own it (same as regular deploy tests).
-        env=(("UCX_TLS", "tcp,self"), ("HF_HOME", TRTLLM_HF_HOME)),
+        env=(("UCX_TLS", "tcp,self,cuda_copy"), ("HF_HOME", TRTLLM_HF_HOME)),
         # Match the base TRTLLM snapshot recipe and avoid cold-worker/restore
         # rollout overlap during initial DGD startup.
         checkpoint_startup_policy="WaitForCheckpoint",
