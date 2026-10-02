@@ -52,6 +52,20 @@ impl RouterRejectionExt for RouterRejection {
     }
 }
 
+/// Log and count a router rejection. Rejections are expected backpressure, so
+/// only `Internal` logs at warn. A queue deadline is not counted, matching the
+/// Frontend, which does not treat it as a rejection.
+pub(crate) fn record_rejection(rejection: RouterRejection, error: &dyn std::fmt::Display) {
+    if rejection == RouterRejection::Internal {
+        tracing::warn!(rejection = rejection.metric_label(), error = %error, "Router rejected the request");
+    } else {
+        tracing::debug!(rejection = rejection.metric_label(), error = %error, "Router rejected the request");
+    }
+    if rejection != RouterRejection::DeadlineExceeded {
+        crate::metrics::inc_router_rejection(rejection);
+    }
+}
+
 /// Classify an error from a routing call. Walks the whole chain, so added
 /// context cannot hide the rejection.
 pub fn classify_router_error(error: &anyhow::Error) -> RouterRejection {

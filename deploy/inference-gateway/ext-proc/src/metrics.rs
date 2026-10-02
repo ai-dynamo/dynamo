@@ -158,6 +158,26 @@ mod tests {
         SERIALIZE.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn rejections(reason: &str) -> u64 {
+        ROUTER_REJECTIONS
+            .with_label_values(&[TEST_MODEL, reason])
+            .get()
+    }
+
+    /// A queue deadline is logged but not counted, matching the Frontend.
+    #[test]
+    fn queue_deadline_is_not_counted_as_a_rejection() {
+        let _guard = bind_test_model();
+        let overloaded = rejections("overloaded");
+        let deadline = rejections("deadline_exceeded");
+
+        crate::admission::record_rejection(RouterRejection::Overloaded, &"busy");
+        crate::admission::record_rejection(RouterRejection::DeadlineExceeded, &"late");
+
+        assert_eq!(rejections("overloaded"), overloaded + 1);
+        assert_eq!(rejections("deadline_exceeded"), deadline);
+    }
+
     /// `(count, sum)` currently recorded against [`TEST_MODEL`].
     fn recorded() -> (u64, f64) {
         let histogram = CACHED_TOKENS.with_label_values(&[TEST_MODEL]);

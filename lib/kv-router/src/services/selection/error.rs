@@ -68,7 +68,7 @@ impl SelectionError {
     }
 }
 
-pub fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
+fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
     match error.rejection() {
         // Deadline expiry is deliberately 429, not 504: the deadline elapsed
         // while waiting for capacity, so it is backpressure the client should

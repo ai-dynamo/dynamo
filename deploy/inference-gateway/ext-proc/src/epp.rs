@@ -32,7 +32,9 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
-use crate::admission::{RouterRejection, RouterRejectionExt, classify_router_error};
+use crate::admission::{
+    RouterRejection, RouterRejectionExt, classify_router_error, record_rejection,
+};
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
@@ -550,12 +552,7 @@ impl Router {
             .map_err(|error| {
                 // Classify while the router's error is still typed.
                 let rejection = classify_router_error(&error);
-                tracing::warn!(
-                    rejection = rejection.metric_label(),
-                    error = %error,
-                    "Decode selection rejected by the router"
-                );
-                crate::metrics::inc_router_rejection(rejection);
+                record_rejection(rejection, &error);
                 rejection.into_pick_error()
             })?;
 
@@ -567,15 +564,7 @@ impl Router {
             } => Ok((worker, overlap_blocks)),
             // An outcome, not an error, so it is classified here.
             FindBestMatchOutcome::QueueRejected { rejection } => {
-                tracing::warn!(
-                    rejection = RouterRejection::QueueRejected.metric_label(),
-                    policy_class = %rejection.policy_class,
-                    limit_kind = %rejection.limit_kind,
-                    current = rejection.current,
-                    limit = rejection.limit,
-                    "Decode selection rejected by a policy-class queue limit"
-                );
-                crate::metrics::inc_router_rejection(RouterRejection::QueueRejected);
+                record_rejection(RouterRejection::QueueRejected, &rejection);
                 Err(RouterRejection::QueueRejected.into_pick_error())
             }
         }
