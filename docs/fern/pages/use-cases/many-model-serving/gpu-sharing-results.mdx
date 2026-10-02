@@ -91,6 +91,7 @@ $/1M is the hourly node cost divided by output tokens per hour, scaled to one mi
 
 ### Rows Are Matched on Load per GPU
 
+Each row compares the configurations at the same number of requests resident on each GPU. A shared GPU hosts two models, so HAMi and GPU fractions at concurrency `c` match the baseline at concurrency `2c`.
 
 Comparing rows at equal `c` instead would give the shared configurations twice the load of the baseline and make them look better than they are.
 
@@ -109,7 +110,7 @@ Comparing rows at equal `c` instead would give the shared configurations twice t
 Base decisions on the percentage columns for three reasons:
 
 1. **They cancel out the setup.** Model size, GPU type, and sequence lengths shift all three configurations together. A ratio against a dedicated baseline at the same load isolates the cost of sharing, which makes it the number most likely to transfer to your workload.
-2. **They map to a GPU-count decision.** At 63.5%, one GPU serves two distinct models at about 63% of the throughput a dedicated GPU would deliver. For every pair of models that can tolerate that, you free a whole GPU. In this benchmark, 16 models run on 8 GPUs instead of 16.
+2. **They map to a GPU-count decision.** At one request per model, GPU fractions keeps 63.5%: one GPU serves two distinct models at about 63% of the throughput a dedicated GPU would deliver, rising to 87.9% at 16 requests per model. For every pair of models that can tolerate that, you free a whole GPU. In this benchmark, 16 models run on 8 GPUs instead of 16.
 3. **They separate how the GPU is shared from the fact that it is shared.** HAMi and GPU fractions both pay the cost of splitting a GPU. The 15 to 20 point gap between them is the gain from partitioning compute instead of time-slicing it. Under time-slicing, one model's kernels wait behind the other's. With dedicated SMs, each model's kernels start immediately.
 
 ## Why Sharing Costs Throughput

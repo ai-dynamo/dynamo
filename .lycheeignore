@@ -88,3 +88,7 @@
 # Introduced by the same PR as its docs link: the K-EXAONE 2.0 recipe does not exist on main
 # until this PR merges, so these blob/main URLs 404 during review. Remove after merge.
 ^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/k-exaone-2\.0
+
+# examples/many-models is added in the same PR as the many-model-serving docs
+# that link to it on main. Remove this rule once that PR merges.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/many-models

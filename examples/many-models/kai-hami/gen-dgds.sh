@@ -115,7 +115,7 @@ spec:
               hostPath:
                 path: $HF_CACHE_DIR
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:

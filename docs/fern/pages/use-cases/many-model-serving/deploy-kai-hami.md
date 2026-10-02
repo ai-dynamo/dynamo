@@ -107,7 +107,7 @@ kubectl get pods -n default -l experiment.nvidia.com/dgd -o custom-columns=NODE:
 Expect one line, `32 <GPU_NODE>`. Each GPU UUID should host exactly two workers:
 
 ```bash
-for p in $(kubectl get pods -n default -o name | grep -i decodeworker); do
+for p in $(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name); do
   kubectl exec -n default "${p#pod/}" -- env | grep NVIDIA_VISIBLE
 done | sort | uniq -c
 ```
@@ -115,7 +115,7 @@ done | sort | uniq -c
 Expect eight lines, each with a count of `2`. Then confirm that HAMi applied the memory cap to a worker:
 
 ```bash
-POD=$(kubectl get pods -n default -o name | grep -i decodeworker | head -1)
+POD=$(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name | head -1)
 kubectl exec -n default "${POD#pod/}" -- nvidia-smi --query-gpu=memory.total --format=csv,noheader
 kubectl exec -n default "${POD#pod/}" -- env | grep CUDA_DEVICE_MEMORY_LIMIT
 ```
@@ -206,6 +206,7 @@ Throughput scales about 9.3x from `c=1` to `c=32`, but the gain from `c=16` to `
 kubectl delete pod aiperf-client -n default --ignore-not-found
 NODE_NAME="$GPU_NODE" kai-hami/gen-dgds.sh | kubectl delete -f -
 kubectl delete job download-qwen3-4b -n default --ignore-not-found
+kubectl delete secret download-qwen3-4b-hf-token -n default --ignore-not-found
 helm uninstall kai-resource-isolator -n kai-resource-isolator
 helm uninstall kai-scheduler -n kai-scheduler
 ```

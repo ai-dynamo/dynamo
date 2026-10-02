@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Many Models per GPU: Reference Manifests and Scripts
 
 This directory holds the manifests and scripts behind the
-[GPU sharing results](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/gpu-sharing-results.mdx)
+[GPU sharing results](../../docs/fern/pages/use-cases/many-model-serving/gpu-sharing-results.mdx)
 for many-model serving. It reproduces three experiments on one node with 8x A100 40GB GPUs:
 
 | Experiment | Directory | DGDs | Placement | Isolation |
@@ -73,7 +73,7 @@ Install the scheduler stack for the experiment first:
   [nv-kmcgill53/KAI-Scheduler](https://github.com/nv-kmcgill53/KAI-Scheduler) and
   [nv-kmcgill53/kai-gpu-fractioning](https://github.com/nv-kmcgill53/kai-gpu-fractioning),
   as described in
-  [Build the KAI-Scheduler and GPU Fractioning Forks](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/build-gpu-fractioning-forks.md).
+  [Build the KAI-Scheduler and GPU Fractioning Forks](../../docs/fern/pages/use-cases/many-model-serving/build-gpu-fractioning-forks.md).
   This requires driver r615 or later for per-namespace MPS limits. Then verify the caps
   with `kai-gpu-fractions/smoke-test-half-gpu.yaml`.
 
@@ -104,9 +104,9 @@ kubectl cp aiperf-client:/work/results ./results
 For the baseline, use `baseline/gen-dgds.sh` and run the sweep with `NUM_MODELS=8`.
 For GPU fractions, use `kai-gpu-fractions/gen-dgds.sh` with `NUM_MODELS=16`.
 The deployment guides walk through each experiment step by step:
-[baseline](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/deploy-baseline.md),
-[KAI + HAMi](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/deploy-kai-hami.md), and
-[KAI + GPU fractions](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/deploy-kai-gpu-fractions.md).
+[baseline](../../docs/fern/pages/use-cases/many-model-serving/deploy-baseline.md),
+[KAI + HAMi](../../docs/fern/pages/use-cases/many-model-serving/deploy-kai-hami.md), and
+[KAI + GPU fractions](../../docs/fern/pages/use-cases/many-model-serving/deploy-kai-gpu-fractions.md).
 
 The sweep is done when `/work/sweep.exit` exists in the pod; `0` means every AIPerf run
 succeeded. Results land in `results/<run-label>/c<N>/worker-NN/`, with a
@@ -122,7 +122,7 @@ cluster needs a different command.
 For the 16-DGD experiments, confirm that each GPU UUID hosts exactly two workers:
 
 ```bash
-for p in $(kubectl get pods -n default -o name | grep -i decodeworker); do
+for p in $(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name); do
   kubectl exec -n default "${p#pod/}" -- env | grep NVIDIA_VISIBLE
 done | sort | uniq -c
 ```
@@ -159,8 +159,8 @@ Also confirm the per-worker caps:
 
 ## Related Documentation
 
-- [Interpreting GPU Sharing Results](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/gpu-sharing-results.mdx)
-- [Deploy the Baseline Experiment](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/deploy-baseline.md)
-- [Deploy the KAI + HAMi Experiment](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/deploy-kai-hami.md)
-- [Build the KAI-Scheduler and GPU Fractioning Forks](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/build-gpu-fractioning-forks.md)
-- [Deploy the KAI + GPU Fractions Experiment](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/many-model-serving/deploy-kai-gpu-fractions.md)
+- [Interpreting GPU Sharing Results](../../docs/fern/pages/use-cases/many-model-serving/gpu-sharing-results.mdx)
+- [Deploy the Baseline Experiment](../../docs/fern/pages/use-cases/many-model-serving/deploy-baseline.md)
+- [Deploy the KAI + HAMi Experiment](../../docs/fern/pages/use-cases/many-model-serving/deploy-kai-hami.md)
+- [Build the KAI-Scheduler and GPU Fractioning Forks](../../docs/fern/pages/use-cases/many-model-serving/build-gpu-fractioning-forks.md)
+- [Deploy the KAI + GPU Fractions Experiment](../../docs/fern/pages/use-cases/many-model-serving/deploy-kai-gpu-fractions.md)

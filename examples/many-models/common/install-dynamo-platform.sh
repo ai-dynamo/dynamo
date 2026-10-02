@@ -35,7 +35,8 @@ read -r -a KUBECTL_CMD <<< "${KUBECTL:-kubectl}"
   --version "${PLATFORM_VERSION}" \
   --namespace "${PLATFORM_NAMESPACE}" --create-namespace \
   --set global.etcd.install=true \
-  --set global.nats.install=true
+  --set global.nats.install=true \
+  --wait --timeout 10m
 
 echo "--- waiting for dynamo-platform pods ---"
 "${KUBECTL_CMD[@]}" -n "${PLATFORM_NAMESPACE}" wait --for=condition=Ready pods --all --timeout=300s

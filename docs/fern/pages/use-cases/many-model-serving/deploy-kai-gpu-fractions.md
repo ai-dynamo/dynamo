@@ -129,7 +129,7 @@ kubectl get pods -n default -l experiment.nvidia.com/dgd -o custom-columns=NODE:
 Expect one line, `32 <GPU_NODE>`. Each GPU UUID should host exactly two workers:
 
 ```bash
-for p in $(kubectl get pods -n default -o name | grep -i decodeworker); do
+for p in $(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name); do
   kubectl exec -n default "${p#pod/}" -- env | grep NVIDIA_VISIBLE
 done | sort | uniq -c
 ```
@@ -137,7 +137,7 @@ done | sort | uniq -c
 Expect eight lines, each with a count of `2`. Then confirm the caps on a worker, and the MPS server's own view, which is the ground truth for enforcement:
 
 ```bash
-POD=$(kubectl get pods -n default -o name | grep -i decodeworker | head -1)
+POD=$(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name | head -1)
 kubectl exec -n default "${POD#pod/}" -- env | grep -E 'CUDA_MPS_ACTIVE_THREAD_PERCENTAGE|CUDA_MPS_PINNED_DEVICE_MEM_LIMIT'
 kubectl -n gpu-fractioning exec ds/gpu-fractioning-mpsd -- \
   nvidia-cuda-mps-control -p 3 namespace list --server=shared
@@ -230,6 +230,7 @@ Throughput grows about 7.8x from `c=1` to `c=32`, with only a 13% gain from `c=1
 kubectl delete pod aiperf-client -n default --ignore-not-found
 NODE_NAME="$GPU_NODE" kai-gpu-fractions/gen-dgds.sh | kubectl delete -f -
 kubectl delete job download-qwen3-4b -n default --ignore-not-found
+kubectl delete secret download-qwen3-4b-hf-token -n default --ignore-not-found
 ```
 
 To remove the forks, follow the [uninstall steps](build-gpu-fractioning-forks.md#uninstall). If MPS state is left over after repeated teardown, delete the `gpu-fractioning-mpsd` pods to restart the daemons. The model cache stays in `/opt/hf-cache` on `$GPU_NODE`; keep it if you plan to run the other experiments on that node.

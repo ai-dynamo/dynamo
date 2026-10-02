@@ -65,6 +65,17 @@ fi
 
 "${KUBECTL_CMD[@]}" -n "${NAMESPACE}" delete job "${JOB_NAME}" --ignore-not-found
 
+# Pass HF_TOKEN through a Secret so the token is not stored in the Job or Pod
+# spec. Without HF_TOKEN, remove any Secret left by an earlier run so a stale
+# token is not used.
+if [ -n "${HF_TOKEN:-}" ]; then
+  "${KUBECTL_CMD[@]}" -n "${NAMESPACE}" create secret generic "${JOB_NAME}-hf-token" \
+    --from-literal=token="${HF_TOKEN}" --dry-run=client -o yaml \
+    | "${KUBECTL_CMD[@]}" apply -f -
+else
+  "${KUBECTL_CMD[@]}" -n "${NAMESPACE}" delete secret "${JOB_NAME}-hf-token" --ignore-not-found
+fi
+
 "${KUBECTL_CMD[@]}" -n "${NAMESPACE}" apply -f - <<EOF
 apiVersion: batch/v1
 kind: Job
@@ -92,7 +103,11 @@ ${INIT_CONTAINERS}
             - name: HF_HOME
               value: ${HF_CACHE_DIR}
             - name: HF_TOKEN
-              value: "${HF_TOKEN:-}"
+              valueFrom:
+                secretKeyRef:
+                  name: ${JOB_NAME}-hf-token
+                  key: token
+                  optional: true
           volumeMounts:
             - name: model-cache
               mountPath: ${HF_CACHE_DIR}

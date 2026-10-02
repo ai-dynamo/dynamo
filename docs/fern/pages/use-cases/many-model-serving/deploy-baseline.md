@@ -105,7 +105,7 @@ kubectl get pods -n default -l experiment.nvidia.com/dgd -o custom-columns=NODE:
 Expect one line, `16 <GPU_NODE>`. Each of the eight GPU UUIDs should host exactly one worker:
 
 ```bash
-for p in $(kubectl get pods -n default -o name | grep -i decodeworker); do
+for p in $(kubectl get pods -n default -l experiment.nvidia.com/role=worker -o name); do
   kubectl exec -n default "${p#pod/}" -- env | grep NVIDIA_VISIBLE
 done | sort | uniq -c
 ```
@@ -197,6 +197,7 @@ The `tok/s per GPU` column is the baseline column in [Interpreting GPU Sharing R
 kubectl delete pod aiperf-client -n default --ignore-not-found
 NODE_NAME="$GPU_NODE" baseline/gen-dgds.sh | kubectl delete -f -
 kubectl delete job download-qwen3-4b -n default --ignore-not-found
+kubectl delete secret download-qwen3-4b-hf-token -n default --ignore-not-found
 ```
 
 The model cache stays in `/opt/hf-cache` on `$GPU_NODE`; keep it if you plan to run the other experiments on that node, since they use the same cache. To remove the platform, run `helm uninstall dynamo-platform -n dynamo-system`.

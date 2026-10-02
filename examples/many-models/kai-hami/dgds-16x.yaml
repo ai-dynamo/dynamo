@@ -54,7 +54,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -181,7 +181,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -308,7 +308,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -435,7 +435,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -562,7 +562,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -689,7 +689,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -816,7 +816,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -943,7 +943,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -1070,7 +1070,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -1197,7 +1197,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -1324,7 +1324,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -1451,7 +1451,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -1578,7 +1578,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -1705,7 +1705,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -1832,7 +1832,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
@@ -1959,7 +1959,7 @@ spec:
               hostPath:
                 path: /opt/hf-cache
                 type: Directory
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
