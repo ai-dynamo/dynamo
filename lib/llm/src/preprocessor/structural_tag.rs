@@ -6,6 +6,8 @@
 mod v1;
 mod v2;
 
+use std::borrow::Cow;
+
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, StructuralTagConfig, StructuralTagReasoningBoundary, StructuralTagScope,
     TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
@@ -14,6 +16,7 @@ use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
 
 use dynamo_parsers::tool_calling::{StructuralTagSchemaMode, ToolChoice, ToolDefinition};
+use dynamo_protocols::types::ResponseFormat;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
@@ -61,7 +64,6 @@ pub(crate) enum SelectedStructuralTagBuilder {
 impl SelectedStructuralTagBuilder {
     fn for_parser(parser_name: &str) -> Option<Self> {
         if v2::enabled()
-            && v2::supports_family(parser_name)
             && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
         {
             return Some(Self::V2(builder));
@@ -253,7 +255,7 @@ impl OpenAIPreprocessor {
         tools: &[ToolDefinition],
         parallel_tool_calls: Option<bool>,
         prompt_injected_reasoning: bool,
-        structured_output_schema: Option<&serde_json::Value>,
+        response_format: Option<&ResponseFormat>,
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
         let parser_name = self.tool_call_parser.as_deref();
@@ -267,7 +269,7 @@ impl OpenAIPreprocessor {
             tools,
             parallel_tool_calls,
             explicit_config,
-            structured_output_schema.is_some(),
+            response_format.is_some_and(|format| !matches!(format, ResponseFormat::Text)),
             self.runtime_config.exclude_tools_when_tool_choice_none,
         )?
         else {
@@ -278,7 +280,15 @@ impl OpenAIPreprocessor {
         let structured_output_schema = if matches!(tool_choice, ToolChoice::Auto)
             && config.allow_tool_calls_with_structured_output
         {
-            structured_output_schema
+            match response_format {
+                Some(ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(Cow::Borrowed(&json_schema.schema))
+                }
+                Some(ResponseFormat::JsonObject) => {
+                    Some(Cow::Owned(serde_json::json!({"type": "object"})))
+                }
+                Some(ResponseFormat::Text) | None => None,
+            }
         } else {
             None
         };
@@ -292,7 +302,7 @@ impl OpenAIPreprocessor {
             reasoning_boundary,
             tool_arguments_any_order: config.tool_arguments_any_order,
             starts_in_reasoning: prompt_injected_reasoning,
-            structured_output_schema,
+            structured_output_schema: structured_output_schema.as_deref(),
         };
 
         let applied =
@@ -427,10 +437,6 @@ pub(super) fn validate_runtime_config(
     anyhow::ensure!(
         v2::supports_family(parser_name),
         "structural_tag.{v2_only_option} is not supported by parser '{parser_name}'"
-    );
-    anyhow::ensure!(
-        v2::StructuralTagBuilder::for_parser(parser_name).is_some(),
-        "parser '{parser_name}' does not provide a parsers-v2 structural-tag builder"
     );
 
     Ok(reasoning_boundary)
@@ -1000,6 +1006,31 @@ mod tests {
 
     #[test]
     fn tool_choice_none_skips_ban_only_when_prompt_excludes_tools() {
+        const CHILD: &str = "DYNAMO_STRUCTURAL_TAG_NONE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            for enabled in ["0", "1"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "preprocessor::structural_tag::tests::tool_choice_none_skips_ban_only_when_prompt_excludes_tools",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, enabled)
+                    .env(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, enabled)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                    "parsers v2={enabled}:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            return;
+        }
+        assert_eq!(v2::enabled(), std::env::var(CHILD).unwrap() == "1");
+
         let tools = [ToolDefinition {
             name: "get_weather".to_string(),
             parameters: None,

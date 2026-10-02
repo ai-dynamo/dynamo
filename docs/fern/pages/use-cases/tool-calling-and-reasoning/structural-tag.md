@@ -143,7 +143,7 @@ based on the request's `tool_choice`:
 |---|---|
 | `required` / `named` | Always |
 | `auto` | Only when any tool has `strict: true` or `parallel_tool_calls` is `false` |
-| `none` | Exclusion tag only (excludes tool-call markers, see [below](#tool_choicenone-and-marker-exclusion)) |
+| `none` | Exclusion tag only when tools remain in the prompt (see [below](#tool_choicenone-and-marker-exclusion)) |
 
 ### `always`
 
@@ -172,9 +172,11 @@ tool arguments inside the structural tag:
 
 ## `tool_choice="none"` and Marker Exclusion
 
-When `tool_choice="none"` and structural tags are enabled, Dynamo injects an
-exclusion structural tag that excludes parser-specific tool-call markers (for
-example `<tool_call>`) so the model cannot complete native tool-call syntax.
+When `tool_choice="none"`, structural tags are enabled, and tools remain in the
+prompt, Dynamo injects an exclusion structural tag that excludes parser-specific
+tool-call markers (for example `<tool_call>`) so the model cannot complete native
+tool-call syntax. When tools are removed from the prompt, the exclusion tag is
+skipped.
 
 **Quality trade-off**. If tools remain in the prompt on `none` (often via
 `--no-exclude-tools-when-tool-choice-none` to keep the chat prefix stable for KV
@@ -192,7 +194,7 @@ This interacts with the `--exclude-tools-when-tool-choice-none` flag (default:
 | `exclude-tools-when-tool-choice-none` | Structural tag | Effect |
 |---|---|---|
 | `true` (default) | off | Tools removed from prompt. Model doesn't know about tools. Prompt changes break KV cache prefix sharing. |
-| `true` | on | Tools removed from prompt; tool-call markers are also excluded. Prompt changes break KV cache prefix sharing. |
+| `true` | on | Tools removed from prompt. Prompt changes break KV cache prefix sharing. |
 | `false` | on | Tools stay in prompt; guided decoding excludes tool-call markers. Model sees tools but cannot complete a native tool-call opening. Stable KV cache prefix across different `tool_choice` values. |
 | `false` | off | Tools stay in prompt; no token ban. Same response shaping as above: no structured `tool_calls` for explicit `none`. Tool-like text may still appear in `content`. |
 

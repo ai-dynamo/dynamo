@@ -83,7 +83,6 @@ impl OpenAIPreprocessor {
         );
         let has_explicit_guided_decoding = has_explicit_guided_decoding(request);
         let has_response_format_constraint = has_response_format_constraint(request);
-        let structured_output_schema = response_format_json_schema(request);
 
         self.validate_structured_output_composition(request, tool_choice, tools.as_ref())?;
 
@@ -116,7 +115,7 @@ impl OpenAIPreprocessor {
             &convert_tools(tools.as_ref()),
             request.inner.parallel_tool_calls,
             prompt_injected_reasoning,
-            structured_output_schema.as_ref(),
+            request.inner.response_format.as_ref(),
             common_request,
         )? {
             return Ok(GuidedToolConstraint::StructuralTag);
@@ -226,16 +225,6 @@ fn has_response_format_constraint(request: &NvCreateChatCompletionRequest) -> bo
         .response_format
         .as_ref()
         .is_some_and(|format| !matches!(format, ResponseFormat::Text))
-}
-
-fn response_format_json_schema(
-    request: &NvCreateChatCompletionRequest,
-) -> Option<serde_json::Value> {
-    match request.inner.response_format.as_ref()? {
-        ResponseFormat::Text => None,
-        ResponseFormat::JsonObject => Some(serde_json::json!({"type": "object"})),
-        ResponseFormat::JsonSchema { json_schema } => Some(json_schema.schema.clone()),
-    }
 }
 
 pub(crate) fn convert_tool_choice(tool_choice: &ChatCompletionToolChoiceOption) -> ToolChoice {
