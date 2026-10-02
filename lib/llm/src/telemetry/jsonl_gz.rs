@@ -10,7 +10,8 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context as _, anyhow};
 use flate2::{Compression, write::GzEncoder};
@@ -25,8 +26,13 @@ pub struct JsonlGzipSinkOptions {
     pub roll_uncompressed_bytes: u64,
     pub roll_lines: Option<u64>,
     /// Maximum number of segments to retain for this exact output prefix.
-    /// `None` preserves all segments.
+    /// `None` disables count-based retention.
     pub max_segments: Option<usize>,
+    /// Total compressed file bytes for this prefix, including the active segment.
+    /// The active segment is never removed, so this is a soft limit.
+    pub max_bytes: Option<u64>,
+    /// Expire segments by their last modification time, including idle segments.
+    pub max_age: Option<Duration>,
 }
 
 impl Default for JsonlGzipSinkOptions {
@@ -37,6 +43,8 @@ impl Default for JsonlGzipSinkOptions {
             roll_uncompressed_bytes: 256 * 1024 * 1024,
             roll_lines: None,
             max_segments: None,
+            max_bytes: None,
+            max_age: None,
         }
     }
 }
@@ -136,6 +144,10 @@ struct GzipBatchWriter<T: Serialize> {
     segment_uncompressed_bytes: u64,
     segment_lines: u64,
     options: JsonlGzipSinkOptions,
+    last_write_time: Option<SystemTime>,
+    // Retention requires exclusive ownership of the prefix. Other writers take
+    // a shared lock, so a cleaner cannot unlink another live writer's segment.
+    prefix_lock: Arc<File>,
     _marker: std::marker::PhantomData<fn(T)>,
 }
 
@@ -143,6 +155,9 @@ impl<T: Serialize> GzipBatchWriter<T> {
     fn new(path: String, options: JsonlGzipSinkOptions) -> anyhow::Result<Self> {
         if options.max_segments == Some(0) {
             return Err(anyhow!("gzip jsonl max_segments must be positive"));
+        }
+        if options.max_bytes == Some(0) || options.max_age == Some(Duration::ZERO) {
+            return Err(anyhow!("gzip jsonl retention limits must be positive"));
         }
 
         let base_path = PathBuf::from(path);
@@ -153,6 +168,10 @@ impl<T: Serialize> GzipBatchWriter<T> {
                 .with_context(|| format!("creating gzip jsonl directory {}", parent.display()))?;
         }
 
+        let prefix_lock = lock_prefix(
+            &base_path,
+            options.max_bytes.is_some() || options.max_age.is_some(),
+        )?;
         let current_index = next_segment_index(&base_path)?;
         Ok(Self {
             base_path,
@@ -164,6 +183,8 @@ impl<T: Serialize> GzipBatchWriter<T> {
             segment_uncompressed_bytes: 0,
             segment_lines: 0,
             options,
+            last_write_time: None,
+            prefix_lock: Arc::new(prefix_lock),
             _marker: std::marker::PhantomData,
         })
     }
@@ -228,10 +249,15 @@ impl<T: Serialize> GzipBatchWriter<T> {
         let base_path = self.base_path.clone();
         let current_index = self.current_index;
         let max_segments = self.options.max_segments;
+        let max_bytes = self.options.max_bytes;
+        let max_age = self.options.max_age;
         let active_file = self.active_file.take();
         let prune_pending = self.prune_pending;
+        let prefix_lock = self.prefix_lock.clone();
 
         let (active_file, current_index, result) = tokio::task::spawn_blocking(move || {
+            // A blocking write outlives cancellation of the async writer.
+            let _prefix_lock = prefix_lock;
             let (mut active_file, current_index, path) = match active_file {
                 Some(file) => (file, current_index, segment_path(&base_path, current_index)),
                 None => match create_available_segment(&base_path, current_index) {
@@ -247,6 +273,18 @@ impl<T: Serialize> GzipBatchWriter<T> {
                 {
                     tracing::warn!("gzip jsonl sink failed to prune old segments: {err}");
                 }
+                if prune_pending
+                    && (max_bytes.is_some() || max_age.is_some())
+                    && let Err(err) = prune_retained_segments(
+                        &base_path,
+                        Some(current_index),
+                        max_bytes,
+                        max_age,
+                        SystemTime::now(),
+                    )
+                {
+                    tracing::warn!("gzip jsonl sink failed retention cleanup: {err}");
+                }
             });
             (Some(active_file), current_index, result)
         })
@@ -257,10 +295,39 @@ impl<T: Serialize> GzipBatchWriter<T> {
         self.current_index = current_index;
         if result.is_ok() {
             self.prune_pending = false;
+            self.last_write_time = Some(SystemTime::now());
         }
         result?;
 
         Ok(())
+    }
+
+    async fn maintain_retention(&mut self, now: SystemTime) -> anyhow::Result<()> {
+        if self.options.max_bytes.is_none() && self.options.max_age.is_none() {
+            return Ok(());
+        }
+        // Called after flushing. Close an idle segment before it expires, so
+        // retention still progresses when no more requests arrive.
+        if let (Some(max_age), Some(last_write)) = (self.options.max_age, self.last_write_time)
+            && now
+                .duration_since(last_write)
+                .is_ok_and(|age| age >= max_age)
+            && self.batch.is_empty()
+            && self.active_file.is_some()
+        {
+            self.roll_segment();
+        }
+        let base_path = self.base_path.clone();
+        let active_index = self.active_file.as_ref().map(|_| self.current_index);
+        let max_bytes = self.options.max_bytes;
+        let max_age = self.options.max_age;
+        let prefix_lock = self.prefix_lock.clone();
+        tokio::task::spawn_blocking(move || {
+            let _prefix_lock = prefix_lock;
+            prune_retained_segments(&base_path, active_index, max_bytes, max_age, now)
+        })
+        .await
+        .context("gzip jsonl retention task panicked")?
     }
 }
 
@@ -272,6 +339,9 @@ async fn run_gzip_writer<T: Serialize>(
     let mut flush_tick =
         tokio::time::interval(writer.options.flush_interval.max(Duration::from_millis(1)));
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let retention_enabled = writer.options.max_bytes.is_some() || writer.options.max_age.is_some();
+    let mut retention_tick = tokio::time::interval(Duration::from_secs(60));
+    retention_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut first_error = None;
 
     loop {
@@ -297,6 +367,15 @@ async fn run_gzip_writer<T: Serialize>(
                 if let Err(err) = writer.flush_batch().await {
                     tracing::warn!("gzip jsonl sink failed flush: {err}");
                     first_error.get_or_insert(err);
+                }
+            }
+            _ = retention_tick.tick(), if retention_enabled => {
+                if let Err(err) = writer.flush_batch().await {
+                    tracing::warn!("gzip jsonl sink failed flush before retention: {err}");
+                    first_error.get_or_insert(err);
+                }
+                if let Err(err) = writer.maintain_retention(SystemTime::now()).await {
+                    tracing::warn!("gzip jsonl sink failed retention cleanup: {err}");
                 }
             }
             msg = rx.recv() => {
@@ -326,6 +405,93 @@ fn ensure_segment_parent(path: &Path) -> anyhow::Result<()> {
     {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating gzip jsonl directory {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn lock_prefix(base_path: &Path, exclusive: bool) -> anyhow::Result<File> {
+    let path = segment_path(base_path, 0).with_extension("lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(exclusive);
+    // Existing shared locks only need read access, including when a previous
+    // writer created the lock file under a different UID.
+    let file = match options.open(&path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(&path)
+            {
+                // Another writer may create the lock between open and create.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    options.open(&path)
+                }
+                result => result,
+            }
+        }
+        Err(error) => Err(error),
+    }
+    .with_context(|| format!("opening gzip jsonl prefix lock {}", path.display()))?;
+    let result = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    result.with_context(|| format!(
+        "locking gzip jsonl prefix {}; retention requires a separate output prefix for each writer",
+        base_path.display()
+    ))?;
+    // Keep this file on disk: removing it would let new writers lock a different
+    // inode while an existing writer still owns this one.
+    Ok(file)
+}
+
+fn prune_retained_segments(
+    base_path: &Path,
+    active_index: Option<u64>,
+    max_bytes: Option<u64>,
+    max_age: Option<Duration>,
+    now: SystemTime,
+) -> anyhow::Result<()> {
+    let mut segments = Vec::new();
+    let mut total_bytes = 0_u64;
+    for (index, path) in matching_segments(base_path)?.prunable {
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("reading retained segment {}", path.display()))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let modified = metadata.modified()?;
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        segments.push((index, path, metadata.len(), modified));
+    }
+    // Segment indices preserve producer order across restarts. Remove expired
+    // files first, then the oldest closed files until the byte budget is met.
+    segments.retain(|(index, _, _, _)| Some(*index) != active_index);
+    for (_, path, bytes, modified) in &segments {
+        if max_age.is_some_and(|limit| now.duration_since(*modified).is_ok_and(|age| age >= limit))
+        {
+            std::fs::remove_file(path)
+                .with_context(|| format!("expiring gzip jsonl segment {}", path.display()))?;
+            total_bytes = total_bytes.saturating_sub(*bytes);
+        }
+    }
+    if let Some(limit) = max_bytes {
+        for (_, path, bytes, modified) in segments {
+            if total_bytes <= limit {
+                break;
+            }
+            if max_age
+                .is_some_and(|limit| now.duration_since(modified).is_ok_and(|age| age >= limit))
+            {
+                continue;
+            }
+            std::fs::remove_file(&path)
+                .with_context(|| format!("pruning gzip jsonl segment {}", path.display()))?;
+            total_bytes = total_bytes.saturating_sub(bytes);
+        }
     }
     Ok(())
 }
@@ -504,6 +670,226 @@ mod tests {
         content
     }
 
+    #[test]
+    fn byte_retention_counts_active_bytes_and_removes_oldest_closed_segments() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trace");
+        for (index, size) in [4, 6, 7, 10].into_iter().enumerate() {
+            std::fs::write(segment_path(&path, index as u64), vec![0; size]).unwrap();
+        }
+        let unrelated = dir.path().join("trace_other.000000.jsonl.gz");
+        let backup = dir.path().join("trace.000000.jsonl.gz.bak");
+        std::fs::write(&unrelated, [0; 100]).unwrap();
+        std::fs::write(&backup, [0; 100]).unwrap();
+        std::fs::create_dir(segment_path(&path, 4)).unwrap();
+
+        prune_retained_segments(&path, Some(3), Some(20), None, SystemTime::now()).unwrap();
+        assert!(!segment_path(&path, 0).exists());
+        assert!(!segment_path(&path, 1).exists());
+        assert!(segment_path(&path, 2).exists());
+        assert!(segment_path(&path, 3).exists());
+        assert!(segment_path(&path, 4).is_dir());
+        assert!(unrelated.exists());
+        assert!(backup.exists());
+
+        // A single active segment may exceed the budget; it is never unlinked.
+        prune_retained_segments(&path, Some(3), Some(1), None, SystemTime::now()).unwrap();
+        assert!(!segment_path(&path, 2).exists());
+        assert_eq!(std::fs::metadata(segment_path(&path, 3)).unwrap().len(), 10);
+    }
+
+    fn set_modified(path: &Path, time: SystemTime) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(time))
+            .unwrap();
+    }
+
+    #[test]
+    fn age_and_byte_retention_apply_together_using_modification_time() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trace");
+        let now = SystemTime::now();
+        for index in 0..4 {
+            let segment = segment_path(&path, index);
+            std::fs::write(&segment, [0; 10]).unwrap();
+            set_modified(&segment, now);
+        }
+        // Expire the newer index first, then enforce the byte limit by index.
+        set_modified(&segment_path(&path, 2), now - Duration::from_secs(100));
+        prune_retained_segments(&path, Some(3), Some(20), Some(Duration::from_secs(60)), now)
+            .unwrap();
+        assert!(!segment_path(&path, 0).exists());
+        assert!(segment_path(&path, 1).exists());
+        assert!(!segment_path(&path, 2).exists());
+        assert!(segment_path(&path, 3).exists());
+    }
+
+    #[tokio::test]
+    async fn idle_segment_expires_and_record_clock_survives_rotation() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trace");
+        let mut writer = GzipBatchWriter::new(
+            path.display().to_string(),
+            JsonlGzipSinkOptions {
+                buffer_bytes: 1,
+                max_age: Some(Duration::from_secs(1)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        writer.start_time = Instant::now() - Duration::from_secs(10);
+        let record = TestRecord {
+            id: 1,
+            name: "before".into(),
+        };
+        writer.push(&record).await.unwrap();
+        assert!(segment_path(&path, 0).exists());
+        writer
+            .maintain_retention(SystemTime::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(!segment_path(&path, 0).exists());
+        assert!(writer.active_file.is_none());
+
+        writer
+            .push(&TestRecord {
+                id: 2,
+                name: "after".into(),
+            })
+            .await
+            .unwrap();
+        let row: serde_json::Value =
+            serde_json::from_str(&read_gzip_jsonl(&segment_path(&path, 1))).unwrap();
+        assert_eq!(row["event"]["id"], 2);
+        assert!(row["timestamp"].as_u64().unwrap() >= 10_000);
+    }
+
+    #[tokio::test]
+    async fn restart_cleans_expired_segments_without_new_records() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trace");
+        let old = segment_path(&path, 7);
+        std::fs::write(&old, b"old segment").unwrap();
+        set_modified(&old, SystemTime::now() - Duration::from_secs(100));
+        let writer = JsonlGzipWriter::<TestRecord>::new(
+            path.display().to_string(),
+            JsonlGzipSinkOptions {
+                max_age: Some(Duration::from_secs(60)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while old.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retention must run without incoming records");
+        writer.close().await.unwrap();
+    }
+
+    #[test]
+    fn retention_requires_exclusive_prefix_ownership() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trace");
+        let retained = JsonlGzipSinkOptions {
+            max_bytes: Some(100),
+            ..Default::default()
+        };
+        let first =
+            GzipBatchWriter::<TestRecord>::new(path.display().to_string(), retained.clone())
+                .unwrap();
+        for options in [JsonlGzipSinkOptions::default(), retained.clone()] {
+            assert!(GzipBatchWriter::<TestRecord>::new(
+                format!("{}.jsonl.gz", path.display()), options,
+            ).is_err());
+        }
+        drop(first);
+        let shared = GzipBatchWriter::<TestRecord>::new(
+            path.display().to_string(),
+            JsonlGzipSinkOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            GzipBatchWriter::<TestRecord>::new(path.display().to_string(), retained.clone())
+                .is_err()
+        );
+        drop(shared);
+        assert!(GzipBatchWriter::<TestRecord>::new(path.display().to_string(), retained).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readonly_existing_lock_allows_recording_and_preserves_exclusion() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trace");
+        let lock_path = segment_path(&path, 0).with_extension("lock");
+        let exclusive_owner = File::options()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let mut shared = lock_prefix(&path, false).unwrap();
+        // Check the descriptor too, so this regression test still detects an
+        // unnecessary write-capable open when run as root.
+        assert!(shared.write_all(b"must not write").is_err());
+        drop(shared);
+
+        let writer =
+            JsonlGzipWriter::new(path.display().to_string(), JsonlGzipSinkOptions::default())
+                .await
+                .unwrap();
+        assert!(matches!(
+            exclusive_owner.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        writer
+            .send(TestRecord {
+                id: 1,
+                name: "recorded".into(),
+            })
+            .await
+            .unwrap();
+        writer.close().await.unwrap();
+        let row: serde_json::Value =
+            serde_json::from_str(&read_gzip_jsonl(&segment_path(&path, 0))).unwrap();
+        assert_eq!(row["event"]["id"], 1);
+
+        exclusive_owner.try_lock().unwrap();
+        assert!(lock_prefix(&path, false).is_err());
+        assert!(std::fs::read(&lock_path).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn byte_retention_does_not_follow_symlinks() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trace");
+        let target = dir.path().join("unrelated");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, segment_path(&path, 0)).unwrap();
+        std::fs::write(segment_path(&path, 1), b"remove").unwrap();
+        prune_retained_segments(&path, None, Some(1), None, SystemTime::now()).unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"keep");
+        assert!(
+            std::fs::symlink_metadata(segment_path(&path, 0))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!segment_path(&path, 1).exists());
+    }
+
     #[tokio::test]
     async fn shutdown_drains_reserved_records_after_cancelled_await() {
         let dir = tempdir().unwrap();
@@ -584,6 +970,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
                 max_segments: None,
+                ..Default::default()
             },
         )
         .await
@@ -623,6 +1010,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: Some(1),
                 max_segments: None,
+                ..Default::default()
             },
         )
         .await
@@ -668,6 +1056,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
                 max_segments: None,
+                ..Default::default()
             },
         )
         .await
@@ -698,6 +1087,7 @@ mod tests {
             roll_uncompressed_bytes: 1024 * 1024,
             roll_lines: None,
             max_segments: None,
+            ..Default::default()
         };
         let first = JsonlGzipWriter::<TestRecord>::new(path.display().to_string(), options.clone())
             .await
@@ -746,6 +1136,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
                 max_segments: Some(2),
+                ..Default::default()
             },
         )
         .await
@@ -782,6 +1173,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
                 max_segments: Some(2),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -824,6 +1216,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: Some(1),
                 max_segments: Some(1),
+                ..Default::default()
             },
         )
         .await
@@ -858,6 +1251,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: Some(1),
                 max_segments: Some(4),
+                ..Default::default()
             },
         )
         .await
@@ -893,6 +1287,7 @@ mod tests {
                 roll_uncompressed_bytes: 32,
                 roll_lines: None,
                 max_segments: None,
+                ..Default::default()
             },
         )
         .await
@@ -938,6 +1333,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
                 max_segments: Some(1),
+                ..Default::default()
             },
         )
         .await
@@ -975,6 +1371,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
                 max_segments: Some(1),
+                ..Default::default()
             },
         )
         .unwrap();

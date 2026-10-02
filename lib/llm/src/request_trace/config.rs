@@ -93,6 +93,8 @@ pub struct RequestTracePolicy {
     pub file_flush_interval_ms: u64,
     pub file_roll_bytes: u64,
     pub file_roll_lines: Option<u64>,
+    pub file_max_bytes: Option<u64>,
+    pub file_max_age_secs: Option<u64>,
     pub nats_subject: String,
     pub otel_max_payload_bytes: usize,
     pub http_header_capture_list: Vec<String>,
@@ -131,7 +133,7 @@ impl RequestTracePolicy {
 static POLICY: OnceLock<RequestTracePolicy> = OnceLock::new();
 static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_UNINITIALIZED);
 
-fn load_from_env() -> RequestTracePolicy {
+pub(super) fn load_from_env() -> RequestTracePolicy {
     let legacy_audit_sinks = env_trimmed(env_audit::DYN_AUDIT_SINKS);
     let request_trace_enabled = env_is_truthy(env_request_trace::DYN_REQUEST_TRACE);
     let audit_force_logging = env_is_truthy(env_audit::DYN_AUDIT_FORCE_LOGGING);
@@ -179,6 +181,8 @@ fn load_from_env() -> RequestTracePolicy {
         env_audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
     ])
     .filter(|value| *value > 0);
+    let file_max_bytes = retention_limit(env_request_trace::DYN_REQUEST_TRACE_FILE_MAX_BYTES);
+    let file_max_age_secs = retention_limit(env_request_trace::DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS);
     let nats_subject = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT)
         .or_else(|| env_trimmed(env_audit::DYN_AUDIT_NATS_SUBJECT))
         .unwrap_or_else(|| {
@@ -246,6 +250,8 @@ fn load_from_env() -> RequestTracePolicy {
         file_flush_interval_ms,
         file_roll_bytes,
         file_roll_lines,
+        file_max_bytes,
+        file_max_age_secs,
         nats_subject,
         otel_max_payload_bytes,
         http_header_capture_list,
@@ -256,6 +262,18 @@ fn load_from_env() -> RequestTracePolicy {
         s3_prefix,
         s3_roll_uncompressed_bytes,
         s3_flush_interval_ms,
+    }
+}
+
+fn retention_limit(name: &str) -> Option<u64> {
+    let value = env_trimmed(name)?;
+    match value.parse::<u64>() {
+        Ok(0) => None,
+        Ok(limit) => Some(limit),
+        Err(error) => {
+            tracing::warn!(name, %error, "invalid request trace retention limit; leaving this limit disabled");
+            None
+        }
     }
 }
 
@@ -451,6 +469,8 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_FILE_ROLL_BYTES,
         env_request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES,
         env_request_trace::DYN_REQUEST_TRACE_FILE_ROLL_LINES,
+        env_request_trace::DYN_REQUEST_TRACE_FILE_MAX_BYTES,
+        env_request_trace::DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS,
         env_request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
@@ -484,6 +504,50 @@ mod tests {
             }
         }
         temp_env::with_vars(vars, test);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn file_retention_is_opt_in_and_parses_independent_limits() {
+        with_request_trace_env(&[(env_request_trace::DYN_REQUEST_TRACE, "1")], || {
+            let policy = load_from_env();
+            assert_eq!(policy.file_max_bytes, None);
+            assert_eq!(policy.file_max_age_secs, None);
+        });
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_FILE_MAX_BYTES,
+                    "10737418240",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS,
+                    "604800",
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(policy.file_max_bytes, Some(10 * 1024 * 1024 * 1024));
+                assert_eq!(policy.file_max_age_secs, Some(7 * 24 * 60 * 60));
+            },
+        );
+        for disabled in ["0", "-1", "invalid"] {
+            with_request_trace_env(
+                &[
+                    (
+                        env_request_trace::DYN_REQUEST_TRACE_FILE_MAX_BYTES,
+                        disabled,
+                    ),
+                    (env_request_trace::DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS, "60"),
+                ],
+                || {
+                    let policy = load_from_env();
+                    assert_eq!(policy.file_max_bytes, None);
+                    assert_eq!(policy.file_max_age_secs, Some(60));
+                },
+            );
+        }
     }
 
     #[test]

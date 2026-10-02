@@ -244,6 +244,7 @@ pub(super) async fn spawn_worker(
             roll_uncompressed_bytes: policy.jsonl_gz_roll_bytes,
             roll_lines: None,
             max_segments: Some(policy.max_segments),
+            ..Default::default()
         },
     )
     .await
@@ -534,6 +535,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
                 max_segments: Some(4),
+                ..Default::default()
             },
         )
         .await

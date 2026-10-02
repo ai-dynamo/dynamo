@@ -698,6 +698,14 @@ pub mod llm {
         /// Gzip file sink roll threshold in record lines.
         pub const DYN_REQUEST_TRACE_FILE_ROLL_LINES: &str = "DYN_REQUEST_TRACE_FILE_ROLL_LINES";
 
+        /// Soft retention limit in compressed bytes for this gzip file prefix.
+        /// Unset or zero disables the limit. The active segment is retained.
+        pub const DYN_REQUEST_TRACE_FILE_MAX_BYTES: &str = "DYN_REQUEST_TRACE_FILE_MAX_BYTES";
+
+        /// Expire gzip segments by last modification time, in seconds.
+        /// Unset or zero disables the limit.
+        pub const DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS: &str = "DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS";
+
         /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_ROLL_LINES`.
         pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES: &str =
             "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES";
@@ -1165,6 +1173,8 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_FILE_ROLL_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_ROLL_LINES,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_MAX_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
