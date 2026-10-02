@@ -269,6 +269,7 @@ class GMSClientMemoryManager:
         """Release local mappings and VAs, then disconnect the socket lease."""
         with self._lock:
             self._check()
+            self.unmap_all_vas()
             for va in sorted(self._regions, reverse=True):
                 self.destroy_mapping(va)
             self.disconnect()
@@ -330,7 +331,11 @@ class GMSClientMemoryManager:
         self._select_device()
         if mapping.handle:
             self._unmap(mapping)
-        if self._session is not None and self._session.lock_type is GrantedLockType.RW:
+        if (
+            not self._persistent_backing
+            and self._session is not None
+            and self._session.lock_type is GrantedLockType.RW
+        ):
             self._session.free(mapping.allocation_id)
         self._vmm.address_free(mapping.base, mapping.reservation_size)
         del self._mappings[mapping.base]

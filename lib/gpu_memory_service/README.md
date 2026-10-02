@@ -10,6 +10,35 @@ The **GPU Memory Service (GMS)** is an out-of-process GPU memory manager that de
 
 GMS provides PyTorch integration via `CUDAPluggableAllocator` and pre-built integrations for inference frameworks like **vLLM** and **SGLang**.
 
+## Experimental Snapshot prefix-cache recovery
+
+For Snapshot-backed intra-pod failover, set `DYN_GMS_USE_V1=true` and
+`DYN_KV_RECOVERY=true` on the vLLM engine. Enable prefix caching and pass
+`--no-async-scheduling`. `DYN_KV_RECOVERY_PATH` optionally selects the metadata
+file; its default is `GMS_SOCKET_DIR/kv-recovery.mmap`. Both engines must see the
+same local, pod-lifetime file and shared GMS service.
+
+Capture still discards bootstrap KV allocations. On the first serving wake, GMS
+allocates and retains the saved KV layout. Subsequent restored engines attach
+that same physical backing. GMS waits for the prior writer's Linux pidfd to
+signal process death, or for a graceful detach after GPU synchronization and
+unmapping; socket closure alone does not release retained memory for reuse.
+
+The recovery journal mirrors full prefix blocks into mmap records. Records are
+invalidated before block reuse and committed only after GPU synchronization.
+Before vLLM resumes scheduling, the adapter validates the GMS incarnation,
+allocation inventory, and tensor layout, then rebuilds vLLM's native prefix
+index. Incompatible or interrupted metadata starts with an empty index.
+
+The initial implementation requires vLLM 0.30.0, TP/PP/DP1, UniProcExecutor,
+synchronous scheduling, and one full-attention cache group. Speculative decoding,
+KV connectors, and LoRA are excluded. It recovers reusable prefixes; it does not
+resume in-flight requests. GMS, GPU memory, and the metadata file must survive.
+Whole-pod/node loss and power-loss durability are outside this contract.
+
+The GMS wheel installs a vLLM plugin that provides compatibility hooks, so this
+experiment does not require an upstream vLLM release containing the native APIs.
+
 ## Problem Statement
 
 In traditional LLM inference deployments, each worker process:

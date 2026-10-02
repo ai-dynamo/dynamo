@@ -63,8 +63,9 @@ def test_persistent_wake_reattaches_original_physical_handles(tmp_path, monkeypa
             assert client.identity == retained_identity
             assert vmm.server_handles == retained_handles
             assert va in vmm.mapped
-            client.unmap_all_vas()
-            client.disconnect()
+            client.close()
+            assert client.mappings == ()
+            assert vmm.server_handles == retained_handles
         finally:
             _stop(server, thread)
 
