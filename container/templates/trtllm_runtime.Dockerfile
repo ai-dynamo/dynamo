@@ -187,7 +187,7 @@ WORKDIR /workspace
 # Backport TRT-LLM PR #19303 (draft KV pool publish). tensorrt_llm comes from
 # the base runtime image and is never reinstalled here, so this can run before
 # the package layers; runtime_full's filesystem is overlaid into pre_runtime.
-# Rebased onto v1.3.0rc27 -- main has since restructured _joint_reuse_supported
+# Rebased onto v1.3.0rc29 -- main has since restructured _joint_reuse_supported
 # and the reuse_match_backoff block, so the upstream diff does not apply to this
 # tag. Drop once an rc ships the fix: --forward then exits non-zero and fails
 # this layer rather than silently shipping an unpatched image.

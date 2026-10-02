@@ -1,8 +1,8 @@
 diff --git a/tensorrt_llm/_torch/attention/backends/sparse/deepseek_v4/cache_manager.py b/tensorrt_llm/_torch/attention/backends/sparse/deepseek_v4/cache_manager.py
-index 513fae8795..ea6b06c77f 100644
+index f7268e60b0..d70208755f 100644
 --- a/tensorrt_llm/_torch/attention/backends/sparse/deepseek_v4/cache_manager.py
 +++ b/tensorrt_llm/_torch/attention/backends/sparse/deepseek_v4/cache_manager.py
-@@ -250,6 +250,7 @@ def _get_index_mode(attn_type: DeepseekV4AttentionType) -> PageIndexMode:
+@@ -271,6 +271,7 @@ def _get_index_mode(attn_type: DeepseekV4AttentionType) -> PageIndexMode:
  
  class DeepseekV4CacheManager(KVCacheManagerV2):
      _supports_reuse_match_backoff = False
@@ -11,10 +11,10 @@ index 513fae8795..ea6b06c77f 100644
      # This tensor is for compatibility with AttentionOp, it only contains swa attention.
      # kv_cache_pool_pointers contains one virtual attention-op pool per local
 diff --git a/tensorrt_llm/_torch/attention/backends/sparse/qsa/cache_manager.py b/tensorrt_llm/_torch/attention/backends/sparse/qsa/cache_manager.py
-index 7029f111cf..8161d36d6b 100644
+index 394cd9e697..abe0429de3 100644
 --- a/tensorrt_llm/_torch/attention/backends/sparse/qsa/cache_manager.py
 +++ b/tensorrt_llm/_torch/attention/backends/sparse/qsa/cache_manager.py
-@@ -48,6 +48,11 @@ class QSAMambaHybridCacheManagerV2(MambaHybridCacheManagerV2):
+@@ -50,6 +50,11 @@ class QSAMambaHybridCacheManagerV2(MambaHybridCacheManagerV2):
      paged cache different shapes or page strides.
      """
  
@@ -27,26 +27,30 @@ index 7029f111cf..8161d36d6b 100644
          self,
          *args,
 diff --git a/tensorrt_llm/_torch/pyexecutor/_util.py b/tensorrt_llm/_torch/pyexecutor/_util.py
-index 78d1b6d921..0953dfa5b1 100644
+index 660ffe11b6..20b1e9fabc 100644
 --- a/tensorrt_llm/_torch/pyexecutor/_util.py
 +++ b/tensorrt_llm/_torch/pyexecutor/_util.py
-@@ -1576,8 +1576,10 @@ class KvCacheCreator:
-         """
-         if not self._is_kv_cache_manager_v2:
+@@ -1847,12 +1847,14 @@ class KvCacheCreator:
+         if lookahead is None:
              return False
-+        # Pairing depends on the draft pool's support: it holds only the
-+        # speculation layers, so it can support what the target pool cannot.
-         if not getattr(self._kv_cache_manager_cls,
--                       "_supports_reuse_match_backoff", False):
-+                       "_supports_draft_reuse_match_backoff", False):
+         if lookahead > 0 and not getattr(self._kv_cache_manager_cls,
+-                                         "_supports_reuse_match_backoff",
++                                         "_supports_draft_reuse_match_backoff",
+                                          False):
+             # The opt-out is about backing the match off by `lookahead` tokens,
+             # which a specialized commit/history protocol (recurrent snapshots,
+             # DSA) cannot express. A zero span asks for no backoff at all, so
+             # every backoff-sized path stays a no-op and the pairing is safe.
++            # The pool that has to express the backoff is the draft pool, which
++            # holds only the speculation layers.
              return False
-         return draft_prompt_lookahead(self._speculative_config) is not None
+         return True
  
 diff --git a/tensorrt_llm/_torch/pyexecutor/kv_cache/kv_cache_manager_v2.py b/tensorrt_llm/_torch/pyexecutor/kv_cache/kv_cache_manager_v2.py
-index 11bf7f0121..ae30277aad 100644
+index 8a8907d88d..78ec27339f 100644
 --- a/tensorrt_llm/_torch/pyexecutor/kv_cache/kv_cache_manager_v2.py
 +++ b/tensorrt_llm/_torch/pyexecutor/kv_cache/kv_cache_manager_v2.py
-@@ -1023,6 +1023,13 @@ class KVCacheManagerV2(BaseResourceManager):
+@@ -1111,6 +1111,13 @@ class KVCacheManagerV2(BaseResourceManager):
      # Read by KvCacheCreator: a subclass that overrides the context
      # commit/history protocol opts out of generic reuse-match backoff.
      _supports_reuse_match_backoff = True
@@ -60,7 +64,7 @@ index 11bf7f0121..ae30277aad 100644
  
      def __init__(
          self,
-@@ -1146,8 +1153,24 @@ class KVCacheManagerV2(BaseResourceManager):
+@@ -1237,8 +1244,24 @@ class KVCacheManagerV2(BaseResourceManager):
          # A draft manager only publishes to its radix tree when it is paired.
          self._can_publish_block_reuse = joint_kv_cache_reuse or not self.is_draft
          # Unsupported adapters keep their main-like reuse endpoint.
@@ -85,12 +89,12 @@ index 11bf7f0121..ae30277aad 100644
 +            # token; relaxed acceptance does not, so it keeps the trim.
              self.reuse_match_backoff = 0
          # Mirror V1's KV reserve sizing (see V1 __init__ for rationale).
-         self._kv_reserve_draft_tokens = self.max_total_draft_tokens
+         self._kv_reserve_draft_tokens, self._generation_kv_capacity_headroom = (
 diff --git a/tensorrt_llm/_torch/pyexecutor/kv_cache/mamba_cache_manager.py b/tensorrt_llm/_torch/pyexecutor/kv_cache/mamba_cache_manager.py
-index f1284e7132..241c3d3380 100644
+index ad41761895..f8c0ee2870 100644
 --- a/tensorrt_llm/_torch/pyexecutor/kv_cache/mamba_cache_manager.py
 +++ b/tensorrt_llm/_torch/pyexecutor/kv_cache/mamba_cache_manager.py
-@@ -2965,6 +2965,12 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
+@@ -2977,6 +2977,12 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
      # Recurrent-state snapshots use a specialized commit/history protocol, so
      # keep main-like reuse endpoints and the existing unpaired draft path.
      _supports_reuse_match_backoff = False
@@ -103,7 +107,7 @@ index f1284e7132..241c3d3380 100644
  
      # Qwen4-Exp PLE state is opt-in. These class-level defaults keep every other
      # model — and any partially-constructed instance that sets only the fields it
-@@ -4634,6 +4640,11 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
+@@ -4686,6 +4692,11 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
                  f"request {request.py_request_id} to {history_length} tokens")
  
      def try_commit_blocks(self, request: LlmRequest, kv_cache=None) -> None:
@@ -115,7 +119,7 @@ index f1284e7132..241c3d3380 100644
          should_block_reuse = (self.enable_block_reuse and not self.is_draft
                                and not request.is_dummy_request)
          if not should_block_reuse:
-@@ -4668,6 +4679,9 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
+@@ -4720,6 +4731,9 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
  
      def update_context_resources(self,
                                   scheduled_batch: ScheduledRequests) -> None:
