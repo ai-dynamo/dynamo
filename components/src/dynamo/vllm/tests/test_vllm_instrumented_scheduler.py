@@ -5698,14 +5698,24 @@ def test_kvwarm_native_capacity_uses_sliding_window_admission_caps():
 
 
 @pytest.mark.core
-def test_kvwarm_native_capacity_counts_mamba_align_state_blocks():
+@pytest.mark.parametrize("align", [True, False])
+def test_kvwarm_native_capacity_counts_mamba_state_blocks(align):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     full = SimpleNamespace(block_size=16)
-    state = SimpleNamespace(
-        block_size=16,
-        mamba_cache_mode="align",
-        num_speculative_blocks=0,
-        kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+    # Three state blocks per request in both modes: align holds 2 + 0
+    # speculative + 1 checkpoint; "none" (block size = max_model_len) holds
+    # 1 + 2 speculative.
+    state = (
+        SimpleNamespace(
+            block_size=16,
+            mamba_cache_mode="align",
+            num_speculative_blocks=0,
+            kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+        )
+        if align
+        else SimpleNamespace(
+            block_size=4096, mamba_cache_mode="none", num_speculative_blocks=2
+        )
     )
     stub.kv_cache_manager = SimpleNamespace(
         coordinator=SimpleNamespace(single_type_managers=[full, state])
@@ -5715,9 +5725,12 @@ def test_kvwarm_native_capacity_counts_mamba_align_state_blocks():
     stub._kvwarm_giant_repeats = lambda: 3
     stub._bench_capacity_limit = lambda name: 4096
 
-    # Per request: ceil((ctx + 1 + 3) / 16) full-attention blocks + 3 align
-    # state blocks (2 + 0 speculative + 1 checkpoint).
-    assert stub._kvwarm_native_required_blocks([31, 12]) == (3 + 3) + (1 + 3)
+    # Per request: ceil((ctx + 1 + 3) / 16) full-attention blocks + 3 state
+    # blocks. Align adds one block per stage: a prefill ending on a hash
+    # boundary inside a Mamba block registers its own partial tail, and the
+    # first decode's admission check asks for one block more than it allocates.
+    expected = (3 + 3) + (1 + 3) + int(align)
+    assert stub._kvwarm_native_required_blocks([31, 12]) == expected
 
 
 @pytest.mark.core
@@ -6028,10 +6041,14 @@ def _kvwarm_collection_bodies(count, length=80):
     return bodies
 
 
-def test_kvwarm_gate_rejects_recurrent_state_layers(monkeypatch):
+@pytest.mark.core
+def test_kvwarm_gate_rejects_state_layers_outside_native_layouts(monkeypatch):
+    # A chunked-local group keeps this hybrid off the native path, and shared
+    # chains cannot supply its recurrent state without random or live-state mode.
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
-    stub = _kvwarm_gate_stub(state_groups=("FullAttentionSpec", "MambaSpec"))
+    stub = _kvwarm_gate_stub(state_groups=("ChunkedLocalAttentionSpec", "MambaSpec"))
     assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is False
+    assert not stub._kvwarm_native
     assert stub._kvwarm_meta["skip_reason"] == "hybrid_state_layers_unsupported"
 
 
@@ -6930,6 +6947,8 @@ def test_kvwarm_dp_filter_rebases_native_plan_without_dropped_points(monkeypatch
     stub._bench_dp_size = 2
     stub.num_lookahead_tokens = 0
     stub._bench_blocks_per_req = lambda tokens, **_: -(-tokens // 16)
+    # No align-mode state group, so native stages need no extra headroom.
+    stub.kv_cache_manager.coordinator = SimpleNamespace(single_type_managers=[])
     stub._kvwarm_warm_eligible = lambda: True
     stub._kvwarm_native = True
     points = [

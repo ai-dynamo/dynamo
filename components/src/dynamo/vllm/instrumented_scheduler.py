@@ -4865,10 +4865,11 @@ class InstrumentedScheduler(AsyncScheduler):
         return meta
 
     def _kvwarm_state_layer_groups(self) -> list[str]:
-        """Recurrent groups whose state must never be borrowed from a chain.
+        """Recurrent groups, whose exact state no shared chain can provide.
 
-        Random-state mode gives shadows private slots; without that mode,
-        these groups remain ineligible for the real-KV warm-up.
+        Native exact-context warm-up admits them: each point computes its own
+        state. The shared-chain path still needs random-state mode (private
+        synthetic slots) or live-state mode (the chain's deeper live state).
         """
         manager = getattr(self, "kv_cache_manager", None)
         config = getattr(manager, "kv_cache_config", None)
@@ -5021,8 +5022,10 @@ class InstrumentedScheduler(AsyncScheduler):
                     False,
                 )
             )
-            # Native for MoE with or without EP (keeps Inkling's exact convolution
-            # state) or recurrent-state layers; dense attention-only stays synthetic.
+            # Native for MoE with or without EP, or recurrent-state layers; dense
+            # attention-only stays synthetic. TP-only MoE stays native, not balanced by
+            # construction: Inkling's convolution cache is a SlidingWindowSpec that the
+            # layout cannot tell apart from other finite windows, and must stay exact.
             self._kvwarm_native = self._kvwarm_native_layout() and (
                 has_experts or bool(self._kvwarm_state_layer_groups())
             )
@@ -5641,7 +5644,13 @@ class InstrumentedScheduler(AsyncScheduler):
         return point.batch_size
 
     def _kvwarm_native_required_blocks(self, context_lengths: list[int]) -> int:
-        """Native fleet peak, including admission and repeated steady writes."""
+        """Native fleet peak, including admission and repeated steady writes.
+
+        An align-mode state group adds one block per stage: a prefill that ends
+        on a hash boundary inside a Mamba block registers its own partial tail,
+        and the first decode's admission check then asks for one block more
+        than it allocates.
+        """
         repeats = min(
             self._kvwarm_giant_repeats(),
             max(
@@ -5649,7 +5658,13 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_capacity_limit("max_model_len") - 2 - max(context_lengths),
             ),
         )
-        return sum(
+        align_headroom = int(
+            any(
+                getattr(manager, "mamba_cache_mode", None) == "align"
+                for manager in self.kv_cache_manager.coordinator.single_type_managers
+            )
+        )
+        return align_headroom + sum(
             self._bench_blocks_per_req(
                 context + 1 + repeats + self.num_lookahead_tokens,
                 apply_admission_cap=True,
