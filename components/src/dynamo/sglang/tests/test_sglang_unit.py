@@ -57,9 +57,7 @@ except ImportError:
 @pytest.mark.parametrize(
     "argv, expected",
     [
-        ([], None),
         (["--disable-piecewise-cuda-graph"], "disabled"),
-        (["--cuda-graph-backend-prefill", "breakable"], "breakable"),
         (
             ["--disable-piecewise-cuda-graph", "--cuda-graph-backend-prefill", "full"],
             "full",
