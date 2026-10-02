@@ -230,3 +230,7 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+[patch.crates-io]
+# Temporary until frontend-crates #322 is released.
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/anthropic-tool-strict" }

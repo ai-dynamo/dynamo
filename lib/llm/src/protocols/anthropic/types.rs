@@ -499,7 +499,7 @@ fn convert_anthropic_tools(
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: Some(schema),
-                    strict: None,
+                    strict: tool.strict,
                 },
             })
         })
@@ -1145,6 +1145,37 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_strict_conversion() {
+        for strict in [Some(true), Some(false), None] {
+            let mut input = serde_json::json!({
+                "model": "test-model",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": "Set the status to gamma."}],
+                "tools": [{
+                    "name": "set_status",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"status": {"type": "string", "enum": ["ALPHA", "BETA"]}},
+                        "required": ["status"],
+                        "additionalProperties": false
+                    }
+                }]
+            });
+            if let Some(strict) = strict {
+                input["tools"][0]["strict"] = strict.into();
+            }
+            let req: AnthropicCreateMessageRequest = serde_json::from_value(input.clone()).unwrap();
+            let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+            let tools = chat_req.inner.tools.unwrap();
+            assert_eq!(tools[0].function.strict, strict);
+            assert_eq!(
+                tools[0].function.parameters.as_ref().unwrap(),
+                &input["tools"][0]["input_schema"]
+            );
+        }
+    }
+
+    #[test]
     fn test_tools_conversion() {
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),
@@ -1172,6 +1203,7 @@ mod tests {
                     "properties": {"location": {"type": "string"}},
                     "required": ["location"]
                 })),
+                strict: None,
                 cache_control: None,
             }]),
             tool_choice: Some(AnthropicToolChoice::Simple(AnthropicToolChoiceSimple {
