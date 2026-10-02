@@ -27,8 +27,8 @@ import (
 // +kubebuilder:validation:XValidation:rule="!has(self.policy) || !has(self.policy.minReplicas) || self.replicas >= self.policy.minReplicas",message="replicas must be greater than or equal to policy.minReplicas"
 // +kubebuilder:validation:XValidation:rule="!has(self.policy) || !has(self.policy.maxReplicas) || self.replicas <= self.policy.maxReplicas",message="replicas must be less than or equal to policy.maxReplicas"
 type DynamoGraphDeploymentEngineGroupSpec struct {
-	// replicas is the absolute desired number of logical engine replicas in this group.
-	// For Elastic EP, one replica maps to one data-parallel replica through the resolved profile.
+	// replicas is the absolute desired number of independently scalable replica allocations.
+	// The profile maps each allocation to whole Pods and one or more native engine members.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	Replicas int32 `json:"replicas"`
@@ -67,16 +67,29 @@ type DynamoGraphDeploymentEngineGroupStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 
-	// availableReplicas is the number of allocated replicas whose complete physical allocation
-	// and profile-required runtime checks are available.
+	// availableReplicas counts allocations whose complete steady-state member set is active
+	// and admitted with usable backing capacity. Partially serving allocations do not count.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 
-	// activeReplicas is the number of replicas in the engine's authoritative committed topology.
+	// desiredNativeMembers is the exact identity set assigned to the desired replica slots.
+	// Survivor recovery does not rewrite this set; identities need not be contiguous.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	DesiredNativeMembers []string `json:"desiredNativeMembers,omitempty"`
+
+	// desiredNativeMemberCount is the cardinality of desiredNativeMembers.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	ActiveReplicas int32 `json:"activeReplicas,omitempty"`
+	DesiredNativeMemberCount int32 `json:"desiredNativeMemberCount,omitempty"`
+
+	// activeNativeMemberCount counts exact members in the authoritative committed topology.
+	// A partially serving allocation contributes only its active members, not one active replica.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ActiveNativeMemberCount int32 `json:"activeNativeMemberCount,omitempty"`
 
 	// selector matches exactly one representative Pod for every allocated logical replica.
 	// It represents allocation, not availability or engine admission.
@@ -95,11 +108,17 @@ type DynamoGraphDeploymentEngineGroupStatus struct {
 	// +optional
 	Topology *EngineGroupTopologyStatus `json:"topology,omitempty"`
 
-	// lastStableReplicas is the most recent membership count that reached its desired target
+	// lastStableReplicas is the most recent allocation count that reached its desired target
 	// without degradation.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	LastStableReplicas int32 `json:"lastStableReplicas,omitempty"`
+
+	// lastStableTopologyGeneration identifies the exact last fully restored serving membership.
+	// It distinguishes unexpected member loss from a planned change in allocation target.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	LastStableTopologyGeneration int64 `json:"lastStableTopologyGeneration,omitempty"`
 
 	// replicaStates contains the stable identity and independently observed physical and engine
 	// state of each known logical replica.
@@ -130,6 +149,7 @@ type DynamoGraphDeploymentEngineGroupStatus struct {
 }
 
 // EngineGroupProfileStatus records immutable geometry and hard capability bounds resolved for a group.
+// +kubebuilder:validation:XValidation:rule="self.minSupportedReplicas <= self.maxSupportedReplicas",message="minSupportedReplicas must be less than or equal to maxSupportedReplicas"
 type EngineGroupProfileStatus struct {
 	// backend is the inference engine that owns native membership.
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
@@ -148,19 +168,24 @@ type EngineGroupProfileStatus struct {
 	// +kubebuilder:validation:Minimum=1
 	PodsPerReplica int32 `json:"podsPerReplica"`
 
-	// minSafeServingReplicas is the lowest committed replica count at which this profile may
+	// nativeMembersPerReplica is the fixed steady-state member count per allocation.
+	// Partial survival and advertised surge may temporarily change the active count.
+	// +kubebuilder:validation:Minimum=1
+	NativeMembersPerReplica int32 `json:"nativeMembersPerReplica"`
+
+	// minSafeServingNativeMembers is the lowest committed native-member count at which this profile may
 	// continue serving while degraded or recovering.
 	// +kubebuilder:validation:Minimum=1
-	MinSafeServingReplicas int32 `json:"minSafeServingReplicas"`
+	MinSafeServingNativeMembers int32 `json:"minSafeServingNativeMembers"`
 
-	// minReplicas is the hard lower bound for live membership operations other than terminal
+	// minSupportedReplicas is the hard lower bound for live membership operations other than terminal
 	// group retirement.
 	// +kubebuilder:validation:Minimum=1
-	MinReplicas int32 `json:"minReplicas"`
+	MinSupportedReplicas int32 `json:"minSupportedReplicas"`
 
-	// maxReplicas is the hard upper bound for live membership operations.
+	// maxSupportedReplicas is the hard upper bound for live membership operations.
 	// +kubebuilder:validation:Minimum=1
-	MaxReplicas int32 `json:"maxReplicas"`
+	MaxSupportedReplicas int32 `json:"maxSupportedReplicas"`
 }
 
 // EngineGroupTopologyStatus is one immutable engine-authoritative committed topology snapshot.
@@ -206,35 +231,54 @@ type EngineGroupReplicaStatus struct {
 	// +optional
 	RepresentativeRef *EngineGroupCapacityRef `json:"representativeRef,omitempty"`
 
-	// current is the currently allocated physical and runtime incarnation.
+	// currentAllocation is the allocation currently backing this stable replica slot.
 	// +optional
-	Current *EngineGroupReplicaIncarnation `json:"current,omitempty"`
+	CurrentAllocation *EngineGroupReplicaAllocationStatus `json:"currentAllocation,omitempty"`
 
-	// previousIncarnations retain identities required for recovery or exact release.
+	// candidateAllocation is the sole replacement being prepared for this replica.
+	// A dormant candidate has no native identities until reuse is safe. A backend
+	// advertising surge may temporarily assign it distinct members before promotion.
 	// +optional
-	PreviousIncarnations []EngineGroupReplicaIncarnation `json:"previousIncarnations,omitempty"`
+	CandidateAllocation *EngineGroupReplicaAllocationStatus `json:"candidateAllocation,omitempty"`
 
-	// nativeMembers are the engine identities currently correlated with this logical replica.
+	// nativeMembers reports membership and traffic independently for every correlated member.
 	// +optional
-	// +kubebuilder:validation:items:MinLength=1
-	NativeMembers []string `json:"nativeMembers,omitempty"`
-
-	// availability reports complete physical and profile-required runtime readiness.
-	Availability EngineGroupReplicaAvailability `json:"availability"`
-
-	// membership reports committed engine state or current orchestration intent.
-	Membership EngineGroupReplicaMembership `json:"membership"`
+	// +listType=map
+	// +listMapKey=id
+	NativeMembers []EngineGroupNativeMemberStatus `json:"nativeMembers,omitempty"`
 }
 
-// EngineGroupReplicaIncarnation binds one logical replica and stable slot to concrete capacity.
-type EngineGroupReplicaIncarnation struct {
+// EngineGroupReplicaAllocationStatus binds concrete capacity to independently observed health.
+type EngineGroupReplicaAllocationStatus struct {
 	// runtimeIncarnation identifies one concrete engine process incarnation.
+	// A dormant candidate may not yet have a runtime incarnation.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
-	RuntimeIncarnation string `json:"runtimeIncarnation"`
+	RuntimeIncarnation string `json:"runtimeIncarnation,omitempty"`
 
 	// capacityRefs contains every concrete Pod incarnation in this replica allocation.
 	// +kubebuilder:validation:MinItems=1
 	CapacityRefs []EngineGroupCapacityRef `json:"capacityRefs"`
+
+	// availability reports usable backing capacity for the members this allocation still serves.
+	// Pod Ready is only an input; a degraded allocation may keep serving surviving members.
+	Availability EngineGroupReplicaAvailability `json:"availability"`
+
+	// health records physical and runtime health independently of committed membership.
+	Health EngineGroupAllocationHealth `json:"health"`
+}
+
+// EngineGroupNativeMemberStatus records one engine-authoritative native member and its traffic evidence.
+type EngineGroupNativeMemberStatus struct {
+	// id is a stable backend-native member identity.
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
+
+	// membership distinguishes committed participation from masking or orchestration intent.
+	Membership EngineGroupReplicaMembership `json:"membership"`
+
+	// traffic is admission or terminal drain evidence from the runtime traffic authority.
+	Traffic EngineGroupMemberTraffic `json:"traffic"`
 }
 
 // EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
@@ -328,8 +372,31 @@ type EngineGroupTargetValidationStatus struct {
 // +kubebuilder:validation:Enum=Available;Unavailable;Unknown
 type EngineGroupReplicaAvailability string
 
+// EngineGroupAllocationHealth records allocation health without collapsing it into membership.
+// +kubebuilder:validation:Enum=Healthy;Degraded;Failed;Unknown
+type EngineGroupAllocationHealth string
+
 const (
-	// EngineGroupReplicaAvailabilityAvailable means every capacity Pod and required runtime check is ready.
+	EngineGroupAllocationHealthHealthy  EngineGroupAllocationHealth = "Healthy"
+	EngineGroupAllocationHealthDegraded EngineGroupAllocationHealth = "Degraded"
+	EngineGroupAllocationHealthFailed   EngineGroupAllocationHealth = "Failed"
+	EngineGroupAllocationHealthUnknown  EngineGroupAllocationHealth = "Unknown"
+)
+
+// EngineGroupMemberTraffic records per-member traffic evidence, independently of Pod readiness.
+// +kubebuilder:validation:Enum=Admitted;Draining;Drained;Withdrawn;Unknown
+type EngineGroupMemberTraffic string
+
+const (
+	EngineGroupMemberTrafficAdmitted  EngineGroupMemberTraffic = "Admitted"
+	EngineGroupMemberTrafficDraining  EngineGroupMemberTraffic = "Draining"
+	EngineGroupMemberTrafficDrained   EngineGroupMemberTraffic = "Drained"
+	EngineGroupMemberTrafficWithdrawn EngineGroupMemberTraffic = "Withdrawn"
+	EngineGroupMemberTrafficUnknown   EngineGroupMemberTraffic = "Unknown"
+)
+
+const (
+	// EngineGroupReplicaAvailabilityAvailable means capacity is usable for the members it still backs.
 	EngineGroupReplicaAvailabilityAvailable EngineGroupReplicaAvailability = "Available"
 	// EngineGroupReplicaAvailabilityUnavailable means at least one required capacity or runtime check failed.
 	EngineGroupReplicaAvailabilityUnavailable EngineGroupReplicaAvailability = "Unavailable"
@@ -342,9 +409,9 @@ const (
 type EngineGroupReplicaMembership string
 
 const (
-	// EngineGroupReplicaMembershipActive means the engine has committed this replica.
+	// EngineGroupReplicaMembershipActive means the engine has committed this native member.
 	EngineGroupReplicaMembershipActive EngineGroupReplicaMembership = "Active"
-	// EngineGroupReplicaMembershipMasked means the engine committed a survivor topology excluding this replica.
+	// EngineGroupReplicaMembershipMasked means the engine committed a topology excluding this member.
 	EngineGroupReplicaMembershipMasked EngineGroupReplicaMembership = "Masked"
 	// EngineGroupReplicaMembershipJoining means orchestration intends this replica to join.
 	EngineGroupReplicaMembershipJoining EngineGroupReplicaMembership = "Joining"
@@ -370,7 +437,7 @@ const (
 // +kubebuilder:printcolumn:name="DESIRED",type="integer",JSONPath=".spec.replicas",description="Desired logical replicas"
 // +kubebuilder:printcolumn:name="ALLOCATED",type="integer",JSONPath=".status.replicas",description="Logically complete physical allocations"
 // +kubebuilder:printcolumn:name="AVAILABLE",type="integer",JSONPath=".status.availableReplicas",description="Available logical replicas"
-// +kubebuilder:printcolumn:name="ACTIVE",type="integer",JSONPath=".status.activeReplicas",description="Engine-committed logical replicas"
+// +kubebuilder:printcolumn:name="ACTIVE MEMBERS",type="integer",JSONPath=".status.activeNativeMemberCount",description="Engine-committed native members"
 // +kubebuilder:printcolumn:name="UNITS",type="string",JSONPath=".status.scaleUnit",description="Unit counted by desired and observed replica columns"
 // +kubebuilder:printcolumn:name="PODS/REPLICA",type="integer",JSONPath=".status.profile.podsPerReplica",description="Physical Pods allocated per logical replica"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"

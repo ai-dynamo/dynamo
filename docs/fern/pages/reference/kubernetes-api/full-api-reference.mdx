@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 166 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 187 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">69 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">90 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">28 types</Card>
 </CardGroup>
 
@@ -2141,6 +2141,7 @@ Package v1beta1 contains API Schema definitions for the nvidia.com v1beta1 API g
 <CardGroup cols={3}>
 <Card title="DynamoComponentDeployment" href="#v1beta1-dynamocomponentdeployment" />
 <Card title="DynamoGraphDeployment" href="#v1beta1-dynamographdeployment" />
+<Card title="DynamoGraphDeploymentEngineGroup" href="#dynamographdeploymentenginegroup" />
 <Card title="DynamoGraphDeploymentRequest" href="#v1beta1-dynamographdeploymentrequest" />
 <Card title="DynamoGraphDeploymentScalingAdapter" href="#v1beta1-dynamographdeploymentscalingadapter" />
 </CardGroup>
@@ -2326,6 +2327,44 @@ identityHash is a deprecated legacy checkpoint identity hash. Native standalone 
 
 <ParamField path="ready" type="boolean">
 ready indicates the checkpoint artifact is ready for future pods to restore.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="componentenginegrouppolicy" title="ComponentEngineGroupPolicy">
+ComponentEngineGroupPolicy configures initial allocation bounds for newly created worlds.
+
+
+**Kind:** `type`
+**Appears in:** [ComponentEngineGroupSpec](#componentenginegroupspec)
+
+<ParamField path="minSize" type="integer">
+minSize seeds the generated Engine Group's policy.minReplicas.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="maxSize" type="integer">
+maxSize seeds the generated Engine Group's policy.maxReplicas.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="componentenginegroupspec" title="ComponentEngineGroupSpec">
+ComponentEngineGroupSpec configures creation of independent engine worlds.
+Initialization and live /scale targets both count whole replica allocations.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
+
+<ParamField path="initialSize" type="integer">
+initialSize is the immutable number of replica allocations in each new world. It is not a GPU, EP-rank, or native-member count. The profile resolves those counts.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="policy" type="ComponentEngineGroupPolicy">
+policy supplies initial bounds copied into each new Engine Group's live policy.
+See [ComponentEngineGroupPolicy](#componentenginegrouppolicy).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2644,8 +2683,14 @@ See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-
 </ParamField>
 
 <ParamField path="replicas" type="integer">
-replicas is the desired number of Pods for this component. When `scalingAdapter` is set on this component, this field is managed by the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
+replicas is the desired number of Pods for an ordinary component. For an engineGroup component it counts independent engine worlds. When `scalingAdapter` is set on this component, this field is managed by the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="engineGroup" type="ComponentEngineGroupSpec">
+engineGroup opts a DGD component into independently resizable engine worlds. Component replicas then count worlds, not allocations inside a world. Each new group's spec.replicas is seeded from initialSize and subsequently scaled independently. DGD-driven Engine Group creation is not enabled yet; admission rejects this block until that workload pathway is implemented. Standalone DCDs cannot use it.
+See [ComponentEngineGroupSpec](#componentenginegroupspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
@@ -2753,8 +2798,14 @@ See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-
 </ParamField>
 
 <ParamField path="replicas" type="integer">
-replicas is the desired number of Pods for this component. When `scalingAdapter` is set on this component, this field is managed by the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
+replicas is the desired number of Pods for an ordinary component. For an engineGroup component it counts independent engine worlds. When `scalingAdapter` is set on this component, this field is managed by the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="engineGroup" type="ComponentEngineGroupSpec">
+engineGroup opts a DGD component into independently resizable engine worlds. Component replicas then count worlds, not allocations inside a world. Each new group's spec.replicas is seeded from initialSize and subsequently scaled independently. DGD-driven Engine Group creation is not enabled yet; admission rejects this block until that workload pathway is implemented. Standalone DCDs cannot use it.
+See [ComponentEngineGroupSpec](#componentenginegroupspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
@@ -2873,6 +2924,157 @@ name is the `metadata.name` of the target DynamoGraphDeployment.
 <ParamField path="componentName" type="string" required={true}>
 componentName is the `componentName` of the entry within the target DGD's `spec.components` list to scale.
 **Validation:** MinLength: 1  Required: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentenginegroup" title="DynamoGraphDeploymentEngineGroup">
+DynamoGraphDeploymentEngineGroup represents one independently resizable distributed engine world.
+The scale subresource counts logical replicas, while status keeps physical allocation, engine
+membership, and traffic admission separately observable.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1beta1`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoGraphDeploymentEngineGroup`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoGraphDeploymentEngineGroupSpec">
+See [DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec).
+</ParamField>
+
+<ParamField path="status" type="DynamoGraphDeploymentEngineGroupStatus">
+See [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentenginegroupspec" title="DynamoGraphDeploymentEngineGroupSpec">
+DynamoGraphDeploymentEngineGroupSpec defines the desired capacity of one independently
+resizable distributed engine world.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+<ParamField path="replicas" type="integer" required={true}>
+replicas is the absolute desired number of independently scalable replica allocations. The profile maps each allocation to whole Pods and one or more native engine members.
+**Validation:** Minimum: 1  Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="policy" type="EngineGroupScalingPolicy">
+policy constrains user- or autoscaler-selected replica targets independently from hard engine capability bounds reported in status.profile.
+See [EngineGroupScalingPolicy](#enginegroupscalingpolicy).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentenginegroupstatus" title="DynamoGraphDeploymentEngineGroupStatus">
+DynamoGraphDeploymentEngineGroupStatus defines the observed state of one Engine Group.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+<ParamField path="observedGeneration" type="integer">
+observedGeneration is the most recent object generation observed by the controller.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="replicas" type="integer">
+replicas is the number of logical replicas with complete physical allocations. It is the current replica count exposed through the scale subresource.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="availableReplicas" type="integer">
+availableReplicas counts allocations whose complete steady-state member set is active and admitted with usable backing capacity. Partially serving allocations do not count.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="desiredNativeMembers" type="string array">
+desiredNativeMembers is the exact identity set assigned to the desired replica slots. Survivor recovery does not rewrite this set; identities need not be contiguous.
+**Validation:** items:MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="desiredNativeMemberCount" type="integer">
+desiredNativeMemberCount is the cardinality of desiredNativeMembers.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="activeNativeMemberCount" type="integer">
+activeNativeMemberCount counts exact members in the authoritative committed topology. A partially serving allocation contributes only its active members, not one active replica.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="selector" type="string">
+selector matches exactly one representative Pod for every allocated logical replica. It represents allocation, not availability or engine admission.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="scaleUnit" type="EngineGroupScaleUnit">
+scaleUnit names the logical unit counted by spec.replicas and status.replicas.
+See [EngineGroupScaleUnit](#enginegroupscaleunit).
+**Validation:** Enum: [replicas]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="profile" type="EngineGroupProfileStatus">
+profile is the immutable resolved mapping between logical replicas and physical capacity.
+See [EngineGroupProfileStatus](#enginegroupprofilestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="topology" type="EngineGroupTopologyStatus">
+topology is the engine's current authoritative committed topology.
+See [EngineGroupTopologyStatus](#enginegrouptopologystatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lastStableReplicas" type="integer">
+lastStableReplicas is the most recent allocation count that reached its desired target without degradation.
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lastStableTopologyGeneration" type="integer">
+lastStableTopologyGeneration identifies the exact last fully restored serving membership. It distinguishes unexpected member loss from a planned change in allocation target.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="replicaStates" type="EngineGroupReplicaStatus array">
+replicaStates contains the stable identity and independently observed physical and engine state of each known logical replica.
+See [EngineGroupReplicaStatus](#enginegroupreplicastatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="traffic" type="EngineGroupTrafficStatus">
+traffic is the runtime's authoritative routing and drain observation.
+See [EngineGroupTrafficStatus](#enginegrouptrafficstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="releaseAuthorizations" type="EngineGroupReleaseAuthorization array">
+releaseAuthorizations names the exact Pod UIDs that may be removed from stable replica slots.
+See [EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="targetValidation" type="EngineGroupTargetValidationStatus">
+targetValidation describes a desired replica target rejected from reconciliation-time profile or capability information.
+See [EngineGroupTargetValidationStatus](#enginegrouptargetvalidationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+conditions contains the latest observations of group availability, progress, degradation, target convergence, target validity, and topology authority.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -3287,6 +3489,422 @@ See [ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubern
 <ParamField path="config" type="EndpointPickerConfig">
 config allows specifying EPP `EndpointPickerConfig` directly as a structured object. The operator marshals this to YAML and creates a ConfigMap automatically. Mutually exclusive with `configMapRef`. One of `configMapRef` or `config` must be specified.
 **Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupallocationhealth" title="EngineGroupAllocationHealth">
+EngineGroupAllocationHealth records allocation health without collapsing it into membership.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Healthy Degraded Failed Unknown]
+**Appears in:** [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Healthy</Badge>
+- <Badge intent="note" minimal>Degraded</Badge>
+- <Badge intent="note" minimal>Failed</Badge>
+- <Badge intent="note" minimal>Unknown</Badge>
+</Accordion>
+
+<Accordion id="enginegroupcapacityref" title="EngineGroupCapacityRef">
+EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization), [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus), [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+<ParamField path="name" type="string">
+name is the Pod name.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="uid" type="UID">
+uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupmemberstatus" title="EngineGroupMemberStatus">
+EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupTopologyStatus](#enginegrouptopologystatus), [EngineGroupTrafficStatus](#enginegrouptrafficstatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is the stable logical identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="runtimeIncarnation" type="string">
+runtimeIncarnation identifies the concrete engine process in this topology.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="nativeMembers" type="string array">
+nativeMembers are the backend-specific ranks or member identities committed for the replica.
+**Validation:** MinItems: 1  items:MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupmembertraffic" title="EngineGroupMemberTraffic">
+EngineGroupMemberTraffic records per-member traffic evidence, independently of Pod readiness.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Admitted Draining Drained Withdrawn Unknown]
+**Appears in:** [EngineGroupNativeMemberStatus](#enginegroupnativememberstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Admitted</Badge>
+- <Badge intent="note" minimal>Draining</Badge>
+- <Badge intent="note" minimal>Drained</Badge>
+- <Badge intent="note" minimal>Withdrawn</Badge>
+- <Badge intent="note" minimal>Unknown</Badge>
+</Accordion>
+
+<Accordion id="enginegroupnativememberstatus" title="EngineGroupNativeMemberStatus">
+EngineGroupNativeMemberStatus records one engine-authoritative native member and its traffic evidence.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+<ParamField path="id" type="string">
+id is a stable backend-native member identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="membership" type="EngineGroupReplicaMembership">
+membership distinguishes committed participation from masking or orchestration intent.
+See [EngineGroupReplicaMembership](#enginegroupreplicamembership).
+**Validation:** Enum: [Active Masked Joining Retiring Unknown]
+</ParamField>
+
+<ParamField path="traffic" type="EngineGroupMemberTraffic">
+traffic is admission or terminal drain evidence from the runtime traffic authority.
+See [EngineGroupMemberTraffic](#enginegroupmembertraffic).
+**Validation:** Enum: [Admitted Draining Drained Withdrawn Unknown]
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupprofilestatus" title="EngineGroupProfileStatus">
+EngineGroupProfileStatus records immutable geometry and hard capability bounds resolved for a group.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="backend" type="string">
+backend is the inference engine that owns native membership.
+**Validation:** Enum: [sglang vllm trtllm]
+</ParamField>
+
+<ParamField path="fingerprint" type="string">
+fingerprint identifies the immutable engine and workload geometry used by this group.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="gpusPerReplica" type="integer">
+gpusPerReplica is the accelerator requirement of one logical replica.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="podsPerReplica" type="integer">
+podsPerReplica is the number of physically disjoint capacity Pods allocated and released together for one logical replica.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="nativeMembersPerReplica" type="integer">
+nativeMembersPerReplica is the fixed steady-state member count per allocation. Partial survival and advertised surge may temporarily change the active count.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="minSafeServingNativeMembers" type="integer">
+minSafeServingNativeMembers is the lowest committed native-member count at which this profile may continue serving while degraded or recovering.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="minSupportedReplicas" type="integer">
+minSupportedReplicas is the hard lower bound for live membership operations other than terminal group retirement.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="maxSupportedReplicas" type="integer">
+maxSupportedReplicas is the hard upper bound for live membership operations.
+**Validation:** Minimum: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreleaseauthorization" title="EngineGroupReleaseAuthorization">
+EngineGroupReleaseAuthorization permits removal of only named concrete Pod incarnations.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="operationID" type="string">
+operationID identifies the membership result authorizing release.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="topologyGeneration" type="integer">
+topologyGeneration identifies the exact committed topology authorizing release.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="replicaID" type="string">
+replicaID is the stable logical replica being released.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="slotID" type="string">
+slotID is the stable workload-manager position being fenced.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="capacityRefs" type="EngineGroupCapacityRef array">
+capacityRefs is the complete set of concrete Pod UIDs authorized for deletion.
+See [EngineGroupCapacityRef](#enginegroupcapacityref).
+**Validation:** MinItems: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreplicaallocationstatus" title="EngineGroupReplicaAllocationStatus">
+EngineGroupReplicaAllocationStatus binds concrete capacity to independently observed health.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+<ParamField path="runtimeIncarnation" type="string">
+runtimeIncarnation identifies one concrete engine process incarnation. A dormant candidate may not yet have a runtime incarnation.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="capacityRefs" type="EngineGroupCapacityRef array">
+capacityRefs contains every concrete Pod incarnation in this replica allocation.
+See [EngineGroupCapacityRef](#enginegroupcapacityref).
+**Validation:** MinItems: 1
+</ParamField>
+
+<ParamField path="availability" type="EngineGroupReplicaAvailability">
+availability reports usable backing capacity for the members this allocation still serves. Pod Ready is only an input; a degraded allocation may keep serving surviving members.
+See [EngineGroupReplicaAvailability](#enginegroupreplicaavailability).
+**Validation:** Enum: [Available Unavailable Unknown]
+</ParamField>
+
+<ParamField path="health" type="EngineGroupAllocationHealth">
+health records physical and runtime health independently of committed membership.
+See [EngineGroupAllocationHealth](#enginegroupallocationhealth).
+**Validation:** Enum: [Healthy Degraded Failed Unknown]
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupreplicaavailability" title="EngineGroupReplicaAvailability">
+EngineGroupReplicaAvailability reports physical and runtime availability independently from membership.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Available Unavailable Unknown]
+**Appears in:** [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Available</Badge> EngineGroupReplicaAvailabilityAvailable means capacity is usable for the members it still backs.
+- <Badge intent="note" minimal>Unavailable</Badge> EngineGroupReplicaAvailabilityUnavailable means at least one required capacity or runtime check failed.
+- <Badge intent="note" minimal>Unknown</Badge> EngineGroupReplicaAvailabilityUnknown means availability cannot currently be established.
+</Accordion>
+
+<Accordion id="enginegroupreplicamembership" title="EngineGroupReplicaMembership">
+EngineGroupReplicaMembership reports committed engine state or current orchestration intent.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Active Masked Joining Retiring Unknown]
+**Appears in:** [EngineGroupNativeMemberStatus](#enginegroupnativememberstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Active</Badge> EngineGroupReplicaMembershipActive means the engine has committed this native member.
+- <Badge intent="note" minimal>Masked</Badge> EngineGroupReplicaMembershipMasked means the engine committed a topology excluding this member.
+- <Badge intent="note" minimal>Joining</Badge> EngineGroupReplicaMembershipJoining means orchestration intends this replica to join.
+- <Badge intent="note" minimal>Retiring</Badge> EngineGroupReplicaMembershipRetiring means orchestration intends this replica to leave.
+- <Badge intent="note" minimal>Unknown</Badge> EngineGroupReplicaMembershipUnknown means authoritative engine membership is unavailable.
+</Accordion>
+
+<Accordion id="enginegroupreplicastatus" title="EngineGroupReplicaStatus">
+EngineGroupReplicaStatus preserves one stable logical identity across physical replacement.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="replicaID" type="string">
+replicaID is stable across physical and runtime replacement.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="slotID" type="string">
+slotID identifies the stable workload-manager position backing this replica.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="representativeRef" type="EngineGroupCapacityRef">
+representativeRef identifies the Pod selected by status.selector for this allocation.
+See [EngineGroupCapacityRef](#enginegroupcapacityref).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="currentAllocation" type="EngineGroupReplicaAllocationStatus">
+currentAllocation is the allocation currently backing this stable replica slot.
+See [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="candidateAllocation" type="EngineGroupReplicaAllocationStatus">
+candidateAllocation is the sole replacement being prepared for this replica. A dormant candidate has no native identities until reuse is safe. A backend advertising surge may temporarily assign it distinct members before promotion.
+See [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="nativeMembers" type="EngineGroupNativeMemberStatus array">
+nativeMembers reports membership and traffic independently for every correlated member.
+See [EngineGroupNativeMemberStatus](#enginegroupnativememberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegroupscaleunit" title="EngineGroupScaleUnit">
+EngineGroupScaleUnit names the logical unit exposed through the Scale subresource.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [replicas]
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>replicas</Badge> EngineGroupScaleUnitReplicas means Scale counts logical engine replicas within one world.
+</Accordion>
+
+<Accordion id="enginegroupscalingpolicy" title="EngineGroupScalingPolicy">
+EngineGroupScalingPolicy defines operator-selected scaling bounds for one Engine Group.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec)
+
+<ParamField path="minReplicas" type="integer">
+minReplicas is the minimum ordinary scaling target. Terminal group retirement is driven by deletion and may retire membership below this bound without writing an out-of-policy target.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="maxReplicas" type="integer">
+maxReplicas is the maximum target selected by policy. It cannot exceed the resolved hard engine capability bound.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptargetvalidationstatus" title="EngineGroupTargetValidationStatus">
+EngineGroupTargetValidationStatus records a reconcile-time target rejection without silently
+changing the requested target.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="requestedReplicas" type="integer">
+requestedReplicas is the rejected desired target.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="effectiveReplicas" type="integer">
+effectiveReplicas is the last valid target still in force.
+**Validation:** Minimum: 0
+</ParamField>
+
+<ParamField path="minReplicas" type="integer">
+minReplicas is the effective lower bound used for validation.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="maxReplicas" type="integer">
+maxReplicas is the effective upper bound used for validation.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="reason" type="string">
+reason is a stable machine-readable rejection reason.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="message" type="string">
+message explains the rejection for a human reader.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptopologystatus" title="EngineGroupTopologyStatus">
+EngineGroupTopologyStatus is one immutable engine-authoritative committed topology snapshot.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="generation" type="integer">
+generation is the engine's topology generation.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="replicas" type="EngineGroupMemberStatus array">
+replicas is the complete logical-to-native membership mapping at this generation.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="enginegrouptrafficstatus" title="EngineGroupTrafficStatus">
+EngineGroupTrafficStatus is the runtime's exact routing and terminal drain state.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+<ParamField path="operationID" type="string">
+operationID identifies the operation for which this observation was produced.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="topologyGeneration" type="integer">
+topologyGeneration binds the observation to an exact committed topology.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="admitted" type="EngineGroupMemberStatus array">
+admitted is the exact set of member incarnations eligible for new work.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="draining" type="EngineGroupMemberStatus array">
+draining is the exact set of member incarnations whose in-flight work has not completed.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="drained" type="EngineGroupMemberStatus array">
+drained is durable terminal non-serving evidence for exact member incarnations.
+See [EngineGroupMemberStatus](#enginegroupmemberstatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

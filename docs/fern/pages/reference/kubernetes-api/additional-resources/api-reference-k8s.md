@@ -1505,6 +1505,7 @@ Package v1beta1 contains API Schema definitions for the nvidia.com v1beta1 API g
 ### Resource Types
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
+- [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
 - [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
 - [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
 
@@ -1664,6 +1665,42 @@ _Appears in:_
 | `checkpointID` _string_ | checkpointID is a deprecated legacy Dynamo artifact ID. Native standalone<br />snapshots leave this field empty. |  | Optional: \{\} <br /> |
 | `identityHash` _string_ | identityHash is a deprecated legacy checkpoint identity hash. Native<br />standalone snapshots leave this field empty. |  | Optional: \{\} <br /> |
 | `ready` _boolean_ | ready indicates the checkpoint artifact is ready for future pods to restore. |  | Optional: \{\} <br /> |
+
+
+#### ComponentEngineGroupPolicy
+
+
+
+ComponentEngineGroupPolicy configures initial allocation bounds for newly created worlds.
+
+
+
+_Appears in:_
+- [ComponentEngineGroupSpec](#componentenginegroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `minSize` _integer_ | minSize seeds the generated Engine Group's policy.minReplicas. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxSize` _integer_ | maxSize seeds the generated Engine Group's policy.maxReplicas. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+
+
+#### ComponentEngineGroupSpec
+
+
+
+ComponentEngineGroupSpec configures creation of independent engine worlds.
+Initialization and live /scale targets both count whole replica allocations.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `initialSize` _integer_ | initialSize is the immutable number of replica allocations in each new world.<br />It is not a GPU, EP-rank, or native-member count. The profile resolves those counts. |  | Minimum: 1 <br /> |
+| `policy` _[ComponentEngineGroupPolicy](#componentenginegrouppolicy)_ | policy supplies initial bounds copied into each new Engine Group's live policy. |  | Optional: \{\} <br /> |
 
 
 #### ComponentKind
@@ -1893,7 +1930,8 @@ _Appears in:_
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
-| `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replicas` _integer_ | replicas is the desired number of Pods for an ordinary component. For an<br />engineGroup component it counts independent engine worlds. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `engineGroup` _[ComponentEngineGroupSpec](#componentenginegroupspec)_ | engineGroup opts a DGD component into independently resizable engine worlds.<br />Component replicas then count worlds, not allocations inside a world. Each new<br />group's spec.replicas is seeded from initialSize and subsequently scaled independently.<br />DGD-driven Engine Group creation is not enabled yet; admission rejects this<br />block until that workload pathway is implemented. Standalone DCDs cannot use it. |  | Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
 | `roles` _[ComponentRoleSpec](#componentrolespec) array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout. |  | Optional: \{\} <br /> |
@@ -1926,7 +1964,8 @@ _Appears in:_
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
-| `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replicas` _integer_ | replicas is the desired number of Pods for an ordinary component. For an<br />engineGroup component it counts independent engine worlds. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `engineGroup` _[ComponentEngineGroupSpec](#componentenginegroupspec)_ | engineGroup opts a DGD component into independently resizable engine worlds.<br />Component replicas then count worlds, not allocations inside a world. Each new<br />group's spec.replicas is seeded from initialSize and subsequently scaled independently.<br />DGD-driven Engine Group creation is not enabled yet; admission rejects this<br />block until that workload pathway is implemented. Standalone DCDs cannot use it. |  | Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
 | `roles` _object array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
@@ -1981,6 +2020,77 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | name is the `metadata.name` of the target DynamoGraphDeployment. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `componentName` _string_ | componentName is the `componentName` of the entry within the target<br />DGD's `spec.components` list to scale. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### DynamoGraphDeploymentEngineGroup
+
+
+
+DynamoGraphDeploymentEngineGroup represents one independently resizable distributed engine world.
+The scale subresource counts logical replicas, while status keeps physical allocation, engine
+membership, and traffic admission separately observable.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
+| `kind` _string_ | `DynamoGraphDeploymentEngineGroup` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec)_ |  |  |  |
+| `status` _[DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)_ |  |  |  |
+
+
+#### DynamoGraphDeploymentEngineGroupSpec
+
+
+
+DynamoGraphDeploymentEngineGroupSpec defines the desired capacity of one independently
+resizable distributed engine world.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | replicas is the absolute desired number of independently scalable replica allocations.<br />The profile maps each allocation to whole Pods and one or more native engine members. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `policy` _[EngineGroupScalingPolicy](#enginegroupscalingpolicy)_ | policy constrains user- or autoscaler-selected replica targets independently from hard<br />engine capability bounds reported in status.profile. |  | Optional: \{\} <br /> |
+
+
+#### DynamoGraphDeploymentEngineGroupStatus
+
+
+
+DynamoGraphDeploymentEngineGroupStatus defines the observed state of one Engine Group.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroup](#dynamographdeploymentenginegroup)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | observedGeneration is the most recent object generation observed by the controller. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replicas` _integer_ | replicas is the number of logical replicas with complete physical allocations. It is the<br />current replica count exposed through the scale subresource. |  | Minimum: 0 <br /> |
+| `availableReplicas` _integer_ | availableReplicas counts allocations whose complete steady-state member set is active<br />and admitted with usable backing capacity. Partially serving allocations do not count. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `desiredNativeMembers` _string array_ | desiredNativeMembers is the exact identity set assigned to the desired replica slots.<br />Survivor recovery does not rewrite this set; identities need not be contiguous. |  | items:MinLength: 1 <br />Optional: \{\} <br /> |
+| `desiredNativeMemberCount` _integer_ | desiredNativeMemberCount is the cardinality of desiredNativeMembers. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `activeNativeMemberCount` _integer_ | activeNativeMemberCount counts exact members in the authoritative committed topology.<br />A partially serving allocation contributes only its active members, not one active replica. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `selector` _string_ | selector matches exactly one representative Pod for every allocated logical replica.<br />It represents allocation, not availability or engine admission. |  | Optional: \{\} <br /> |
+| `scaleUnit` _[EngineGroupScaleUnit](#enginegroupscaleunit)_ | scaleUnit names the logical unit counted by spec.replicas and status.replicas. |  | Enum: [replicas] <br />Optional: \{\} <br /> |
+| `profile` _[EngineGroupProfileStatus](#enginegroupprofilestatus)_ | profile is the immutable resolved mapping between logical replicas and physical capacity. |  | Optional: \{\} <br /> |
+| `topology` _[EngineGroupTopologyStatus](#enginegrouptopologystatus)_ | topology is the engine's current authoritative committed topology. |  | Optional: \{\} <br /> |
+| `lastStableReplicas` _integer_ | lastStableReplicas is the most recent allocation count that reached its desired target<br />without degradation. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `lastStableTopologyGeneration` _integer_ | lastStableTopologyGeneration identifies the exact last fully restored serving membership.<br />It distinguishes unexpected member loss from a planned change in allocation target. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `replicaStates` _[EngineGroupReplicaStatus](#enginegroupreplicastatus) array_ | replicaStates contains the stable identity and independently observed physical and engine<br />state of each known logical replica. |  | Optional: \{\} <br /> |
+| `traffic` _[EngineGroupTrafficStatus](#enginegrouptrafficstatus)_ | traffic is the runtime's authoritative routing and drain observation. |  | Optional: \{\} <br /> |
+| `releaseAuthorizations` _[EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization) array_ | releaseAuthorizations names the exact Pod UIDs that may be removed from stable replica slots. |  | Optional: \{\} <br /> |
+| `targetValidation` _[EngineGroupTargetValidationStatus](#enginegrouptargetvalidationstatus)_ | targetValidation describes a desired replica target rejected from reconciliation-time<br />profile or capability information. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | conditions contains the latest observations of group availability, progress, degradation,<br />target convergence, target validity, and topology authority. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentExperimentalSpec
@@ -2219,6 +2329,319 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | configMapRef references a user-provided ConfigMap containing EPP<br />configuration. Mutually exclusive with `config`. |  | Optional: \{\} <br /> |
 | `config` _EndpointPickerConfig_ | config allows specifying EPP `EndpointPickerConfig` directly as a<br />structured object. The operator marshals this to YAML and creates a<br />ConfigMap automatically. Mutually exclusive with `configMapRef`. One of<br />`configMapRef` or `config` must be specified. |  | Type: object <br />Optional: \{\} <br /> |
+
+
+#### EngineGroupAllocationHealth
+
+_Underlying type:_ _string_
+
+EngineGroupAllocationHealth records allocation health without collapsing it into membership.
+
+_Validation:_
+- Enum: [Healthy Degraded Failed Unknown]
+
+_Appears in:_
+- [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Healthy` |  |
+| `Degraded` |  |
+| `Failed` |  |
+| `Unknown` |  |
+
+
+#### EngineGroupCapacityRef
+
+
+
+EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+
+
+
+_Appears in:_
+- [EngineGroupReleaseAuthorization](#enginegroupreleaseauthorization)
+- [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name is the Pod name. |  | MinLength: 1 <br /> |
+| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | uid is the concrete Pod incarnation and prevents name reuse from inheriting authority. |  |  |
+
+
+#### EngineGroupMemberStatus
+
+
+
+EngineGroupMemberStatus is one engine-owned logical, runtime, and native-member mapping.
+
+
+
+_Appears in:_
+- [EngineGroupTopologyStatus](#enginegrouptopologystatus)
+- [EngineGroupTrafficStatus](#enginegrouptrafficstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
+| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the concrete engine process in this topology. |  | MinLength: 1 <br /> |
+| `nativeMembers` _string array_ | nativeMembers are the backend-specific ranks or member identities committed for the replica. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
+
+
+#### EngineGroupMemberTraffic
+
+_Underlying type:_ _string_
+
+EngineGroupMemberTraffic records per-member traffic evidence, independently of Pod readiness.
+
+_Validation:_
+- Enum: [Admitted Draining Drained Withdrawn Unknown]
+
+_Appears in:_
+- [EngineGroupNativeMemberStatus](#enginegroupnativememberstatus)
+
+| Field | Description |
+| --- | --- |
+| `Admitted` |  |
+| `Draining` |  |
+| `Drained` |  |
+| `Withdrawn` |  |
+| `Unknown` |  |
+
+
+#### EngineGroupNativeMemberStatus
+
+
+
+EngineGroupNativeMemberStatus records one engine-authoritative native member and its traffic evidence.
+
+
+
+_Appears in:_
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | id is a stable backend-native member identity. |  | MinLength: 1 <br /> |
+| `membership` _[EngineGroupReplicaMembership](#enginegroupreplicamembership)_ | membership distinguishes committed participation from masking or orchestration intent. |  | Enum: [Active Masked Joining Retiring Unknown] <br /> |
+| `traffic` _[EngineGroupMemberTraffic](#enginegroupmembertraffic)_ | traffic is admission or terminal drain evidence from the runtime traffic authority. |  | Enum: [Admitted Draining Drained Withdrawn Unknown] <br /> |
+
+
+#### EngineGroupProfileStatus
+
+
+
+EngineGroupProfileStatus records immutable geometry and hard capability bounds resolved for a group.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `backend` _string_ | backend is the inference engine that owns native membership. |  | Enum: [sglang vllm trtllm] <br /> |
+| `fingerprint` _string_ | fingerprint identifies the immutable engine and workload geometry used by this group. |  | MinLength: 1 <br /> |
+| `gpusPerReplica` _integer_ | gpusPerReplica is the accelerator requirement of one logical replica. |  | Minimum: 1 <br /> |
+| `podsPerReplica` _integer_ | podsPerReplica is the number of physically disjoint capacity Pods allocated and released<br />together for one logical replica. |  | Minimum: 1 <br /> |
+| `nativeMembersPerReplica` _integer_ | nativeMembersPerReplica is the fixed steady-state member count per allocation.<br />Partial survival and advertised surge may temporarily change the active count. |  | Minimum: 1 <br /> |
+| `minSafeServingNativeMembers` _integer_ | minSafeServingNativeMembers is the lowest committed native-member count at which this profile may<br />continue serving while degraded or recovering. |  | Minimum: 1 <br /> |
+| `minSupportedReplicas` _integer_ | minSupportedReplicas is the hard lower bound for live membership operations other than terminal<br />group retirement. |  | Minimum: 1 <br /> |
+| `maxSupportedReplicas` _integer_ | maxSupportedReplicas is the hard upper bound for live membership operations. |  | Minimum: 1 <br /> |
+
+
+#### EngineGroupReleaseAuthorization
+
+
+
+EngineGroupReleaseAuthorization permits removal of only named concrete Pod incarnations.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operationID` _string_ | operationID identifies the membership result authorizing release. |  | MinLength: 1 <br /> |
+| `topologyGeneration` _integer_ | topologyGeneration identifies the exact committed topology authorizing release. |  | Minimum: 1 <br /> |
+| `replicaID` _string_ | replicaID is the stable logical replica being released. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID is the stable workload-manager position being fenced. |  | MinLength: 1 <br /> |
+| `capacityRefs` _[EngineGroupCapacityRef](#enginegroupcapacityref) array_ | capacityRefs is the complete set of concrete Pod UIDs authorized for deletion. |  | MinItems: 1 <br /> |
+
+
+#### EngineGroupReplicaAllocationStatus
+
+
+
+EngineGroupReplicaAllocationStatus binds concrete capacity to independently observed health.
+
+
+
+_Appears in:_
+- [EngineGroupReplicaStatus](#enginegroupreplicastatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `runtimeIncarnation` _string_ | runtimeIncarnation identifies one concrete engine process incarnation.<br />A dormant candidate may not yet have a runtime incarnation. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `capacityRefs` _[EngineGroupCapacityRef](#enginegroupcapacityref) array_ | capacityRefs contains every concrete Pod incarnation in this replica allocation. |  | MinItems: 1 <br /> |
+| `availability` _[EngineGroupReplicaAvailability](#enginegroupreplicaavailability)_ | availability reports usable backing capacity for the members this allocation still serves.<br />Pod Ready is only an input; a degraded allocation may keep serving surviving members. |  | Enum: [Available Unavailable Unknown] <br /> |
+| `health` _[EngineGroupAllocationHealth](#enginegroupallocationhealth)_ | health records physical and runtime health independently of committed membership. |  | Enum: [Healthy Degraded Failed Unknown] <br /> |
+
+
+#### EngineGroupReplicaAvailability
+
+_Underlying type:_ _string_
+
+EngineGroupReplicaAvailability reports physical and runtime availability independently from membership.
+
+_Validation:_
+- Enum: [Available Unavailable Unknown]
+
+_Appears in:_
+- [EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Available` | EngineGroupReplicaAvailabilityAvailable means capacity is usable for the members it still backs.<br /> |
+| `Unavailable` | EngineGroupReplicaAvailabilityUnavailable means at least one required capacity or runtime check failed.<br /> |
+| `Unknown` | EngineGroupReplicaAvailabilityUnknown means availability cannot currently be established.<br /> |
+
+
+#### EngineGroupReplicaMembership
+
+_Underlying type:_ _string_
+
+EngineGroupReplicaMembership reports committed engine state or current orchestration intent.
+
+_Validation:_
+- Enum: [Active Masked Joining Retiring Unknown]
+
+_Appears in:_
+- [EngineGroupNativeMemberStatus](#enginegroupnativememberstatus)
+
+| Field | Description |
+| --- | --- |
+| `Active` | EngineGroupReplicaMembershipActive means the engine has committed this native member.<br /> |
+| `Masked` | EngineGroupReplicaMembershipMasked means the engine committed a topology excluding this member.<br /> |
+| `Joining` | EngineGroupReplicaMembershipJoining means orchestration intends this replica to join.<br /> |
+| `Retiring` | EngineGroupReplicaMembershipRetiring means orchestration intends this replica to leave.<br /> |
+| `Unknown` | EngineGroupReplicaMembershipUnknown means authoritative engine membership is unavailable.<br /> |
+
+
+#### EngineGroupReplicaStatus
+
+
+
+EngineGroupReplicaStatus preserves one stable logical identity across physical replacement.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicaID` _string_ | replicaID is stable across physical and runtime replacement. |  | MinLength: 1 <br /> |
+| `slotID` _string_ | slotID identifies the stable workload-manager position backing this replica. |  | MinLength: 1 <br /> |
+| `representativeRef` _[EngineGroupCapacityRef](#enginegroupcapacityref)_ | representativeRef identifies the Pod selected by status.selector for this allocation. |  | Optional: \{\} <br /> |
+| `currentAllocation` _[EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)_ | currentAllocation is the allocation currently backing this stable replica slot. |  | Optional: \{\} <br /> |
+| `candidateAllocation` _[EngineGroupReplicaAllocationStatus](#enginegroupreplicaallocationstatus)_ | candidateAllocation is the sole replacement being prepared for this replica.<br />A dormant candidate has no native identities until reuse is safe. A backend<br />advertising surge may temporarily assign it distinct members before promotion. |  | Optional: \{\} <br /> |
+| `nativeMembers` _[EngineGroupNativeMemberStatus](#enginegroupnativememberstatus) array_ | nativeMembers reports membership and traffic independently for every correlated member. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupScaleUnit
+
+_Underlying type:_ _string_
+
+EngineGroupScaleUnit names the logical unit exposed through the Scale subresource.
+
+_Validation:_
+- Enum: [replicas]
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description |
+| --- | --- |
+| `replicas` | EngineGroupScaleUnitReplicas means Scale counts logical engine replicas within one world.<br /> |
+
+
+#### EngineGroupScalingPolicy
+
+
+
+EngineGroupScalingPolicy defines operator-selected scaling bounds for one Engine Group.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupSpec](#dynamographdeploymentenginegroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `minReplicas` _integer_ | minReplicas is the minimum ordinary scaling target. Terminal group retirement is driven by<br />deletion and may retire membership below this bound without writing an out-of-policy target. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxReplicas` _integer_ | maxReplicas is the maximum target selected by policy. It cannot exceed the resolved hard<br />engine capability bound. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+
+
+#### EngineGroupTargetValidationStatus
+
+
+
+EngineGroupTargetValidationStatus records a reconcile-time target rejection without silently
+changing the requested target.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `requestedReplicas` _integer_ | requestedReplicas is the rejected desired target. |  | Minimum: 0 <br /> |
+| `effectiveReplicas` _integer_ | effectiveReplicas is the last valid target still in force. |  | Minimum: 0 <br /> |
+| `minReplicas` _integer_ | minReplicas is the effective lower bound used for validation. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxReplicas` _integer_ | maxReplicas is the effective upper bound used for validation. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `reason` _string_ | reason is a stable machine-readable rejection reason. |  | MinLength: 1 <br /> |
+| `message` _string_ | message explains the rejection for a human reader. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTopologyStatus
+
+
+
+EngineGroupTopologyStatus is one immutable engine-authoritative committed topology snapshot.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `generation` _integer_ | generation is the engine's topology generation. |  | Minimum: 1 <br /> |
+| `replicas` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | replicas is the complete logical-to-native membership mapping at this generation. |  | Optional: \{\} <br /> |
+
+
+#### EngineGroupTrafficStatus
+
+
+
+EngineGroupTrafficStatus is the runtime's exact routing and terminal drain state.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentEngineGroupStatus](#dynamographdeploymentenginegroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `operationID` _string_ | operationID identifies the operation for which this observation was produced. |  | Optional: \{\} <br /> |
+| `topologyGeneration` _integer_ | topologyGeneration binds the observation to an exact committed topology. |  | Minimum: 1 <br /> |
+| `admitted` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | admitted is the exact set of member incarnations eligible for new work. |  | Optional: \{\} <br /> |
+| `draining` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | draining is the exact set of member incarnations whose in-flight work has not completed. |  | Optional: \{\} <br /> |
+| `drained` _[EngineGroupMemberStatus](#enginegroupmemberstatus) array_ | drained is durable terminal non-serving evidence for exact member incarnations. |  | Optional: \{\} <br /> |
 
 
 #### ExperimentalSpec

@@ -33,9 +33,9 @@ spec:
           jsonPath: .status.availableReplicas
           name: AVAILABLE
           type: integer
-        - description: Engine-committed logical replicas
-          jsonPath: .status.activeReplicas
-          name: ACTIVE
+        - description: Engine-committed native members
+          jsonPath: .status.activeNativeMemberCount
+          name: ACTIVE MEMBERS
           type: integer
         - description: Unit counted by desired and observed replica columns
           jsonPath: .status.scaleUnit
@@ -103,8 +103,8 @@ spec:
                       rule: '!has(self.minReplicas) || !has(self.maxReplicas) || self.minReplicas <= self.maxReplicas'
                 replicas:
                   description: |-
-                    replicas is the absolute desired number of logical engine replicas in this group.
-                    For Elastic EP, one replica maps to one data-parallel replica through the resolved profile.
+                    replicas is the absolute desired number of independently scalable replica allocations.
+                    The profile maps each allocation to whole Pods and one or more native engine members.
                   format: int32
                   minimum: 1
                   type: integer
@@ -119,15 +119,17 @@ spec:
             status:
               description: DynamoGraphDeploymentEngineGroupStatus defines the observed state of one Engine Group.
               properties:
-                activeReplicas:
-                  description: activeReplicas is the number of replicas in the engine's authoritative committed topology.
+                activeNativeMemberCount:
+                  description: |-
+                    activeNativeMemberCount counts exact members in the authoritative committed topology.
+                    A partially serving allocation contributes only its active members, not one active replica.
                   format: int32
                   minimum: 0
                   type: integer
                 availableReplicas:
                   description: |-
-                    availableReplicas is the number of allocated replicas whose complete physical allocation
-                    and profile-required runtime checks are available.
+                    availableReplicas counts allocations whose complete steady-state member set is active
+                    and admitted with usable backing capacity. Partially serving allocations do not count.
                   format: int32
                   minimum: 0
                   type: integer
@@ -192,12 +194,33 @@ spec:
                   x-kubernetes-list-map-keys:
                     - type
                   x-kubernetes-list-type: map
+                desiredNativeMemberCount:
+                  description: desiredNativeMemberCount is the cardinality of desiredNativeMembers.
+                  format: int32
+                  minimum: 0
+                  type: integer
+                desiredNativeMembers:
+                  description: |-
+                    desiredNativeMembers is the exact identity set assigned to the desired replica slots.
+                    Survivor recovery does not rewrite this set; identities need not be contiguous.
+                  items:
+                    minLength: 1
+                    type: string
+                  type: array
+                  x-kubernetes-list-type: set
                 lastStableReplicas:
                   description: |-
-                    lastStableReplicas is the most recent membership count that reached its desired target
+                    lastStableReplicas is the most recent allocation count that reached its desired target
                     without degradation.
                   format: int32
                   minimum: 0
+                  type: integer
+                lastStableTopologyGeneration:
+                  description: |-
+                    lastStableTopologyGeneration identifies the exact last fully restored serving membership.
+                    It distinguishes unexpected member loss from a planned change in allocation target.
+                  format: int64
+                  minimum: 1
                   type: integer
                 observedGeneration:
                   description: observedGeneration is the most recent object generation observed by the controller.
@@ -223,22 +246,29 @@ spec:
                       format: int64
                       minimum: 1
                       type: integer
-                    maxReplicas:
-                      description: maxReplicas is the hard upper bound for live membership operations.
+                    maxSupportedReplicas:
+                      description: maxSupportedReplicas is the hard upper bound for live membership operations.
                       format: int32
                       minimum: 1
                       type: integer
-                    minReplicas:
+                    minSafeServingNativeMembers:
                       description: |-
-                        minReplicas is the hard lower bound for live membership operations other than terminal
+                        minSafeServingNativeMembers is the lowest committed native-member count at which this profile may
+                        continue serving while degraded or recovering.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    minSupportedReplicas:
+                      description: |-
+                        minSupportedReplicas is the hard lower bound for live membership operations other than terminal
                         group retirement.
                       format: int32
                       minimum: 1
                       type: integer
-                    minSafeServingReplicas:
+                    nativeMembersPerReplica:
                       description: |-
-                        minSafeServingReplicas is the lowest committed replica count at which this profile may
-                        continue serving while degraded or recovering.
+                        nativeMembersPerReplica is the fixed steady-state member count per allocation.
+                        Partial survival and advertised surge may temporarily change the active count.
                       format: int32
                       minimum: 1
                       type: integer
@@ -253,11 +283,15 @@ spec:
                     - backend
                     - fingerprint
                     - gpusPerReplica
-                    - maxReplicas
-                    - minReplicas
-                    - minSafeServingReplicas
+                    - maxSupportedReplicas
+                    - minSafeServingNativeMembers
+                    - minSupportedReplicas
+                    - nativeMembersPerReplica
                     - podsPerReplica
                   type: object
+                  x-kubernetes-validations:
+                    - message: minSupportedReplicas must be less than or equal to maxSupportedReplicas
+                      rule: self.minSupportedReplicas <= self.maxSupportedReplicas
                 releaseAuthorizations:
                   description: releaseAuthorizations names the exact Pod UIDs that may be removed from stable replica slots.
                   items:
@@ -316,16 +350,21 @@ spec:
                   items:
                     description: EngineGroupReplicaStatus preserves one stable logical identity across physical replacement.
                     properties:
-                      availability:
-                        description: availability reports complete physical and profile-required runtime readiness.
-                        enum:
-                          - Available
-                          - Unavailable
-                          - Unknown
-                        type: string
-                      current:
-                        description: current is the currently allocated physical and runtime incarnation.
+                      candidateAllocation:
+                        description: |-
+                          candidateAllocation is the sole replacement being prepared for this replica.
+                          A dormant candidate has no native identities until reuse is safe. A backend
+                          advertising surge may temporarily assign it distinct members before promotion.
                         properties:
+                          availability:
+                            description: |-
+                              availability reports usable backing capacity for the members this allocation still serves.
+                              Pod Ready is only an input; a degraded allocation may keep serving surviving members.
+                            enum:
+                              - Available
+                              - Unavailable
+                              - Unknown
+                            type: string
                           capacityRefs:
                             description: capacityRefs contains every concrete Pod incarnation in this replica allocation.
                             items:
@@ -347,64 +386,113 @@ spec:
                                   rule: size(self.uid) > 0
                             minItems: 1
                             type: array
+                          health:
+                            description: health records physical and runtime health independently of committed membership.
+                            enum:
+                              - Healthy
+                              - Degraded
+                              - Failed
+                              - Unknown
+                            type: string
                           runtimeIncarnation:
-                            description: runtimeIncarnation identifies one concrete engine process incarnation.
+                            description: |-
+                              runtimeIncarnation identifies one concrete engine process incarnation.
+                              A dormant candidate may not yet have a runtime incarnation.
                             minLength: 1
                             type: string
                         required:
+                          - availability
                           - capacityRefs
-                          - runtimeIncarnation
+                          - health
                         type: object
-                      membership:
-                        description: membership reports committed engine state or current orchestration intent.
-                        enum:
-                          - Active
-                          - Masked
-                          - Joining
-                          - Retiring
-                          - Unknown
-                        type: string
+                      currentAllocation:
+                        description: currentAllocation is the allocation currently backing this stable replica slot.
+                        properties:
+                          availability:
+                            description: |-
+                              availability reports usable backing capacity for the members this allocation still serves.
+                              Pod Ready is only an input; a degraded allocation may keep serving surviving members.
+                            enum:
+                              - Available
+                              - Unavailable
+                              - Unknown
+                            type: string
+                          capacityRefs:
+                            description: capacityRefs contains every concrete Pod incarnation in this replica allocation.
+                            items:
+                              description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
+                              properties:
+                                name:
+                                  description: name is the Pod name.
+                                  minLength: 1
+                                  type: string
+                                uid:
+                                  description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
+                                  type: string
+                              required:
+                                - name
+                                - uid
+                              type: object
+                              x-kubernetes-validations:
+                                - message: uid must not be empty
+                                  rule: size(self.uid) > 0
+                            minItems: 1
+                            type: array
+                          health:
+                            description: health records physical and runtime health independently of committed membership.
+                            enum:
+                              - Healthy
+                              - Degraded
+                              - Failed
+                              - Unknown
+                            type: string
+                          runtimeIncarnation:
+                            description: |-
+                              runtimeIncarnation identifies one concrete engine process incarnation.
+                              A dormant candidate may not yet have a runtime incarnation.
+                            minLength: 1
+                            type: string
+                        required:
+                          - availability
+                          - capacityRefs
+                          - health
+                        type: object
                       nativeMembers:
-                        description: nativeMembers are the engine identities currently correlated with this logical replica.
+                        description: nativeMembers reports membership and traffic independently for every correlated member.
                         items:
-                          minLength: 1
-                          type: string
-                        type: array
-                      previousIncarnations:
-                        description: previousIncarnations retain identities required for recovery or exact release.
-                        items:
-                          description: EngineGroupReplicaIncarnation binds one logical replica and stable slot to concrete capacity.
+                          description: EngineGroupNativeMemberStatus records one engine-authoritative native member and its traffic evidence.
                           properties:
-                            capacityRefs:
-                              description: capacityRefs contains every concrete Pod incarnation in this replica allocation.
-                              items:
-                                description: EngineGroupCapacityRef identifies one concrete Pod allocated to a logical replica.
-                                properties:
-                                  name:
-                                    description: name is the Pod name.
-                                    minLength: 1
-                                    type: string
-                                  uid:
-                                    description: uid is the concrete Pod incarnation and prevents name reuse from inheriting authority.
-                                    type: string
-                                required:
-                                  - name
-                                  - uid
-                                type: object
-                                x-kubernetes-validations:
-                                  - message: uid must not be empty
-                                    rule: size(self.uid) > 0
-                              minItems: 1
-                              type: array
-                            runtimeIncarnation:
-                              description: runtimeIncarnation identifies one concrete engine process incarnation.
+                            id:
+                              description: id is a stable backend-native member identity.
                               minLength: 1
                               type: string
+                            membership:
+                              description: membership distinguishes committed participation from masking or orchestration intent.
+                              enum:
+                                - Active
+                                - Masked
+                                - Joining
+                                - Retiring
+                                - Unknown
+                              type: string
+                            traffic:
+                              description: traffic is admission or terminal drain evidence from the runtime traffic authority.
+                              enum:
+                                - Admitted
+                                - Draining
+                                - Drained
+                                - Withdrawn
+                                - Unknown
+                              type: string
                           required:
-                            - capacityRefs
-                            - runtimeIncarnation
+                            - id
+                            - membership
+                            - traffic
                           type: object
                         type: array
+                        x-kubernetes-list-map-keys:
+                          - id
+                        x-kubernetes-list-type: map
                       replicaID:
                         description: replicaID is stable across physical and runtime replacement.
                         minLength: 1
@@ -431,8 +519,6 @@ spec:
                         minLength: 1
                         type: string
                     required:
-                      - availability
-                      - membership
                       - replicaID
                       - slotID
                     type: object

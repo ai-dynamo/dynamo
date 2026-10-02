@@ -170,6 +170,11 @@ Allowed local helpers:
 
 ## API Changes
 
+`DynamoGraphDeploymentEngineGroup` is a v1beta1-only kind, so its allocation/member
+status changes have no spoke conversion. The DGD/DCD shared `engineGroup` creation
+block is hub-only and is preserved/restored in the existing sparse spec payload,
+matched by component name. It never overrides the live alpha `replicas` field.
+
 For every added, removed, renamed, or semantically changed API field, choose one
 explicit conversion policy:
 
