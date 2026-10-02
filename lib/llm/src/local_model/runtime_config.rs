@@ -443,8 +443,6 @@ impl ModelRuntimeConfig {
         self.runtime_flag_enabled(capability)
     }
 
-    /// Whether the worker declared its input modalities without `modality`.
-    ///
     /// An absent or malformed declaration rejects nothing.
     pub(crate) fn rejects_input_modality(&self, modality: &str) -> bool {
         match self.runtime_data.get(INPUT_MODALITIES_RUNTIME_KEY) {
