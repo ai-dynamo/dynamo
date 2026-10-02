@@ -546,12 +546,12 @@ pub(crate) fn start_replica_publisher(
             let frames = match message.encode() {
                 Ok(frames) => frames,
                 Err(error) => {
-                    tracing::error!(%message, "Failed to encode replica message: {error}");
+                    tracing::error!(event = %message, error = %error, "Failed to encode replica message");
                     continue;
                 }
             };
             if let Err(error) = socket.send_multipart(frames).await {
-                tracing::error!(%message, "Failed to publish replica message: {error}");
+                tracing::error!(event = %message, error = %error, "Failed to publish replica message");
             }
         }
     });
