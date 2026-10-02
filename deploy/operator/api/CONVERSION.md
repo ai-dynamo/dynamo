@@ -174,6 +174,8 @@ Allowed local helpers:
 status changes have no spoke conversion. The DGD/DCD shared `engineGroup` creation
 block is hub-only and is preserved/restored in the existing sparse spec payload,
 matched by component name. It never overrides the live alpha `replicas` field.
+The Engine Group's canonical desired-member assignment and spec-generation correlation
+are v1beta1-only status; no v1alpha1 conversion is required.
 
 For every added, removed, renamed, or semantically changed API field, choose one
 explicit conversion policy:
