@@ -25,9 +25,9 @@ pub trait DecodeInterpolator: Send + Sync {
     fn interp(&self, x: f64, y: f64) -> Result<f64, InterpolateError>;
 }
 
-/// Callback trait for direct AIC SDK calls.
-/// Implementors call the Rust AIC core API.
-pub trait AicCallback: Send + Sync {
+/// Callback trait for direct AIS SDK calls.
+/// Implementors call the Rust AIS core API.
+pub trait AisCallback: Send + Sync {
     /// Predict prefill latency in ms.
     /// Parameters: (batch_size, effective_isl, prefix)
     fn predict_prefill(
@@ -91,7 +91,7 @@ pub enum PerfModel {
     },
     /// AI Configurator SDK calls through the configured callback.
     /// Passes the reduced prefill inputs (batch_size, effective_isl, prefix).
-    Aiconfigurator { callback: Arc<dyn AicCallback> },
+    Ais { callback: Arc<dyn AisCallback> },
 }
 
 impl Clone for PerfModel {
@@ -112,7 +112,7 @@ impl Clone for PerfModel {
                 prefill_interp: Arc::clone(prefill_interp),
                 decode_interp: Arc::clone(decode_interp),
             },
-            PerfModel::Aiconfigurator { callback } => PerfModel::Aiconfigurator {
+            PerfModel::Ais { callback } => PerfModel::Ais {
                 callback: Arc::clone(callback),
             },
         }
@@ -131,7 +131,7 @@ impl std::fmt::Debug for PerfModel {
                 "PerfModel::Fixed {{ prefill_ms: {prefill_ms}, decode_ms: {decode_ms} }}"
             ),
             PerfModel::Interpolated { .. } => write!(f, "PerfModel::Interpolated {{ .. }}"),
-            PerfModel::Aiconfigurator { .. } => write!(f, "PerfModel::Aiconfigurator"),
+            PerfModel::Ais { .. } => write!(f, "PerfModel::Ais"),
         }
     }
 }
@@ -228,9 +228,9 @@ impl PerfModel {
         })
     }
 
-    /// Create an Aiconfigurator perf model from a callback.
-    pub fn from_aic_callback(callback: Arc<dyn AicCallback>) -> Self {
-        PerfModel::Aiconfigurator { callback }
+    /// Create an Ais perf model from a callback.
+    pub fn from_ais_callback(callback: Arc<dyn AisCallback>) -> Self {
+        PerfModel::Ais { callback }
     }
 
     /// Predict prefill time in milliseconds.
@@ -238,7 +238,7 @@ impl PerfModel {
     /// Callers always pass all parameters; each external variant uses what it needs:
     /// - Interpolated uses total new tokens across the batch
     ///   (`batch_size * (isl - prefix)`).
-    /// - Aiconfigurator: passes (batch_size, isl - prefix, prefix) to the AIC SDK
+    /// - Ais: passes (batch_size, isl - prefix, prefix) to the AIS SDK
     pub fn predict_prefill_time(
         &self,
         batch_size: usize,
@@ -259,9 +259,9 @@ impl PerfModel {
                 let tokens = (batch_size * new_tokens_per_req) as f64;
                 prefill_interp.interp(tokens).unwrap_or(0.0)
             }
-            PerfModel::Aiconfigurator { callback } => callback
+            PerfModel::Ais { callback } => callback
                 .predict_prefill(batch_size, new_tokens_per_req, prefix)
-                .context("AIC prefill prediction failed")?,
+                .context("AIS prefill prediction failed")?,
         };
         Ok(time.max(0.0))
     }
@@ -273,7 +273,7 @@ impl PerfModel {
     ///
     /// Callers always pass all parameters; each variant uses what it needs:
     /// - Interpolated: uses (active_kv_tokens, context_length)
-    /// - Aiconfigurator: uses (batch_size, context_length)
+    /// - Ais: uses (batch_size, context_length)
     pub fn predict_decode_time(
         &self,
         batch_size: usize,
@@ -293,9 +293,9 @@ impl PerfModel {
             PerfModel::Interpolated { decode_interp, .. } => decode_interp
                 .interp(active_kv_tokens as f64, context_length as f64)
                 .unwrap_or(0.0),
-            PerfModel::Aiconfigurator { callback } => callback
+            PerfModel::Ais { callback } => callback
                 .predict_decode(batch_size, context_length, 2)
-                .context("AIC decode prediction failed")?,
+                .context("AIS decode prediction failed")?,
         };
         // Token-emitting decode steps should not collapse onto the same timestamp.
         let result = time.max(1.0);
@@ -308,12 +308,12 @@ impl PerfModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{AicCallback, PerfModel};
+    use super::{AisCallback, PerfModel};
     use std::sync::Arc;
 
     struct EchoBatchCallback;
 
-    impl AicCallback for EchoBatchCallback {
+    impl AisCallback for EchoBatchCallback {
         fn predict_prefill(
             &self,
             batch_size: usize,
@@ -335,14 +335,14 @@ mod tests {
 
     struct FailingCallback;
 
-    impl AicCallback for FailingCallback {
+    impl AisCallback for FailingCallback {
         fn predict_prefill(
             &self,
             _batch_size: usize,
             _effective_isl: usize,
             _prefix: usize,
         ) -> anyhow::Result<f64> {
-            anyhow::bail!("missing AIC prefill point")
+            anyhow::bail!("missing AIS prefill point")
         }
 
         fn predict_decode(
@@ -351,7 +351,7 @@ mod tests {
             _isl: usize,
             _osl: usize,
         ) -> anyhow::Result<f64> {
-            anyhow::bail!("missing AIC decode point")
+            anyhow::bail!("missing AIS decode point")
         }
     }
 
@@ -364,30 +364,30 @@ mod tests {
     }
 
     #[test]
-    fn aic_forwards_scheduler_local_batch() {
-        let model = PerfModel::from_aic_callback(Arc::new(EchoBatchCallback));
+    fn ais_forwards_scheduler_local_batch() {
+        let model = PerfModel::from_ais_callback(Arc::new(EchoBatchCallback));
 
         assert_eq!(model.predict_prefill_time(7, 128, 0).unwrap(), 7.0);
         assert_eq!(model.predict_decode_time(9, 0, 128, 0).unwrap(), 9.0);
     }
 
     #[test]
-    fn aic_prefill_prediction_errors_propagate() {
-        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+    fn ais_prefill_prediction_errors_propagate() {
+        let error = PerfModel::from_ais_callback(Arc::new(FailingCallback))
             .predict_prefill_time(2, 128, 32)
             .unwrap_err();
 
-        assert_eq!(error.to_string(), "AIC prefill prediction failed");
-        assert_eq!(error.root_cause().to_string(), "missing AIC prefill point");
+        assert_eq!(error.to_string(), "AIS prefill prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIS prefill point");
     }
 
     #[test]
-    fn aic_decode_prediction_errors_propagate() {
-        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+    fn ais_decode_prediction_errors_propagate() {
+        let error = PerfModel::from_ais_callback(Arc::new(FailingCallback))
             .predict_decode_time(2, 64, 128, 1024)
             .unwrap_err();
 
-        assert_eq!(error.to_string(), "AIC decode prediction failed");
-        assert_eq!(error.root_cause().to_string(), "missing AIC decode point");
+        assert_eq!(error.to_string(), "AIS decode prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIS decode point");
     }
 }
