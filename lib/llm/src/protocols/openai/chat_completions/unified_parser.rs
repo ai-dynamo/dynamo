@@ -736,8 +736,8 @@ pub(crate) struct ChoiceState {
     next_tool_index: usize,
     /// Tool indices whose UnifiedParser events have not emitted an explicit completion.
     pending_tool_calls: HashSet<usize>,
-    /// Pass-through OpenAI call fragments awaiting a terminal finish reason.
-    pending_parsed_tool_calls: HashSet<usize>,
+    /// Pass-through OpenAI call argument fragments awaiting terminal or JSON completion.
+    pending_parsed_tool_calls: HashMap<usize, String>,
     /// Whether any tool-call delta was emitted, including a streamed fragment.
     tool_emitted: bool,
     /// The parser errored. Later chunks pass through as plain text instead of failing
@@ -789,7 +789,7 @@ impl ChoiceState {
             tool_index_offset: 0,
             next_tool_index: 0,
             pending_tool_calls: HashSet::new(),
-            pending_parsed_tool_calls: HashSet::new(),
+            pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
         })
@@ -813,7 +813,7 @@ impl ChoiceState {
             tool_index_offset: 0,
             next_tool_index: 0,
             pending_tool_calls: HashSet::new(),
-            pending_parsed_tool_calls: HashSet::new(),
+            pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
         })
@@ -1060,9 +1060,6 @@ impl ChoiceState {
         finish_reason: Option<FinishReason>,
     ) -> Vec<ChatChoiceStream> {
         let terminal_tool_call_delta = finish_reason_closes_tool_calls(finish_reason.as_ref());
-        if terminal_tool_call_delta {
-            self.pending_parsed_tool_calls.clear();
-        }
         // Queued reasoning belongs to its earlier source response. Coalescing it
         // with parser reasoning would erase the source envelope's event boundary.
         let source_positions = std::mem::take(&mut self.qwen_reasoning_event_positions);
@@ -1096,11 +1093,19 @@ impl ChoiceState {
                     &mut self.tool_types_emitted,
                     &mut self.next_tool_index,
                 );
-                if !terminal_tool_call_delta {
-                    self.pending_parsed_tool_calls.insert(tool_index);
-                }
+                append_parsed_tool_call_arguments(
+                    &mut self.pending_parsed_tool_calls,
+                    tool_index,
+                    call,
+                );
                 self.tool_emitted = true;
             }
+        }
+        if terminal_tool_call_delta {
+            resolve_complete_parsed_tool_calls_at_terminal(
+                &mut self.pending_parsed_tool_calls,
+                finish_reason == Some(FinishReason::ToolCalls),
+            );
         }
         let index = original.index;
         let count = deltas.len();
@@ -1197,6 +1202,10 @@ impl ChoiceState {
             && self.pending_parsed_tool_calls.is_empty()
     }
 
+    fn resolve_complete_parsed_tool_calls_at_eof(&mut self) {
+        resolve_complete_parsed_tool_calls_at_eof(&mut self.pending_parsed_tool_calls);
+    }
+
     fn is_guided_named(&self) -> bool {
         matches!(
             &self.tool_output_mode,
@@ -1229,16 +1238,47 @@ impl ChoiceState {
     /// OpenAI streaming contract: `Stop` becomes `ToolCalls` only when every emitted
     /// call index is complete. `Length` / `ContentFilter` stay unchanged.
     fn normalize_finish_reason(&self, finish_reason: Option<FinishReason>) -> Option<FinishReason> {
-        if finish_reason == Some(FinishReason::Stop) && self.has_terminal_tool_calls() {
-            Some(FinishReason::ToolCalls)
-        } else {
-            finish_reason
+        match finish_reason {
+            Some(FinishReason::ToolCalls) if !self.pending_parsed_tool_calls.is_empty() => {
+                Some(FinishReason::Stop)
+            }
+            Some(FinishReason::Stop) if self.has_terminal_tool_calls() => {
+                Some(FinishReason::ToolCalls)
+            }
+            other => other,
         }
     }
 }
 
-// OpenAI tool-call chunks have no per-delta completion bit, so only a terminal
-// finish reason can close a pass-through call fragment.
+// OpenAI tool-call chunks have no per-delta completion bit. Retain every argument
+// fragment so EOF can distinguish a complete JSON value from a truncated call.
+fn append_parsed_tool_call_arguments(
+    pending: &mut HashMap<usize, String>,
+    tool_index: usize,
+    call: &ChatCompletionMessageToolCallChunk,
+) {
+    let arguments = call
+        .function
+        .as_ref()
+        .and_then(|function| function.arguments.as_deref())
+        .unwrap_or_default();
+    pending.entry(tool_index).or_default().push_str(arguments);
+}
+
+fn resolve_complete_parsed_tool_calls_at_eof(pending: &mut HashMap<usize, String>) {
+    resolve_complete_parsed_tool_calls_at_terminal(pending, false);
+}
+
+fn resolve_complete_parsed_tool_calls_at_terminal(
+    pending: &mut HashMap<usize, String>,
+    allow_empty_parameterless: bool,
+) {
+    pending.retain(|_, arguments| {
+        !(allow_empty_parameterless && arguments.is_empty())
+            && serde_json::from_str::<serde_json::Value>(arguments).is_err()
+    });
+}
+
 fn finish_reason_closes_tool_calls(finish_reason: Option<&FinishReason>) -> bool {
     matches!(
         finish_reason,
@@ -1397,8 +1437,8 @@ struct ChoiceRecord {
     next_tool_index: usize,
     /// Incomplete events from the live UnifiedParser instance.
     pending_tool_calls: HashSet<usize>,
-    /// Pass-through OpenAI call fragments awaiting a terminal finish reason.
-    pending_parsed_tool_calls: HashSet<usize>,
+    /// Pass-through OpenAI call argument fragments awaiting terminal or JSON completion.
+    pending_parsed_tool_calls: HashMap<usize, String>,
     /// Source envelopes for Qwen reasoning held until a split native opener resolves.
     pending_qwen_opener_responses: VecDeque<PendingQwenReasoningResponse>,
     tool_emitted: bool,
@@ -1519,6 +1559,7 @@ fn finish_unterminated_choices(
                 // Only complete calls get a synthetic `ToolCalls` terminal at EOF;
                 // provisional parser or pass-through fragments must stay provisional.
                 let mut flushed = state.choices_for(&base, deltas, true, None);
+                state.resolve_complete_parsed_tool_calls_at_eof();
                 if state.has_terminal_tool_calls() {
                     if let Some(last_position) = flushed.len().checked_sub(1) {
                         if state
@@ -1548,6 +1589,7 @@ fn finish_unterminated_choices(
                         record,
                     )));
                 }
+                resolve_complete_parsed_tool_calls_at_eof(&mut record.pending_parsed_tool_calls);
                 if record.tool_emitted
                     && record.pending_tool_calls.is_empty()
                     && record.pending_parsed_tool_calls.is_empty()
@@ -1737,9 +1779,6 @@ where
                     }
                     let parsed_calls_are_terminal =
                         finish_reason_closes_tool_calls(original.finish_reason.as_ref());
-                    if parsed_calls_are_terminal {
-                        record.pending_parsed_tool_calls.clear();
-                    }
                     // An already-parsed chunk carries its tool calls verbatim in its
                     // own delta rather than through a `ChoiceState`, so that history
                     // has to be observed here directly — a state may never exist for
@@ -1762,9 +1801,23 @@ where
                             );
                             if parsed_calls_are_terminal {
                                 record.pending_tool_calls.remove(&tool_index);
-                            } else {
-                                record.pending_parsed_tool_calls.insert(tool_index);
                             }
+                            append_parsed_tool_call_arguments(
+                                &mut record.pending_parsed_tool_calls,
+                                tool_index,
+                                call,
+                            );
+                        }
+                    }
+                    if parsed_calls_are_terminal {
+                        resolve_complete_parsed_tool_calls_at_terminal(
+                            &mut record.pending_parsed_tool_calls,
+                            original.finish_reason == Some(FinishReason::ToolCalls),
+                        );
+                        if !record.pending_parsed_tool_calls.is_empty()
+                            && original.finish_reason == Some(FinishReason::ToolCalls)
+                        {
+                            original.finish_reason = Some(FinishReason::Stop);
                         }
                     }
                     let reported_tool_indices: HashSet<usize> = if parsed_calls_are_terminal {
@@ -1902,12 +1955,9 @@ where
                         state
                             .pending_tool_calls
                             .extend(record.pending_tool_calls.iter().copied());
-                        if parsed_calls_are_terminal {
-                            state.pending_parsed_tool_calls.clear();
-                        }
                         state
                             .pending_parsed_tool_calls
-                            .extend(record.pending_parsed_tool_calls.iter().copied());
+                            .clone_from(&record.pending_parsed_tool_calls);
                         let deltas = state.finish();
                         let flushed = state.choices_for(
                             &empty_choice(original.index),
@@ -2056,9 +2106,9 @@ where
                                     state
                                         .pending_tool_calls
                                         .extend(record.pending_tool_calls.iter().copied());
-                                    state.pending_parsed_tool_calls.extend(
-                                        record.pending_parsed_tool_calls.iter().copied(),
-                                    );
+                                    state
+                                        .pending_parsed_tool_calls
+                                        .clone_from(&record.pending_parsed_tool_calls);
                                 }
                                 entry.insert(state)
                             }
@@ -3105,7 +3155,7 @@ mod tests {
                 r#type: Some(FunctionType::Function),
                 function: Some(FunctionCallStream {
                     name: Some("first".to_string()),
-                    arguments: Some(r#"{"city":"Par"#.to_string()),
+                    arguments: Some(r#"{"city":"Paris"}"#.to_string()),
                 }),
             },
             ChatCompletionMessageToolCallChunk {
@@ -3114,7 +3164,7 @@ mod tests {
                 r#type: Some(FunctionType::Function),
                 function: Some(FunctionCallStream {
                     name: Some("second".to_string()),
-                    arguments: Some(r#"{"city":"Tok"#.to_string()),
+                    arguments: Some(r#"{"city":"Tokyo"}"#.to_string()),
                 }),
             },
         ]);
@@ -5127,6 +5177,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_passthrough_tool_call_without_terminal_gets_eof_terminal() {
+        let mut parsed = chunk("", false);
+        let choice = &mut parsed.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call-complete".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some("{}".to_string()),
+            }),
+        }]);
+
+        let responses = apply_stream(
+            stream::iter([parsed]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let finish_reasons: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice.finish_reason)
+            .collect();
+
+        assert_eq!(
+            finish_reasons,
+            vec![FinishReason::ToolCalls],
+            "a complete already-parsed call must receive a terminal reason at EOF"
+        );
+    }
+
+    #[tokio::test]
+    async fn passthrough_argument_fragments_are_combined_before_eof_validation() {
+        let mut first = chunk("", false);
+        let first_choice = &mut first.data.as_mut().unwrap().inner.choices[0];
+        first_choice.delta.content = None;
+        first_choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call-fragmented".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(r#"{"city":"#.to_string()),
+            }),
+        }]);
+
+        let mut second = chunk("", false);
+        let second_choice = &mut second.data.as_mut().unwrap().inner.choices[0];
+        second_choice.delta.content = None;
+        second_choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: None,
+            r#type: None,
+            function: Some(FunctionCallStream {
+                name: None,
+                arguments: Some(r#""Tokyo"}"#.to_string()),
+            }),
+        }]);
+
+        let responses = apply_stream(
+            stream::iter([first, second]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let arguments = choices
+            .iter()
+            .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+            .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+            .fold(String::new(), |mut all, fragment| {
+                all.push_str(fragment);
+                all
+            });
+        let finish_reasons: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice.finish_reason)
+            .collect();
+
+        assert_eq!(arguments, r#"{"city":"Tokyo"}"#);
+        assert_eq!(finish_reasons, vec![FinishReason::ToolCalls]);
+    }
+
+    #[tokio::test]
+    async fn valid_json_prefix_with_invalid_suffix_stays_provisional_at_eof() {
+        let parsed_fragment = |arguments: &str, id: Option<&str>| {
+            let mut parsed = chunk("", false);
+            let choice = &mut parsed.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: id.map(str::to_string),
+                r#type: id.map(|_| FunctionType::Function),
+                function: Some(FunctionCallStream {
+                    name: id.map(|_| "get_weather".to_string()),
+                    arguments: Some(arguments.to_string()),
+                }),
+            }]);
+            parsed
+        };
+
+        let responses = apply_stream(
+            stream::iter([
+                parsed_fragment("{}", Some("call-suffix")),
+                parsed_fragment(" trailing", None),
+            ]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+
+        assert!(
+            choices.iter().all(|choice| choice.finish_reason.is_none()),
+            "a valid JSON prefix followed by malformed bytes must remain provisional"
+        );
+    }
+
+    #[tokio::test]
     async fn already_parsed_gap_terminal_precedes_a_usage_only_chunk() {
         let tool_call = concat!(
             "<tool_call>\n<function=get_weather>\n",
@@ -5923,9 +6106,9 @@ mod tests {
                     arguments: Some(r#"{"city":"NY"}"#.to_string()),
                 },
             ];
-            if terminal {
-                expected.push(OutputEvent::Finish(FinishReason::ToolCalls));
-            }
+            // The explicit upstream terminal and a valid complete JSON call at EOF
+            // must expose the same terminal event to stream consumers.
+            expected.push(OutputEvent::Finish(FinishReason::ToolCalls));
             assert_eq!(
                 observed, expected,
                 "content, held reasoning, the parsed call, and terminal metadata must stay ordered and appear once"
@@ -6091,7 +6274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn separate_terminal_chunk_closes_parsed_fragments_for_all_indices() {
+    async fn separate_terminal_chunk_keeps_malformed_parsed_fragments_provisional() {
         for tool_calls_finish in [false, true] {
             let mut parsed_fragments = chunk("", false);
             let choice = &mut parsed_fragments.data.as_mut().unwrap().inner.choices[0];
@@ -6143,10 +6326,135 @@ mod tests {
                     .iter()
                     .filter_map(|choice| choice.finish_reason)
                     .collect::<Vec<_>>(),
-                vec![FinishReason::ToolCalls],
-                "a separate terminal reason must close all parsed fragments (tool_calls_finish={tool_calls_finish})"
+                vec![FinishReason::Stop],
+                "a terminal reason must not complete malformed parsed fragments (tool_calls_finish={tool_calls_finish})"
+            );
+            let emitted_arguments: Vec<_> = choices
+                .iter()
+                .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                .collect();
+            assert_eq!(
+                emitted_arguments,
+                vec![r#"{"city":"Par"#, r#"{"city":"Tok"#],
+                "malformed fragments remain identifiable but receive no successful terminal"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_argument_fragments_are_validated_after_assembly_per_choice() {
+        let fragments = chunk("raw prelude", false);
+        let mut partials = chunk("", false);
+        let first = &mut partials.data.as_mut().unwrap().inner.choices[0];
+        first.delta.content = None;
+        first.delta.tool_calls = Some(vec![
+            ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: Some("call-invalid".to_string()),
+                r#type: Some(FunctionType::Function),
+                function: Some(FunctionCallStream {
+                    name: Some("get_weather".to_string()),
+                    arguments: Some(r#"{"city":"#.to_string()),
+                }),
+            },
+            ChatCompletionMessageToolCallChunk {
+                index: 1,
+                id: Some("call-valid".to_string()),
+                r#type: Some(FunctionType::Function),
+                function: Some(FunctionCallStream {
+                    name: Some("get_weather".to_string()),
+                    arguments: Some(r#"{"city":"#.to_string()),
+                }),
+            },
+        ]);
+        let mut second = first.clone();
+        second.index = 1;
+        second.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call-parameterless".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: Some(String::new()),
+            }),
+        }]);
+        partials.data.as_mut().unwrap().inner.choices.push(second);
+
+        let mut terminal = chunk("", false);
+        let first = &mut terminal.data.as_mut().unwrap().inner.choices[0];
+        first.delta.content = None;
+        first.finish_reason = Some(FinishReason::ToolCalls);
+        first.delta.tool_calls = Some(vec![
+            ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: None,
+                r#type: None,
+                function: Some(FunctionCallStream {
+                    name: None,
+                    arguments: Some("not-json".to_string()),
+                }),
+            },
+            ChatCompletionMessageToolCallChunk {
+                index: 1,
+                id: None,
+                r#type: None,
+                function: Some(FunctionCallStream {
+                    name: None,
+                    arguments: Some(r#""Tokyo"}"#.to_string()),
+                }),
+            },
+        ]);
+        let mut second = first.clone();
+        second.index = 1;
+        second.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: None,
+            r#type: None,
+            function: Some(FunctionCallStream {
+                name: None,
+                arguments: Some(String::new()),
+            }),
+        }]);
+        terminal.data.as_mut().unwrap().inner.choices.push(second);
+
+        let responses = apply_stream(
+            stream::iter([fragments, partials, terminal]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let finishes: HashMap<_, _> = choices
+            .iter()
+            .filter_map(|choice| choice.finish_reason.map(|reason| (choice.index, reason)))
+            .collect();
+
+        assert_eq!(finishes.get(&0), Some(&FinishReason::Stop));
+        assert_eq!(finishes.get(&1), Some(&FinishReason::ToolCalls));
+        let calls: HashMap<_, _> = choices
+            .iter()
+            .flat_map(|choice| {
+                choice
+                    .delta
+                    .tool_calls
+                    .iter()
+                    .flatten()
+                    .filter_map(move |call| {
+                        call.id
+                            .as_deref()
+                            .map(|id| ((choice.index, call.index as usize), id))
+                    })
+            })
+            .collect();
+
+        assert_eq!(calls.get(&(0, 0)), Some(&"call-invalid"));
+        assert_eq!(calls.get(&(0, 1)), Some(&"call-valid"));
+        assert_eq!(calls.get(&(1, 0)), Some(&"call-parameterless"));
     }
 
     #[tokio::test]
@@ -6475,7 +6783,7 @@ mod tests {
             tool_index_offset: 0,
             next_tool_index: 0,
             pending_tool_calls: HashSet::new(),
-            pending_parsed_tool_calls: HashSet::new(),
+            pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
         };

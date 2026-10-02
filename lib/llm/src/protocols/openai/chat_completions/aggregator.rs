@@ -207,9 +207,9 @@ fn suppress_tool_call_output(choice: &mut DeltaChoice) {
     }
 }
 
-/// A token-limit finish can interrupt only the final structured call. Keep earlier
-/// calls whose argument strings are valid JSON, but do not expose the incomplete call
-/// as executable structured output.
+/// A token-limit finish can interrupt any call that the upstream emitted as provisional.
+/// Keep calls with complete JSON arguments, but do not expose malformed fragments as
+/// executable structured output, regardless of their position in the response.
 ///
 /// An empty argument string is the MOST truncated shape, not a parameterless call: the
 /// limit landed after the name and before the first argument token. The wire schema does
@@ -223,19 +223,47 @@ fn drop_incomplete_length_tool_calls(choice: &mut DeltaChoice) {
     let Some(tool_calls) = choice.tool_calls.as_mut() else {
         return;
     };
-    let terminal_index = tool_calls.len().saturating_sub(1);
     let calls = std::mem::take(tool_calls);
     *tool_calls = calls
         .into_iter()
-        .enumerate()
-        .filter(|(index, tool_call)| {
-            *index != terminal_index
-                || serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments).is_ok()
+        .filter(|tool_call| {
+            serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments).is_ok()
         })
-        .map(|(_, tool_call)| tool_call)
         .collect();
     if tool_calls.is_empty() {
         choice.tool_calls = None;
+    }
+}
+
+/// A stop or EOF can follow a streamed call whose last argument fragment is not
+/// valid JSON. The adapter can normalize that stop to `ToolCalls` before aggregation,
+/// so validate that terminal state too before exposing an executable final response.
+/// An empty argument string remains valid when the upstream explicitly completed a
+/// parameterless call with `ToolCalls`.
+fn drop_malformed_terminal_tool_calls(choice: &mut DeltaChoice) {
+    if !matches!(
+        choice.finish_reason,
+        None | Some(dynamo_protocols::types::FinishReason::Stop)
+            | Some(dynamo_protocols::types::FinishReason::ToolCalls)
+    ) {
+        return;
+    }
+
+    let explicit_parameterless_call =
+        choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls);
+    let Some(tool_calls) = choice.tool_calls.as_mut() else {
+        return;
+    };
+    tool_calls.retain(|tool_call| {
+        let arguments = &tool_call.function.arguments;
+        (explicit_parameterless_call && arguments.is_empty())
+            || serde_json::from_str::<serde_json::Value>(arguments).is_ok()
+    });
+    if tool_calls.is_empty() {
+        choice.tool_calls = None;
+        if choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls) {
+            choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+        }
     }
 }
 
@@ -717,6 +745,7 @@ impl DeltaAggregator {
 
         for choice in aggregator.choices.values_mut() {
             drop_incomplete_length_tool_calls(choice);
+            drop_malformed_terminal_tool_calls(choice);
         }
 
         // A retained whole-response parser may discover a syntactically valid
@@ -2134,6 +2163,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_normalization_drops_incomplete_call_but_keeps_closed_json() {
+        let make_chunk = |id: Option<&str>, name: Option<&str>, arguments: Option<&str>| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: id.map(str::to_string),
+                r#type: id.map(|_| dynamo_protocols::types::FunctionType::Function),
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: name.map(str::to_string),
+                    arguments: arguments.map(str::to_string),
+                }),
+            }
+        };
+
+        for finish_reason in [
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            Some(dynamo_protocols::types::FinishReason::ToolCalls),
+            None,
+        ] {
+            let chunks = vec![
+                create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(
+                        Some("call-1"),
+                        Some("get_weather"),
+                        Some(r#"{"city": "#),
+                    )],
+                    None,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                ),
+                create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(None, None, Some(r#""Tokyo""#))],
+                    finish_reason,
+                    None,
+                ),
+            ];
+            let result =
+                DeltaAggregator::apply(Box::pin(stream::iter(chunks)), ParsingOptions::default())
+                    .await
+                    .unwrap();
+
+            let choice = &result.inner.choices[0];
+            assert_eq!(
+                choice.finish_reason,
+                match finish_reason {
+                    Some(dynamo_protocols::types::FinishReason::ToolCalls) => {
+                        Some(dynamo_protocols::types::FinishReason::Stop)
+                    }
+                    other => other,
+                }
+            );
+            assert!(
+                choice.message.tool_calls.is_none(),
+                "incomplete JSON must not become a final tool call"
+            );
+        }
+
+        for arguments in [None, Some("")] {
+            let result = DeltaAggregator::apply(
+                Box::pin(stream::iter(vec![create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(Some("call-1"), Some("get_weather"), arguments)],
+                    None,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                )])),
+                ParsingOptions::default(),
+            )
+            .await
+            .unwrap();
+
+            let choice = &result.inner.choices[0];
+            assert_eq!(choice.finish_reason, None);
+            assert!(
+                choice.message.tool_calls.is_none(),
+                "a name-only EOF fragment must remain provisional"
+            );
+        }
+
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![
+                create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(Some("call-1"), Some("get_weather"), None)],
+                    None,
+                    Some(dynamo_protocols::types::Role::Assistant),
+                ),
+                create_test_delta_with_tool_chunks(
+                    0,
+                    vec![make_chunk(None, None, Some(r#"{"city":"Tokyo"}"#))],
+                    Some(dynamo_protocols::types::FinishReason::Stop),
+                    None,
+                ),
+            ])),
+            ParsingOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let choice = &result.inner.choices[0];
+        let tool_call = &choice.message.tool_calls.as_ref().unwrap()[0];
+        assert_eq!(tool_call.function.name, "get_weather");
+        assert_eq!(tool_call.function.arguments, r#"{"city":"Tokyo"}"#);
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_normalization_keeps_valid_calls_when_sibling_is_malformed() {
+        let make_chunk = |index, id: Option<&str>, name: Option<&str>, arguments: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index,
+                id: id.map(str::to_string),
+                r#type: id.map(|_| dynamo_protocols::types::FunctionType::Function),
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: name.map(str::to_string),
+                    arguments: Some(arguments.to_string()),
+                }),
+            }
+        };
+
+        let chunks = vec![
+            create_test_delta_with_tool_chunks(
+                0,
+                vec![
+                    make_chunk(0, Some("call-invalid"), Some("get_weather"), r#"{"city":"#),
+                    make_chunk(1, Some("call-valid"), Some("get_time"), r#"{"tz":"#),
+                ],
+                None,
+                Some(dynamo_protocols::types::Role::Assistant),
+            ),
+            create_test_delta_with_tool_chunks(
+                0,
+                vec![
+                    make_chunk(0, None, None, "not-json"),
+                    make_chunk(1, None, None, r#""UTC"}"#),
+                ],
+                Some(dynamo_protocols::types::FinishReason::ToolCalls),
+                None,
+            ),
+        ];
+        let result =
+            DeltaAggregator::apply(Box::pin(stream::iter(chunks)), ParsingOptions::default())
+                .await
+                .unwrap();
+
+        let choice = &result.inner.choices[0];
+        let calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call-valid");
+        assert_eq!(calls[0].function.name, "get_time");
+        assert_eq!(calls[0].function.arguments, r#"{"tz":"UTC"}"#);
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
     async fn test_length_keeps_prose_before_incomplete_native_marker() {
         let text = "I can help. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Par";
         let delta = create_test_delta(
@@ -2160,7 +2349,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_length_retains_a_nonfinal_invalid_structured_tool_call() {
+    async fn test_length_drops_a_nonfinal_invalid_structured_tool_call() {
         let make_name = |idx: u32, id: &str, name: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                 index: idx,
@@ -2211,10 +2400,11 @@ mod tests {
             .message
             .tool_calls
             .as_ref()
-            .expect("both ordered calls must remain visible");
-        assert_eq!(tool_calls.len(), 2);
-        assert_eq!(tool_calls[0].function.arguments, "{\"city\":");
-        assert_eq!(tool_calls[1].function.arguments, "{\"tz\":\"UTC\"}");
+            .expect("the later complete call must remain visible");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "second");
+        assert_eq!(tool_calls[0].function.name, "get_time");
+        assert_eq!(tool_calls[0].function.arguments, "{\"tz\":\"UTC\"}");
     }
 
     #[tokio::test]
