@@ -68,6 +68,7 @@ fn apply_request_tool_call_parsing_options(
     );
     parsing_options.structured_response =
         OpenAIPreprocessor::has_structured_response_format(request);
+    parsing_options.tool_choice = request.inner.tool_choice.clone();
     let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(request);
     let tool_choice = request
         .inner

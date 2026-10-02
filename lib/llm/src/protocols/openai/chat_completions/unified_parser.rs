@@ -41,8 +41,8 @@ use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers_v2::{
     InvalidGuidedPayloadPolicy, Tool, UnifiedEvent, UnifiedParser, UnifiedParserEvent,
-    UnifiedParserExt, UnifiedParserInit, UnifiedParserOutput, UnifiedParserStartingState,
-    UnifiedToolOutputMode, create_unified_parser_for_family,
+    UnifiedParserInit, UnifiedParserOutput, UnifiedParserStartingState, UnifiedToolOutputMode,
+    create_unified_parser_for_family,
 };
 use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
@@ -67,6 +67,8 @@ use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 /// the same XML grammar; `qwen3` is the canonical registry name and the one the
 /// conformance corpus uses, so it is what this module passes and logs.
 pub(crate) const QWEN3_UNIFIED_FAMILY: &str = "qwen3";
+pub(crate) const KIMI_K2_UNIFIED_FAMILY: &str = "kimi_k2";
+pub(crate) const KIMI_K3_UNIFIED_FAMILY: &str = "kimi_k3";
 pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
 
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
@@ -74,6 +76,14 @@ const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
 
 /// Dynamo's `--dyn-reasoning-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
 const QWEN3_REASONING_PARSER: &str = "qwen3";
+
+const KIMI_K3_REASONING_STARTS: &[&str] = &["<|open|>think<|sep|>", "<|open|> think <|sep|>"];
+
+pub(crate) fn kimi_k3_prompt_reasoning_prefill(prompt: &str) -> bool {
+    KIMI_K3_REASONING_STARTS
+        .iter()
+        .any(|marker| prompt.ends_with(marker))
+}
 
 /// Whether the experimental v2 parser path is enabled. Read once — env vars are fixed
 /// for the process lifetime, so re-reading per request would only add syscalls.
@@ -108,8 +118,27 @@ pub(crate) fn configured_family(
         (Some(DEEPSEEK_V41_UNIFIED_FAMILY), Some(DEEPSEEK_V41_UNIFIED_FAMILY)) => {
             Some(DEEPSEEK_V41_UNIFIED_FAMILY)
         }
+        (Some("kimi_k2"), Some("kimi_k25")) => Some(KIMI_K2_UNIFIED_FAMILY),
+        (Some("kimi_k3" | "kimi-k3"), Some("kimi_k3" | "kimi-k3")) => Some(KIMI_K3_UNIFIED_FAMILY),
         _ => None,
     }
+}
+
+/// Kimi's initial rollout covers native auto requests; forced modes keep their existing route.
+pub(crate) fn selected_request_family(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    tool_choice: Option<&dynamo_protocols::types::ChatCompletionToolChoiceOption>,
+    constraint: &GuidedToolConstraint,
+) -> Option<&'static str> {
+    selected_family(tool_call_parser, reasoning_parser).filter(|family| {
+        !matches!(*family, KIMI_K2_UNIFIED_FAMILY | KIMI_K3_UNIFIED_FAMILY)
+            || (!constraint.installs_guided_json()
+                && matches!(
+                    tool_choice,
+                    None | Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto)
+                ))
+    })
 }
 
 /// The unified family to actually use for this parser pair, or `None` to keep the
@@ -133,31 +162,9 @@ pub(crate) fn selected_family(
         "unified parser path decision"
     );
     configured.filter(|family| match *family {
-        QWEN3_UNIFIED_FAMILY => experimental_parsers_v2_enabled(),
-        DEEPSEEK_V41_UNIFIED_FAMILY => true,
-        _ => false,
-    })
-}
-
-/// The configured family eligible to own raw aggregate text.
-///
-/// Every request for the configured pair opts into the v2 batch parser. Requests that
-/// suppress calls still need the unified decoder to strip native markup before the
-/// calls are discarded, while named/required raw text is decoded using the installed
-/// constraint plus the observed native-marker fallback in [`batch_tool_output_mode`].
-pub(crate) fn configured_batch_family(
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> Option<&'static str> {
-    configured_family(tool_call_parser, reasoning_parser)
-}
-
-pub(crate) fn selected_batch_family(
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> Option<&'static str> {
-    configured_batch_family(tool_call_parser, reasoning_parser).filter(|family| match *family {
-        QWEN3_UNIFIED_FAMILY => experimental_parsers_v2_enabled(),
+        QWEN3_UNIFIED_FAMILY | KIMI_K2_UNIFIED_FAMILY | KIMI_K3_UNIFIED_FAMILY => {
+            experimental_parsers_v2_enabled()
+        }
         DEEPSEEK_V41_UNIFIED_FAMILY => true,
         _ => false,
     })
@@ -205,11 +212,9 @@ pub(crate) fn stream_prefill(
 /// untouched); anything else is ordinary text, meaning this really is a reasoning block
 /// that will close normally (start at `Reasoning`).
 ///
-/// An empty or whitespace-only first chunk (e.g. a role-only opening delta) is
-/// inconclusive by this single-chunk check — unlike the legacy path, which re-evaluates
-/// per subsequent chunk, the unified parser commits to a starting state once at
-/// `ChoiceState` creation, so an inconclusive first chunk conservatively keeps the
-/// `Reasoning` default rather than risking a genuine reasoning turn being misclassified.
+/// Nonterminal empty and whitespace-only chunks are held by `apply_stream` until this
+/// check can classify the first non-whitespace content. A terminal empty stream keeps
+/// the prompt's `Reasoning` state because there is no later payload to classify.
 fn bare_guided_json_prefill(
     first_content: Option<&ChatCompletionMessageContent>,
 ) -> UnifiedParserStartingState {
@@ -234,7 +239,7 @@ fn bare_guided_json_prefill(
 /// neither marker means reasoning never ran for this turn.
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
-        QWEN3_UNIFIED_FAMILY | DEEPSEEK_V41_UNIFIED_FAMILY => {
+        QWEN3_UNIFIED_FAMILY | DEEPSEEK_V41_UNIFIED_FAMILY | KIMI_K2_UNIFIED_FAMILY => {
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
             // pre-opened reasoning produces a leading `</think>` with no opener before
             // it, but a later `<think>...</think>` pair from the model can still follow
@@ -253,6 +258,22 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 // open reasoning itself later, currently visible as ordinary text.
                 (Some(_), _) => UnifiedParserStartingState::None,
                 (None, None) => UnifiedParserStartingState::Response,
+            })
+        }
+        KIMI_K3_UNIFIED_FAMILY => {
+            let first_marker = |markers: &[&str]| {
+                markers
+                    .iter()
+                    .filter_map(|marker| first_unquoted_marker_position(content, marker))
+                    .min()
+            };
+            let opener = first_marker(KIMI_K3_REASONING_STARTS);
+            let closer = first_marker(&["<|close|>think", "<|close|> think"]);
+            Ok(match (opener, closer) {
+                (None, Some(_)) => UnifiedParserStartingState::Reasoning,
+                (Some(open), Some(close)) if close < open => UnifiedParserStartingState::Reasoning,
+                (Some(_), _) => UnifiedParserStartingState::None,
+                (None, None) => UnifiedParserStartingState::None,
             })
         }
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
@@ -736,6 +757,7 @@ pub(crate) struct ChoiceState {
     next_tool_index: usize,
     /// Tool indices whose UnifiedParser events have not emitted an explicit completion.
     pending_tool_calls: HashSet<usize>,
+    parser_call_completion: HashMap<usize, bool>,
     /// Pass-through OpenAI call argument fragments awaiting terminal or JSON completion.
     pending_parsed_tool_calls: HashMap<usize, String>,
     /// Whether any tool-call delta was emitted, including a streamed fragment.
@@ -789,6 +811,7 @@ impl ChoiceState {
             tool_index_offset: 0,
             next_tool_index: 0,
             pending_tool_calls: HashSet::new(),
+            parser_call_completion: HashMap::new(),
             pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
@@ -813,6 +836,7 @@ impl ChoiceState {
             tool_index_offset: 0,
             next_tool_index: 0,
             pending_tool_calls: HashSet::new(),
+            parser_call_completion: HashMap::new(),
             pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
@@ -1018,6 +1042,8 @@ impl ChoiceState {
                     &mut self.next_tool_index,
                 );
                 self.tool_emitted = true;
+                self.parser_call_completion
+                    .insert(tool_index, call.complete);
                 if call.complete {
                     self.pending_tool_calls.remove(&tool_index);
                     self.pending_parsed_tool_calls.remove(&tool_index);
@@ -1026,8 +1052,7 @@ impl ChoiceState {
                 }
                 // The OpenAI streaming tool-call contract: the FIRST chunk for a tool
                 // index carries id + type + name, later chunks carry only argument
-                // fragments. `dynamo-parsers-v2` mints no ids (serving layers own them),
-                // so one is minted here per call, exactly once.
+                // fragments. Preserve model IDs when the native grammar supplies one.
                 let first = self.opened_calls.insert(tool_index);
                 if first {
                     self.tool_ids_emitted.insert(tool_index);
@@ -1035,7 +1060,12 @@ impl ChoiceState {
                 }
                 choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
                     index: tool_index as u32,
-                    id: first.then(|| format!("call-{}", Uuid::new_v4())),
+                    id: first.then(|| {
+                        self.parser
+                            .tool_call_id(call.tool_index)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("call-{}", Uuid::new_v4()))
+                    }),
                     r#type: first.then_some(FunctionType::Function),
                     function: Some(FunctionCallStream {
                         name: first.then_some(call.name).flatten(),
@@ -1200,6 +1230,7 @@ impl ChoiceState {
         self.tool_emitted
             && self.pending_tool_calls.is_empty()
             && self.pending_parsed_tool_calls.is_empty()
+            && !has_incomplete_call_evidence(&self.parser_call_completion)
     }
 
     fn resolve_complete_parsed_tool_calls_at_eof(&mut self) {
@@ -1222,7 +1253,7 @@ impl ChoiceState {
             // look closed to the opener tracker. Only the parser owns recovery.
             || (self.family == QWEN3_UNIFIED_FAMILY
                 && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native))
-            || self.family == "kimi_k2"
+            || matches!(self.family.as_str(), KIMI_K2_UNIFIED_FAMILY | KIMI_K3_UNIFIED_FAMILY)
     }
 
     fn qwen_resumed_marker_can_start_call(&self) -> bool {
@@ -1239,7 +1270,11 @@ impl ChoiceState {
     /// call index is complete. `Length` / `ContentFilter` stay unchanged.
     fn normalize_finish_reason(&self, finish_reason: Option<FinishReason>) -> Option<FinishReason> {
         match finish_reason {
-            Some(FinishReason::ToolCalls) if !self.pending_parsed_tool_calls.is_empty() => {
+            Some(FinishReason::ToolCalls)
+                if !self.pending_tool_calls.is_empty()
+                    || !self.pending_parsed_tool_calls.is_empty()
+                    || has_incomplete_call_evidence(&self.parser_call_completion) =>
+            {
                 Some(FinishReason::Stop)
             }
             Some(FinishReason::Stop) if self.has_terminal_tool_calls() => {
@@ -1388,11 +1423,40 @@ pub(crate) fn parse_complete(
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
-    for event in parser.parse_complete(content)? {
+    let mut output = UnifiedParserOutput::default();
+    parser.parse_into(content, &mut output)?;
+    output.events.extend(parser.finish()?.events);
+    let completed_indices: HashSet<_> = output
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            UnifiedParserEvent::ToolCall(call) if call.complete => Some(call.tool_index),
+            _ => None,
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    let mut completed_indices = output.events.iter().filter_map(|event| match event {
+        UnifiedParserEvent::ToolCall(call)
+            if completed_indices.contains(&call.tool_index) && seen.insert(call.tool_index) =>
+        {
+            Some(call.tool_index)
+        }
+        _ => None,
+    });
+    let events = dynamo_parsers_v2::assemble(&output.events);
+    for event in events {
         match event {
             UnifiedEvent::Text { text: chunk } => text.push_str(&chunk),
             UnifiedEvent::Reasoning { text: chunk } => reasoning.push_str(&chunk),
             UnifiedEvent::ToolCall { name, arguments } => {
+                let id = parser
+                    .tool_call_id(
+                        completed_indices
+                            .next()
+                            .expect("assembled call has completion evidence"),
+                    )
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("call-{}", Uuid::new_v4()));
                 if forced_tool_name.is_some_and(|forced| forced != name) {
                     tracing::warn!(
                         forced_tool_name = forced_tool_name,
@@ -1402,7 +1466,7 @@ pub(crate) fn parse_complete(
                     continue;
                 }
                 tool_calls.push(ChatCompletionMessageToolCall {
-                    id: format!("call-{}", Uuid::new_v4()),
+                    id,
                     r#type: FunctionType::Function,
                     // `assemble` already parsed the argument fragments into a typed
                     // object, so this re-serializes rather than passing the model's
@@ -1437,8 +1501,12 @@ struct ChoiceRecord {
     next_tool_index: usize,
     /// Incomplete events from the live UnifiedParser instance.
     pending_tool_calls: HashSet<usize>,
+    parser_call_completion: HashMap<usize, bool>,
     /// Pass-through OpenAI call argument fragments awaiting terminal or JSON completion.
     pending_parsed_tool_calls: HashMap<usize, String>,
+    /// Leading whitespace held until a Reasoning-prefill guided request reveals
+    /// whether generation starts with reasoning prose or bare guided JSON.
+    pending_guided_prefill_whitespace: String,
     /// Source envelopes for Qwen reasoning held until a split native opener resolves.
     pending_qwen_opener_responses: VecDeque<PendingQwenReasoningResponse>,
     tool_emitted: bool,
@@ -1504,6 +1572,27 @@ fn qwen_chunks_for_choices(
 }
 
 impl ChoiceRecord {
+    fn normalize_finish_reason(&self, finish_reason: Option<FinishReason>) -> Option<FinishReason> {
+        match finish_reason {
+            Some(FinishReason::ToolCalls)
+                if !self.pending_tool_calls.is_empty()
+                    || !self.pending_parsed_tool_calls.is_empty()
+                    || has_incomplete_call_evidence(&self.parser_call_completion) =>
+            {
+                Some(FinishReason::Stop)
+            }
+            Some(FinishReason::Stop)
+                if self.tool_emitted
+                    && self.pending_tool_calls.is_empty()
+                    && self.pending_parsed_tool_calls.is_empty()
+                    && !has_incomplete_call_evidence(&self.parser_call_completion) =>
+            {
+                Some(FinishReason::ToolCalls)
+            }
+            other => other,
+        }
+    }
+
     fn remember_state(&mut self, state: &ChoiceState) {
         self.opened_calls.extend(state.opened_calls.iter().copied());
         self.tool_ids_emitted
@@ -1517,6 +1606,12 @@ impl ChoiceRecord {
         self.next_tool_index = self.next_tool_index.max(state.next_tool_index);
         self.pending_tool_calls
             .clone_from(&state.pending_tool_calls);
+        self.parser_call_completion.extend(
+            state
+                .parser_call_completion
+                .iter()
+                .map(|(index, complete)| (*index, *complete)),
+        );
         self.pending_parsed_tool_calls
             .clone_from(&state.pending_parsed_tool_calls);
         self.tool_emitted |= state.tool_emitted();
@@ -1584,6 +1679,13 @@ fn finish_unterminated_choices(
                 chunks.extend(qwen_chunks_for_choices(state, record, flushed));
             }
             None => {
+                let pending_whitespace =
+                    std::mem::take(&mut record.pending_guided_prefill_whitespace);
+                if !pending_whitespace.is_empty() {
+                    let mut choice = empty_choice(index);
+                    choice.delta.reasoning_content = Some(pending_whitespace);
+                    chunks.push(FinishedStreamChunk::Choice(choice));
+                }
                 while !record.pending_qwen_opener_responses.is_empty() {
                     chunks.push(FinishedStreamChunk::Source(take_qwen_reasoning_response(
                         record,
@@ -1593,6 +1695,7 @@ fn finish_unterminated_choices(
                 if record.tool_emitted
                     && record.pending_tool_calls.is_empty()
                     && record.pending_parsed_tool_calls.is_empty()
+                    && !has_incomplete_call_evidence(&record.parser_call_completion)
                 {
                     let mut choice = base;
                     choice.finish_reason = Some(FinishReason::ToolCalls);
@@ -1604,6 +1707,66 @@ fn finish_unterminated_choices(
     chunks
 }
 
+fn has_incomplete_call_evidence(completion: &HashMap<usize, bool>) -> bool {
+    completion.values().any(|complete| !complete)
+}
+
+fn merge_passthrough_completion(
+    completion: &mut HashMap<usize, bool>,
+    indices: &HashMap<usize, usize>,
+    evidence: &[super::ToolCallCompletion],
+    choice_index: u32,
+) {
+    for evidence in evidence
+        .iter()
+        .filter(|evidence| evidence.choice_index == choice_index)
+    {
+        if let Some(index) = indices.get(&(evidence.tool_index as usize)) {
+            completion
+                .entry(*index)
+                .and_modify(|complete| *complete |= evidence.complete)
+                .or_insert(evidence.complete);
+        }
+    }
+}
+
+fn attach_call_completion(
+    data: &mut NvCreateChatCompletionStreamResponse,
+    choice: &ChatChoiceStream,
+    states: &HashMap<u32, ChoiceState>,
+    records: &HashMap<u32, ChoiceRecord>,
+) {
+    let incoming = std::mem::take(&mut data.tool_call_completion);
+    if let Some(calls) = &choice.delta.tool_calls {
+        for call in calls {
+            let index = call.index as usize;
+            let complete = states
+                .get(&choice.index)
+                .and_then(|state| state.parser_call_completion.get(&index))
+                .or_else(|| {
+                    records
+                        .get(&choice.index)
+                        .and_then(|record| record.parser_call_completion.get(&index))
+                });
+            let complete = complete.copied().or_else(|| {
+                incoming
+                    .iter()
+                    .find(|evidence| {
+                        evidence.choice_index == choice.index && evidence.tool_index == call.index
+                    })
+                    .map(|evidence| evidence.complete)
+            });
+            if let Some(complete) = complete {
+                data.tool_call_completion.push(super::ToolCallCompletion {
+                    choice_index: choice.index,
+                    tool_index: call.index,
+                    complete,
+                });
+            }
+        }
+    }
+}
+
 /// Wrap one rewritten choice in a response built from `template`.
 ///
 /// Usage, nvext and metrics are cleared: they belong to the chunk that carried them,
@@ -1611,8 +1774,11 @@ fn finish_unterminated_choices(
 fn response_with_choice(
     template: &NvCreateChatCompletionStreamResponse,
     choice: ChatChoiceStream,
+    states: &HashMap<u32, ChoiceState>,
+    records: &HashMap<u32, ChoiceRecord>,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
     let mut data = template.clone();
+    attach_call_completion(&mut data, &choice, states, records);
     data.inner.choices = vec![choice];
     data.inner.usage = None;
     data.nvext = None;
@@ -1750,7 +1916,7 @@ where
                     for output in finish_unterminated_choices(&mut states, &mut records) {
                         match output {
                             FinishedStreamChunk::Choice(choice) => {
-                                yield response_with_choice(template, choice);
+                                yield response_with_choice(template, choice, &states, &records);
                             }
                             FinishedStreamChunk::Source(response) => yield response.map_data(|data| Ok(*data)),
                         }
@@ -1770,6 +1936,18 @@ where
                     // built for it (e.g. its first-ever chunk is already-parsed),
                     // so it is not invisible to `finish_unterminated_choices`.
                     let record = records.entry(original.index).or_default();
+                    let pending_whitespace =
+                        std::mem::take(&mut record.pending_guided_prefill_whitespace);
+                    if !pending_whitespace.is_empty() {
+                        if let Some(reasoning) = original.delta.reasoning_content.as_mut() {
+                            reasoning.insert_str(0, &pending_whitespace);
+                        } else {
+                            let mut deferred_reasoning = empty_choice(original.index);
+                            deferred_reasoning.delta.reasoning_content =
+                                Some(pending_whitespace);
+                            emitted.push(deferred_reasoning);
+                        }
+                    }
                     // Any raw run resuming this choice after this point must rebuild
                     // starting at `Response`, not the outer request-level `prefill` —
                     // see the `Vacant` arm below and the field doc on `ChoiceRecord`.
@@ -1809,16 +1987,17 @@ where
                             );
                         }
                     }
+                    merge_passthrough_completion(
+                        &mut record.parser_call_completion,
+                        &record.passthrough_tool_indices,
+                        &chat.tool_call_completion,
+                        original.index,
+                    );
                     if parsed_calls_are_terminal {
                         resolve_complete_parsed_tool_calls_at_terminal(
                             &mut record.pending_parsed_tool_calls,
                             original.finish_reason == Some(FinishReason::ToolCalls),
                         );
-                        if !record.pending_parsed_tool_calls.is_empty()
-                            && original.finish_reason == Some(FinishReason::ToolCalls)
-                        {
-                            original.finish_reason = Some(FinishReason::Stop);
-                        }
                     }
                     let reported_tool_indices: HashSet<usize> = if parsed_calls_are_terminal {
                         original
@@ -1974,25 +2153,8 @@ where
                             }
                         }
                         record.remember_state(&state);
-                        if original.finish_reason == Some(FinishReason::Stop)
-                            && record.tool_emitted
-                            && record.pending_tool_calls.is_empty()
-                            && record.pending_parsed_tool_calls.is_empty()
-                        {
-                            original.finish_reason = Some(FinishReason::ToolCalls);
-                        }
-                    } else {
-                        if record.tool_emitted
-                            && record.pending_tool_calls.is_empty()
-                            && record.pending_parsed_tool_calls.is_empty()
-                            && original.finish_reason == Some(FinishReason::Stop)
-                        {
-                            // No live state for this chunk (an earlier already-parsed
-                            // chunk already discarded it), but this choice emitted a
-                            // tool call before that gap.
-                            original.finish_reason = Some(FinishReason::ToolCalls);
-                        }
                     }
+                    original.finish_reason = record.normalize_finish_reason(original.finish_reason);
                     if original.finish_reason.is_some() {
                         record.finished = true;
                     }
@@ -2049,6 +2211,32 @@ where
                         record.remember_state(&state);
                 }
 
+                let waiting_for_guided_prefill =
+                    prefill == UnifiedParserStartingState::Reasoning
+                        && guided_tool_constraint.installs_guided_json()
+                        && !states.contains_key(&original.index)
+                        && !records
+                            .get(&original.index)
+                            .is_some_and(|record| record.detoured)
+                        && original.finish_reason.is_none()
+                        && match original.delta.content.as_ref() {
+                            None => true,
+                            Some(ChatCompletionMessageContent::Text(text)) => {
+                                text.trim().is_empty()
+                            }
+                            Some(ChatCompletionMessageContent::Parts(_)) => false,
+                        };
+                if waiting_for_guided_prefill {
+                    let record = records.entry(original.index).or_default();
+                    if let Some(ChatCompletionMessageContent::Text(text)) =
+                        original.delta.content.take()
+                    {
+                        record.pending_guided_prefill_whitespace.push_str(&text);
+                    }
+                    emitted.push(original);
+                    continue;
+                }
+
                 let state = match states.entry(original.index) {
                     std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                     std::collections::hash_map::Entry::Vacant(entry) => {
@@ -2072,6 +2260,33 @@ where
                         } else {
                             prefill
                         };
+                        let pending_whitespace = records
+                            .get_mut(&original.index)
+                            .map(|record| {
+                                std::mem::take(
+                                    &mut record.pending_guided_prefill_whitespace,
+                                )
+                            })
+                            .unwrap_or_default();
+                        if choice_prefill == UnifiedParserStartingState::Reasoning
+                            && !pending_whitespace.is_empty()
+                        {
+                            match original.delta.content.as_mut() {
+                                Some(ChatCompletionMessageContent::Text(text)) => {
+                                    let mut combined = pending_whitespace;
+                                    combined.push_str(text);
+                                    *text = combined;
+                                }
+                                None => {
+                                    original.delta.content = Some(
+                                        ChatCompletionMessageContent::Text(pending_whitespace),
+                                    );
+                                }
+                                Some(ChatCompletionMessageContent::Parts(_)) => {
+                                    unreachable!("already parsed parts bypass raw parser setup")
+                                }
+                            }
+                        }
                         match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming) {
                             Ok(mut state) => {
                                 // A raw run resuming after an already-parsed detour
@@ -2103,6 +2318,7 @@ where
                                             .iter()
                                             .map(|(k, v)| (*k, *v)),
                                     );
+                                    state.parser_call_completion.clone_from(&record.parser_call_completion);
                                     state
                                         .pending_tool_calls
                                         .extend(record.pending_tool_calls.iter().copied());
@@ -2143,7 +2359,18 @@ where
                     records.entry(original.index).or_default().finished = true;
                 }
 
-                let choices = state.choices_for(&original, deltas, true, terminal);
+                let mut choices = state.choices_for(&original, deltas, true, terminal);
+                merge_passthrough_completion(
+                    &mut state.parser_call_completion,
+                    &state.passthrough_tool_indices,
+                    &chat.tool_call_completion,
+                    original.index,
+                );
+                // Pass-through indices are assigned by choices_for, so completion
+                // evidence must be remapped before accepting its terminal decision.
+                for choice in &mut choices {
+                    choice.finish_reason = state.normalize_finish_reason(choice.finish_reason);
+                }
                 let mut parsed = Vec::new();
                 let record = records.entry(original.index).or_default();
                 for output in qwen_chunks_for_choices(state, record, choices) {
@@ -2199,6 +2426,7 @@ where
                 };
                 let is_last = Some(position) == last;
                 let mut data = chat.clone();
+                attach_call_completion(&mut data, &choice, &states, &records);
                 data.inner.choices = vec![choice];
                 if !is_last {
                     data.inner.usage = None;
@@ -2222,7 +2450,7 @@ where
             for output in finish_unterminated_choices(&mut states, &mut records) {
                 match output {
                     FinishedStreamChunk::Choice(choice) => {
-                        yield response_with_choice(template, choice);
+                        yield response_with_choice(template, choice, &states, &records);
                     }
                     FinishedStreamChunk::Source(response) => yield response.map_data(|data| Ok(*data)),
                 }
@@ -2294,6 +2522,7 @@ mod tests {
             nvext: None,
             prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         };
         Annotated::from_data(response)
     }
@@ -2423,7 +2652,7 @@ mod tests {
         let pair = (Some("deepseek_v41"), Some("deepseek_v41"));
         assert_eq!(configured_family(pair.0, pair.1), Some("deepseek_v41"));
         assert_eq!(selected_family(pair.0, pair.1), Some("deepseek_v41"));
-        assert_eq!(selected_batch_family(pair.0, pair.1), Some("deepseek_v41"));
+        assert_eq!(selected_family(pair.0, pair.1), Some("deepseek_v41"));
         assert_eq!(configured_family(Some("deepseek_v41"), Some("qwen3")), None);
         assert_eq!(configured_family(Some("deepseek_v41"), None), None);
         assert_eq!(configured_family(None, Some("deepseek_v41")), None);
@@ -2630,7 +2859,7 @@ mod tests {
     fn batch_routing_uses_the_configured_pair_for_every_output_mode() {
         let pair = (Some("qwen3_coder"), Some("qwen3"));
         assert_eq!(
-            configured_batch_family(pair.0, pair.1),
+            configured_family(pair.0, pair.1),
             Some(QWEN3_UNIFIED_FAMILY),
             "the carried constraint selects native versus guided parsing after routing"
         );
@@ -2790,7 +3019,7 @@ mod tests {
             UnifiedParserStartingState::Reasoning,
             "an apostrophe in prose must not hide a later control marker"
         );
-        assert!(detect_prefill("kimi_k3", "answer").is_err());
+        assert!(detect_prefill("unknown", "answer").is_err());
     }
 
     #[test]
@@ -3717,6 +3946,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inconclusive_first_chunk_waits_before_classifying_guided_prefill() {
+        let mut role_only = chunk("", false);
+        role_only.data.as_mut().unwrap().inner.choices[0]
+            .delta
+            .content = None;
+
+        for first in [role_only, chunk(" \n", false)] {
+            let responses = apply_stream(
+                stream::iter([first, chunk(r#"{"city":"Tokyo"}"#, true)]),
+                Some(weather_tools()),
+                Some(named_choice("get_weather")),
+                false,
+                UnifiedParserStartingState::Reasoning,
+                QWEN3_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let choices = collect_choices(&responses);
+            let calls: Vec<_> = choices
+                .iter()
+                .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                .flatten()
+                .collect();
+
+            assert_eq!(
+                calls
+                    .iter()
+                    .find_map(|call| call.function.as_ref()?.name.as_deref()),
+                Some("get_weather")
+            );
+            let arguments: String = calls
+                .iter()
+                .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                .collect();
+            assert_eq!(arguments, r#"{"city":"Tokyo"}"#);
+            assert!(
+                choices
+                    .iter()
+                    .all(|choice| choice.delta.reasoning_content.is_none())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_prefill_whitespace_is_reasoning_when_prose_arrives_first() {
+        let responses = apply_stream(
+            stream::iter([
+                chunk(" \n", false),
+                chunk("reason</think>{\"city\": ", false),
+                chunk("\"Tokyo\"}", true),
+            ]),
+            Some(weather_tools()),
+            Some(named_choice("get_weather")),
+            false,
+            UnifiedParserStartingState::Reasoning,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+        let reasoning: String = choices
+            .iter()
+            .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+            .collect();
+        assert_eq!(reasoning, " \nreason");
+        let arguments: String = choices
+            .iter()
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .flatten()
+            .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+            .collect();
+        assert_eq!(arguments, r#"{"city": "Tokyo"}"#);
+    }
+
+    #[tokio::test]
     async fn named_guided_json_becomes_a_tool_call() {
         let responses = apply_stream(
             stream::iter([
@@ -3813,6 +4117,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![FinishReason::Stop],
             "an incomplete argument object must not be reported as a completed tool call"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_named_guided_json_downgrades_tool_calls_terminal() {
+        let mut terminal = chunk("\"Tokyo\"", true);
+        terminal.data.as_mut().unwrap().inner.choices[0].finish_reason =
+            Some(FinishReason::ToolCalls);
+        let responses = apply_stream(
+            stream::iter([chunk("reason</think>{\"city\": ", false), terminal]),
+            Some(weather_tools()),
+            Some(named_choice("get_weather")),
+            false,
+            UnifiedParserStartingState::Reasoning,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let choices = collect_choices(&responses);
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.delta.tool_calls.is_some())
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect::<Vec<_>>(),
+            vec![FinishReason::Stop]
         );
     }
 
@@ -5016,6 +5351,7 @@ mod tests {
                 nvext: None,
                 prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             };
             Annotated::from_data(response)
         }
@@ -5788,6 +6124,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_provisional_call_downgrades_already_parsed_tool_calls_terminal() {
+        let mut parsed_terminal = chunk("", true);
+        let choice = &mut parsed_terminal.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("already parsed reasoning".to_string());
+        choice.finish_reason = Some(FinishReason::ToolCalls);
+
+        let responses = apply_stream(
+            stream::iter([
+                chunk(
+                    "<tool_call><function=get_weather><parameter=city>Paris",
+                    false,
+                ),
+                parsed_terminal,
+            ]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::Response,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.delta.tool_calls.is_some())
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect::<Vec<_>>(),
+            vec![FinishReason::Stop]
+        );
+    }
+
+    #[tokio::test]
     async fn qwen_call_start_marker_inside_parameter_value_survives_reasoning_detour_at_every_split()
      {
         async fn run(
@@ -6531,6 +6907,7 @@ mod tests {
                 nvext: None,
                 prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             };
             Annotated::from_data(response)
         }
@@ -6783,6 +7160,7 @@ mod tests {
             tool_index_offset: 0,
             next_tool_index: 0,
             pending_tool_calls: HashSet::new(),
+            parser_call_completion: HashMap::new(),
             pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
@@ -7614,6 +7992,249 @@ mod tests {
                     ["before <tool_c".to_string(), "XYZanswer".to_string()],
                     "split={split}"
                 );
+            }
+        }
+    }
+    #[test]
+    fn kimi_pair_routing_preserves_forced_modes() {
+        for (tool, reason, family) in [
+            ("kimi_k2", "kimi_k25", KIMI_K2_UNIFIED_FAMILY),
+            ("kimi_k3", "kimi_k3", KIMI_K3_UNIFIED_FAMILY),
+            ("kimi-k3", "kimi_k3", KIMI_K3_UNIFIED_FAMILY),
+            ("kimi_k3", "kimi-k3", KIMI_K3_UNIFIED_FAMILY),
+            ("kimi-k3", "kimi-k3", KIMI_K3_UNIFIED_FAMILY),
+        ] {
+            assert_eq!(configured_family(Some(tool), Some(reason)), Some(family));
+            let selected = experimental_parsers_v2_enabled().then_some(family);
+            assert_eq!(
+                selected_request_family(
+                    Some(tool),
+                    Some(reason),
+                    None,
+                    &GuidedToolConstraint::None
+                ),
+                selected
+            );
+            assert_eq!(
+                selected_request_family(
+                    Some(tool),
+                    Some(reason),
+                    Some(&ChatCompletionToolChoiceOption::Auto),
+                    &GuidedToolConstraint::None
+                ),
+                selected
+            );
+            assert_eq!(
+                selected_request_family(
+                    Some(tool),
+                    Some(reason),
+                    Some(&ChatCompletionToolChoiceOption::Required),
+                    &GuidedToolConstraint::None
+                ),
+                None
+            );
+            assert_eq!(
+                selected_request_family(
+                    Some(tool),
+                    Some(reason),
+                    Some(&ChatCompletionToolChoiceOption::None),
+                    &GuidedToolConstraint::None
+                ),
+                None
+            );
+        }
+        assert_eq!(configured_family(Some("kimi_k2"), Some("kimi_k3")), None);
+    }
+
+    #[test]
+    fn kimi_batch_prefill_and_ids_follow_native_grammar() {
+        for input in [
+            "visible",
+            "visible<|close|>response<|sep|>",
+            "<|open|>response<|sep|>visible<|close|>response<|sep|>",
+            "<|open|> response <|sep|>visible<|close|> response <|sep|>",
+        ] {
+            let parsed = parse_complete(
+                KIMI_K3_UNIFIED_FAMILY,
+                input,
+                &GuidedToolConstraint::None,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(parsed.text, "visible", "{input}");
+            assert!(parsed.reasoning.is_empty());
+            assert!(parsed.tool_calls.is_empty());
+        }
+        for closer in [
+            "<|close|>think<|sep|>",
+            "<|close|> think <|sep|>",
+            "<|close|>think",
+            "<|close|> think",
+        ] {
+            let input =
+                format!("private{closer}<|open|>response<|sep|>visible<|close|>response<|sep|>");
+            let parsed = parse_complete(
+                KIMI_K3_UNIFIED_FAMILY,
+                &input,
+                &GuidedToolConstraint::None,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(parsed.reasoning, "private", "{closer}");
+            assert_eq!(parsed.text, "visible", "{closer}");
+        }
+        for opener in KIMI_K3_REASONING_STARTS {
+            assert!(kimi_k3_prompt_reasoning_prefill(opener));
+        }
+        let input = concat!(
+            "<|open|>tools<|sep|>",
+            "<|open|>call tool=\"bad\" index=\"1\"<|sep|><|open|>json type=\"object\"<|sep|>{\"x\":}<|close|>json<|sep|><|close|>call<|sep|>",
+            "<|open|>call tool=\"good\" index=\"2\"<|sep|><|open|>argument key=\"x\" type=\"number\"<|sep|>7<|close|>argument<|sep|><|close|>call<|sep|>",
+            "<|close|>tools<|sep|>"
+        );
+        let parsed = parse_complete(
+            KIMI_K3_UNIFIED_FAMILY,
+            input,
+            &GuidedToolConstraint::None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].id, "good:1");
+    }
+    #[tokio::test]
+    async fn kimi_completion_evidence_follows_passthrough_index_collisions() {
+        let raw = "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\":\"Tokyo\"}<|tool_call_end|><|tool_calls_section_end|>";
+        for mixed_content in [false, true] {
+            let mut upstream = chunk("", false);
+            let data = upstream.data.as_mut().unwrap();
+            data.tool_call_completion = vec![super::super::ToolCallCompletion {
+                choice_index: 0,
+                tool_index: 0,
+                complete: false,
+            }];
+            let choice = &mut data.inner.choices[0];
+            choice.delta.content =
+                mixed_content.then(|| ChatCompletionMessageContent::Text("".into()));
+            choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: Some("unfinished".into()),
+                r#type: Some(FunctionType::Function),
+                function: Some(FunctionCallStream {
+                    name: Some("get_weather".into()),
+                    arguments: Some("{}".into()),
+                }),
+            }]);
+            let mut terminal = chunk("", false);
+            terminal.data.as_mut().unwrap().inner.choices[0].finish_reason =
+                Some(FinishReason::Length);
+            let output = apply_stream(
+                stream::iter(vec![chunk(raw, false), upstream, terminal]),
+                Some(weather_tools()),
+                Some(ChatCompletionToolChoiceOption::Auto),
+                false,
+                UnifiedParserStartingState::None,
+                KIMI_K2_UNIFIED_FAMILY,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            assert!(
+                output
+                    .iter()
+                    .filter_map(|chunk| chunk.data.as_ref())
+                    .flat_map(|data| &data.tool_call_completion)
+                    .any(|evidence| evidence.tool_index == 1 && !evidence.complete)
+            );
+            let transported = output
+                .into_iter()
+                .map(|chunk| {
+                    serde_json::from_value::<Annotated<NvCreateChatCompletionStreamResponse>>(
+                        serde_json::to_value(chunk).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let aggregate = super::super::aggregator::DeltaAggregator::apply(
+                stream::iter(transported),
+                crate::protocols::openai::ParsingOptions::default(),
+            )
+            .await
+            .unwrap();
+            let calls = aggregate.inner.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, "functions.get_weather:0");
+            assert_eq!(
+                aggregate.inner.choices[0].finish_reason,
+                Some(FinishReason::Length)
+            );
+        }
+    }
+    #[tokio::test]
+    async fn explicit_incomplete_evidence_prevents_tool_terminal_for_valid_json() {
+        for mixed_content in [false, true] {
+            for same_envelope in [false, true] {
+                for finish in [
+                    None,
+                    Some(FinishReason::Stop),
+                    Some(FinishReason::ToolCalls),
+                ] {
+                    let mut upstream = chunk("", false);
+                    let data = upstream.data.as_mut().unwrap();
+                    data.tool_call_completion = vec![super::super::ToolCallCompletion {
+                        choice_index: 0,
+                        tool_index: 0,
+                        complete: false,
+                    }];
+                    let choice = &mut data.inner.choices[0];
+                    choice.delta.content =
+                        mixed_content.then(|| ChatCompletionMessageContent::Text(String::new()));
+                    if same_envelope {
+                        choice.finish_reason = finish;
+                    }
+                    choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                        index: 0,
+                        id: Some("unfinished".into()),
+                        r#type: Some(FunctionType::Function),
+                        function: Some(FunctionCallStream {
+                            name: Some("get_weather".into()),
+                            arguments: Some("{}".into()),
+                        }),
+                    }]);
+                    let mut input = vec![upstream];
+                    if let Some(finish) = finish.filter(|_| !same_envelope) {
+                        let mut terminal = chunk("", false);
+                        terminal.data.as_mut().unwrap().inner.choices[0].finish_reason =
+                            Some(finish);
+                        input.push(terminal);
+                    }
+                    let output = apply_stream(
+                        stream::iter(input),
+                        Some(weather_tools()),
+                        Some(ChatCompletionToolChoiceOption::Auto),
+                        false,
+                        UnifiedParserStartingState::None,
+                        KIMI_K2_UNIFIED_FAMILY,
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                    assert!(
+                        !collect_choices(&output)
+                            .iter()
+                            .any(|choice| choice.finish_reason == Some(FinishReason::ToolCalls)),
+                        "{finish:?}, mixed={mixed_content}, same_envelope={same_envelope}"
+                    );
+                    let aggregate = super::super::aggregator::DeltaAggregator::apply(
+                        stream::iter(output),
+                        crate::protocols::openai::ParsingOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(aggregate.inner.choices[0].message.tool_calls.is_none());
+                }
             }
         }
     }
