@@ -22,7 +22,8 @@ spec:
       - name: perf
         env:
         - name: CONCURRENCIES
-          value: "512"
+          # Match the rc28 comparison runs while isolating the engine upgrade.
+          value: "1"
         - name: BENCHMARK_DURATION
           value: "60"
       volumes:
