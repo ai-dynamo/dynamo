@@ -390,6 +390,27 @@ impl LocalKvIndexer {
         drop(unusable_snapshot);
     }
 
+    /// Recovery callers require actual application, including failures, before
+    /// publishing readiness. Ordinary event admission remains asynchronous.
+    pub async fn apply_recovery_event_with_buffer(
+        &self,
+        event: RouterEvent,
+    ) -> Result<(), KvRouterError> {
+        let targets_primary = event
+            .targets_primary()
+            .map_err(|e| KvRouterError::Unsupported(e.to_string()))?;
+        let result = if matches!(event.event.data, KvCacheEventData::Cleared) {
+            self.apply_event_by_tier(&event).await
+        } else if targets_primary {
+            self.indexer.apply_event_and_wait(event.clone()).await
+        } else {
+            self.get_or_create_lower_tier_indexer(event.storage_tier)
+                .apply_event_and_wait(event.clone())
+                .await
+        };
+        self.record_applied_event(event, result).await
+    }
+
     /// Apply event with buffering.
     ///
     /// Stored and Removed events are recorded after successful queue admission; this does not

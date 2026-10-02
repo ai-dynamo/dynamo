@@ -45,11 +45,11 @@ pub(super) fn decode_zmq_kv_batch(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn start_zmq_listener(
+pub(super) async fn start_zmq_listener<I: From<Vec<PlacementEvent>> + Send>(
     zmq_endpoint: String,
     zmq_topic: String,
     worker_id: WorkerId,
-    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
+    tx: mpsc::UnboundedSender<I>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
     next_event_id: Arc<AtomicU64>,
@@ -156,7 +156,7 @@ pub(super) async fn start_zmq_listener(
                 }
                 if !events.is_empty() {
                     let event_count = events.len() as u64;
-                    if tx.send(events).is_err() {
+                    if tx.send(events.into()).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         break 'main String::from("channel receiver dropped");
                     }

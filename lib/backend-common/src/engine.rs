@@ -337,6 +337,12 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(MetricsBindings::default())
     }
 
+    /// Complete one-time initialization after KV publishers are attached and
+    /// before registering serving endpoints. Failure must not permit serving.
+    async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
     /// Canary payload registered with the runtime's `HealthCheckManager`.
     /// `Worker` calls this once after [`start`](LLMEngine::start). Returning
     /// `Ok(None)` (default) disables active probing — the endpoint then

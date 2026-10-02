@@ -313,6 +313,13 @@ impl EngineKind {
         }
     }
 
+    async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.wait_for_startup().await,
+            EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.health_check_payload().await,
@@ -1148,6 +1155,12 @@ impl Worker {
         // hold suppresses the whole process's readiness, so covering the primary
         // endpoint also covers the RL endpoint registered further down.
         let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
+
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Ok(()),
+            result = self.engine.wait_for_startup() => result?,
+        }
 
         let start_fut = builder.start_with_registration();
         tokio::pin!(start_fut);
@@ -4295,6 +4308,172 @@ mod handoff_and_lifecycle_tests {
         );
 
         worker.begin_engine_route_shutdown().await;
+    }
+
+    struct StartupGateEngine(tokio::sync::watch::Receiver<bool>);
+
+    #[async_trait]
+    impl LLMEngine for StartupGateEngine {
+        async fn start(&self, id: u64) -> Result<EngineConfig, DynamoError> {
+            DefaultsEngine.start(id).await
+        }
+        async fn generate(
+            &self,
+            request: PreprocessedRequest,
+            ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            DefaultsEngine.generate(request, ctx).await
+        }
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+        async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+            let mut result = self.0.clone();
+            loop {
+                if *result.borrow_and_update() {
+                    return Ok(());
+                }
+                result.changed().await.map_err(|_| {
+                    err(
+                        ErrorType::Backend(BackendError::EngineShutdown),
+                        "bootstrap failed".to_string(),
+                    )
+                })?;
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn bootstrap_gates_initial_registration() {
+        with_each_health_route_shape(|| async {
+            let endpoint = test_local_endpoint().await;
+            let health = endpoint.drt().system_health();
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            let mut worker = Worker::new(Arc::new(StartupGateEngine(rx)), WorkerConfig::default());
+            let shutdown = CancellationToken::new();
+            let serve = tokio::spawn({
+                let endpoint = endpoint.clone();
+                let shutdown = shutdown.clone();
+                async move {
+                    worker
+                        .serve_with_orchestrator(
+                            &EngineConfig {
+                                model: "recovery-test".into(),
+                                ..Default::default()
+                            },
+                            endpoint,
+                            shutdown,
+                        )
+                        .await
+                }
+            });
+            // Wait until the worker observes the initial false gate.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!health.lock().get_health_status().0);
+            let id = endpoint.id();
+            let query = DiscoveryQuery::Endpoint {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+            };
+            assert!(
+                endpoint
+                    .drt()
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            tx.send_replace(true);
+            assert!(health_reaches(&health, true).await);
+            assert!(
+                !endpoint
+                    .drt()
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            shutdown.cancel();
+            tokio::time::timeout(Duration::from_secs(120), serve)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!health.lock().get_health_status().0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn failed_bootstrap_never_registers() {
+        with_each_health_route_shape(|| async {
+            let endpoint = test_local_endpoint().await;
+            let health = endpoint.drt().system_health();
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            let mut worker = Worker::new(Arc::new(StartupGateEngine(rx)), WorkerConfig::default());
+            let shutdown = CancellationToken::new();
+            let serve = tokio::spawn({
+                let endpoint = endpoint.clone();
+                let shutdown = shutdown.clone();
+                async move {
+                    worker
+                        .serve_with_orchestrator(
+                            &EngineConfig {
+                                model: "recovery-test".into(),
+                                ..Default::default()
+                            },
+                            endpoint,
+                            shutdown,
+                        )
+                        .await
+                }
+            });
+            // Wait until the worker observes the initial false gate.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!health.lock().get_health_status().0);
+            let id = endpoint.id();
+            let query = DiscoveryQuery::Endpoint {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+            };
+            assert!(
+                endpoint
+                    .drt()
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(tx); // The startup hook returns failure.
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), serve)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(!health.lock().get_health_status().0);
+            assert!(
+                endpoint
+                    .drt()
+                    .discovery()
+                    .list(query)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        })
+        .await;
     }
 
     /// Ensures a payload-free Rust backend publishes readiness while it is
