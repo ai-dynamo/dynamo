@@ -16,7 +16,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// localPartitionIDsEnv publishes the GPU-local runtime partitions to Cyborg.
 const localPartitionIDsEnv = "LPX_LOCAL_PARTITION_IDS"
 
 // selectRemotePartitions splits a hybrid build's physical partitions into the
