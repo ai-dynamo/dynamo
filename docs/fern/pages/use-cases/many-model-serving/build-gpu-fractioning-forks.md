@@ -75,10 +75,11 @@ Check every row on a GPU node before you install anything. The defaults of a sto
 
 | Requirement | Detail | Check | References |
 |---|---|---|---|
-| NVIDIA driver r615 or newer (CUDA 13.4) | Provides the MPS v3 control daemon with `namespace` support. This is not the GPU Operator's default driver (the chart defaults to 595.91.07), so pin it. This guide used 615.71.09 | `nvidia-smi --query-gpu=driver_version --format=csv,noheader` prints `615.x` or newer, and `nvidia-cuda-mps-control -p 3 namespace --help` lists `create`, `delete`, `list`, `set`, and `get` | [Driver Installation Guide](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/index.html), [CUDA apt repository (Ubuntu 24.04)](https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/), [MPS v3 Interface](https://docs.nvidia.com/deploy/mps/latest/mpsv3-interface.html) |
+| NVIDIA driver r615 or newer (CUDA 13.4) | Provides the MPS v3 control daemon with `namespace` support. This is not the GPU Operator's default driver (the chart defaults to 595.91.07), so pin it. This guide used 615.71.09 | `nvidia-smi --query-gpu=driver_version --format=csv,noheader` prints `615.x` or newer, and `nvidia-cuda-mps-control -p 3 namespace --help` lists `create`, `delete`, `list`, `set`, and `get`. With a GPU Operator-managed driver, the MPS binary is in the driver container: run the second command as `kubectl -n gpu-operator exec ds/nvidia-driver-daemonset -- nvidia-cuda-mps-control -p 3 namespace --help` | [Driver Installation Guide](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/index.html), [CUDA apt repository (Ubuntu 24.04)](https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/), [MPS v3 Interface](https://docs.nvidia.com/deploy/mps/latest/mpsv3-interface.html) |
 | NVIDIA GPU Operator v26.7.1 or newer | The `gpu-fractioning` chart refuses to start below `gpuOperator.minimumVersion` (default `v26.7.1`). v26.7.1 ships the container toolkit's `apply-cuda-memory-limits` hook, which turns the memory cap into a driver-enforced limit. v26.7.0 also works if you set that value to `v26.7.0`, but the memory cap then rests only on the `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` variable that `fractiond` injects into the container's environment, which a process inside the container can change | `helm list -n gpu-operator` | [Installing the GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html), [Release Notes](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/release-notes.html), [Platform Support](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/platform-support.html) |
 | containerd 2.0 or newer with NRI enabled, or CRI-O with NRI | `fractiond` is an NRI plugin. Without NRI nothing is injected into containers | `containerd --version`, and `ls -l /var/run/nri/nri.sock` shows the socket | [containerd releases](https://github.com/containerd/containerd/releases), [NRI Support in containerd](https://github.com/containerd/containerd/blob/main/docs/NRI.md), [CRI-O `enable_nri`](https://github.com/cri-o/cri-o/blob/main/docs/crio.conf.5.md), [NRI project](https://github.com/containerd/nri) |
 | `nvidia.com/gpu.present=true` node label | The `mpsd` and `fractiond` DaemonSets select GPU nodes by this label. The GPU Operator sets it; a node without it gets no daemons and reports no error | `kubectl get nodes -l nvidia.com/gpu.present=true` lists every GPU node | [GPU Operator installation](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) |
+| `nvidia.com/gpu.memory` node label | KAI's binder reads each GPU's memory size from this label to compute a pod's memory cap. GPU Feature Discovery, part of the GPU Operator, sets it. Without it, fractional pods stay `Pending` and only a binder event explains why | `kubectl get nodes -L nvidia.com/gpu.memory` shows a value in MiB for every GPU node | [GPU Feature Discovery labels](https://github.com/NVIDIA/k8s-device-plugin/blob/main/docs/gpu-feature-discovery/README.md) |
 | `nvidia` RuntimeClass | Needed by GPU pods for driver libraries, and by KAI's reservation pod, which calls NVML | `kubectl get runtimeclass nvidia` | [Kubernetes RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/), [GPU Operator installation](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) |
 | `nvidia-fabricmanager` | Required on multi-GPU NVLink and NVSwitch nodes such as HGX A100. Match the driver branch | `systemctl is-active nvidia-fabricmanager` | [Fabric Manager User Guide](https://docs.nvidia.com/datacenter/tesla/fabric-manager-user-guide/index.html) |
 | Host memory for `mpsd` | `mpsd` holds one CUDA server context per GPU at about 50 MiB of host memory each. This fork's default pod limit is `1Gi`, enough for 16 GPUs. Raise it on denser nodes | `kubectl -n gpu-fractioning get ds -o yaml` after install, under `resources.limits.memory` | [MPS documentation](https://docs.nvidia.com/deploy/mps/index.html), [`mpsDaemon` chart value](https://github.com/nv-kmcgill53/kai-gpu-fractioning/blob/af0544e4dbd1d8e03ca14fc1e06d6265fabed99b/operator/charts/values.yaml) |
@@ -142,7 +143,7 @@ git -C kai-gpu-fractioning status --porcelain    # prints nothing
 Set the registry and one tag for both forks. The tag records the pairing by naming both commits:
 
 ```bash
-export REGISTRY=<your-registry>/kai-fork          # for example registry.example.com/team/kai-fork
+export REGISTRY=registry.example.com/team/kai-fork   # replace with a registry you can push to
 export TAG=smshare-44d1d0a-af0544e
 ```
 
@@ -159,7 +160,7 @@ make docker-build docker-push \
 cd ..
 ```
 
-This builds and pushes `operator`, `mpsd`, `fractiond`, and `metricsd` as `$REGISTRY/kai-gpu-fractioning/<name>:$TAG`. For a multi-architecture build, run `make docker-buildx DOCKER_REPO_BASE="$REGISTRY/kai-gpu-fractioning" VERSION="$TAG" DOCKER_BUILD_PLATFORM=linux/amd64,linux/arm64`, which pushes directly. Pass `DOCKER_REPO_BASE` and `VERSION` again: without them the target tags the images for the upstream `ghcr.io/kai-scheduler` registry with a `git describe` version. It also needs a `docker-container` buildx builder (`docker buildx create --use`) and QEMU binfmt emulation for the non-native architecture.
+This builds and pushes `operator`, `mpsd`, `fractiond`, and `metricsd` as `$REGISTRY/kai-gpu-fractioning/<name>:$TAG`. For a multi-architecture build, run `make docker-buildx DOCKER_REPO_BASE="$REGISTRY/kai-gpu-fractioning" VERSION="$TAG" DOCKER_BUILD_PLATFORM=linux/amd64,linux/arm64`, which pushes directly. Pass `DOCKER_REPO_BASE` and `VERSION` again: without them the target tags the images for the upstream `ghcr.io/kai-scheduler` registry with a `git describe` version. It also needs a `docker-container` buildx builder and QEMU emulation for the non-native architecture. Install the emulator with `docker run --privileged --rm tonistiigi/binfmt --install arm64` (or `amd64` on an Arm host), create a dedicated builder with `docker buildx create --name kai-multiarch --driver docker-container`, and prefix the `make` command with `BUILDX_BUILDER=kai-multiarch` so your default builder is not changed. A `docker-container` builder runs in its own network namespace, so it cannot push to a registry on `localhost`; use a registry it can reach over the network.
 
 ### KAI-Scheduler
 
@@ -173,7 +174,7 @@ cd ..
 ```
 
 > [!NOTE]
-> `make build` uses your current buildx builder; check it with `docker buildx ls`. With the default `docker` driver, images built without `--push` stay in your local Docker daemon. With a `docker-container` builder they stay only in the build cache, and a registry on `localhost` is unreachable from inside the builder container, so the push fails with `connection refused`. In that case, prefix the command with `BUILDX_BUILDER=default`.
+> `make build` uses your current buildx builder; check it with `docker buildx ls`. With the default `docker` driver, images built without `--push` stay in your local Docker daemon. With a `docker-container` builder they stay only in the build cache, and a registry on `localhost` is unreachable from inside the builder container, so the push fails with `connection refused`. In that case, prefix the command with `BUILDX_BUILDER=<builder>`, naming a builder that `docker buildx ls` lists with the `docker` driver, usually `default`.
 >
 > In this Makefile `make push` is only an alias for `make build`: it has no recipe of its own and does not push. Pushing happens because `DOCKER_BUILDX_ADDITIONAL_ARGS=--push` is passed to `docker buildx build`. Without it, `make build push` leaves the images in your local Docker daemon only. The images match your host architecture. Set `DOCKER_BUILD_PLATFORM=linux/amd64` when you build on an Arm machine for x86 nodes.
 
@@ -218,9 +219,10 @@ cd ..
 - Leave `global.nvFractions.set` at its default, `false`. Setting it to `true` installs the upstream `kai-gpu-fractioning` release from `ghcr.io` as a subchart, which is not your fork. You install the fork as its own release in Step 4. `helm dependency build` still has to download that subchart, because Helm checks that every declared dependency is present.
 - For a private registry, add `--set 'global.imagePullSecrets[0].name=<secret>'` and create the secret in `kai-scheduler` first.
 
-Verify before moving on:
+Verify before moving on. Wait for the deployments first, because `helm upgrade --install` returns before the pods are up:
 
 ```bash
+kubectl -n kai-scheduler wait --for=condition=Available deploy --all --timeout=300s
 helm status kai-scheduler -n kai-scheduler                   # STATUS: deployed
 kubectl -n kai-scheduler get pods                            # all Running or Completed
 kubectl -n kai-scheduler get deploy \
@@ -282,6 +284,14 @@ Adjust for your environment:
 
 Verify:
 
+Wait for the operator, then for the DaemonSets it creates. The DaemonSets appear a few seconds after the operator starts:
+
+```bash
+kubectl -n gpu-fractioning wait --for=condition=Available deploy --all --timeout=300s
+sleep 15
+kubectl -n gpu-fractioning rollout status ds --timeout=300s
+```
+
 ```bash
 helm status gpu-fractioning -n gpu-fractioning               # STATUS: deployed
 kubectl -n gpu-fractioning get pods -o wide                  # operator, plus mpsd and fractiond (2/2, with a metricsd sidecar) on each GPU node
@@ -294,8 +304,7 @@ kubectl get gpufractioningconfig default \
 For every DaemonSet, desired must equal ready. A mismatch usually means a node failed the NRI or CRI socket check. Then confirm each GPU node reports ready, which is what gates scheduling:
 
 ```bash
-kubectl get nodes -o json | jq '.items[].status.conditions[]
-  | select(.type=="gpu-fractioning.nvidia.com/Ready")'
+kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="gpu-fractioning.nvidia.com/Ready")].status}{"\n"}{end}'
 ```
 
 Confirm that MPS started in multi-user mode. Without it, a server accepts only clients with the owner's uid, which would force every pod to run as that user:
@@ -373,14 +382,55 @@ kubectl exec fraction-smoke-a -- env CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=100 \
 |---|---|
 | 1 | Both pods show non-empty `gpu-compute.portion` and `gpu-memory.request` values and a real `gpus.devices` UUID. By default the scheduler bin-packs fractional pods, so the two UUIDs should match; matching UUIDs mean both pods share one GPU. An empty UUID means the pair is mismatched ([Troubleshooting](#troubleshooting)) |
 | 2 | `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50` and `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=<N>M`, where N = (GPU memory in MiB − 1024) × 0.5. The 1 GiB reserve is the MPS server's own context. Change it with the binder's `reservedGpuMemory` argument |
-| 3 | Two `kai_*` namespaces at `50.00` active thread percentage, plus `default` at `10.00` |
-| 4 | Reports the pod's capped memory, not the physical card's. The environment override does not change the effective SM share, because the MPS server enforces it through the pod's namespace; the variable can only lower a share, never raise it. Check 3 shows `unlimited` in the namespace's pinned-memory column: the memory cap is not a namespace setting. It comes from the container toolkit's memory-limit hook and from the `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` variable in check 2 |
+| 3 | Two `kai_*` namespaces at `50.00` active thread percentage, plus `default` at `10.00`. If you re-ran the test, namespaces from the deleted pods can linger for up to about a minute before `mpsd` removes them; run the command again |
+| 4 | Reports the pod's capped memory, not the physical card's. This confirms what the pod sees, not that the cap is enforced: the value comes from `fractiond`'s NVML shim. The memory cap is not a namespace setting either (check 3 shows `unlimited` in the pinned-memory column); the container toolkit's memory-limit hook and the `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` variable from check 2 apply it. The MPS server enforces the SM share through the pod's namespace; the next section measures it |
 
 Clean up:
 
 ```bash
 kubectl delete pod fraction-smoke-a fraction-smoke-b
 ```
+
+### Measure the Effective SM Share
+
+The checks above show the caps that were requested and configured. To show that the SM share is enforced, run CUDA's `deviceQuery` sample as a half-GPU pod that tries to override its own share to 100%:
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fraction-devicequery
+  labels:
+    kai.scheduler/queue: default-queue
+  annotations:
+    gpu-fraction: "0.5"
+    nvidia.com/container.main.gpu-compute.mode: sm-sharing
+spec:
+  schedulerName: kai-scheduler
+  runtimeClassName: nvidia
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+  containers:
+  - name: main
+    image: nvcr.io/nvidia/k8s/cuda-sample:devicequery
+    env:
+    - name: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE
+      value: "100"
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+EOF
+
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/fraction-devicequery --timeout=180s
+kubectl logs fraction-devicequery | grep -E 'Multiprocessors|Result'
+kubectl delete pod fraction-devicequery
+```
+
+The `Multiprocessors` count must be half the GPU's SM count, rounded down, despite the override: for example, `(054) Multiprocessors` on an A100 with 108 SMs. `fractiond` replaces the variable when the container is created, and the MPS server caps the namespace whatever the client asks for. `deviceQuery` still reports the physical memory total, as the note below explains.
 
 > [!NOTE]
 > `nvidia-smi` and `pynvml` in a pod report the pod's slice, but CUDA's `cudaMemGetInfo` total stays at the physical card size. Engines that size their KV cache from it, such as vLLM with `--gpu-memory-utilization`, therefore size against the whole GPU. Set that flag against the physical total, not the quota, when you [deploy the models](deploy-kai-gpu-fractions.md).
@@ -398,7 +448,8 @@ kubectl delete pod fraction-smoke-a fraction-smoke-b
 | `nvidia-cuda-mps-control -p 3 namespace --help` has no `namespace` subcommand | Driver older than r615, or `mpsd` is not running protocol 3 | Check the driver version and the `mpsd` logs |
 | Container has no `CUDA_MPS_*` variables | `fractiond` did not register as an NRI plugin | `kubectl -n gpu-fractioning logs ds/gpu-fractioning-fractiond \| grep -i "registering plugin\|configured NRI"`; on MicroK8s, set the socket paths as described in Step 4 |
 | `sm-sharing` pod will not start, and `mpsd` logs a namespace error | Namespace provisioning fails closed, so a container is refused rather than started uncapped | `kubectl -n gpu-fractioning logs ds/gpu-fractioning-mpsd \| grep -iE "namespace\|provision"` |
-| Pod fails to start with `error running createRuntime hook ... failed to set memory limits for gpu ...: Insufficient Permissions` | The container toolkit's memory-limit hook cannot set a limit on this node | Check that the driver and toolkit versions support the hook. To fall back to the MPS-only memory cap, run GPU Operator v26.7.0 with `--set gpuOperator.minimumVersion=v26.7.0` |
+| Fractional pods stay `Pending`; `kubectl get events` shows `BindingError ... failed to set NvFractions memory annotation: node does not include nvidia.com/gpu.memory label` | The node has no `nvidia.com/gpu.memory` label | Run GPU Feature Discovery (the GPU Operator includes it), which sets the label. Confirm with `kubectl get nodes -L nvidia.com/gpu.memory` |
+| Pod fails to start with `error running createRuntime hook ... failed to set memory limits for gpu ...: Insufficient Permissions` | The container toolkit's memory-limit hook cannot set a limit on this node | Check that the driver and toolkit versions support the hook. To fall back to the MPS-only memory cap, run GPU Operator v26.7.0 with `--set gpuOperator.minimumVersion=v26.7.0` If the container toolkit is installed on the host rather than by the GPU Operator, use a toolkit version that does not ship the `apply-cuda-memory-limits` hook |
 | An MPS server is wedged after a run, or pods will not start after repeated teardown | MPS state survives pod deletion | Delete the `gpu-fractioning-mpsd` pods to restart the daemons |
 
 ## Uninstall
