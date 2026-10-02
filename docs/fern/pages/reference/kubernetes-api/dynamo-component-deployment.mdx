@@ -252,7 +252,7 @@ Set the engine launch configuration and sidecar command for your backend. See th
 
 ## Runtime Version Compatibility
 
-DGD admission requires `runtimeVersionOverride` for non-LPX components when the runtime image has no parseable semantic-version tag. The runtime image is `spec.podTemplate.spec.initContainers[name=runtime].image` in Dynamo sidecar mode, or `spec.podTemplate.spec.containers[name=main].image` otherwise. Also set it when a parseable tag does not represent the Dynamo runtime version in the image. The override must describe the Dynamo runtime actually contained in the image.
+DGD admission requires `runtimeVersionOverride` for non-LPX components when the runtime image has no parseable semantic-version tag. The runtime image is `spec.components[*].podTemplate.spec.initContainers[name=runtime].image` in Dynamo sidecar mode, or `spec.components[*].podTemplate.spec.containers[name=main].image` otherwise. Also set it when a parseable tag does not represent the Dynamo runtime version in the image. The override must describe the Dynamo runtime actually contained in the image.
 
 When updating an image to a different Dynamo runtime version, update any configured `runtimeVersionOverride` in the same change, or remove it if the new image tag correctly identifies the runtime version. The operator uses the resolved runtime version to select feature gates that control how it renders the component's PodSpec, including flags, environment variables, and probes. For Dynamo 1.5.0 and later, changing the override alone may change the rendered PodSpec or worker revision and trigger a rollout, even when the image reference is unchanged. Keep the override aligned with the Dynamo runtime actually contained in the image.
 

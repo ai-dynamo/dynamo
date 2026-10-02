@@ -287,13 +287,12 @@ There is no published sidecar image yet, so build and push the image from
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
-The vLLM engine runs in `spec.podTemplate.spec.containers[name=main]`, alongside the
-restartable Dynamo sidecar in `spec.podTemplate.spec.initContainers[name=runtime]`.
-Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates Dynamo sidecar mode;
-keep `restartPolicy: Always`. These paths use the standalone DCD layout; in the DGD manifests,
-replace the leading `spec.podTemplate` with `spec.components[*].podTemplate`.
+The vLLM engine runs in `spec.components[*].podTemplate.spec.containers[name=main]`, alongside the
+restartable Dynamo sidecar in `spec.components[*].podTemplate.spec.initContainers[name=runtime]`.
+Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo sidecar mode;
+keep `restartPolicy: Always`.
 
-The operator injects probes into `spec.podTemplate.spec.initContainers[name=runtime]`:
+The operator injects probes into `spec.components[*].podTemplate.spec.initContainers[name=runtime]`:
 `/live` for startup and liveness, and `/health` for runtime readiness, independent of engine loading.
 Kubernetes-native gRPC probes on port `50051` gate pod readiness and restart
 unhealthy engine containers, with a 30-minute startup budget; increase this for
@@ -309,7 +308,7 @@ upstream vLLM images and locate the binary inside the Python package.
 
 - A Kubernetes cluster (**v1.29+**, or v1.28 with the `SidecarContainers` feature
   gate) with the Dynamo operator and a GPU node (multiple GPUs plus an RDMA fabric
-  for `disagg.yaml`). The native sidecar in `spec.podTemplate.spec.initContainers[name=runtime]`
+  for `disagg.yaml`). The native sidecar in `spec.components[*].podTemplate.spec.initContainers[name=runtime]`
   uses `restartPolicy: Always`, which requires that version.
 - `kubectl` set to that cluster, and a namespace to deploy into.
 - A container registry you can push to and the cluster can pull from.
@@ -331,26 +330,21 @@ build. These manifests set the container `command` to
 ### 2. Point the manifest at your image
 
 In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set
-`spec.podTemplate.spec.initContainers[name=runtime].image` to the one you pushed.
-Keep the vLLM engine image in `spec.podTemplate.spec.containers[name=main].image`.
+`spec.components[*].podTemplate.spec.initContainers[name=runtime].image` to the one you pushed.
+Keep the vLLM engine image in `spec.components[*].podTemplate.spec.containers[name=main].image`.
 Add `imagePullSecrets` if your registry is private.
-For a custom image tag without a semantic version, set `runtimeVersionOverride`
+For a custom image tag without a semantic version, set `spec.components[*].runtimeVersionOverride`
 to the Dynamo version built into the sidecar image.
 
-For custom mounts on `spec.podTemplate.spec.initContainers[name=runtime]`, declare matching entries in
-`spec.podTemplate.spec.volumes`; the operator does not infer PVC volumes from
-init-container mounts. `compilationCache` configures the engine in
-`spec.podTemplate.spec.containers[name=main]` and creates its pod volume; it does not
-mount the cache into `spec.podTemplate.spec.initContainers[name=runtime]`.
+For custom mounts on `spec.components[*].podTemplate.spec.initContainers[name=runtime]`, declare matching entries in
+`spec.components[*].podTemplate.spec.volumes`; the operator does not infer PVC volumes from
+init-container mounts. `spec.components[*].compilationCache` configures the engine in
+`spec.components[*].podTemplate.spec.containers[name=main]` and creates its pod volume; it does not
+mount the cache into `spec.components[*].podTemplate.spec.initContainers[name=runtime]`.
 
-For TLS-enabled deployments, the operator injects `DYN_TCP_TLS_*` and `NATS_TLS_*` paths into
-`spec.podTemplate.spec.initContainers[name=runtime]`. Mount the certificate Secret volumes at
-those paths in `spec.podTemplate.spec.initContainers[name=runtime].volumeMounts`; mounts on
-`spec.podTemplate.spec.containers[name=main]` are not shared with the runtime. If
-`spec.frontendSidecar` selects a co-located frontend, explicitly mount the certificates in
-`spec.podTemplate.spec.containers[name=<frontendSidecar>].volumeMounts` too. The frontend does
-not inherit mounts from `spec.podTemplate.spec.initContainers[name=runtime]`.
-See [Operator TLS](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/tls.md).
+For TLS-enabled deployments, mount the certificate Secrets on the runtime container.
+A co-located frontend also needs its own certificate mounts. See the
+[sidecar-mode TLS example](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/tls.md#dynamo-sidecar-mode).
 
 ### 3. Deploy
 
