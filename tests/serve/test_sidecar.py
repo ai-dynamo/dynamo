@@ -18,11 +18,24 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.serve.sidecar_checks import (
+    assert_cancellation_and_recovery,
+    assert_kv_transfer,
+    assert_sglang_transfer_wait_cancelled,
+)
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
-from tests.utils.payload_builder import LONG_PROMPT_FOR_CACHING, chat_payload_default
-from tests.utils.payloads import ChatPayload, DisaggregatedChatPayload
+from tests.utils.payload_builder import (
+    LONG_PROMPT_FOR_CACHING,
+    chat_payload_default,
+    chat_payload_with_logprobs,
+)
+from tests.utils.payloads import (
+    ChatPayload,
+    DisaggregatedChatPayload,
+    GuidedDecodingChatPayload,
+)
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
     deallocate_ports,
@@ -96,6 +109,49 @@ def _disaggregated_chat_payload() -> DisaggregatedChatPayload:
     )
 
 
+def _compatibility_payloads():
+    logprobs = chat_payload_with_logprobs(
+        content="Count from one to ten.",
+        expected_response=[],
+        max_tokens=8,
+        top_logprobs=2,
+        stream=True,
+        prompt_logprobs=2,
+        extra_body={
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+    logprobs.expected_finish_reason = "length"
+    logprobs.expected_completion_tokens = 8
+    logprobs.min_token_chunks = 2
+    structured = GuidedDecodingChatPayload(
+        body={
+            "messages": [{"role": "user", "content": "Return a successful status."}],
+            "max_tokens": 64,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "status",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"ok": {"type": "boolean", "const": True}},
+                        "required": ["ok"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_json={"ok": True},
+        expected_finish_reason="stop",
+    )
+    return [chat_payload_default(), logprobs, structured]
+
+
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
 # has not been profiled for the sidecar launch path. Add one once measured, to
 # admit these into the parallel stage alongside the equivalent dynamo.{backend}
@@ -110,30 +166,28 @@ sidecar_configs = {
             pytest.mark.gpu_1,
             # Let the 600s health check report failure before pytest times out.
             pytest.mark.timeout(780),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         # Flush Python output promptly into CI logs.
         env={"PYTHONUNBUFFERED": "1"},
-        request_payloads=[
-            chat_payload_default(),
-        ],
+        request_payloads=_compatibility_payloads(),
     ),
     "sglang_aggregated": EngineConfig(
         name="sglang_aggregated",
         directory=sglang_sidecar_dir,
         script_name="agg.sh",
+        script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
+            pytest.mark.requested_sglang_kv_tokens(8192),
         ],
         model="Qwen/Qwen3-0.6B",
         env={"PYTHONUNBUFFERED": "1"},
-        request_payloads=[
-            chat_payload_default(),
-        ],
+        request_payloads=_compatibility_payloads(),
     ),
     "trtllm_aggregated": EngineConfig(
         name="trtllm_aggregated",
@@ -210,12 +264,14 @@ sidecar_configs = {
         name="vllm_disaggregated",
         directory=vllm_sidecar_dir,
         script_name="disagg.sh",
+        script_args=[
+            "--worker-extension-cls",
+            "tests.serve.vllm_transfer_probe.TransferProbe",
+        ],
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
             pytest.mark.post_merge,
-            pytest.mark.nightly,
             pytest.mark.timeout(1200),
             pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
         ],
@@ -229,13 +285,16 @@ sidecar_configs = {
         name="sglang_disaggregated",
         directory=sglang_sidecar_dir,
         script_name="disagg.sh",
-        script_args=["--disable-cuda-graph"],
+        script_args=[
+            "--disable-cuda-graph",
+            "--enable-metrics",
+            "--decode-log-interval",
+            "1",
+        ],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
             pytest.mark.post_merge,
-            pytest.mark.nightly,
             pytest.mark.timeout(1200),
             pytest.mark.requested_sglang_kv_tokens(2048),
         ],
@@ -266,6 +325,8 @@ def test_serve_deployment(
     num_system_ports,
     predownload_models,
     monkeypatch,
+    tmp_path,
+    discovery_backend,
 ):
     """Launch a native engine and sidecar deployment and validate chat completion."""
     assert (
@@ -306,23 +367,74 @@ def test_serve_deployment(
                 engine_env["VLLM_PREFILL_KV_EVENT_PORT"] = str(
                     dynamo_dynamic_ports.kv_event_ports[1]
                 )
+                probe_path = tmp_path / "transfers.jsonl"
+                probe_path.write_text("")
+                engine_env["DYN_TEST_TRANSFER_PROBE"] = str(probe_path)
+                engine_env["PYTHONPATH"] = os.pathsep.join(
+                    [WORKSPACE_DIR, os.environ.get("PYTHONPATH", "")]
+                )
             elif backend == "sglang":
                 engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"] = str(
                     engine_ports[4]
                 )
+
+            def validate_transfer():
+                def transfer():
+                    payload = _disaggregated_chat_payload().with_model(config.model)
+                    payload.port = config.frontend_port
+                    assert_kv_transfer(
+                        backend=backend,
+                        payload=payload,
+                        prefill_http_port=int(
+                            engine_env[f"{backend.upper()}_PREFILL_HTTP_PORT"]
+                        ),
+                        decode_http_port=int(
+                            engine_env[f"{backend.upper()}_DECODE_HTTP_PORT"]
+                        ),
+                        probe_path=probe_path if backend == "vllm" else None,
+                    )
+
+                transfer()
+                if backend == "sglang":
+                    assert_sglang_transfer_wait_cancelled(
+                        namespace=engine_env["DYN_NAMESPACE"],
+                        model=config.model,
+                        decode_http_port=int(engine_env["SGLANG_DECODE_HTTP_PORT"]),
+                        bootstrap_port=int(
+                            engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"]
+                        ),
+                        discovery_backend=discovery_backend,
+                    )
+                    transfer()
+
             run_serve_deployment(
-                config, request, ports=dynamo_dynamic_ports, extra_env=engine_env
+                config,
+                request,
+                ports=dynamo_dynamic_ports,
+                extra_env=engine_env,
+                post_validation=validate_transfer
+                if backend in ("vllm", "sglang")
+                else None,
             )
-    elif config.name == "vllm_aggregated":
+    elif config.name in ("vllm_aggregated", "sglang_aggregated"):
+        backend = config.name.removesuffix("_aggregated")
         with reserved_ports(2, start_port=DynamoPortRange.SERVE.value) as engine_ports:
             run_serve_deployment(
                 config,
                 request,
                 ports=dynamo_dynamic_ports,
                 extra_env={
-                    "VLLM_RS_HTTP_PORT": str(engine_ports[0]),
-                    "VLLM_GRPC_PORT": str(engine_ports[1]),
+                    "VLLM_RS_HTTP_PORT"
+                    if backend == "vllm"
+                    else "SGLANG_HTTP_PORT": str(engine_ports[0]),
+                    f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
                 },
+                post_validation=lambda: assert_cancellation_and_recovery(
+                    backend=backend,
+                    model=config.model,
+                    frontend_port=config.frontend_port,
+                    engine_http_port=engine_ports[0],
+                ),
             )
     else:
         run_serve_deployment(config, request, ports=dynamo_dynamic_ports)

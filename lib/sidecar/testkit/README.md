@@ -52,13 +52,11 @@ lib/sidecar/
     ├── tests/
     │   ├── conformance.rs     # Direct sidecar-to-Mocker scenarios over real gRPC
     │   ├── cross_process.rs   # Sidecar children, discovery, routing and shutdown
-    │   ├── native_engine.rs   # Real vLLM/SGLang compatibility, cancellation and KV transfer
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
     │       ├── vllm.rs        # vLLM protocol, Mocker and child-command adapter
     │       ├── sglang.rs      # SGLang protocol, discovery, health and child-command adapter
     │       └── process.rs     # Local discovery, worker processes and TCP routing
-    ├── native_probe.py        # Observes completed native NIXL transfers
     └── README.md              # This guide
 ```
 
@@ -92,8 +90,6 @@ and are local to the integration suite, rather than a public fixture API.
 Each top-level Rust file in `testkit/tests/` builds a separate test executable.
 The two CPU files separate direct engine calls from child-process startup,
 discovery and shutdown, making each setup easier to follow and run independently.
-The separate `native_engine` target uses a Cargo feature to keep GPU execution
-out of ordinary CPU test runs while allowing a compile-only check.
 
 ## Adding a unit test
 
@@ -162,9 +158,6 @@ Each suite exercises a different request path:
 - `cross_process.rs` uses local discovery to find sidecar child processes and
   sends requests to them over TCP. Each sidecar calls a CPU Mocker over native
   gRPC. Handoff scenarios also use the production PrefillRouter.
-- `native_engine.rs` calls the production sidecar engine library against real
-  vLLM or SGLang engines over native gRPC. The pytest launcher starts those engines
-  and the Rust test executable. Model inference and NIXL KV transfer use one GPU.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -183,23 +176,18 @@ clients. That makes peer-loss tests deterministic.
 | --- | --- | --- |
 | `conformance.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
 | `cross_process.rs` | Both backends: registration/error recovery, readiness, startup failure, cancellation, SIGTERM and real PrefillRouter handoff; SGLang discovery identity, HealthCheck and changed-role startup | CPU, ordinary pre-merge Cargo tests |
-| `native_engine.rs` | Real logprobs and structured output, native scheduler cancellation/drop, completed KV transfer between engines | GPU, post-merge and nightly via pytest |
+| `tests/serve/test_sidecar.py` | Real engine logprobs, structured output, cancellation and recovery, completed KV transfer, and routing | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 Both vLLM and SGLang register the shared wire and process scenarios.
 TensorRT-LLM is not enrolled here.
 
-The native tests retain their own purpose: a Mocker cannot prove that a real engine
-accepts the serialized request, executes a structured-output constraint, releases
-its real scheduler work, or transfers GPU KV cache. CPU handoff checks
-opaque vLLM metadata and SGLang concurrent bootstrap coordination. Native handoff
-separately requires completed transfer bytes and checks decode output length and token usage.
-SGLang uses its native transfer metrics; vLLM uses the NIXL probe.
-SGLang also cancels decode while its native transfer queue has work, then
-requires that queue to drain before a following handoff succeeds. This does not
-establish migration or cancellation while transfer packets are in flight.
-CPU handoff cancellation holds the peers before Mocker admission; it proves
-transport cleanup and recovery, not native scheduler or transfer cleanup.
+CPU handoff checks opaque vLLM metadata and SGLang concurrent bootstrap
+coordination. CPU handoff cancellation holds the peers before Mocker admission;
+it proves transport cleanup and recovery, not native scheduler or transfer
+cleanup. A Mocker cannot prove that a real engine accepts the serialized request,
+executes a structured-output constraint, releases its real scheduler work, or
+transfers GPU KV cache.
 
 Existing tests in `lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` retain distinct
 KV-event and handoff coverage. Backend-local socket tests in `vllm/src/tests.rs`
@@ -210,16 +198,14 @@ establish complete parity with the legacy Python backend.
 ### Relationship to serving E2E tests
 
 `tests/serve/test_sidecar.py` starts the frontend, production sidecar executable
-and real engines. It checks HTTP serving, distinct prefill/decode workers and
-KV-aware routing. The native integration suite calls the Rust engine adapter
-directly, so it does not replace those deployment checks.
+and real engines through the existing launch scripts. Payloads validate HTTP
+streaming, logprobs, structured output, distinct prefill/decode workers and
+KV-aware routing. Post-validation checks scheduler cleanup after client
+disconnection, recovery on the same deployment, and completed KV transfers.
+GPU assertions share each deployment's existing startup and teardown.
 
-The native suite adds detailed assertions beyond the existing sidecar E2E tests:
-token/logprob correspondence and structured JSON output, scheduler cleanup and
-recovery after explicit cancellation or consumer drop, and completed NIXL
-transfer bytes. Successful handoff overlaps with E2E split serving, but the
-native test also inspects the handoff metadata and decode output contract.
-Testing the same container does not make these assertions equivalent.
+The CPU suites retain direct adapter cancellation and consumer-drop checks;
+the GPU suite exercises cancellation through the frontend connection.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
@@ -230,8 +216,9 @@ The legacy Python backend suite is also distributed by behavior, including
 1. Choose the boundary being protected. Parsing and state transitions without
    I/O belong beside production code. Direct native RPC behavior belongs in
    `conformance.rs`; Worker/discovery or process lifetime belongs in
-   `cross_process.rs`. Use `native_engine.rs` only when the assertion requires
-   an actual inference engine or GPU state.
+   `cross_process.rs`. Assertions requiring real inference or GPU state belong
+   in `tests/serve/test_sidecar.py`, as payloads or post-validation checks on an
+   existing deployment.
 2. For shared behavior, write a scenario accepting only its fixture type. Use
    `SidecarFixture` for the common engine lifecycle, `WireFixture` when a test
    must observe active scheduler work, and `ProcessFixture` when it launches a
@@ -284,51 +271,18 @@ cargo test --locked -p dynamo-sidecar-testkit --test conformance
 cargo test --locked -p dynamo-sidecar-testkit --test cross_process
 ```
 
-### Running native GPU integration tests
+### Running GPU E2E tests
 
-The GPU suite runs after sidecar E2E in the same one-GPU sidecar test container
-for each backend, in post-merge and nightly. The two suites have separate pytest
-steps, timeouts and results, and share the image, GPU assignment and pytest setup.
-Legacy backend jobs remain separate. The suite uses the `predownload_models`
-fixture to prepare `Qwen/Qwen3-0.6B` before starting an engine. The launcher checks
-that the Python vLLM package and bundled `vllm-rs` versions agree, or that SGLang
-matches its pinned version. All three cases for each backend use one GPU.
-Handoff starts two independent engines on the same assigned GPU, with separate
-caches and dynamically allocated ports. It verifies transfer between engines,
-not cross-GPU transport. Each case has a profiled VRAM marker. CI runs the cases
-sequentially in the dedicated native step after E2E finishes.
-
-Build the native Rust test executable on the same platform as the test image:
+Run the sidecar serving tests in the corresponding backend image, with the
+production sidecar binary available:
 
 ```sh
-cargo test --locked -p dynamo-sidecar-testkit --features native-tests \
-  --test native_engine --no-run --message-format=json > /tmp/sidecar-native-build.jsonl
-export DYNAMO_SIDECAR_NATIVE_TEST="$(jq -r \
-  'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "native_engine") | .executable // empty' \
-  /tmp/sidecar-native-build.jsonl)"
-python3 -m pytest tests/sidecar/test_native_integration.py -m sglang -v
+python3 -m pytest tests/serve/test_sidecar.py -m "vllm and gpu_1" -v
+python3 -m pytest tests/serve/test_sidecar.py -m "sglang and gpu_1" -v
 ```
 
-Select `-m vllm` in the vLLM image. Set `CUDA_VISIBLE_DEVICES` to select the GPU;
-the launcher uses the first visible device for both handoff engines. Set
-`SIDECAR_NATIVE_MODEL_PATH` to an existing local model directory when needed.
-For offline runs, also pass
-`--models-dir /path/to/hf_cache` with a populated cache to skip downloads.
-CI builds/uploads the executable in `shared-build-sidecar-tests.yml`, and the
-one-GPU sidecar job downloads it alongside the production sidecar binary.
-This CPU build produces a Rust test executable, not a separate runtime image. The
-`native-tests` Cargo feature enables this explicit GPU target. Pre-merge compiles
-it with `--no-run` on CPU alongside the ordinary CPU test execution; only
-post-merge and nightly execute it against real engines. A pre-merge CPU pass
-does not establish native GPU behavior.
-
-Both `post-merge-ci.yml` and `nightly-ci.yml` run the native step through
-`shared-test.yml` in the existing one-GPU vLLM and SGLang sidecar jobs. Each
-backend depends on its own image build. The E2E selection excludes `sidecar_native`;
-the following native step selects only those tests
-and runs them sequentially with retries disabled. Both steps contribute to the
-job's final result. The two-GPU sidecar job does not receive the native artifact.
-
-The launcher in `tests/sidecar/test_native_integration.py` starts and cleans up
-its engine processes inside the existing container after the E2E step finishes.
-There is no additional native GPU job or test-container startup.
+Both aggregated and disaggregated cases use one GPU. The usual
+`predownload_models` fixture prepares model weights, and the serve runner owns
+engine startup, readiness and cleanup. Post-merge and nightly CI execute these
+assertions through the existing sidecar E2E jobs. No separate GPU test executable
+or native-test build artifact is needed.
