@@ -50,8 +50,8 @@ lib/sidecar/
     │   ├── fixtures.rs         # Shared request construction and stream collection
     │   └── assert.rs           # Token, terminal, usage and error assertions
     ├── tests/
-    │   ├── conformance.rs     # Direct sidecar-to-Mocker scenarios over real gRPC
-    │   ├── cross_process.rs   # Sidecar children, discovery, routing and shutdown
+    │   ├── sidecar_mocker_integration.rs         # Direct sidecar-to-Mocker scenarios over real gRPC
+    │   ├── router_sidecar_mocker_integration.rs  # Sidecar children, discovery, routing and shutdown
     │   └── support/
     │       ├── mod.rs         # Fixture contracts and scheduler-state waits
     │       ├── vllm.rs        # vLLM protocol, Mocker and child-command adapter
@@ -153,11 +153,11 @@ connections; neither etcd nor NATS is required.
 
 Each suite exercises a different request path:
 
-- `conformance.rs` uses a backend fixture to call the production sidecar engine
-  library, which sends native gRPC requests to a CPU Mocker.
-- `cross_process.rs` uses local discovery to find sidecar child processes and
-  sends requests to them over TCP. Each sidecar calls a CPU Mocker over native
-  gRPC. Handoff scenarios also use the production PrefillRouter.
+- `sidecar_mocker_integration.rs` uses a backend fixture to call the production
+  sidecar engine library, which sends native gRPC requests to a CPU Mocker.
+- `router_sidecar_mocker_integration.rs` uses local discovery to find sidecar
+  child processes and sends requests to them over TCP. Each sidecar calls a CPU
+  Mocker over native gRPC. Handoff scenarios also use the production PrefillRouter.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -174,8 +174,8 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `conformance.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
-| `cross_process.rs` | Both backends: registration/error recovery, readiness, startup failure, cancellation, SIGTERM and real PrefillRouter handoff; SGLang discovery identity, HealthCheck and changed-role startup | CPU, ordinary pre-merge Cargo tests |
+| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection and malformed response checks | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | Both backends: registration/error recovery, readiness, startup failure, cancellation, SIGTERM and real PrefillRouter handoff; SGLang discovery identity, HealthCheck and changed-role startup | CPU, ordinary pre-merge Cargo tests |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 Both vLLM and SGLang register the shared wire and process scenarios.
@@ -209,8 +209,8 @@ The legacy Python backend suite is also distributed by behavior, including
 
 1. Choose the boundary being protected. Parsing and state transitions without
    I/O belong beside production code. Direct native RPC behavior belongs in
-   `conformance.rs`; Worker/discovery or process lifetime belongs in
-   `cross_process.rs`.
+   `sidecar_mocker_integration.rs`; Worker/discovery or process lifetime belongs in
+   `router_sidecar_mocker_integration.rs`.
 2. For shared behavior, write a scenario accepting only its fixture type. Use
    `SidecarFixture` for the common engine lifecycle, `WireFixture` when a test
    must observe active scheduler work, and `ProcessFixture` when it launches a
@@ -259,6 +259,6 @@ vLLM and SGLang packages alongside testkit when validating source changes. After
 you can select a suite or test by name:
 
 ```sh
-cargo test --locked -p dynamo-sidecar-testkit --test conformance
-cargo test --locked -p dynamo-sidecar-testkit --test cross_process
+cargo test --locked -p dynamo-sidecar-testkit --test sidecar_mocker_integration
+cargo test --locked -p dynamo-sidecar-testkit --test router_sidecar_mocker_integration
 ```
