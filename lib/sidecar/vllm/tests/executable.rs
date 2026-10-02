@@ -61,6 +61,10 @@ fn sidecar(engine: u16, logs: &std::fs::File) -> Sidecar {
                 &format!("http://127.0.0.1:{engine}"),
                 "--grpc-startup-deadline-secs",
                 "60",
+                "--dyn-tool-call-parser",
+                "hermes",
+                "--dyn-reasoning-parser",
+                "qwen3",
             ])
             .env("DYN_SYSTEM_HOST", "127.0.0.1")
             .env("DYN_SYSTEM_PORT", "0")
@@ -160,10 +164,6 @@ async fn probes_work_before_engine_is_available() {
 fn invalid_arguments_fail_before_runtime_configuration() {
     let overflowing_deadline = u64::MAX.to_string();
     for (args, message) in [
-        (
-            ["--dyn-tool-call-parser", "hermes"],
-            "vLLM gRPC does not preserve",
-        ),
         (
             ["--vllm-http-endpoint", "http://localhost:8000?invalid=true"],
             "must not include a query or fragment",

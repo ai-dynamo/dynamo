@@ -191,6 +191,7 @@ areas:
   - benchmarks/omni/
   - components/src/dynamo/common/multimodal/
   - examples/custom_encoder/
+  - examples/nemotron_speech_cascaded_pipeline/
   - components/src/dynamo/trtllm/multimodal/
   - components/src/dynamo/vllm/multimodal_handlers/
   - components/src/dynamo/vllm/multimodal_utils/
@@ -437,7 +438,6 @@ areas:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
   - components/src/dynamo/common/tests/test_snapshot*
-  - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/
   - lib/gpu_memory_service/

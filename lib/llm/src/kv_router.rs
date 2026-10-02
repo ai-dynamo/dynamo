@@ -461,6 +461,8 @@ pub enum FindBestMatchOutcome {
         overlap_blocks: u32,
         effective_overlap_blocks: f64,
         cached_tokens: usize,
+        selected_raw_cached_tokens: Option<usize>,
+        max_raw_cached_tokens: Option<usize>,
         potential_decode_blocks: u64,
         routing_hashes: Option<RoutingDecisionHashes>,
         kv_hint: Option<KvHint>,
@@ -884,7 +886,7 @@ impl KvRouter {
                 policy_factory,
             },
             workers_with_configs.clone(),
-            Some(Arc::new(request_leases.clone())),
+            Some(request_leases.replica_observer()),
             cancellation_token.child_token(),
         )
         .await?;
@@ -1517,6 +1519,8 @@ impl KvRouter {
                 overlap_blocks,
                 effective_overlap_blocks: response.effective_overlap_blocks,
                 cached_tokens: response.cached_tokens,
+                selected_raw_cached_tokens: response.selected_raw_cached_tokens,
+                max_raw_cached_tokens: response.max_raw_cached_tokens,
                 potential_decode_blocks: response.potential_decode_blocks as u64,
                 routing_hashes,
                 kv_hint,
@@ -1694,14 +1698,15 @@ impl KvRouter {
         (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
     }
 
-    pub(crate) async fn enqueue_output_block_if_booking(
+    pub(crate) async fn add_output_blocks_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
         self.selection
             .scheduler()
-            .enqueue_output_block_if_booking(booking, decay_fraction)
+            .add_output_blocks_if_booking(booking, num_blocks, decay_fraction)
             .await
     }
 
@@ -2602,7 +2607,7 @@ mod tests {
 
     /// Three default-config workers under the registry policy, with
     /// `router_track_active_blocks` on so bookings send tracking hashes.
-    async fn tracked_router(name: &str) -> KvRouter {
+    pub(super) async fn tracked_router(name: &str) -> KvRouter {
         // Prefill load decays with wall time and would let near-ties flip
         // between two runs microseconds apart.
         let config = KvRouterConfig {
