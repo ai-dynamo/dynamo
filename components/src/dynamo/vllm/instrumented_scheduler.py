@@ -4880,29 +4880,38 @@ class InstrumentedScheduler(AsyncScheduler):
                 names.append(spec_name)
         return names
 
+    @staticmethod
+    def _kvwarm_is_state_spec(spec) -> bool:
+        """Recurrent (Mamba/KDA) state group; same predicate as live-state mode."""
+        return isinstance(spec, MambaSpec) or "Mamba" in type(spec).__name__
+
     def _kvwarm_native_layout(self) -> bool:
-        """Finite windows must continue their exact native prefill requests.
+        """Layouts whose decode state must come from each point's own prefill.
 
         A deep parked chain may have evicted the history a shallower point
-        needs. Inkling's convolution cache is a SlidingWindowSpec too, so
-        native allocation and forward execution initialize all four streams
-        without assuming a tensor layout or borrowing writable state.
-
-        The layout check is necessary but not sufficient: the gate in
-        ``_kvwarm_warm_eligible`` also requires experts or recurrent-state
-        layers, because dense attention-only models are content-insensitive.
+        needs (finite windows, including Inkling's convolution cache), and a
+        recurrent state cannot be borrowed from a chain at another depth.
+        Native allocation and forward execution build both exactly. Necessary,
+        not sufficient: the gate also requires experts or state layers.
         """
-        groups = self.kv_cache_manager.kv_cache_config.kv_cache_groups
-        specs = [group.kv_cache_spec for group in groups]
+        specs = [
+            group.kv_cache_spec
+            for group in self.kv_cache_manager.kv_cache_config.kv_cache_groups
+        ]
+
+        def finite_window(spec) -> bool:
+            return isinstance(spec, SlidingWindowSpec) and spec.sliding_window > 0
+
         return (
             not self._bench_random_kda
             and any(
-                isinstance(spec, SlidingWindowSpec) and spec.sliding_window > 0
+                finite_window(spec) or self._kvwarm_is_state_spec(spec)
                 for spec in specs
             )
             and all(
-                isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
-                and (not isinstance(spec, SlidingWindowSpec) or spec.sliding_window > 0)
+                isinstance(spec, FullAttentionSpec)
+                or finite_window(spec)
+                or self._kvwarm_is_state_spec(spec)
                 for spec in specs
             )
         )
@@ -4963,12 +4972,14 @@ class InstrumentedScheduler(AsyncScheduler):
                 setattr(self, attr, None)
 
     def _kvwarm_warm_eligible(self) -> bool:
-        """Select native finite-window or shared-prefix attention-KV warm-up.
+        """Select native exact-context or shared-prefix attention-KV warm-up.
 
         Random-state mode also admits hybrid MoE without EP: its attention
         prefixes are real, while recurrent states remain private and synthetic.
-        Finite-window layouts instead prefill and continue each point's own
-        requests; this needs neither expert parallelism nor prefix caching.
+        Native warm-up instead prefills and continues each point's own requests
+        for models with experts or recurrent-state layers whose layout
+        qualifies (``_kvwarm_native_layout``); this needs neither expert
+        parallelism nor prefix caching.
 
         The verdict travels in the capacity envelope (see
         ``_bench_make_local_capacity``), so every host-local input the stage
@@ -5010,13 +5021,17 @@ class InstrumentedScheduler(AsyncScheduler):
                     False,
                 )
             )
-            # Native prefill only pays off when decode timing depends on KV
-            # content: expert routing, or recurrent state that synthetic KV
-            # cannot reproduce. Dense attention-only models stay synthetic.
+            # Native for MoE with or without EP (keeps Inkling's exact convolution
+            # state) or recurrent-state layers; dense attention-only stays synthetic.
             self._kvwarm_native = self._kvwarm_native_layout() and (
                 has_experts or bool(self._kvwarm_state_layer_groups())
             )
             if self._kvwarm_native:
+                if self._bench_hybrid_live_state:
+                    logger.info(
+                        "KVWARM: native exact-context warm-up computes the "
+                        "recurrent state; --benchmark-hybrid-live-state is unused"
+                    )
                 reason = self._kvwarm_probe_content()
                 eligible = reason is None
                 meta["initialization_strategy"] = "native_exact_context"

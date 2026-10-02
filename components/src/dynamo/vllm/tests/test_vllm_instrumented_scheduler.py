@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import time
 import uuid
@@ -5105,15 +5106,87 @@ def test_kvwarm_native_skips_dense_attention_only_layouts():
 
 
 @pytest.mark.core
-def test_kvwarm_sliding_window_does_not_admit_mamba_state():
-    stub = _kvwarm_native_gate_stub(ep=True, prefix=True)
+def test_kvwarm_native_reads_experts_from_the_text_config():
+    # Inkling's HF config: no top-level expert keys, text_config.n_routed_experts.
+    stub = _kvwarm_native_gate_stub(ep=False, prefix=False)
+    stub.vllm_config.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(),
+        hf_text_config=SimpleNamespace(n_routed_experts=256),
+    )
+
+    assert stub._kvwarm_warm_eligible()
+    assert stub._kvwarm_native
+
+
+def _with_state_group(stub):
     stub.kv_cache_manager.kv_cache_config.kv_cache_groups.append(
         SimpleNamespace(kv_cache_spec=type("MambaSpec", (), {})())
     )
+    return stub
 
-    assert not stub._kvwarm_warm_eligible()
+
+@pytest.mark.core
+@pytest.mark.parametrize("experts", [8, 0])
+def test_kvwarm_native_admits_recurrent_state_layouts(experts):
+    stub = _with_state_group(_kvwarm_native_gate_stub(experts=experts, ep=False))
+
+    assert stub._kvwarm_warm_eligible()
+    assert stub._kvwarm_native
+    assert stub._kvwarm_meta["initialization_strategy"] == "native_exact_context"
+
+
+@pytest.mark.core
+def test_kvwarm_native_admits_full_attention_plus_state_without_windows():
+    # GLM-5.3-Flash / Qwen3-Next shape: full (or MLA) attention + KDA/Mamba state.
+    stub = _kvwarm_gate_stub(experts=8, ep=False, prefix=False)
+    stub.kv_cache_manager.kv_cache_config.kv_cache_groups = [
+        SimpleNamespace(
+            kv_cache_spec=FullAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+            )
+        ),
+        SimpleNamespace(kv_cache_spec=type("MambaSpec", (), {})()),
+    ]
+
+    assert stub._kvwarm_warm_eligible()
+    assert stub._kvwarm_native
+
+
+@pytest.mark.core
+def test_kvwarm_random_kda_keeps_shared_chain_for_state_layouts():
+    stub = _with_state_group(_kvwarm_native_gate_stub(experts=8, ep=True, prefix=True))
+    stub._bench_random_kda = True
+
+    stub._kvwarm_warm_eligible()
+
     assert not stub._kvwarm_native
-    assert stub._kvwarm_meta["skip_reason"] == "hybrid_state_layers_unsupported"
+    assert "initialization_strategy" not in stub._kvwarm_meta
+
+
+@pytest.mark.core
+def test_kvwarm_native_wins_over_hybrid_live_state(caplog):
+    stub = _with_state_group(_kvwarm_native_gate_stub(experts=8, ep=True, prefix=True))
+    stub._bench_hybrid_live_state = True
+
+    with caplog.at_level(
+        logging.INFO, logger=instrumented_scheduler_module.logger.name
+    ):
+        assert stub._kvwarm_warm_eligible()
+
+    assert stub._kvwarm_native
+    assert any("live-state" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.core
+def test_kvwarm_native_rejects_unsupported_spec_with_state():
+    stub = _with_state_group(_kvwarm_native_gate_stub(experts=8, ep=True, prefix=True))
+    stub.kv_cache_manager.kv_cache_config.kv_cache_groups.append(
+        SimpleNamespace(kv_cache_spec=type("ChunkedLocalAttentionSpec", (), {})())
+    )
+
+    stub._kvwarm_warm_eligible()
+
+    assert not stub._kvwarm_native
 
 
 @pytest.mark.core
@@ -5436,15 +5509,28 @@ def _kvwarm_native_resume_stub(use_v2):
 
 
 @pytest.mark.core
+@pytest.mark.parametrize("with_state", [False, True])
 @pytest.mark.parametrize("use_v2", [False, True])
 def test_kvwarm_native_resume_continues_private_requests_and_preserves_runner_state(
-    use_v2,
+    use_v2, with_state
 ):
     stub, requests = _kvwarm_native_resume_stub(use_v2)
+    tables = {"chain-a": ([1, 11], [2, 21]), "chain-b": ([3, 12], [4, 22])}
+    delta = ([11], [21])
+    if with_state:
+        # Second group is a Mamba/KDA state group holding one live state block
+        # per request; this decode step reuses it, so its delta is empty.
+        tables = {"chain-a": ([1, 11], [31]), "chain-b": ([3, 12], [32])}
+        delta = ([11], [])
+        stub.kv_cache_manager.get_block_ids.side_effect = tables.__getitem__
+        blocks = stub.kv_cache_manager.allocate_slots.return_value
+        blocks.get_block_ids.return_value = delta
 
     output = stub._kvwarm_resume_native()
 
     assert output.total_num_scheduled_tokens == 2
+    # Cached path only: runners rebuild request state just for new requests.
+    assert output.scheduled_new_reqs == []
     assert stub.running == requests
     assert all(stub.requests[request.request_id] is request for request in requests)
     assert stub._bench_active_req_ids == {"chain-a", "chain-b"}
@@ -5456,11 +5542,13 @@ def test_kvwarm_native_resume_continues_private_requests_and_preserves_runner_st
         request.request_id: request.all_token_ids for request in requests
     }
     if use_v2:
+        # V2 keeps the parked tables and accepts only the appended delta.
         assert cached.resumed_req_ids == set()
-        assert cached.new_block_ids == [([11], [21]), ([11], [21])]
+        assert cached.new_block_ids == [delta, delta]
     else:
+        # V1 re-adds the parked requests: every group's full table, unchanged.
         assert cached.resumed_req_ids == {"chain-a", "chain-b"}
-        assert cached.new_block_ids == [([1, 11], [2, 21]), ([3, 12], [4, 22])]
+        assert cached.new_block_ids == [tables["chain-a"], tables["chain-b"]]
     assert output.kv_cache_block_copies == [(8, 9)]
     stub._free_cow_retained_blocks.assert_called_once_with(["retained"], 11)
     assert stub._kvwarm_native_resume_ids == set()
@@ -5607,6 +5695,29 @@ def test_kvwarm_native_capacity_uses_sliding_window_admission_caps():
     # 511 prefilled tokens + admission + three steady writes; the full
     # group holds 33 blocks, while the native finite window needs only four.
     assert stub._kvwarm_native_required_blocks([511]) == 37
+
+
+@pytest.mark.core
+def test_kvwarm_native_capacity_counts_mamba_align_state_blocks():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    full = SimpleNamespace(block_size=16)
+    state = SimpleNamespace(
+        block_size=16,
+        mamba_cache_mode="align",
+        num_speculative_blocks=0,
+        kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+    )
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=[full, state])
+    )
+    stub.block_size = 16
+    stub.num_lookahead_tokens = 0
+    stub._kvwarm_giant_repeats = lambda: 3
+    stub._bench_capacity_limit = lambda name: 4096
+
+    # Per request: ceil((ctx + 1 + 3) / 16) full-attention blocks + 3 align
+    # state blocks (2 + 0 speculative + 1 checkpoint).
+    assert stub._kvwarm_native_required_blocks([31, 12]) == (3 + 3) + (1 + 3)
 
 
 @pytest.mark.core
