@@ -29,8 +29,10 @@ dynamo:
   planner_runtime_image_tag: 3.12-v4.0.3
   python_version: "3.12"
 
-  nats_version: v2.10.28
-  etcd_version: v3.5.30
+  # v2.12.15 ships Go 1.25.12 and golang.org/x/crypto v0.55.0.
+  nats_version: v2.12.15
+  # v3.5.34 ships Go 1.26.8 and golang.org/x/crypto v0.55.0.
+  etcd_version: v3.5.34
 
   nixl_ref: v1.0.1
   nixl_ucx_ref: v1.20.x
