@@ -32,6 +32,7 @@ const (
 
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
+	roleLaunchOwnership       roleLaunchOwnership
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
@@ -55,15 +56,25 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	annotations := GetPodTemplateAnnotations(component)
 
 	if isMultinode {
-		containerGPUs, err := containerGPUCount()
-		if err != nil {
-			return fmt.Errorf("failed to resolve container GPUs: %w", err)
+		preserveRoleLaunch := b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate
+		launchArgs := parseVLLMLaunchArgs(getExpandedCommandLine(container))
+		roleTemplateMP := preserveRoleLaunch && launchArgs.IsMpDistributedExecutorBackend
+		if roleTemplateMP {
+			if err := ensureContainerCommandLineFlag(container, "--master-port", commonconsts.VLLMMpMasterPort, "vllm", "vllm", "serve"); err != nil {
+				return err
+			}
+		}
+		if !preserveRoleLaunch {
+			containerGPUs, err := containerGPUCount()
+			if err != nil {
+				return fmt.Errorf("failed to resolve container GPUs: %w", err)
+			}
+
+			// Apply multinode-specific argument modifications.
+			updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations)
 		}
 
-		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations)
-
-		if shouldUseMpBackend(annotations) {
+		if roleTemplateMP || (!preserveRoleLaunch && shouldUseMpBackend(annotations)) {
 			container.Env = append(container.Env, corev1.EnvVar{
 				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
 				ValueFrom: &corev1.EnvVarSource{
@@ -139,6 +150,61 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	}
 
 	return nil
+}
+
+// ensureContainerCommandLineFlag adds one operator-owned flag while preserving
+// the authored command shape. It handles both Python module launches and direct
+// executables such as `vllm serve`.
+func ensureContainerCommandLineFlag(container *corev1.Container, flag, value, framework, executable, subcommand string) error {
+	if hasArg(getExpandedCommandLine(container), flag, value) {
+		return nil
+	}
+	injectFlagsIntoContainerCommand(container, flag+" "+value, false, framework)
+	if !hasArg(getExpandedCommandLine(container), flag, value) {
+		for i, arg := range container.Args {
+			modified := injectFlagsIntoDirectCommand(arg, flag+" "+value, executable, subcommand)
+			if modified != arg {
+				container.Args[i] = modified
+				break
+			}
+		}
+	}
+	if !hasArg(getExpandedCommandLine(container), flag, value) {
+		for i, command := range container.Command {
+			modified := injectFlagsIntoDirectCommand(command, flag+" "+value, executable, subcommand)
+			if modified != command {
+				container.Command[i] = modified
+				break
+			}
+		}
+	}
+	if !hasArg(getExpandedCommandLine(container), flag, value) &&
+		(len(container.Command) == 0 || !isShellCommand(container.Command[0])) {
+		container.Args = append(container.Args, flag, value)
+	}
+	if !hasArg(getExpandedCommandLine(container), flag, value) {
+		return fmt.Errorf("could not add operator-owned flag %q to the container command line", flag)
+	}
+	return nil
+}
+
+func injectFlagsIntoDirectCommand(command, flags, executable, subcommand string) string {
+	directCommand := strings.TrimSpace(executable + " " + subcommand)
+	pattern := fmt.Sprintf(`(^|\s)((?:exec\s+)?%s(?:\s+[^|&;]*)?)(\s|$|[|&;])`, regexp.QuoteMeta(directCommand))
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllStringFunc(command, func(match string) string {
+		submatches := re.FindStringSubmatch(match)
+		if len(submatches) < 4 {
+			return match
+		}
+		return fmt.Sprintf("%s%s %s%s", submatches[1], strings.TrimSpace(submatches[2]), flags, submatches[3])
+	})
+}
+
+func isShellCommand(command string) bool {
+	parts := strings.Split(command, "/")
+	base := parts[len(parts)-1]
+	return base == "sh" || base == "bash"
 }
 
 const (

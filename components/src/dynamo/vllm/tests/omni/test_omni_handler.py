@@ -496,6 +496,40 @@ class _AsyncReturn:
 class TestI2VEngineInputs:
     """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
 
+    @pytest.mark.parametrize(
+        "negative_prompt,with_image",
+        [
+            (None, False),
+            ("", False),
+            ("blurry", False),
+            ("模糊 🛶", False),
+            ("blurry", True),
+        ],
+    )
+    def test_video_negative_prompt(self, negative_prompt, with_image):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a small boat",
+            model="test-model",
+            response_format="b64_json",
+            nvext=VideoNvExt(negative_prompt=negative_prompt),
+        )
+        image = Image.new("RGB", (64, 64)) if with_image else None
+
+        result = handler._engine_inputs_from_video(req, image=image)
+
+        assert result.prompt["prompt"] == req.prompt
+        if negative_prompt is None:
+            assert "negative_prompt" not in result.prompt
+        else:
+            assert result.prompt["negative_prompt"] == negative_prompt
+        if with_image:
+            assert result.prompt["multi_modal_data"]["image"] is image
+        else:
+            assert "multi_modal_data" not in result.prompt
+        assert result.request_type == RequestType.VIDEO_GENERATION
+        assert result.response_format == "b64_json"
+
     @pytest.mark.asyncio
     async def test_t2v_no_multi_modal_data_and_i2v_attaches_image(self):
         """T2V has no multi_modal_data; I2V attaches image to prompt."""

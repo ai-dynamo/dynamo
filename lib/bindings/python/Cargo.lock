@@ -2157,6 +2157,7 @@ dependencies = [
  "blake3",
  "chrono",
  "crossbeam-queue",
+ "crossbeam-utils",
  "dashmap",
  "derive_builder",
  "dynamo-kv-hashing",

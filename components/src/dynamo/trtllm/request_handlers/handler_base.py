@@ -1463,13 +1463,16 @@ class HandlerBase(BaseGenerativeHandler):
                             )
 
                             if prefill_prompt_tokens_details:
+                                # A decode with a prefill result: its prefill
+                                # attempt already reported cache reuse.
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                prompt_tokens_details = _prompt_tokens_details(
-                                    res,
-                                    num_input_tokens,
+                                is_generation_only = (
                                     getattr(disaggregated_params, "request_type", None)
-                                    == "generation_only",
+                                    == "generation_only"
+                                )
+                                prompt_tokens_details = _prompt_tokens_details(
+                                    res, num_input_tokens, is_generation_only
                                 )
                                 engine_reported = prompt_tokens_details.pop(
                                     "_engine_reported", None
@@ -1478,6 +1481,21 @@ class HandlerBase(BaseGenerativeHandler):
                                     out.setdefault("engine_data", {})[
                                         "cached_tokens_engine_reported"
                                     ] = engine_reported
+                                # A generation-only request counts its transferred
+                                # prompt KV as cached, and a multimodal count
+                                # includes expanded image tokens the unexpanded
+                                # prompt length omits, so only text context
+                                # attempts report.
+                                if not is_generation_only and not isinstance(
+                                    processed_input, dict
+                                ):
+                                    kv_cache_hit = _kv_cache_hit_engine_data(
+                                        res, num_input_tokens
+                                    )
+                                    if kv_cache_hit:
+                                        out.setdefault("engine_data", {})[
+                                            "kv_cache_hit"
+                                        ] = kv_cache_hit
 
                             out["completion_usage"] = {
                                 "prompt_tokens": int(num_input_tokens),
@@ -1687,6 +1705,14 @@ class HandlerBase(BaseGenerativeHandler):
         # 1. it catches unsupported fields / attributes.
         # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
         return dataclasses.replace(sampling_params, **overrides)
+
+
+def _kv_cache_hit_engine_data(res, num_input_tokens: int) -> dict:
+    """Build the final-chunk cache-reuse report read by the KV router."""
+    cached_tokens = getattr(res, "cached_tokens", None)
+    if cached_tokens is None:
+        return {}
+    return {"prompt_tokens": num_input_tokens, "reused_tokens": int(cached_tokens)}
 
 
 def _prompt_tokens_details(res, num_input_tokens: int, generation_only: bool) -> dict:

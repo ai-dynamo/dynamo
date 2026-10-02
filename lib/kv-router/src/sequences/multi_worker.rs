@@ -10,7 +10,7 @@
 //! this crate while the runtime glue stays in `lib/llm`.
 
 use dynamo_tokens::SequenceHash;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::env;
@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::{RequestBooking, RequestIndex};
+use super::sharded_lock::ShardedRwLock;
 use super::single::{
     ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PromptMembershipDelta, RequestId,
 };
@@ -351,14 +352,14 @@ impl LifecycleMutationOutcome {
 /// Multi-worker extension of [`ActiveSequences`] with per-worker `parking_lot::RwLock` for
 /// fine-grained concurrent access.
 ///
-/// The outer `RwLock<WorkerTable>` is held only during sync blocks (never across `.await`),
-/// while each worker slot has its own `RwLock<ActiveSequences>` for per-worker fine-grained
-/// locking with cache-friendly Vec layout.
+/// The outer reader-sharded `WorkerTable` lock is held only during sync blocks (never across
+/// `.await`), while each worker slot has its own `RwLock<ActiveSequences>` for per-worker
+/// fine-grained locking with cache-friendly Vec layout.
 ///
 /// Generic over `P: SequencePublisher` to decouple from runtime-specific event transport
 /// and metrics infrastructure.
 pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
-    pub(super) workers: RwLock<WorkerTable>,
+    pub(super) workers: ShardedRwLock<WorkerTable>,
     pub(super) request_index: RequestIndex,
     pub(super) prompt_registry: PromptRegistry,
     block_size: usize,
@@ -468,7 +469,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
 
         Self {
-            workers: RwLock::new(workers),
+            workers: ShardedRwLock::new(workers),
             request_index: RequestIndex::default(),
             prompt_registry,
             block_size,
@@ -550,10 +551,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    fn enqueue_publish_event(&self, event: ActiveSequenceEvent) {
+    fn enqueue_publish_event(&self, event: impl FnOnce() -> ActiveSequenceEvent) {
         if !self.replica_sync {
             return;
         }
+        let event = event();
 
         // TODO: Publish explicit prompt-load decay timestamps with these events so peer routers
         // can mirror the same oldest-prefill anchor instead of approximating from receive time.
@@ -824,7 +826,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         });
         let attempt_id = self.add_request_local(req, decay_now, lazily_register_worker)?;
         if let Some(event) = event {
-            self.enqueue_publish_event(event);
+            self.enqueue_publish_event(|| event);
         }
         Ok(attempt_id)
     }
@@ -856,7 +858,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         if !self.has_booking(booking) {
             return false;
         }
-        self.enqueue_publish_event(ActiveSequenceEvent {
+        self.enqueue_publish_event(|| ActiveSequenceEvent {
             request_id: booking.request_id.clone(),
             worker: booking.worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
@@ -882,7 +884,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let Some(worker) = self.request_index.worker_for(request_id) else {
             return Ok(LifecycleMutationOutcome::NoChange);
         };
-        let lora_name = self.request_index.lora_for(request_id);
+        self.free_on_worker(request_id, worker, decay_now)
+    }
+
+    fn free_on_worker(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        decay_now: Instant,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
         let state_changed = match self.mutate_request_worker_prompt_state_local(
             worker,
             request_id,
@@ -895,24 +905,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             }
             Err(error) => return Err(error),
         };
-        let booking_removed = self
+        let Some(removed) = self
             .request_index
-            .remove_request_if_worker(request_id, worker);
-
-        if booking_removed {
-            self.enqueue_publish_event(ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::Free,
-                router_id: self.router_id,
-                lora_name,
-            });
-        }
-        Ok(if state_changed.is_applied() || booking_removed {
-            LifecycleMutationOutcome::Applied
-        } else {
-            LifecycleMutationOutcome::NoChange
-        })
+            .remove_request_if_worker(request_id, worker)
+        else {
+            return Ok(state_changed);
+        };
+        self.enqueue_publish_event(|| ActiveSequenceEvent {
+            request_id: request_id.clone(),
+            worker,
+            data: ActiveSequenceEventData::Free,
+            router_id: self.router_id,
+            lora_name: removed.lora_name,
+        });
+        Ok(LifecycleMutationOutcome::Applied)
     }
 
     /// Release `request_id`'s booking only if it is still on `worker`.
@@ -928,36 +934,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         if self.request_index.worker_for(request_id) != Some(worker) {
             return Ok(LifecycleMutationOutcome::NoChange);
         }
-        let lora_name = self.request_index.lora_for(request_id);
-        let state_changed = match self.mutate_request_worker_prompt_state_local(
-            worker,
-            request_id,
-            decay_now,
-            |seqs, rid, decay_now| seqs.free(rid, decay_now),
-        ) {
-            Ok(outcome) => outcome,
-            Err(SequenceError::RequestNotFound { .. }) => {
-                return Ok(LifecycleMutationOutcome::Applied);
-            }
-            Err(error) => return Err(error),
-        };
-        let booking_removed = self
-            .request_index
-            .remove_request_if_worker(request_id, worker);
-        if booking_removed {
-            self.enqueue_publish_event(ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::Free,
-                router_id: self.router_id,
-                lora_name,
-            });
-        }
-        Ok(if state_changed.is_applied() || booking_removed {
-            LifecycleMutationOutcome::Applied
-        } else {
-            LifecycleMutationOutcome::NoChange
-        })
+        self.free_on_worker(request_id, worker, decay_now)
     }
 
     /// Release only the scheduler booking owned by one request attempt.
@@ -1003,13 +980,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         visibility: BookingReleaseVisibility,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
         let expected = RequestBooking { worker, attempt_id };
-        let (state_changed, booking_removed, load, lora_name) = {
+        let (state_changed, removed, load) = {
             let table = self.workers.read();
             let Some(&idx) = table.index.get(&worker) else {
                 drop(table);
                 let removed = self
                     .request_index
-                    .remove_request_if_booking(request_id, worker, attempt_id);
+                    .remove_request_if_booking(request_id, worker, attempt_id)
+                    .is_some();
                 return Ok(if removed {
                     LifecycleMutationOutcome::Applied
                 } else {
@@ -1023,7 +1001,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if self.request_index.booking_for(request_id) != Some(expected) {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
-            let lora_name = self.request_index.lora_for(request_id);
             let delta = seq.free(request_id, decay_now);
             let state_changed = delta.is_some();
             let load = delta.map(|delta| {
@@ -1032,21 +1009,24 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     .apply_membership_delta_and_load(worker, delta, load);
                 load
             });
-            let booking_removed = self
+            let removed = self
                 .request_index
                 .remove_request_if_booking(request_id, worker, attempt_id);
-            (state_changed, booking_removed, load, lora_name)
+            (state_changed, removed, load)
         };
         if let Some(load) = load {
             self.publish_worker_load_snapshot(worker, load, decay_now);
         }
-        if booking_removed && matches!(visibility, BookingReleaseVisibility::Publish) {
-            self.enqueue_publish_event(ActiveSequenceEvent {
+        let booking_removed = removed.is_some();
+        if let Some(removed) = removed
+            && matches!(visibility, BookingReleaseVisibility::Publish)
+        {
+            self.enqueue_publish_event(|| ActiveSequenceEvent {
                 request_id: request_id.clone(),
                 worker,
                 data: ActiveSequenceEventData::Free,
                 router_id: self.router_id,
-                lora_name,
+                lora_name: removed.lora_name,
             });
         }
         Ok(if state_changed || booking_removed {
@@ -1101,11 +1081,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             }
             let load = seq.worker_load_snapshot();
             self.prompt_registry.replace_worker_load_state(worker, load);
-            (load, self.request_index.lora_for(request_id))
+            let lora_name = self
+                .replica_sync
+                .then(|| self.request_index.lora_for(request_id))
+                .flatten();
+            (load, lora_name)
         };
 
         self.publish_worker_load_snapshot(worker, load, decay_now);
-        self.enqueue_publish_event(ActiveSequenceEvent {
+        self.enqueue_publish_event(|| ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
@@ -1118,10 +1102,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Publish the router's ordered completion fallback independently of the local mutation.
     /// This is a no-op when the request no longer has a live worker booking.
     pub(crate) fn publish_prefill_completed(&self, request_id: &RequestId) {
+        if !self.replica_sync {
+            return;
+        }
         let Some(worker) = self.request_index.worker_for(request_id) else {
             return;
         };
-        self.enqueue_publish_event(ActiveSequenceEvent {
+        self.enqueue_publish_event(|| ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
@@ -1237,31 +1224,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> PotentialLoadMaps {
-        #[cfg(feature = "bench")]
-        let start = tokio::time::Instant::now();
-
-        #[cfg(feature = "bench")]
-        let num_workers = self.workers.read().slots.len();
-
-        let result = self
-            .prompt_registry
+        self.prompt_registry
             .potential_blocks_and_tokens::<INCLUDE_ACTIVE_REQUESTS>(
                 token_sequence,
                 prefill_token_deltas,
                 decay_now,
-            );
-
-        #[cfg(feature = "bench")]
-        {
-            let total_elapsed = start.elapsed();
-            tracing::info!(
-                num_workers,
-                total_us = total_elapsed.as_micros() as u64,
-                "potential_blocks_and_tokens completed"
-            );
-        }
-
-        result
+            )
     }
 
     pub fn project_worker_loads(
@@ -1280,24 +1248,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     ) {
-        #[cfg(feature = "bench")]
-        let start = tokio::time::Instant::now();
-
-        #[cfg(feature = "bench")]
-        let num_workers = self.workers.read().slots.len();
-
         self.prompt_registry
             .project_worker_loads_into(token_sequence, decay_now, projections);
-
-        #[cfg(feature = "bench")]
-        {
-            let total_elapsed = start.elapsed();
-            tracing::info!(
-                num_workers,
-                total_us = total_elapsed.as_micros() as u64,
-                "project_worker_loads completed"
-            );
-        }
     }
 
     #[cfg(feature = "bench")]
@@ -1410,8 +1362,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// at the given interval until `cancel_token` is cancelled.
     ///
     /// **Concurrency note:** This type is always used as `Arc<ActiveSequencesMultiWorker>`. All
-    /// mutation is via interior mutability (`RwLock<WorkerTable>`, `DashMap`), so the periodic
-    /// task only needs `&self` and does not block other callers.
+    /// mutation is via interior mutability (`ShardedRwLock<WorkerTable>`, `DashMap`), so the
+    /// periodic task only needs `&self` and does not block other callers.
     pub fn start_periodic_force_expiry_across_all_workers(
         self: &Arc<Self>,
         cancel_token: CancellationToken,

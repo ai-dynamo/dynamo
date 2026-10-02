@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
-#[cfg(not(target_os = "linux"))]
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use dynamo_bench::kv_router_common::issuer::pin_current_thread;
 use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
 use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
@@ -22,15 +22,21 @@ use tokio::sync::{Notify, oneshot};
 
 use super::active_sequences_shared::{SequenceTrace, SequenceTraceEntry};
 
-const RESULT_SCHEMA_VERSION: u32 = 1;
+const RESULT_SCHEMA_VERSION: u32 = 2;
 const EMPTY_OPERATION_ID: u32 = u32::MAX;
 const START_LEAD_NS: u64 = 20_000_000;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ActiveSequencesRunConfig {
     pub(crate) operation_lanes: usize,
     pub(crate) spin_us: u64,
     pub(crate) issue_lag_diagnostic_threshold_us: u64,
+    pub(crate) issuer_cpu: Option<usize>,
+    /// Recorded for provenance; the caller pins the runtime before construction.
+    pub(crate) backend_cpus: Vec<usize>,
+    /// When set, every add carries an expected prefill duration of `isl / rate`,
+    /// exercising the modeled (AIC-style) prefill-load path.
+    pub(crate) modeled_prefill_tokens_per_sec: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -413,8 +419,9 @@ impl PreparedActiveSequencesTrial {
 }
 
 pub(crate) fn prepare_active_sequences_trial(
-    corpus: PreparedActiveSequencesCorpus,
+    corpus: &PreparedActiveSequencesCorpus,
     operation_lanes: usize,
+    modeled_prefill_tokens_per_sec: Option<u64>,
 ) -> anyhow::Result<PreparedActiveSequencesTrial> {
     if operation_lanes == 0 {
         anyhow::bail!("Active Sequences operation-lane count must be positive");
@@ -434,7 +441,7 @@ pub(crate) fn prepare_active_sequences_trial(
         total_workers,
     } = corpus;
     let mut lane_capacities = vec![0usize; operation_lanes];
-    for operation in &operations {
+    for operation in operations {
         lane_capacities[operation.worker_id as usize % operation_lanes] += 1;
     }
     let mut lane_payloads = lane_capacities
@@ -459,7 +466,7 @@ pub(crate) fn prepare_active_sequences_trial(
     let mut operation_workers = Vec::with_capacity(operations.len());
     let mut operation_kinds = Vec::with_capacity(operations.len());
 
-    for operation in operations {
+    for &operation in operations {
         let request = requests
             .get(operation.request_index as usize)
             .ok_or_else(|| anyhow::anyhow!("operation {} has an invalid request", operation.id))?;
@@ -497,7 +504,12 @@ pub(crate) fn prepare_active_sequences_trial(
                     expected_output_tokens: Some(request.output_length),
                     prefill_load_hint: Some(PrefillLoadHint {
                         initial_effective_prefill_tokens: request.isl,
-                        expected_prefill_duration: None,
+                        expected_prefill_duration: modeled_prefill_tokens_per_sec.map(|rate| {
+                            Duration::from_nanos(
+                                (request.isl as u128 * 1_000_000_000 / u128::from(rate.max(1)))
+                                    as u64,
+                            )
+                        }),
                     }),
                     worker: WorkerWithDpRank::from_worker_id(operation.worker_id),
                     lora_name: None,
@@ -542,11 +554,11 @@ pub(crate) fn prepare_active_sequences_trial(
         lane_capacities,
         operation_workers: operation_workers.into_boxed_slice(),
         operation_kinds: operation_kinds.into_boxed_slice(),
-        expected_operations_by_worker,
-        totals,
-        benchmark_duration_ns,
-        block_size,
-        total_workers,
+        expected_operations_by_worker: expected_operations_by_worker.clone(),
+        totals: *totals,
+        benchmark_duration_ns: *benchmark_duration_ns,
+        block_size: *block_size,
+        total_workers: *total_workers,
     })
 }
 
@@ -625,6 +637,7 @@ struct CompletionRecord {
     id: u32,
     started_ns: u64,
     project_finished_ns: u64,
+    add_started_ns: u64,
     finished_ns: u64,
     projection_count: u64,
     projection_inspected: u64,
@@ -681,6 +694,13 @@ struct LaneResult {
     failure: LaneFailure,
 }
 
+thread_local! {
+    // One reused projection map per runtime thread, like the production scheduler queue's
+    // single reused map. Per-lane maps would keep `lanes x workers` entries cache-cold.
+    static PROJECTIONS: RefCell<FxHashMap<WorkerWithDpRank, WorkerLoadProjection>> =
+        RefCell::new(FxHashMap::default());
+}
+
 fn execute_payload(
     sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
     clock: &BenchmarkClock,
@@ -702,13 +722,25 @@ fn execute_payload(
 
     match payload {
         LanePayload::ProjectAndAdd(request) => {
-            let projections =
-                sequences.project_worker_loads(request.token_sequence.as_deref(), decay_now);
-            let projection_count = projections.len() as u64;
-            let (projection_inspected, projection_digest) =
-                summarize_worker_projections(&projections);
-            drop(black_box(projections));
-            let project_finished_ns = clock.now_ns();
+            let (project_finished_ns, projection_count, projection_inspected, projection_digest) =
+                PROJECTIONS.with_borrow_mut(|projections| {
+                    sequences.bench_project_worker_loads_into(
+                        request.token_sequence.as_deref(),
+                        decay_now,
+                        projections,
+                    );
+                    let project_finished_ns = clock.now_ns();
+                    // Digest after the projection timestamp so it forces materialization
+                    // without billing benchmark bookkeeping to projection service time.
+                    let (inspected, digest) = summarize_worker_projections(black_box(projections));
+                    (
+                        project_finished_ns,
+                        projections.len() as u64,
+                        inspected,
+                        digest,
+                    )
+                });
+            let add_started_ns = clock.now_ns();
             let failure = sequences
                 .add_request(request, decay_now)
                 .err()
@@ -718,6 +750,7 @@ fn execute_payload(
                 id,
                 started_ns,
                 project_finished_ns,
+                add_started_ns,
                 finished_ns: clock.now_ns(),
                 projection_count,
                 projection_inspected,
@@ -852,6 +885,7 @@ struct IssueRecord {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IssuerFailure {
+    Affinity,
     LaneOverflow,
     DuplicateOperation,
     InvalidLane,
@@ -861,6 +895,7 @@ enum IssuerFailure {
 struct IssuerOutput {
     records: Box<[IssueRecord]>,
     producer_stop_ns: u64,
+    cpu_ns: Option<u64>,
     failure: Option<IssuerFailure>,
 }
 
@@ -871,23 +906,31 @@ fn issue_operations(
     clock: Arc<BenchmarkClock>,
     start_signal: Arc<AtomicU64>,
     ready: mpsc::SyncSender<()>,
+    issuer_cpu: Option<usize>,
 ) -> IssuerOutput {
     let mut records = vec![IssueRecord::default(); operation_count].into_boxed_slice();
     let mut lane_cursors = vec![0usize; lanes.len()].into_boxed_slice();
     let mut touched_flags = vec![false; lanes.len()].into_boxed_slice();
     let mut touched_lanes = Vec::with_capacity(lanes.len());
-    let mut failure = None;
+    let mut failure = pin_current_thread(issuer_cpu)
+        .err()
+        .map(|_| IssuerFailure::Affinity);
     if ready.send(()).is_err() {
+        failure.get_or_insert(IssuerFailure::DispatchMismatch);
+    }
+    if failure.is_some() {
         return IssuerOutput {
             records,
             producer_stop_ns: clock.now_ns(),
-            failure: Some(IssuerFailure::DispatchMismatch),
+            cpu_ns: None,
+            failure,
         };
     }
     while start_signal.load(Ordering::Acquire) == 0 {
         std::hint::spin_loop();
     }
     let start_ns = start_signal.load(Ordering::Acquire);
+    let cpu_started = thread_cpu_time_ns();
     let mut operations = dispatch.into_iter().peekable();
 
     while failure.is_none() {
@@ -944,12 +987,16 @@ fn issue_operations(
     IssuerOutput {
         records,
         producer_stop_ns: clock.now_ns(),
+        cpu_ns: thread_cpu_time_ns()
+            .zip(cpu_started)
+            .map(|(end, start)| end.saturating_sub(start)),
         failure,
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub(crate) struct Distribution {
+    pub(crate) mean_ns: u64,
     pub(crate) p50_ns: u64,
     pub(crate) p99_ns: u64,
     pub(crate) p999_ns: u64,
@@ -963,6 +1010,9 @@ pub(crate) struct ActiveSequencesResult {
     pub(crate) benchmark_duration_ms: u64,
     pub(crate) block_size: u32,
     pub(crate) operation_lanes: usize,
+    pub(crate) issuer_cpu: Option<usize>,
+    pub(crate) backend_cpus: Vec<usize>,
+    pub(crate) modeled_prefill_tokens_per_sec: Option<u64>,
     pub(crate) total_workers: usize,
     pub(crate) total_adds: usize,
     pub(crate) total_prefill_completes: usize,
@@ -982,6 +1032,13 @@ pub(crate) struct ActiveSequencesResult {
     pub(crate) offered_logical_block_visits_per_sec: f64,
     pub(crate) actual_issue_logical_block_visits_per_sec: f64,
     pub(crate) achieved_logical_block_visits_per_sec: f64,
+    /// Sum of every lifecycle method's service time divided by logical operations.
+    pub(crate) tracker_service_ns_per_op: f64,
+    /// Process CPU from the start signal until every lane drains.
+    pub(crate) process_cpu_ns: Option<u64>,
+    pub(crate) issuer_cpu_ns: Option<u64>,
+    /// Process CPU excluding the issuer thread, per logical operation.
+    pub(crate) backend_cpu_ns_per_op: Option<f64>,
     pub(crate) issue_lag: Distribution,
     pub(crate) queue_wait: Distribution,
     pub(crate) scheduled_to_completed: Distribution,
@@ -1013,11 +1070,17 @@ pub(crate) async fn run_active_sequences_benchmark(
     corpus: PreparedActiveSequencesCorpus,
     config: ActiveSequencesRunConfig,
 ) -> anyhow::Result<ActiveSequencesResult> {
-    let trial = prepare_active_sequences_trial(corpus, config.operation_lanes)?;
+    let trial = prepare_active_sequences_trial(
+        &corpus,
+        config.operation_lanes,
+        config.modeled_prefill_tokens_per_sec,
+    )?;
+    // Release the source corpus before the timed run.
+    drop(corpus);
     run_active_sequences_trial(trial, config).await
 }
 
-async fn run_active_sequences_trial(
+pub(crate) async fn run_active_sequences_trial(
     trial: PreparedActiveSequencesTrial,
     config: ActiveSequencesRunConfig,
 ) -> anyhow::Result<ActiveSequencesResult> {
@@ -1073,6 +1136,7 @@ async fn run_active_sequences_trial(
         let issuer_lanes = lanes.iter().map(Arc::clone).collect::<Vec<_>>();
         let clock = Arc::clone(&clock);
         let start_signal = Arc::clone(&start_signal);
+        let issuer_cpu = config.issuer_cpu;
         move || {
             issue_operations(
                 trial.dispatch,
@@ -1081,6 +1145,7 @@ async fn run_active_sequences_trial(
                 clock,
                 start_signal,
                 issuer_ready_tx,
+                issuer_cpu,
             )
         }
     });
@@ -1096,6 +1161,7 @@ async fn run_active_sequences_trial(
         anyhow::bail!("Active Sequences issuer exited before becoming ready");
     }
     let start_ns = clock.now_ns().saturating_add(START_LEAD_NS);
+    let process_cpu_started = process_cpu_time_ns();
     start_signal.store(start_ns, Ordering::Release);
     let issuer = match issuer_handle.join() {
         Ok(issuer) => issuer,
@@ -1118,6 +1184,9 @@ async fn run_active_sequences_trial(
     for task in lane_tasks {
         lane_results.push(task.await?);
     }
+    let process_cpu_ns = process_cpu_time_ns()
+        .zip(process_cpu_started)
+        .map(|(end, start)| end.saturating_sub(start));
     let end_ns = lane_results
         .iter()
         .map(|result| result.drain_ns)
@@ -1158,6 +1227,7 @@ async fn run_active_sequences_trial(
         trial.total_workers,
         config,
         issuer,
+        process_cpu_ns,
         lane_results,
         queue_depth_at_stop,
         obvious_empty,
@@ -1179,6 +1249,7 @@ fn analyze_result(
     total_workers: usize,
     config: ActiveSequencesRunConfig,
     issuer: IssuerOutput,
+    process_cpu_ns: Option<u64>,
     lane_results: Vec<LaneResult>,
     queue_depth_at_stop: Vec<usize>,
     final_state_empty: bool,
@@ -1352,13 +1423,16 @@ fn analyze_result(
                         .project_finished_ns
                         .saturating_sub(completion.started_ns),
                 );
-                add_service.push(
+                let add_ns = completion
+                    .finished_ns
+                    .saturating_sub(completion.add_started_ns);
+                add_service.push(add_ns);
+                project_and_add_service.push(
                     completion
-                        .finished_ns
-                        .saturating_sub(completion.project_finished_ns),
+                        .project_finished_ns
+                        .saturating_sub(completion.started_ns)
+                        .saturating_add(add_ns),
                 );
-                project_and_add_service
-                    .push(completion.finished_ns.saturating_sub(completion.started_ns));
                 worker_projections_produced =
                     worker_projections_produced.saturating_add(completion.projection_count);
                 worker_projections_inspected =
@@ -1413,6 +1487,16 @@ fn analyze_result(
             "operation_completion_failure".to_string(),
         );
     }
+    let tracker_service_ns = project_and_add_service
+        .iter()
+        .chain(&prefill_complete_service)
+        .chain(&free_service)
+        .map(|&value| u128::from(value))
+        .sum::<u128>();
+    let logical_operations = totals.logical_operations().max(1) as f64;
+    let backend_cpu_ns_per_op = process_cpu_ns
+        .zip(issuer.cpu_ns)
+        .map(|(process, issuer)| process.saturating_sub(issuer) as f64 / logical_operations);
     let generator_valid = failure_reasons.is_empty();
     let kept_up =
         generator_valid && total_duration_ns <= benchmark_duration_ns.saturating_mul(110) / 100;
@@ -1426,6 +1510,9 @@ fn analyze_result(
         benchmark_duration_ms: benchmark_duration_ns / 1_000_000,
         block_size,
         operation_lanes: config.operation_lanes,
+        issuer_cpu: config.issuer_cpu,
+        backend_cpus: config.backend_cpus,
+        modeled_prefill_tokens_per_sec: config.modeled_prefill_tokens_per_sec,
         total_workers,
         total_adds: totals.adds,
         total_prefill_completes: totals.prefill_completes,
@@ -1448,6 +1535,10 @@ fn analyze_result(
             / issue_seconds,
         achieved_logical_block_visits_per_sec: totals.logical_block_visits() as f64
             / achieved_seconds,
+        tracker_service_ns_per_op: tracker_service_ns as f64 / logical_operations,
+        process_cpu_ns,
+        issuer_cpu_ns: issuer.cpu_ns,
+        backend_cpu_ns_per_op,
         issue_lag: distribution(issue_lag),
         queue_wait: distribution(queue_wait),
         scheduled_to_completed: distribution(scheduled_to_completed),
@@ -1498,7 +1589,9 @@ fn distribution(mut values: Vec<u64>) -> Distribution {
         return Distribution::default();
     }
     values.sort_unstable();
+    let total_ns = values.iter().map(|&value| u128::from(value)).sum::<u128>();
     Distribution {
+        mean_ns: (total_ns / values.len() as u128) as u64,
         p50_ns: nearest_rank(&values, 50, 100),
         p99_ns: nearest_rank(&values, 99, 100),
         p999_ns: nearest_rank(&values, 999, 1_000),
@@ -1576,6 +1669,42 @@ fn monotonic_now_ns() -> anyhow::Result<u64> {
     Ok((timestamp.tv_sec as u64)
         .saturating_mul(1_000_000_000)
         .saturating_add(timestamp.tv_nsec as u64))
+}
+
+fn process_cpu_time_ns() -> Option<u64> {
+    cpu_time_ns(CpuClock::Process)
+}
+
+fn thread_cpu_time_ns() -> Option<u64> {
+    cpu_time_ns(CpuClock::Thread)
+}
+
+enum CpuClock {
+    Process,
+    Thread,
+}
+
+#[cfg(target_os = "linux")]
+fn cpu_time_ns(clock: CpuClock) -> Option<u64> {
+    let clock_id = match clock {
+        CpuClock::Process => libc::CLOCK_PROCESS_CPUTIME_ID,
+        CpuClock::Thread => libc::CLOCK_THREAD_CPUTIME_ID,
+    };
+    let mut timestamp = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let rc = unsafe { libc::clock_gettime(clock_id, &mut timestamp) };
+    (rc == 0).then(|| {
+        (timestamp.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(timestamp.tv_nsec as u64)
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cpu_time_ns(_clock: CpuClock) -> Option<u64> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -1845,6 +1974,9 @@ mod tests {
                 operation_lanes: 1,
                 spin_us: 50,
                 issue_lag_diagnostic_threshold_us: 250,
+                issuer_cpu: None,
+                backend_cpus: Vec::new(),
+                modeled_prefill_tokens_per_sec: None,
             },
         )
         .await
@@ -1864,7 +1996,7 @@ mod tests {
         assert_eq!(result.worker_projections_inspected, 1);
         assert_eq!(result.queue_depth_at_stop.len(), 1);
         let json = serde_json::to_value(&result).unwrap();
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], 2);
         assert_eq!(json["total_adds"], 1);
         assert_eq!(json["total_prefill_completes"], 1);
         assert_eq!(json["total_frees"], 1);
