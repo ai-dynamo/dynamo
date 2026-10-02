@@ -24,7 +24,8 @@ use super::credit_selection::CreditPoolSelector;
 use super::scheduler_metrics::SchedulerLoadRepository;
 
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
-const MAX_OVERLAP_TOKEN_IDS: usize = 32 * 1024;
+// Cover long-context trace requests while bounding CPU work for prefix hashing.
+const MAX_OVERLAP_TOKEN_IDS: usize = 128 * 1024;
 const ROUTER_HOP_HEADER: &str = "x-dynamo-global-router-hop";
 
 /// Load-based aggregated routing from a regional ingress to private Frontends.
@@ -604,6 +605,33 @@ mod tests {
             .await;
         assert_eq!(response.headers()["x-dynamo-target-region"], "us-west-2");
         assert_eq!(response.headers()["x-dynamo-matched-prefix-tokens"], "1024");
+        // Long-context requests must keep the selected credit policy rather
+        // than silently reverting to request counts above the former 32K cap.
+        let response = one
+            .forward(
+                "/v1/completions",
+                HeaderMap::new(),
+                Body::from(json!({"model": "model", "prompt": vec![1; 128 * 1024]}).to_string()),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["x-dynamo-routing-basis"],
+            "dynamo_credit"
+        );
+        let response = one
+            .forward(
+                "/v1/completions",
+                HeaderMap::new(),
+                Body::from(
+                    json!({"model": "model", "prompt": vec![1; 128 * 1024 + 1]}).to_string(),
+                ),
+            )
+            .await;
+        assert_eq!(
+            response.headers()["x-dynamo-routing-basis"],
+            "request_count"
+        );
         // Missing a ready pool's scheduler sample must not make it look idle or
         // remove it from eligibility. The host falls back across BOTH pools.
         samples.0.write().remove(&west_id);
