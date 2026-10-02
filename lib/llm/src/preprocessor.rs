@@ -3479,11 +3479,16 @@ impl OpenAIPreprocessor {
                             let size = url.as_str().len();
                             let limit = max_data_url_bytes();
                             if size > limit {
-                                return Err(invalid_argument_error(format!(
+                                let message = format!(
                                     "{type_str} data: URL is {size} bytes, exceeds the {limit}-byte limit. \
                                      To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) on \
                                      both the frontend and the workers."
-                                )));
+                                );
+                                // The text holds a fixed modality key and two
+                                // numbers, so the 400 body can carry it.
+                                return Err(crate::protocols::common::invalid_argument_error(
+                                    message,
+                                ));
                             }
                         }
                         if has_media_loader {
@@ -12458,6 +12463,8 @@ mod tests {
                 "{}",
                 dynamo_error.message()
             );
+            // The 400 body carries the same text.
+            assert_eq!(dynamo_error.public_message(), Some(dynamo_error.message()));
         })
         .await;
     }
