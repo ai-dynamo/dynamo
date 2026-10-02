@@ -92,10 +92,27 @@ const (
 	// so v1-compatible releases continue to generate new DCDs with the v1 value.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
-	// Engine Group labels correlate capacity and the allocation-count Scale selector.
+	// Engine Group labels form the stable identity contract between the Engine
+	// Group controller and workload-manager adapters. They intentionally name
+	// logical replicas and slots rather than Pod ordinals so replacement Pods
+	// retain their logical identity while receiving a new UID.
 	KubeLabelDynamoEngineGroup            = "nvidia.com/dynamo-engine-group"
+	KubeLabelDynamoEngineGroupRuntime     = "nvidia.com/dynamo-engine-group-runtime"
+	KubeLabelDynamoEngineGroupReplica     = "nvidia.com/dynamo-engine-group-replica"
+	KubeLabelDynamoEngineGroupSlot        = "nvidia.com/dynamo-engine-group-slot"
+	KubeLabelDynamoEngineGroupRole        = "nvidia.com/dynamo-engine-group-role"
 	KubeLabelDynamoScaleRepresentative    = "nvidia.com/dynamo-scale-representative"
+	KubeLabelDynamoEngineGroupRolePrimary = "primary"
+	KubeLabelDynamoEngineGroupRoleJoiner  = "joiner"
+	KubeLabelDynamoEngineGroupSGLang      = "sglang-elastic-ep"
 	KubeLabelDynamoScaleRepresentativeYes = "true"
+
+	// Engine Group annotations carry runtime endpoints that cannot be selected
+	// with Kubernetes labels. Future DGD lifecycle reconciliation writes the
+	// same annotations that the standalone integration fixture uses today.
+	KubeAnnotationDynamoEngineGroupControlPort = "nvidia.com/dynamo-engine-group-control-port"
+	KubeAnnotationDynamoEngineGroupVerifyURL   = "nvidia.com/dynamo-engine-group-verify-url"
+	KubeAnnotationDynamoEngineGroupVerifyModel = "nvidia.com/dynamo-engine-group-verify-model"
 
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
 	// lifecycle is tied to an owning DGD generation.
