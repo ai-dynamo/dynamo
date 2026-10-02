@@ -250,6 +250,7 @@ data:
   prefill.yaml: |
     cache_transceiver_config:
       backend: UCX
+      transceiver_runtime: CPP
       max_tokens_in_buffer: 0
       kv_transfer_sender_future_timeout_ms: 30000
     allreduce_strategy: MNNVL
@@ -284,6 +285,7 @@ data:
     allreduce_strategy: MNNVL
     cache_transceiver_config:
       backend: UCX
+      transceiver_runtime: CPP
       max_tokens_in_buffer: 0
       kv_transfer_sender_future_timeout_ms: 30000
     max_num_tokens: 640
