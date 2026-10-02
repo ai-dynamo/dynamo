@@ -41,6 +41,44 @@ const SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY: &str = "sglang_hicache_mooncake";
 const MOONCAKE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_MOONCAKE_INDEX_ENTRIES: usize = 1_000_000;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HicacheHitPolicy {
+    #[default]
+    AllPages,
+    TrailingPages,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+struct HicacheObjectPool {
+    suffixes: Vec<String>,
+    #[serde(default)]
+    hit_policy: HicacheHitPolicy,
+    #[serde(default)]
+    trailing_pages: Option<u32>,
+}
+
+impl HicacheObjectPool {
+    fn covers_page(&self, page_index: usize, num_pages: usize) -> bool {
+        match self.hit_policy {
+            HicacheHitPolicy::AllPages => true,
+            HicacheHitPolicy::TrailingPages => {
+                let trailing = self.trailing_pages.unwrap_or(0) as usize;
+                page_index >= num_pages.saturating_sub(trailing)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+struct HicacheObjectLayout {
+    #[serde(default)]
+    pools: Vec<HicacheObjectPool>,
+    // Mooncake folds the backend tag and the model name into this prefix.
+    #[serde(default)]
+    key_prefix: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct SglangHicacheMooncakeConfig {
     backend: String,
@@ -56,6 +94,8 @@ struct SglangHicacheMooncakeConfig {
     extra_backend_tag: Option<String>,
     #[serde(default)]
     kv_events_endpoint: Option<String>,
+    #[serde(default)]
+    hicache_object_layout: HicacheObjectLayout,
 }
 
 impl SglangHicacheMooncakeConfig {
@@ -69,6 +109,7 @@ impl SglangHicacheMooncakeConfig {
             && self.tp_lcm_size == other.tp_lcm_size
             && self.should_split_heads == other.should_split_heads
             && self.extra_backend_tag == other.extra_backend_tag
+            && self.hicache_object_layout == other.hicache_object_layout
     }
 }
 
@@ -434,18 +475,22 @@ impl SharedKvCache for HicacheSharedKvCache {
             return Ok(SharedCacheHits::default());
         }
 
+        let num_pages = page_hashes.len();
         let page_hits = page_hashes
             .iter()
-            .map(|page_hash| {
+            .enumerate()
+            .map(|(page_index, page_hash)| {
                 let group_id = sglang_group_id(page_hash, &config);
                 let generation = self.group_states.get(&group_id).map(|state| *state);
                 if generation.is_some_and(|(_, verified)| verified) {
                     return true;
                 }
 
-                let hit = expand_actual_query_keys(page_hash, &config)
-                    .iter()
-                    .all(|key| self.present_keys.contains(key));
+                let required_keys = required_page_keys(page_hash, page_index, num_pages, &config);
+                let hit = !required_keys.is_empty()
+                    && required_keys
+                        .iter()
+                        .all(|key| self.present_keys.contains(key));
                 if hit
                     && let Some((generation, _)) = generation
                     && let Some(mut state) = self.group_states.get_mut(&group_id)
@@ -551,21 +596,49 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn sglang_group_id(logical_page_hash: &str, config: &SglangHicacheMooncakeConfig) -> String {
-    match config
-        .extra_backend_tag
+    let prefix = config
+        .hicache_object_layout
+        .key_prefix
         .as_deref()
-        .filter(|tag| !tag.is_empty())
-    {
-        Some(tag) => format!("sglang-hicache:{tag}_{logical_page_hash}"),
+        .or(config.extra_backend_tag.as_deref())
+        .filter(|tag| !tag.is_empty());
+    match prefix {
+        Some(prefix) => format!("sglang-hicache:{prefix}_{logical_page_hash}"),
         None => format!("sglang-hicache:{logical_page_hash}"),
     }
 }
 
-fn expand_actual_query_keys(
+fn required_page_keys(
     logical_page_hash: &str,
+    page_index: usize,
+    num_pages: usize,
     config: &SglangHicacheMooncakeConfig,
 ) -> Vec<String> {
+    let layout = &config.hicache_object_layout;
+
+    if !layout.pools.is_empty() {
+        let prefix = layout
+            .key_prefix
+            .as_deref()
+            .or(config.extra_backend_tag.as_deref());
+        let logical_key = maybe_prefix_key(logical_page_hash, prefix);
+        return layout
+            .pools
+            .iter()
+            .filter(|pool| pool.covers_page(page_index, num_pages))
+            .flat_map(|pool| {
+                pool.suffixes
+                    .iter()
+                    .map(|suffix| format!("{logical_key}{suffix}"))
+            })
+            .collect();
+    }
+
     let logical_key = maybe_prefix_key(logical_page_hash, config.extra_backend_tag.as_deref());
+    derived_query_keys(&logical_key, config)
+}
+
+fn derived_query_keys(logical_key: &str, config: &SglangHicacheMooncakeConfig) -> Vec<String> {
     let pp_size = config.pp_size.max(1);
 
     if config.is_mla_model {
@@ -631,6 +704,22 @@ mod tests {
             should_split_heads: false,
             extra_backend_tag: None,
             kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+            hicache_object_layout: HicacheObjectLayout::default(),
+        }
+    }
+
+    fn object_layout(pools: Vec<HicacheObjectPool>) -> HicacheObjectLayout {
+        HicacheObjectLayout {
+            pools,
+            key_prefix: None,
+        }
+    }
+
+    fn all_pages_pool(suffix: &str) -> HicacheObjectPool {
+        HicacheObjectPool {
+            suffixes: vec![suffix.to_string()],
+            hit_policy: HicacheHitPolicy::AllPages,
+            trailing_pages: None,
         }
     }
 
@@ -681,14 +770,14 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_actual_query_keys_for_mha_tp_pp_layout() {
+    fn test_required_page_keys_for_mha_tp_pp_layout() {
         let config = SglangHicacheMooncakeConfig {
             tp_size: 2,
             pp_size: 2,
             ..mooncake_config()
         };
 
-        let query_keys = expand_actual_query_keys("hash", &config);
+        let query_keys = required_page_keys("hash", 0, 1, &config);
         assert_eq!(
             query_keys,
             vec![
@@ -705,18 +794,18 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_actual_query_keys_for_mla_without_pp_uses_double_underscore() {
+    fn test_required_page_keys_for_mla_without_pp_uses_double_underscore() {
         let config = SglangHicacheMooncakeConfig {
             is_mla_model: true,
             ..mooncake_config()
         };
 
-        let query_keys = expand_actual_query_keys("hash", &config);
+        let query_keys = required_page_keys("hash", 0, 1, &config);
         assert_eq!(query_keys, vec!["hash__k"]);
     }
 
     #[test]
-    fn test_expand_actual_query_keys_for_split_heads() {
+    fn test_required_page_keys_for_split_heads() {
         let config = SglangHicacheMooncakeConfig {
             tp_size: 2,
             tp_lcm_size: Some(4),
@@ -725,7 +814,7 @@ mod tests {
             ..mooncake_config()
         };
 
-        let query_keys = expand_actual_query_keys("hash", &config);
+        let query_keys = required_page_keys("hash", 0, 1, &config);
         assert_eq!(
             query_keys,
             vec![
@@ -742,6 +831,165 @@ mod tests {
     }
 
     #[test]
+    fn test_required_page_keys_uses_advertised_pool_suffixes() {
+        let config = SglangHicacheMooncakeConfig {
+            hicache_object_layout: object_layout(vec![
+                all_pages_pool("__deepseek_v4_c4"),
+                all_pages_pool("__deepseek_v4_c128"),
+                all_pages_pool("__deepseek_v4_c4_indexer"),
+                all_pages_pool("__deepseek_v4_c4_state"),
+                all_pages_pool("__deepseek_v4_c4_indexer_state"),
+                all_pages_pool("__swa"),
+            ]),
+            ..mooncake_config()
+        };
+
+        let query_keys = required_page_keys("hash", 0, 1, &config);
+        assert_eq!(
+            query_keys,
+            vec![
+                "hash__deepseek_v4_c4",
+                "hash__deepseek_v4_c128",
+                "hash__deepseek_v4_c4_indexer",
+                "hash__deepseek_v4_c4_state",
+                "hash__deepseek_v4_c4_indexer_state",
+                "hash__swa",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_required_page_keys_uses_advertised_key_prefix() {
+        let config = SglangHicacheMooncakeConfig {
+            hicache_object_layout: HicacheObjectLayout {
+                pools: vec![all_pages_pool("__deepseek_v4_c4")],
+                key_prefix: Some("tag_deepseek-ai-DeepSeek-V4".to_string()),
+            },
+            extra_backend_tag: Some("tag".to_string()),
+            ..mooncake_config()
+        };
+
+        assert_eq!(
+            required_page_keys("hash", 0, 1, &config),
+            vec!["tag_deepseek-ai-DeepSeek-V4_hash__deepseek_v4_c4"]
+        );
+    }
+
+    #[test]
+    fn test_required_page_keys_scopes_trailing_pool_to_trailing_pages() {
+        let config = SglangHicacheMooncakeConfig {
+            hicache_object_layout: object_layout(vec![
+                all_pages_pool("__deepseek_v4_c4"),
+                HicacheObjectPool {
+                    suffixes: vec!["__swa".to_string()],
+                    hit_policy: HicacheHitPolicy::TrailingPages,
+                    trailing_pages: Some(1),
+                },
+            ]),
+            ..mooncake_config()
+        };
+
+        assert_eq!(
+            required_page_keys("hash", 0, 3, &config),
+            vec!["hash__deepseek_v4_c4"]
+        );
+        assert_eq!(
+            required_page_keys("hash", 2, 3, &config),
+            vec!["hash__deepseek_v4_c4", "hash__swa"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_blocks_hits_deepseek_v4_pool_suffixed_keys() {
+        // Regression: the guessed `_k`/`_v` layout never matches DeepSeek V4's per-pool keys.
+        let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72".to_string();
+        let config = SglangHicacheMooncakeConfig {
+            hicache_object_layout: object_layout(vec![
+                all_pages_pool("__deepseek_v4_c4"),
+                all_pages_pool("__deepseek_v4_c4_indexer"),
+                all_pages_pool("__deepseek_v4_c4_state"),
+            ]),
+            ..mooncake_config()
+        };
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        cache.apply_batch(
+            1,
+            vec![
+                MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(format!("{hash}__deepseek_v4_c4")),
+                    tenant_id: "default".to_string(),
+                    group_id: None,
+                },
+                MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(format!("{hash}__deepseek_v4_c4_indexer")),
+                    tenant_id: "default".to_string(),
+                    group_id: None,
+                },
+                MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(format!("{hash}__deepseek_v4_c4_state")),
+                    tenant_id: "default".to_string(),
+                    group_id: None,
+                },
+            ],
+        );
+
+        let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
+        assert_eq!(hits.ranges, vec![Range { start: 0, end: 1 }]);
+        assert_eq!(hits.total_hits, 1);
+    }
+
+    #[tokio::test]
+    async fn test_check_blocks_does_not_require_trailing_pool_on_leading_pages() {
+        let hash0 = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72".to_string();
+        let hash1 = "4ebfa8a1f3c341517621838c6e1b9aa350307e3f00b3cbd1a07ef740f54396d6".to_string();
+        let config = SglangHicacheMooncakeConfig {
+            hicache_object_layout: object_layout(vec![
+                all_pages_pool("__deepseek_v4_c4"),
+                HicacheObjectPool {
+                    suffixes: vec!["__swa".to_string()],
+                    hit_policy: HicacheHitPolicy::TrailingPages,
+                    trailing_pages: Some(1),
+                },
+            ]),
+            ..mooncake_config()
+        };
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        cache.apply_batch(
+            1,
+            vec![
+                MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(format!("{hash0}__deepseek_v4_c4")),
+                    tenant_id: "default".to_string(),
+                    group_id: None,
+                },
+                MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(format!("{hash1}__deepseek_v4_c4")),
+                    tenant_id: "default".to_string(),
+                    group_id: None,
+                },
+                MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(format!("{hash1}__swa")),
+                    tenant_id: "default".to_string(),
+                    group_id: None,
+                },
+            ],
+        );
+
+        // Regression: the flat `.all()` check dropped the leading page.
+        let hits = cache
+            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.total_hits, 2);
+    }
+
+    #[test]
     fn test_sglang_group_id_uses_extra_backend_tag() {
         let config = SglangHicacheMooncakeConfig {
             extra_backend_tag: Some("tag".to_string()),
@@ -749,6 +997,23 @@ mod tests {
         };
 
         assert_eq!(sglang_group_id("hash", &config), "sglang-hicache:tag_hash");
+    }
+
+    #[test]
+    fn test_sglang_group_id_uses_advertised_key_prefix() {
+        let config = SglangHicacheMooncakeConfig {
+            hicache_object_layout: HicacheObjectLayout {
+                pools: vec![all_pages_pool("__deepseek_v4_c4")],
+                key_prefix: Some("tag_deepseek-ai-DeepSeek-V4".to_string()),
+            },
+            extra_backend_tag: Some("tag".to_string()),
+            ..mooncake_config()
+        };
+
+        assert_eq!(
+            sglang_group_id("hash", &config),
+            "sglang-hicache:tag_deepseek-ai-DeepSeek-V4_hash"
+        );
     }
 
     #[test]
@@ -850,7 +1115,7 @@ mod tests {
         let group_id = sglang_group_id(&hash, &config);
         cache.apply_batch(
             1,
-            expand_actual_query_keys(&hash, &config)
+            required_page_keys(&hash, 0, 1, &config)
                 .into_iter()
                 .map(|object_key| MooncakeObjectEvent {
                     event_type: "stored".to_string(),
