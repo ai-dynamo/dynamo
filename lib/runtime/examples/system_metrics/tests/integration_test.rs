@@ -4,8 +4,10 @@
 #![cfg(feature = "integration")]
 
 use dynamo_runtime::{
-    DistributedRuntime, Result, Runtime, config::environment_names::runtime::system as env_system,
-    pipeline::PushRouter, protocols::annotated::Annotated,
+    DistributedRuntime, Result, Runtime,
+    config::environment_names::runtime::system as env_system,
+    pipeline::{PushRouter, SingleIn},
+    protocols::annotated::Annotated,
 };
 use futures::StreamExt;
 use rand::Rng;
@@ -71,7 +73,7 @@ async fn test_backend_with_metrics_inner() -> Result<()> {
     // Send a few test requests to generate metrics
     for i in 0..3 {
         let test_message = format!("test message {}", i);
-        let mut stream = router.random(test_message.clone().into()).await?;
+        let mut stream = router.random(SingleIn::new(&test_message)).await?;
 
         // Process the response stream
         while let Some(resp) = stream.next().await {

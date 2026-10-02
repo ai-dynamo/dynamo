@@ -165,7 +165,7 @@ mod integration {
                 tasks.push(tokio::spawn(async move {
                     let mut stream = tokio::time::timeout(
                         Duration::from_secs(5),
-                        router.random("hello world".to_string().into()),
+                        router.random(SingleIn::new("hello world".to_string())),
                     )
                     .await
                     .context("request timed out")??;
