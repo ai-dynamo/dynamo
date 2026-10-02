@@ -33,6 +33,7 @@ use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
+use dynamo_llm::protocols::common::timing::RequestPhase;
 use serde::Deserialize;
 
 use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
@@ -399,6 +400,7 @@ impl EndpointPicker for EppRouter {
         self.request_metrics.requests_started_total.inc();
         self.request_metrics
             .input_sequence_tokens
+            .with_label_values(&[RequestPhase::Aggregated.as_str(), &self.model_name])
             .observe(input_tokens as f64);
 
         // The reflector owns the address + readiness. If it can no longer resolve

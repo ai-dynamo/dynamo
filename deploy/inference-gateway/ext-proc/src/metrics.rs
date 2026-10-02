@@ -231,7 +231,10 @@ mod tests {
     async fn standalone_router_series_use_the_private_scrape_registry() {
         let router = register_router_metrics("router-test-model", "router-test-pool").unwrap();
         router.requests_started_total.inc();
-        router.input_sequence_tokens.observe(19.0);
+        router
+            .input_sequence_tokens
+            .with_label_values(&["aggregated", "router-test-model"])
+            .observe(19.0);
         observe_cached_tokens(0);
 
         let response = render().await.into_response();

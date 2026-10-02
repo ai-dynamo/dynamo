@@ -582,6 +582,14 @@ func IsElasticEPRayLaunch(container *corev1.Container) bool {
 // getExpandedCommandLine flattens Command and Args and splits any space-joined
 // tokens, so flag detection works whether the manifest puts flags in Command or
 // Args and whether they are separate list items or a single combined string.
+//
+// TODO: an "sh -c" script is split on whitespace here (and in getExpandedArgs)
+// rather than read the way the shell reads it, so a flag inside a shell comment
+// ("# --tensor-parallel-size 4") counts as a real occurrence and can be the one
+// parseVLLMLaunchArgs resolves, although vLLM never receives it. Either drop
+// everything from a word starting with "#" to the end of its line before
+// splitting, or parse the script with a shell parser such as mvdan.cc/sh to get
+// exactly the argv vLLM receives (comments, quotes and variables).
 func getExpandedCommandLine(container *corev1.Container) []string {
 	commandLine := make([]string, 0, len(container.Command)+len(container.Args))
 	commandLine = append(commandLine, container.Command...)
@@ -603,8 +611,8 @@ var vllmShortFlagAliases = map[string]string{
 	dataParallelBackendShortFlag: dataParallelBackendFlag,
 }
 
-// vllmNormalizedFlags is the set of canonical long flags this package's readers (hasFlag,
-// hasArg, getFlagValue) actually look for. Underscore-to-dash rewriting in
+// vllmNormalizedFlags is the set of canonical long flags parseVLLMLaunchArgs actually
+// looks for. Underscore-to-dash rewriting in
 // normalizeVLLMFlags is restricted to this set: vLLM's FlexibleArgumentParser treats "_"
 // and "-" as interchangeable in long option names ("--tensor_parallel_size" ==
 // "--tensor-parallel-size"), so a token is only rewritten when its dashed form is one of
@@ -643,8 +651,8 @@ var vllmValueFlags = map[string]bool{
 // the engine only ever sees "ray" in "--data-parallel-backend=ray;".
 const shellControlChars = ";&|<>()"
 
-// vllmStringValueFlags is the subset of vllmValueFlags whose value hasArg compares as a
-// string, and is the only place a shell terminator is trimmed.
+// vllmStringValueFlags is the subset of vllmValueFlags whose value parseVLLMLaunchArgs
+// compares as a string, and is the only place a shell terminator is trimmed.
 //
 // Trimming is kept to these two because they are the two whose values were previously
 // matched by substring, which tolerated a terminator glued to the value; the numeric flags
@@ -724,16 +732,6 @@ func normalizeVLLMFlags(expanded []string) []string {
 	return normalized
 }
 
-// hasFlag returns true if flag exists in expandedArgs.
-func hasFlag(expandedArgs []string, flag string) bool {
-	for _, arg := range expandedArgs {
-		if arg == flag {
-			return true
-		}
-	}
-	return false
-}
-
 // vllmLaunchArgs is the result of parsing a container's launch command line exactly once,
 // so one place interprets vLLM flag semantics (aliases, equals and underscore spellings)
 // and two readers cannot disagree.
@@ -755,18 +753,50 @@ func (a vllmLaunchArgs) WorldSize() int64 {
 	return a.TensorParallelSize * a.PipelineParallelSize
 }
 
-// parseVLLMLaunchArgs requires an already-normalized list -- see getExpandedArgs /
-// getExpandedCommandLine.
+// parseVLLMLaunchArgs reads an already-normalized list (see getExpandedArgs /
+// getExpandedCommandLine) in one pass. Each occurrence of a flag overwrites the field it
+// sets, so a repeated flag resolves to its final occurrence, as it does in vLLM's
+// argparse. A size value that does not parse as an integer leaves the earlier value in
+// place.
 func parseVLLMLaunchArgs(expandedArgs []string) vllmLaunchArgs {
-	return vllmLaunchArgs{
-		TensorParallelSize:             getFlagValue(expandedArgs, tensorParallelSizeFlag),
-		PipelineParallelSize:           getFlagValue(expandedArgs, pipelineParallelSizeFlag),
-		DataParallelSize:               getFlagValue(expandedArgs, dataParallelSizeFlag),
-		HasDataParallelSize:            hasFlag(expandedArgs, dataParallelSizeFlag),
-		IsRayDataParallelBackend:       hasArg(expandedArgs, dataParallelBackendFlag, dataParallelBackendRay),
-		IsElasticEPEnabled:             hasFlag(expandedArgs, enableElasticEPFlag),
-		IsMpDistributedExecutorBackend: hasArg(expandedArgs, distributedExecutorFlag, "mp"),
+	args := vllmLaunchArgs{TensorParallelSize: 1, PipelineParallelSize: 1, DataParallelSize: 1}
+	for i, arg := range expandedArgs {
+		// Presence flags count even when nothing follows them.
+		switch arg {
+		case dataParallelSizeFlag:
+			args.HasDataParallelSize = true
+		case enableElasticEPFlag:
+			args.IsElasticEPEnabled = true
+		}
+
+		// A trailing flag has no value to apply.
+		if i+1 >= len(expandedArgs) {
+			continue
+		}
+		value := expandedArgs[i+1]
+		switch arg {
+		case tensorParallelSizeFlag:
+			args.TensorParallelSize = parseSizeOr(value, args.TensorParallelSize)
+		case pipelineParallelSizeFlag:
+			args.PipelineParallelSize = parseSizeOr(value, args.PipelineParallelSize)
+		case dataParallelSizeFlag:
+			args.DataParallelSize = parseSizeOr(value, args.DataParallelSize)
+		case dataParallelBackendFlag:
+			args.IsRayDataParallelBackend = value == dataParallelBackendRay
+		case distributedExecutorFlag:
+			args.IsMpDistributedExecutorBackend = value == "mp"
+		}
 	}
+	return args
+}
+
+// parseSizeOr returns value parsed as an integer, or current when it does not parse.
+func parseSizeOr(value string, current int64) int64 {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return current
+	}
+	return parsed
 }
 
 func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, args vllmLaunchArgs) {
@@ -838,18 +868,4 @@ func needsDataParallelMultinodeLaunch(args vllmLaunchArgs, containerGPUs int64) 
 		return false
 	}
 	return args.WorldSize()*args.DataParallelSize > containerGPUs
-}
-
-func getFlagValue(expandedArgs []string, flag string) int64 {
-	var flagValue int64 = 1
-	for i, arg := range expandedArgs {
-		if arg == flag && (i+1 < len(expandedArgs)) {
-			flagValue, err := strconv.ParseInt(expandedArgs[i+1], 10, 64)
-			if err != nil {
-				continue
-			}
-			return flagValue
-		}
-	}
-	return flagValue
 }

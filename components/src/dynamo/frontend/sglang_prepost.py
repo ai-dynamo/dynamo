@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, TypeAlias
 
+from jinja2.exceptions import TemplateError
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.entrypoints.openai.protocol import ToolChoice as SglangToolChoice
@@ -280,6 +281,7 @@ def create_parsers(
     reasoning_parser_name: str | None,
     sglang_tools: list[SglangTool] | None = None,
     force_reasoning: bool = False,
+    tokenizer: Any | None = None,
 ) -> tuple[ToolCallParserType | None, ReasoningParser | None]:
     """Create tool call and reasoning parsers for a request.
 
@@ -307,6 +309,7 @@ def create_parsers(
             tool_call_parser = FunctionCallParser(
                 tools=sglang_tools,
                 tool_call_parser=tool_call_parser_name,
+                **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
             )
 
     reasoning_parser = None
@@ -319,6 +322,7 @@ def create_parsers(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
             force_reasoning=force_reasoning,
+            **_parser_tokenizer_kwargs(ReasoningParser, tokenizer),
         )
 
     return tool_call_parser, reasoning_parser
@@ -579,10 +583,17 @@ def _call_with_optional_parallel_tool_calls(
     return func(*args)
 
 
+def _parser_tokenizer_kwargs(parser: Any, tokenizer: Any) -> dict[str, Any]:
+    if tokenizer is not None and _callable_accepts_kwarg(parser, "tokenizer"):
+        return {"tokenizer": tokenizer}
+    return {}
+
+
 def build_tool_call_guided_decoding(
     request: dict[str, Any],
     *,
     tool_call_parser_name: str | None,
+    tokenizer: Any | None = None,
     sglang_tools: list[SglangTool] | None,
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
@@ -637,6 +648,7 @@ def build_tool_call_guided_decoding(
         parser = FunctionCallParser(
             tools=sglang_tools,
             tool_call_parser=tool_call_parser_name,
+            **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
         )
         constraint = _call_with_optional_parallel_tool_calls(
             parser.get_structure_constraint,
@@ -847,9 +859,14 @@ def preprocess_chat_request(
 
         template_messages = _normalize_messages_for_template(messages, tokenizer)
 
-        prompt_token_ids = _normalize_prompt_token_ids(
-            tokenizer.apply_chat_template(template_messages, **template_kwargs)
-        )
+        try:
+            rendered = tokenizer.apply_chat_template(
+                template_messages, **template_kwargs
+            )
+        except (TemplateError, TypeError) as exc:
+            # Jinja filters such as tojson can raise TypeError for invalid inputs.
+            raise PreprocessError(str(exc)) from exc
+        prompt_token_ids = _normalize_prompt_token_ids(rendered)
 
     # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
     # while still sharing the existing Dynamo parser/guided-decoding behavior.
@@ -859,12 +876,14 @@ def preprocess_chat_request(
         reasoning_parser_name=effective_reasoning_parser_name,
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
+        tokenizer=tokenizer,
     )
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
+        tokenizer=tokenizer,
     )
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently
@@ -1650,6 +1669,9 @@ class SglangStreamingPostProcessor:
                             fcp = FunctionCallParser(
                                 tools=self._sglang_tools,
                                 tool_call_parser=self._tool_call_parser_name,
+                                **_parser_tokenizer_kwargs(
+                                    FunctionCallParser, self.tokenizer
+                                ),
                             )
                             _, final_calls = fcp.parse_non_stream(full_text)
                         except (

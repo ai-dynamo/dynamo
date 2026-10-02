@@ -814,6 +814,11 @@ pub mod request_plane {
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 
+    /// Serialize `PreprocessedRequest.token_ids` as one packed little-endian int32 blob on
+    /// binary codecs instead of a sequence. Opt-in; every msgpack worker must run a release
+    /// whose readers accept the packed form.
+    pub const DYN_TOKEN_IDS_AS_BYTES: &str = "DYN_TOKEN_IDS_AS_BYTES";
+
     /// Maximum TCP request-plane message size, in bytes.
     pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
 
@@ -842,6 +847,11 @@ pub mod tcp_response_stream {
     /// Port shared by the TCP request callback and QUIC response listeners.
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
+
+    /// Listen backlog of the TCP response stream (CallHome) listener. Defaults to
+    /// 4096, capped by the kernel at `net.core.somaxconn`. Unset, zero, negative, or
+    /// unparseable values fall back to the default.
+    pub const DYN_TCP_LISTEN_BACKLOG: &str = "DYN_TCP_LISTEN_BACKLOG";
 
     /// Host or interface for the TCP response stream server and QUIC response listener.
     ///
@@ -1186,6 +1196,7 @@ mod tests {
             request_plane::DYN_TCP_RPC_PORT,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            tcp_response_stream::DYN_TCP_LISTEN_BACKLOG,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
             tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_KEY_PATH,

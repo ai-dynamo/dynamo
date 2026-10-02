@@ -74,7 +74,7 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="phase" type="string">
-  `[Shared]` On `dynamo_frontend_stage_requests` — the serving phase. See [Phase values](#phase-values). The empty value is used when the stage does not distinguish phases (e.g. `preprocess`).
+  `[Shared]` On `dynamo_frontend_stage_requests` — the serving phase. See [Phase values](#phase-values). The empty value is used when the stage does not distinguish phases (e.g. `preprocess`). Router input-token and KV-reuse families also carry this label; the standalone EPP reports input tokens under `aggregated`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>aggregated</Badge> <Badge intent="note" minimal>"" (empty)</Badge></span>
 </ParamField>

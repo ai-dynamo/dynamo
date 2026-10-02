@@ -191,6 +191,7 @@ areas:
   - benchmarks/omni/
   - components/src/dynamo/common/multimodal/
   - examples/custom_encoder/
+  - examples/nemotron_speech_cascaded_pipeline/
   - components/src/dynamo/trtllm/multimodal/
   - components/src/dynamo/vllm/multimodal_handlers/
   - components/src/dynamo/vllm/multimodal_utils/
@@ -426,13 +427,17 @@ areas:
   - deploy/utils/tests/
   - examples/deployments/
   - tests/deploy/
+- label: lpx
+  github_team: '@ai-dynamo/dynamo-lpx-codeowners'
+  path_globs:
+  - deploy/operator/internal/controller/lpx/
+  - deploy/operator/internal/dynamo/lpx/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
   - components/src/dynamo/common/tests/test_snapshot*
-  - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/
   - lib/gpu_memory_service/
@@ -954,6 +959,16 @@ shared:
   owners:
   - operator
   - observability
+- glob: deploy/operator/internal/controller/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/operator/internal/dynamo/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/**/*lpx*
+  owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
   - operator

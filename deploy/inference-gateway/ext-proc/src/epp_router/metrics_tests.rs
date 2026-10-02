@@ -200,8 +200,20 @@ async fn standalone_router_metrics_follow_the_wire_observation_paths() {
         );
     }
     assert_eq!(metrics.requests_started_total.get(), 4);
-    assert_eq!(metrics.input_sequence_tokens.get_sample_count(), 4);
-    assert_eq!(metrics.input_sequence_tokens.get_sample_sum(), 16.0);
+    assert_eq!(
+        metrics
+            .input_sequence_tokens
+            .with_label_values(&["aggregated", "served-model"])
+            .get_sample_count(),
+        4
+    );
+    assert_eq!(
+        metrics
+            .input_sequence_tokens
+            .with_label_values(&["aggregated", "served-model"])
+            .get_sample_sum(),
+        16.0
+    );
     assert_eq!(metrics.output_sequence_tokens.get_sample_count(), 2);
     assert_eq!(metrics.output_sequence_tokens.get_sample_sum(), 5.0);
 
@@ -220,7 +232,13 @@ async fn standalone_router_metrics_follow_the_wire_observation_paths() {
             .any(|r| matches!(r.response, Some(Response::ImmediateResponse(_))))
     );
     assert_eq!(metrics.requests_started_total.get(), 4);
-    assert_eq!(metrics.input_sequence_tokens.get_sample_count(), 4);
+    assert_eq!(
+        metrics
+            .input_sequence_tokens
+            .with_label_values(&["aggregated", "served-model"])
+            .get_sample_count(),
+        4
+    );
     assert_eq!(metrics.output_sequence_tokens.get_sample_count(), 2);
 
     // Byte chunks and terminal callbacks are not router token timing or a
@@ -235,6 +253,7 @@ async fn standalone_router_metrics_follow_the_wire_observation_paths() {
     let text = String::from_utf8(encoded).unwrap();
     assert_eq!(registry.gather().len(), 3);
     assert!(text.contains("model=\"served-model\""));
+    assert!(text.contains("phase=\"aggregated\""));
     assert!(text.contains("inference_pool=\"test-pool\""));
     assert!(!text.contains("untrusted-name"));
     assert!(!text.contains("dynamo_namespace"));

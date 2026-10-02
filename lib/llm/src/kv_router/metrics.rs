@@ -21,7 +21,7 @@
 //!   tokens, KV hit rate, and non-max-overlap routing decisions).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`
 //!   or on the standalone EPP's private `prometheus::Registry` without a DRT.
-//!   Eagerly created so registered families appear as zeros before requests.
+//!   Scalar families are eager; phase/model token series appear on observation.
 //!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
@@ -66,6 +66,7 @@ use prometheus::{
 };
 
 use crate::http::service::metrics::generate_log_buckets;
+use crate::protocols::common::timing::RequestPhase;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
 
@@ -1033,7 +1034,7 @@ pub struct RouterRequestMetrics {
     pub requests_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
     pub inter_token_latency_seconds: prometheus::Histogram,
-    pub input_sequence_tokens: prometheus::Histogram,
+    pub input_sequence_tokens: HistogramVec,
     pub output_sequence_tokens: prometheus::Histogram,
     pub kv_hit_rate: prometheus::Histogram,
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
@@ -1041,7 +1042,16 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
+    /// Raw cached prefix tokens on the best eligible worker at selection, one observation
+    /// per tracked attempt; labels `phase` (aggregated | prefill | decode) and `model`.
+    pub kv_best_eligible_cached_prefix_tokens: IntCounterVec,
+    /// Raw cached prefix tokens on the selected worker and DP rank at selection; same labels.
+    pub kv_selected_cached_prefix_tokens: IntCounterVec,
+    /// Backend-reported reused tokens, counted once per attempt; same labels.
+    pub kv_worker_reused_tokens: IntCounterVec,
 }
+
+const KV_PHASE_LABEL: &str = "phase";
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
@@ -1067,12 +1077,21 @@ impl RequestMetricsRegistration<'_> {
         buckets: Option<Vec<f64>>,
         label_names: Option<&[&str]>,
     ) -> anyhow::Result<T> {
+        // Model is a variable label on phase-aware token families. Keep the
+        // deployment-bound model on scalar families without declaring it twice.
+        let const_labels: Vec<_> = const_labels
+            .iter()
+            .copied()
+            .filter(|(key, _)| {
+                *key != labels::MODEL || !label_names.is_some_and(|names| names.contains(key))
+            })
+            .collect();
         match self {
             Self::Hierarchy(hierarchy) => dynamo_runtime::metrics::create_metric(
                 *hierarchy,
                 name,
                 help,
-                const_labels,
+                &const_labels,
                 buckets,
                 label_names,
             ),
@@ -1179,8 +1198,8 @@ impl RouterRequestMetrics {
         for (key, _) in const_labels {
             anyhow::ensure!(keys.insert(*key), "duplicate router metric label: {key}");
             anyhow::ensure!(
-                *key != labels::WORKER_TYPE,
-                "worker_type is a variable router metric label"
+                *key != labels::WORKER_TYPE && *key != KV_PHASE_LABEL,
+                "{key} is a variable router metric label"
             );
         }
         Ok(Arc::new(Self::build(
@@ -1226,7 +1245,7 @@ impl RouterRequestMetrics {
             "Input sequence length in tokens observed at the router",
             extra_labels,
             Some(generate_log_buckets(50.0, 128000.0, 12)),
-            None,
+            Some(&[KV_PHASE_LABEL, labels::MODEL]),
         )?;
         let output_sequence_tokens = registration.create(
             &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
@@ -1283,6 +1302,27 @@ impl RouterRequestMetrics {
         if registration.includes(router::OVERLAP_BLOCKS_LOST) {
             overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
         }
+        let kv_tokens_counter = |name: &str, help: &str| -> anyhow::Result<IntCounterVec> {
+            registration.create(
+                &router_metric(name),
+                help,
+                extra_labels,
+                None,
+                Some(&[KV_PHASE_LABEL, labels::MODEL]),
+            )
+        };
+        let kv_best_eligible_cached_prefix_tokens = kv_tokens_counter(
+            frontend_service::KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL,
+            "Raw cached prefix tokens on the best eligible worker at selection time",
+        )?;
+        let kv_selected_cached_prefix_tokens = kv_tokens_counter(
+            frontend_service::KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL,
+            "Raw cached prefix tokens on the selected worker and DP rank",
+        )?;
+        let kv_worker_reused_tokens = kv_tokens_counter(
+            frontend_service::KV_WORKER_REUSED_TOKENS_TOTAL,
+            "Worker-reported reused tokens per routing attempt",
+        )?;
         Ok(Self {
             requests_started_total,
             requests_total,
@@ -1296,6 +1336,9 @@ impl RouterRequestMetrics {
             shared_cache_beyond_blocks,
             non_max_overlap_selections_total,
             overlap_blocks_lost,
+            kv_best_eligible_cached_prefix_tokens,
+            kv_selected_cached_prefix_tokens,
+            kv_worker_reused_tokens,
         })
     }
 
@@ -1310,6 +1353,17 @@ impl RouterRequestMetrics {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(registry: &dynamo_runtime::MetricsRegistry) -> Arc<Self> {
+        let mut hierarchy = registration_tests::FakeHierarchy::component("", "", 0);
+        hierarchy.registry = registry.clone();
+        hierarchy.connection_id = None;
+        Arc::new(
+            Self::build(RequestMetricsRegistration::Hierarchy(&hierarchy), &[])
+                .expect("failed to create isolated router metrics"),
+        )
+    }
+
     /// Record a selection that sacrificed KV cache overlap.
     pub fn observe_non_max_overlap_selection(&self, worker_type: &str, overlap_blocks_lost: f64) {
         debug_assert!(overlap_blocks_lost > 0.0);
@@ -1319,6 +1373,26 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+    }
+
+    /// Record the router's estimates for one tracked attempt at selection time and
+    /// return its worker-reuse counter, already exported at zero for backends that
+    /// never report.
+    pub fn observe_kv_route_estimate(
+        &self,
+        phase: RequestPhase,
+        model: &str,
+        best_tokens: u64,
+        selected_tokens: u64,
+    ) -> IntCounter {
+        let labels = &[phase.as_str(), model];
+        self.kv_best_eligible_cached_prefix_tokens
+            .with_label_values(labels)
+            .inc_by(best_tokens);
+        self.kv_selected_cached_prefix_tokens
+            .with_label_values(labels)
+            .inc_by(selected_tokens);
+        self.kv_worker_reused_tokens.with_label_values(labels)
     }
 }
 
@@ -1558,11 +1632,91 @@ mod tests {
     use super::*;
     use prometheus::{Encoder, TextEncoder};
 
+    #[test]
+    fn router_request_metrics_register_with_component_labels() {
+        let hierarchy = registration_tests::FakeHierarchy::component("dynamo", "frontend", 0x123);
+        let metrics = RouterRequestMetrics::build(
+            RequestMetricsRegistration::Hierarchy(&hierarchy),
+            &[(labels::ROUTER_ID, "291")],
+        )
+        .unwrap();
+        metrics
+            .observe_kv_route_estimate(RequestPhase::Prefill, "m", 96, 64)
+            .inc_by(72);
+        metrics
+            .input_sequence_tokens
+            .with_label_values(&["prefill", "m"])
+            .observe(100.0);
+        let families = hierarchy.registry.get_prometheus_registry().gather();
+        for name in [
+            "input_sequence_tokens",
+            "kv_best_eligible_cached_prefix_tokens_total",
+            "kv_selected_cached_prefix_tokens_total",
+            "kv_worker_reused_tokens_total",
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == format!("dynamo_component_router_{name}"))
+                .unwrap();
+            let sample = &family.get_metric()[0];
+            for (name, value) in [
+                (labels::NAMESPACE, "dynamo"),
+                (labels::COMPONENT, "frontend"),
+                (labels::WORKER_ID, "123"),
+                (labels::ROUTER_ID, "291"),
+                (KV_PHASE_LABEL, "prefill"),
+                (labels::MODEL, "m"),
+            ] {
+                assert!(
+                    sample
+                        .get_label()
+                        .iter()
+                        .any(|label| { label.name() == name && label.value() == value }),
+                    "missing {name}={value} on {}",
+                    family.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kv_estimates_and_input_tokens_have_matching_labels() {
+        let registry = dynamo_runtime::MetricsRegistry::new();
+        let metrics = RouterRequestMetrics::for_test(&registry);
+        for (phase, model, input, best) in [
+            (RequestPhase::Prefill, "m", 100, 96),
+            (RequestPhase::Decode, "m", 200, 150),
+            (RequestPhase::Prefill, "other", 300, 250),
+        ] {
+            metrics
+                .input_sequence_tokens
+                .with_label_values(&[phase.as_str(), model])
+                .observe(input as f64);
+            metrics.observe_kv_route_estimate(phase, model, best, best);
+            let output = registry.prometheus_expfmt_combined().unwrap();
+            let phase = phase.as_str();
+            assert!(output.contains(&format!("router_input_sequence_tokens_sum{{model=\"{model}\",phase=\"{phase}\"}} {input}\n")), "{output}");
+            assert!(output.contains(&format!("router_kv_best_eligible_cached_prefix_tokens_total{{model=\"{model}\",phase=\"{phase}\"}} {best}\n")), "{output}");
+        }
+    }
+
     fn gather_pef(registry: &prometheus::Registry) -> String {
         let encoder = TextEncoder::new();
         let mut buffer = Vec::new();
         encoder.encode(&registry.gather(), &mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn missing_worker_reports_export_zero_reused_tokens() {
+        let registry = dynamo_runtime::MetricsRegistry::new();
+        let metrics = RouterRequestMetrics::for_test(&registry);
+        metrics.observe_kv_route_estimate(RequestPhase::Aggregated, "m", 96, 64);
+        let output = registry.prometheus_expfmt_combined().unwrap();
+        assert!(
+            output.contains("kv_worker_reused_tokens_total{model=\"m\",phase=\"aggregated\"} 0"),
+            "{output}"
+        );
     }
 
     #[test]
@@ -1872,16 +2026,16 @@ mod registration_tests {
     /// Stand-in for the DRT → Namespace → Component chain, without a live runtime.
     /// `connection_id` is what drives the auto-injected `worker_id` const label,
     /// so it must be set for these tests to reproduce the original conditions.
-    struct FakeHierarchy {
+    pub(super) struct FakeHierarchy {
         basename: String,
         parents: Vec<FakeHierarchy>,
-        registry: MetricsRegistry,
-        connection_id: Option<u64>,
+        pub(super) registry: MetricsRegistry,
+        pub(super) connection_id: Option<u64>,
     }
 
     impl FakeHierarchy {
         /// Mirror a component-level hierarchy: `["" (drt), namespace, component]`.
-        fn component(namespace: &str, component: &str, connection_id: u64) -> Self {
+        pub(super) fn component(namespace: &str, component: &str, connection_id: u64) -> Self {
             Self {
                 basename: component.to_string(),
                 parents: vec![Self::bare(""), Self::bare(namespace)],
@@ -2044,7 +2198,7 @@ mod registration_tests {
             ],
         )
         .unwrap();
-        assert_eq!(registry.gather().len(), 12);
+        assert_eq!(registry.gather().len(), 11);
         assert_eq!(
             registry.gather(),
             hierarchy.registry.get_prometheus_registry().gather()
@@ -2054,7 +2208,13 @@ mod registration_tests {
             metrics.requests_total.inc();
             metrics.time_to_first_token_seconds.observe(0.2);
             metrics.inter_token_latency_seconds.observe(0.01);
-            metrics.input_sequence_tokens.observe(128.0);
+            metrics
+                .input_sequence_tokens
+                .with_label_values(&["prefill", "m"])
+                .observe(128.0);
+            metrics
+                .observe_kv_route_estimate(RequestPhase::Prefill, "m", 96, 64)
+                .inc_by(72);
             metrics.output_sequence_tokens.observe(16.0);
             metrics.kv_hit_rate.observe(0.5);
             metrics.kv_transfer_estimated_latency_seconds.observe(0.03);
@@ -2078,9 +2238,16 @@ mod registration_tests {
         let b =
             RouterRequestMetrics::from_registry(&second, name_prefix::COMPONENT, labels).unwrap();
         a.requests_started_total.inc_by(3);
-        a.input_sequence_tokens.observe(64.0);
+        a.input_sequence_tokens
+            .with_label_values(&["aggregated", "served-model"])
+            .observe(64.0);
         assert_eq!(b.requests_started_total.get(), 0);
-        assert_eq!(b.input_sequence_tokens.get_sample_count(), 0);
+        assert_eq!(
+            b.input_sequence_tokens
+                .with_label_values(&["aggregated", "served-model"])
+                .get_sample_count(),
+            0
+        );
         assert!(!Arc::ptr_eq(&a, &b));
         let error = RouterRequestMetrics::from_registry(&first, name_prefix::COMPONENT, labels)
             .err()
@@ -2096,7 +2263,7 @@ mod registration_tests {
                 for label in metric.get_label() {
                     assert!(matches!(
                         label.name(),
-                        "model" | "inference_pool" | "worker_type"
+                        "model" | "inference_pool" | "worker_type" | "phase"
                     ));
                 }
             }
@@ -2156,7 +2323,10 @@ mod registration_tests {
         .unwrap();
         for metrics in [&full, &subset] {
             metrics.requests_started_total.inc();
-            metrics.input_sequence_tokens.observe(19.0);
+            metrics
+                .input_sequence_tokens
+                .with_label_values(&["aggregated", "served-model"])
+                .observe(19.0);
             metrics.output_sequence_tokens.observe(8.0);
         }
         let full_selected: Vec<_> = full_registry

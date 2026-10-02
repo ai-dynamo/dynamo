@@ -128,13 +128,6 @@ impl VllmSidecarEngine {
     }
 
     fn validate_args(args: &Args) -> Result<Option<RlAdminBaseUrl>, DynamoError> {
-        if args.sidecar.common.dyn_tool_call_parser.is_some()
-            || args.sidecar.common.dyn_reasoning_parser.is_some()
-        {
-            return Err(client::invalid_argument(
-                "vLLM gRPC does not preserve the request options required by Dynamo tool-call and reasoning parsers",
-            ));
-        }
         // Reject overflow before runtime connections, but start the actual
         // engine deadline only when the bootstrap future is polled.
         client::startup_deadline(args.sidecar.grpc.config().startup_deadline)?;
@@ -155,9 +148,7 @@ impl VllmSidecarEngine {
         vllm_http_url: Option<RlAdminBaseUrl>,
         bootstrap: bool,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
-        let endpoint = args.sidecar.grpc_endpoint;
-        let enable_rl = args.sidecar.common.enable_rl;
-        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
+        let endpoint = &args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
         if bootstrap {
@@ -169,7 +160,19 @@ impl VllmSidecarEngine {
             tracing::info!(%endpoint, startup_deadline = ?transport.startup_deadline,
                 "Discovering vLLM model metadata");
         }
-        let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline, bootstrap).await?;
+        let model = bootstrap_discover(endpoint, transport, bootstrap_deadline, bootstrap).await?;
+        Self::from_discovered(args, model, vllm_http_url)
+    }
+
+    fn from_discovered(
+        args: Args,
+        model: DiscoveredModel,
+        vllm_http_url: Option<RlAdminBaseUrl>,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let endpoint = args.sidecar.grpc_endpoint;
+        let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
+        let transport = args.sidecar.grpc.config();
         let mode = args.sidecar.common.disaggregation_mode;
         if mode.is_encode() && !model.supports_multimodal {
             return Err(client::invalid_argument(format!(
@@ -195,9 +198,8 @@ impl VllmSidecarEngine {
             custom_jinja_template: args.sidecar.common.custom_jinja_template,
             model_name: model.source.clone(),
             served_model_name: Some(model.served_name.clone()),
-            // gRPC cannot yet preserve the parser request semantics.
-            tool_call_parser: None,
-            reasoning_parser: None,
+            tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
+            reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
@@ -1423,4 +1425,183 @@ async fn bootstrap_discover(
 
 fn is_hot_swap_requested() -> bool {
     dynamo_runtime::config::env_is_truthy("DYN_LORA_HOTSWAP_ENABLED")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixtures::{minimal_request, model_info, server_info};
+
+    use clap::Parser;
+    use dynamo_backend_common::{BackendError, ErrorType};
+
+    fn args(mode: &str) -> Args {
+        Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--namespace",
+            "test-namespace",
+            "--component",
+            "configured-component",
+            "--endpoint",
+            "tokens",
+            "--disaggregation-mode",
+            mode,
+            "--custom-jinja-template",
+            "local-template.jinja",
+        ])
+        .unwrap()
+    }
+
+    fn worker(mode: &str) -> (VllmSidecarEngine, WorkerConfig) {
+        let mut info = model_info();
+        info.supports_multimodal = true;
+        let model = DiscoveredModel::from_proto(info, server_info()).unwrap();
+        VllmSidecarEngine::from_discovered(args(mode), model, None).unwrap()
+    }
+
+    #[test]
+    fn worker_defaults_omit_parsers_and_preserve_encode_options() {
+        for mode in ["aggregated", "prefill", "decode", "encode"] {
+            let (_, config) = worker(mode);
+            assert!(config.tool_call_parser.is_none());
+            assert!(config.reasoning_parser.is_none());
+            if mode == "encode" {
+                assert_eq!(config.namespace, "test-namespace");
+                assert_eq!(config.component, "encode");
+                assert_eq!(config.endpoint, "tokens");
+                assert_eq!(
+                    config.custom_jinja_template.as_deref(),
+                    Some(std::path::Path::new("local-template.jinja"))
+                );
+                assert_eq!(config.model_name, "model-source");
+                assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+                assert!(!config.enable_kv_routing);
+                assert_eq!(config.disaggregation_mode.as_str(), "encode");
+            }
+        }
+    }
+
+    #[test]
+    fn worker_advertises_configured_parsers() {
+        let args = Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--dyn-tool-call-parser",
+            "qwen3_coder",
+            "--dyn-reasoning-parser",
+            "qwen3",
+        ])
+        .unwrap();
+        let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
+        // Native parser names differ from the explicit Dynamo configuration.
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let (_, config) = VllmSidecarEngine::from_discovered(args, model, vllm_http_url).unwrap();
+        assert_eq!(config.tool_call_parser.as_deref(), Some("qwen3_coder"));
+        assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn encode_requires_multimodal_model() {
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let error = VllmSidecarEngine::from_discovered(args("encode"), model, None)
+            .err()
+            .expect("encode requires media");
+        assert!(error.to_string().contains("requires a multimodal engine"));
+    }
+
+    #[tokio::test]
+    async fn draft_updates_require_both_native_capabilities() {
+        for flags in [
+            None,
+            Some((false, false)),
+            Some((false, true)),
+            Some((true, false)),
+            Some((true, true)),
+        ] {
+            let mut server = server_info();
+            match flags {
+                None => server.rl_capabilities = None,
+                Some((transfer, draft)) => {
+                    let capabilities = server.rl_capabilities.as_mut().unwrap();
+                    capabilities.weight_transfer_enabled = transfer;
+                    capabilities.draft_weight_updates_enabled = draft;
+                }
+            }
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            let (engine, _) =
+                VllmSidecarEngine::from_discovered(args("aggregated"), model, None).unwrap();
+            let supported = flags == Some((true, true));
+            assert_eq!(
+                engine
+                    .supported_updates()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "start_draft_weight_update"),
+                supported,
+                "capabilities: {flags:?}"
+            );
+            assert!(engine.client.get().is_none());
+            if !supported {
+                assert_eq!(
+                    engine
+                        .engine_update("start_draft_weight_update".into(), serde_json::json!({}))
+                        .await
+                        .unwrap(),
+                    serde_json::json!({
+                        "status": "error",
+                        "message": "unsupported engine update: start_draft_weight_update"
+                    }),
+                    "capabilities: {flags:?}"
+                );
+                assert!(engine.client.get().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn worker_options_and_model_identity_are_preserved() {
+        for (mode, component) in [
+            ("aggregated", "configured-component"),
+            ("prefill", "prefill"),
+            ("decode", "backend"),
+        ] {
+            let (_, config) = worker(mode);
+            assert_eq!(config.namespace, "test-namespace");
+            assert_eq!(config.component, component);
+            assert_eq!(config.endpoint, "tokens");
+            assert_eq!(
+                config.custom_jinja_template.as_deref(),
+                Some(std::path::Path::new("local-template.jinja"))
+            );
+            assert_eq!(config.model_name, "model-source");
+            assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+            assert!(config.enable_kv_routing);
+            assert_eq!(
+                config.disaggregation_mode.as_str(),
+                if mode == "aggregated" { "agg" } else { mode }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unstarted_generation_fails_and_cleanup_is_idempotent() {
+        let (engine, _) = worker("aggregated");
+        let context = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let error = engine
+            .generate(minimal_request(), context)
+            .await
+            .err()
+            .expect("unstarted engine");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        engine.cleanup().await.unwrap();
+        engine.cleanup().await.unwrap();
+        assert!(engine.cancel.is_cancelled());
+    }
 }
