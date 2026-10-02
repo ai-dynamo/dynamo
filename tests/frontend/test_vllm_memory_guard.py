@@ -119,9 +119,9 @@ def test_worker_pins_guarded_gpu_by_uuid(
 
     test_vllm.WorkerProcess(
         request,
-        "worker",
-        dynamo_dynamic_ports.frontend_port,
-        dynamo_dynamic_ports.system_ports[0],
+        worker_id="worker",
+        frontend_port=dynamo_dynamic_ports.frontend_port,
+        system_port=dynamo_dynamic_ports.system_ports[0],
     )
 
     launch = initialize.call_args.kwargs
