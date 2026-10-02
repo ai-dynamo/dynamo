@@ -1,0 +1,599 @@
+[
+  {
+    "name": "removed leading and interior partitions",
+    "artifacts": [
+      {
+        "id": 0,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-0"
+      },
+      {
+        "id": 1,
+        "chips": 16,
+        "devices": 8,
+        "path": "part-1"
+      },
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      1,
+      3
+    ],
+    "expected": [
+      {
+        "source_partition_id": 1,
+        "relative_path": "part-1",
+        "node_count": 2
+      },
+      {
+        "source_partition_id": 3,
+        "relative_path": "part-3",
+        "node_count": 1
+      }
+    ],
+    "chains": [],
+    "hybrid": true,
+    "error": ""
+  },
+  {
+    "name": "selection order is authoritative",
+    "artifacts": [
+      {
+        "id": 0,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-0"
+      },
+      {
+        "id": 1,
+        "chips": 16,
+        "devices": 8,
+        "path": "part-1"
+      },
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      3,
+      1
+    ],
+    "expected": [
+      {
+        "source_partition_id": 3,
+        "relative_path": "part-3",
+        "node_count": 1
+      },
+      {
+        "source_partition_id": 1,
+        "relative_path": "part-1",
+        "node_count": 2
+      }
+    ],
+    "chains": [],
+    "hybrid": true,
+    "error": ""
+  },
+  {
+    "name": "all local",
+    "artifacts": [
+      {
+        "id": 0,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-0"
+      },
+      {
+        "id": 1,
+        "chips": 16,
+        "devices": 8,
+        "path": "part-1"
+      },
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [],
+    "expected": [],
+    "chains": [],
+    "hybrid": true,
+    "error": ""
+  },
+  {
+    "name": "sparse IDs and nested artifact paths",
+    "artifacts": [
+      {
+        "id": 7,
+        "chips": 8,
+        "devices": 8,
+        "path": "compiled/part3"
+      },
+      {
+        "id": 8,
+        "path": "part-8",
+        "chips": 64,
+        "devices": 8
+      },
+      {
+        "id": 11,
+        "chips": 64,
+        "devices": 8,
+        "path": "part-11"
+      }
+    ],
+    "selected": [
+      11,
+      7
+    ],
+    "expected": [
+      {
+        "source_partition_id": 11,
+        "relative_path": "part-11",
+        "node_count": 8
+      },
+      {
+        "source_partition_id": 7,
+        "relative_path": "compiled/part3",
+        "node_count": 9
+      }
+    ],
+    "chains": [
+      [
+        7,
+        8
+      ]
+    ],
+    "hybrid": true,
+    "error": ""
+  },
+  {
+    "name": "collapsed chain root",
+    "artifacts": [
+      {
+        "id": 0,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-0"
+      },
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 16,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      2
+    ],
+    "expected": [
+      {
+        "source_partition_id": 2,
+        "relative_path": "part-2",
+        "node_count": 3
+      }
+    ],
+    "chains": [
+      [
+        2,
+        3
+      ]
+    ],
+    "hybrid": true,
+    "error": ""
+  },
+  {
+    "name": "sub-node chain",
+    "artifacts": [
+      {
+        "id": 2,
+        "chips": 4,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 4,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      2
+    ],
+    "expected": [
+      {
+        "source_partition_id": 2,
+        "relative_path": "part-2",
+        "node_count": 2
+      }
+    ],
+    "chains": [
+      [
+        2,
+        3
+      ]
+    ],
+    "hybrid": true,
+    "error": ""
+  },
+  {
+    "name": "Nova physical chain members",
+    "artifacts": [
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 16,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      2,
+      3
+    ],
+    "expected": [
+      {
+        "source_partition_id": 2,
+        "relative_path": "part-2",
+        "node_count": 1
+      },
+      {
+        "source_partition_id": 3,
+        "relative_path": "part-3",
+        "node_count": 2
+      }
+    ],
+    "chains": [
+      [
+        2,
+        3
+      ]
+    ],
+    "hybrid": false,
+    "error": ""
+  },
+  {
+    "name": "CPU embedding already omitted",
+    "artifacts": [
+      {
+        "id": 0,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-0"
+      },
+      {
+        "id": 1,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-1"
+      }
+    ],
+    "selected": [
+      1
+    ],
+    "expected": [
+      {
+        "source_partition_id": 1,
+        "relative_path": "part-1",
+        "node_count": 1
+      }
+    ],
+    "chains": [],
+    "hybrid": false,
+    "error": ""
+  },
+  {
+    "name": "HX physical chain",
+    "artifacts": [
+      {
+        "id": 1,
+        "chips": 32,
+        "devices": 16,
+        "path": "part-1",
+        "hx_shape": [
+          16,
+          2,
+          1,
+          1
+        ]
+      },
+      {
+        "id": 3,
+        "chips": 16,
+        "devices": 16,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      1,
+      3
+    ],
+    "expected": [
+      {
+        "source_partition_id": 1,
+        "relative_path": "part-1",
+        "node_count": 2
+      },
+      {
+        "source_partition_id": 3,
+        "relative_path": "part-3",
+        "node_count": 1
+      }
+    ],
+    "chains": [
+      [
+        1,
+        3
+      ]
+    ],
+    "hybrid": true,
+    "error": ""
+  },
+  {
+    "name": "unknown ID",
+    "artifacts": [
+      {
+        "id": 0,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-0"
+      },
+      {
+        "id": 1,
+        "chips": 16,
+        "devices": 8,
+        "path": "part-1"
+      },
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      4
+    ],
+    "expected": [],
+    "chains": [],
+    "hybrid": true,
+    "error": "unknown partition ID"
+  },
+  {
+    "name": "duplicate ID",
+    "artifacts": [
+      {
+        "id": 0,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-0"
+      },
+      {
+        "id": 1,
+        "chips": 16,
+        "devices": 8,
+        "path": "part-1"
+      },
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      1,
+      1
+    ],
+    "expected": [],
+    "chains": [],
+    "hybrid": true,
+    "error": "duplicate partition ID"
+  },
+  {
+    "name": "collapsed chain member",
+    "artifacts": [
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      3
+    ],
+    "expected": [],
+    "chains": [
+      [
+        2,
+        3
+      ]
+    ],
+    "hybrid": true,
+    "error": "collapsed chain member"
+  },
+  {
+    "name": "unknown chain member",
+    "artifacts": [
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      }
+    ],
+    "selected": [
+      2
+    ],
+    "expected": [],
+    "chains": [
+      [
+        2,
+        3
+      ]
+    ],
+    "hybrid": true,
+    "error": "unknown prop-sync chain member"
+  },
+  {
+    "name": "nonadjacent chain",
+    "artifacts": [
+      {
+        "id": 0,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-0"
+      },
+      {
+        "id": 1,
+        "chips": 16,
+        "devices": 8,
+        "path": "part-1"
+      },
+      {
+        "id": 2,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-2"
+      },
+      {
+        "id": 3,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-3"
+      }
+    ],
+    "selected": [
+      1
+    ],
+    "expected": [],
+    "chains": [
+      [
+        1,
+        3
+      ]
+    ],
+    "hybrid": true,
+    "error": "invalid or overlapping"
+  },
+  {
+    "name": "duplicate artifact",
+    "artifacts": [
+      {
+        "id": 1,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-1"
+      },
+      {
+        "id": 1,
+        "chips": 8,
+        "devices": 8,
+        "path": "part-1"
+      }
+    ],
+    "selected": [
+      1
+    ],
+    "expected": [],
+    "chains": [],
+    "hybrid": true,
+    "error": "duplicate artifact partition"
+  },
+  {
+    "name": "bad artifact path",
+    "artifacts": [
+      {
+        "id": 1,
+        "chips": 8,
+        "devices": 8,
+        "path": "../escape"
+      }
+    ],
+    "selected": [
+      1
+    ],
+    "expected": [],
+    "chains": [],
+    "hybrid": true,
+    "error": "unsafe artifact path"
+  },
+  {
+    "name": "invalid geometry",
+    "artifacts": [
+      {
+        "id": 1,
+        "chips": 12,
+        "devices": 8,
+        "path": "part-1"
+      }
+    ],
+    "selected": [
+      1
+    ],
+    "expected": [],
+    "chains": [],
+    "hybrid": true,
+    "error": "invalid XT chip/device"
+  }
+]

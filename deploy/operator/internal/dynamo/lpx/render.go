@@ -91,28 +91,48 @@ func RenderNodeLocal(
 	if err != nil {
 		return nil, err
 	}
-	configMap, configHash, err := renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
+	// All role templates opt into the manifest contract together with their runtime images.
+	manifestContract, err := manifestRuntime(storageTemplate.Spec)
 	if err != nil {
 		return nil, err
 	}
-	v2HybridRuntime := projections[0].configuredBuild.Family == BuildFamilyXT &&
-		projections[0].pipeline == PipelineLPX
-
-	// Render the optional Cyborg config and construct final resource order once.
-	var (
-		cyborgConfigMap  *corev1.ConfigMap
-		cyborgConfigHash string
-		extraResources   []client.Object
-	)
-	if v2HybridRuntime {
-		cyborgConfigMap, cyborgConfigHash, err = workload.renderCyborgConfigMap(plan)
+	for stage, template := range input.Stages {
+		selected, err := manifestRuntime(template.Spec)
 		if err != nil {
 			return nil, err
 		}
-		// Preserve the legacy graph order: Cyborg config first, LPU config last.
-		extraResources = []client.Object{cyborgConfigMap, configMap}
-	} else {
-		extraResources = []client.Object{configMap}
+		if selected != manifestContract {
+			return nil, fmt.Errorf("stage %s and conductor must migrate LPX runtime contracts together", stage)
+		}
+	}
+	if hybrid {
+		selected, err := manifestRuntime(cyborg.Spec.PodSpec)
+		if err != nil {
+			return nil, err
+		}
+		if selected != manifestContract {
+			return nil, fmt.Errorf("Cyborg and Agents must migrate LPX runtime contracts together")
+		}
+	}
+
+	// Legacy images retain their configuration until their templates opt into manifest-v1.
+	var configMap, cyborgConfigMap *corev1.ConfigMap
+	var configHash, cyborgConfigHash, configMapName string
+	var extraResources []client.Object
+	if !manifestContract {
+		configMap, configHash, err = renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
+		if err != nil {
+			return nil, err
+		}
+		configMapName = configMap.Name
+		if projections[0].configuredBuild.Family == BuildFamilyXT && hybrid {
+			cyborgConfigMap, cyborgConfigHash, err = workload.renderCyborgConfigMap(plan)
+			if err != nil {
+				return nil, err
+			}
+			extraResources = append(extraResources, cyborgConfigMap)
+		}
+		extraResources = append(extraResources, configMap)
 	}
 
 	// Consume the independently rendered conductor without copying Agent startup or placement.
@@ -122,8 +142,13 @@ func RenderNodeLocal(
 		if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
 			return nil, err
 		}
+		if manifestContract {
+			applyNovaSelections(container, projections)
+		}
 		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
-		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
+		if !manifestContract {
+			annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
+		}
 		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        conductorTemplateName,
 			Labels:      conductorTemplate.Labels,
@@ -165,7 +190,7 @@ func RenderNodeLocal(
 			if stage == conductorStage && conductor != nil {
 				conductorSpec = &conductor.Spec.PodSpec
 			}
-			if err := configureLPURolePods(&template.Spec, conductorSpec, workload, configMap.Name, allocation); err != nil {
+			if err := configureLPURolePods(&template.Spec, conductorSpec, workload, configMapName, allocation); err != nil {
 				return nil, fmt.Errorf("stage %s: %w", stage, err)
 			}
 		}
@@ -174,8 +199,16 @@ func RenderNodeLocal(
 			podSpec = *podSpec.DeepCopy()
 		}
 
+		if manifestContract {
+			container := common.FindContainerByName(podSpec.Containers, lpuAgentContainerName)
+			if err := applyRuntimeSelection(container, projection, modelStoragePath); err != nil {
+				return nil, err
+			}
+		}
 		annotations := roleAnnotations(maps.Clone(template.Annotations), lpxv1alpha1.PodRoleAgent, projection.Digest().String())
-		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
+		if !manifestContract {
+			annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
+		}
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
@@ -210,7 +243,7 @@ func RenderNodeLocal(
 
 		// Bind the authored HX Cyborg configuration mount to the generated ConfigMap.
 		container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
-		if cyborgConfigMap == nil && slices.ContainsFunc(container.VolumeMounts,
+		if !manifestContract && cyborgConfigMap == nil && slices.ContainsFunc(container.VolumeMounts,
 			func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName }) {
 			if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, configMap.Name, true); err != nil {
 				return nil, err
@@ -228,6 +261,15 @@ func RenderNodeLocal(
 			return nil, err
 		}
 
+		if manifestContract {
+			if err := applyRuntimeSelection(container, projections[0], modelStoragePath); err != nil {
+				return nil, err
+			}
+			applyOwnedRuntimeEnv(container, []corev1.EnvVar{{
+				Name:  "LPX_AGENT_HOST_TEMPLATE",
+				Value: plan.ScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-${LPX_LEADER_OFFSET}",
+			}})
+		}
 		cyborg.Spec.MinAvailable = ptr.To(int32(1))
 	}
 
@@ -256,15 +298,19 @@ func RenderNodeLocal(
 // configureLPURolePods consumes fresh, independently owned Agent and conductor
 // specs. Agent and workload are nonnil; nil conductor means no emitted launcher.
 func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, workload *Workload, configMapName, allocation string) error {
-	if err := withLPUConfigVolume(agentPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
-		return err
+	if configMapName != "" {
+		if err := withLPUConfigVolume(agentPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
+			return err
+		}
 	}
 	configureAgentScheduling(agentPodSpec, workload.BuildFamily())
 	// Placement is already resolved; shape only the actual conductor's LPX-owned fields.
 	if conductorPodSpec != nil {
 		stripLPUResources(conductorPodSpec)
-		if err := withLPUConfigVolume(conductorPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
-			return err
+		if configMapName != "" {
+			if err := withLPUConfigVolume(conductorPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
+				return err
+			}
 		}
 		configureNodeLocalConductorRuntime(conductorPodSpec, allocation)
 	}

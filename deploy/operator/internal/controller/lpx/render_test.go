@@ -1085,3 +1085,68 @@ func TestHybridWorkloadUsesLPXSchedulerWithKaiEnabled(t *testing.T) {
 		require.NotContains(t, clique.Labels, consts.KubeLabelKaiSchedulerQueue, "clique %s", clique.Name)
 	}
 }
+
+func TestManifestRuntimeMigrationPreservesPlacement(t *testing.T) {
+	t.Log("Use the same compiler registry for legacy and manifest-backed rendering")
+	registry := newTestDataModelRegistry(t, t.TempDir())
+	for _, name := range []string{
+		"node-local-v2-lpu-only", "node-local-v2-hybrid", "node-local-v2-specdecode",
+		"node-local-v3-hx-lpu-only", "node-local-v3-hx-hybrid", "node-local-v3-hx-specdecode",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Log("Render the legacy workload with its original runtime metadata")
+			payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/" + name + ".input.yaml")
+			require.NoError(t, err)
+			dgd := &v1beta1.DynamoGraphDeployment{}
+			require.NoError(t, yaml.Unmarshal(payload, dgd))
+			child := newLPXRenderDeployment(t, dgd)
+			r := &graphReconciler{config: &configv1alpha1.OperatorConfiguration{}, runtimeConfig: &commoncontroller.RuntimeConfig{}, modelRegistry: registry}
+			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
+			require.NoError(t, err)
+			legacy, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+			require.NoError(t, err)
+
+			t.Log("Migrate every role and remove metadata-only options")
+			for _, component := range lpx.Components(dgd) {
+				for _, role := range component.Roles {
+					for index := range role.PodTemplate.Spec.Containers {
+						container := &role.PodTemplate.Spec.Containers[index]
+						if container.Name == "main" {
+							container.Env = append(container.Env, corev1.EnvVar{Name: "LPX_RUNTIME_CONTRACT", Value: "manifest-v1"})
+						}
+						container.Env = slices.DeleteFunc(container.Env, func(e corev1.EnvVar) bool {
+							return e.Name == "LPU_CONFIG_DIR" || strings.HasSuffix(e.Name, "RESOLVED_PARTITIONS_DIR")
+						})
+						container.VolumeMounts = slices.DeleteFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == "config" })
+						container.Args = slices.DeleteFunc(container.Args, func(a string) bool { return a == "--partition-metadata" || a == "--expand-hosts" })
+						container.Command = slices.DeleteFunc(container.Command, func(a string) bool { return a == "--partition-metadata" || a == "--expand-hosts" })
+					}
+				}
+			}
+			migratedChild := newLPXRenderDeployment(t, dgd)
+			migratedWorkloads, migratedPlans, err := r.resolveWorkloads(t.Context(), migratedChild, dgd)
+			require.NoError(t, err)
+			require.Equal(t, plans, migratedPlans)
+			migrated, resources, err := r.renderPodCliqueSet(t.Context(), migratedChild, dgd, migratedWorkloads, migratedPlans)
+			require.NoError(t, err)
+
+			t.Log("Keep placement, compiler identity and resource sizing without runtime ConfigMaps")
+			for _, resource := range resources {
+				_, configMap := resource.(*corev1.ConfigMap)
+				require.False(t, configMap)
+			}
+			require.Len(t, migrated.Spec.Template.Cliques, len(legacy.Spec.Template.Cliques))
+			for i, clique := range migrated.Spec.Template.Cliques {
+				before := legacy.Spec.Template.Cliques[i]
+				require.Equal(t, before.Name, clique.Name)
+				require.Equal(t, before.Spec.Replicas, clique.Spec.Replicas)
+				require.Equal(t, before.Spec.PodSpec.Containers[0].Resources, clique.Spec.PodSpec.Containers[0].Resources)
+				require.Equal(t, before.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation], clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
+				require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash)
+				for _, volume := range clique.Spec.PodSpec.Volumes {
+					require.NotEqual(t, "config", volume.Name)
+				}
+			}
+		})
+	}
+}
