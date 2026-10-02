@@ -26,8 +26,8 @@ func TestServingVerifierReturnsCanonicalTopologyProof(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	verifier.Now = func() time.Time { return now }
 	topology := enginegroup.MembershipTopology{Generation: 2, Replicas: []enginegroup.ReplicaMembership{
-		{ReplicaID: "replica-0", RuntimeIncarnation: "pod-0", NativeMembers: []enginegroup.NativeMemberID{"dp-0"}},
-		{ReplicaID: "replica-1", RuntimeIncarnation: "pod-1", NativeMembers: []enginegroup.NativeMemberID{"dp-1"}},
+		{ReplicaID: "replica-0", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-0", RuntimeIncarnation: "pod-0"}}},
+		{ReplicaID: "replica-1", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-1", RuntimeIncarnation: "pod-1"}}},
 	}}
 
 	t.Log("prove progress through the real serving path and bind it to the coordinator digest")

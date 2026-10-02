@@ -107,7 +107,7 @@ func TestSGLangGrowthPlannerBuildsContiguousIdentityPlan(t *testing.T) {
 		CommittedTopology: enginegroup.MembershipTopology{
 			Generation: 1,
 			Replicas: []enginegroup.ReplicaMembership{{
-				ReplicaID: "replica-0", RuntimeIncarnation: "pod-0", NativeMembers: []enginegroup.NativeMemberID{"dp-0"},
+				ReplicaID: "replica-0", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-0", RuntimeIncarnation: "pod-0"}},
 			}},
 		},
 	}}}

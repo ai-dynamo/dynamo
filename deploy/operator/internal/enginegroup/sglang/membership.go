@@ -90,10 +90,10 @@ func (a *LegacyGrowthAdapter) ValidateTarget(
 	}
 	joining := make(map[enginegroup.ReplicaID]enginegroup.RuntimeIncarnationID, len(target.Joining))
 	for _, member := range target.Joining {
-		if member.ReplicaID == "" || member.RuntimeIncarnation == "" {
+		if member.ReplicaID == "" || len(member.Members) != 1 || member.Members[0].RuntimeIncarnation == "" {
 			return rejectedPreflight("InvalidJoiningSet", "joining replica and runtime identities are required"), nil
 		}
-		joining[member.ReplicaID] = member.RuntimeIncarnation
+		joining[member.ReplicaID] = member.Members[0].RuntimeIncarnation
 	}
 	for _, replica := range target.Plan.Change.Grow.Replicas {
 		if joining[replica.ReplicaID] == "" {

@@ -203,7 +203,7 @@ func TestGrowthRejectsUnsafeCapacityTargets(t *testing.T) {
 
 func TestObservationRejectsInvalidNativeCapacityBindings(t *testing.T) {
 	// Binding failures cannot be hidden by a selector that omits the unexpected Pod.
-	cases := []string{"duplicate-slot", "invalid-index", "unlabelled-group", "wrong-owner", "recreated-clique"}
+	cases := []string{"duplicate-slot", "invalid-index", "unlabelled-group", "wrong-owner", "recreated-clique", "restarted-container"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Log("introduce one invalid identity into an otherwise healthy Grove clique")
@@ -221,6 +221,8 @@ func TestObservationRejectsInvalidNativeCapacityBindings(t *testing.T) {
 					delete(pod.Labels, consts.KubeLabelDynamoEngineGroup)
 				case "wrong-owner":
 					pod.OwnerReferences[0].UID = "other-clique-uid"
+				case "restarted-container":
+					pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", RestartCount: 1}}
 				}
 				require.NoError(t, fixture.client.Create(t.Context(), pod))
 			}

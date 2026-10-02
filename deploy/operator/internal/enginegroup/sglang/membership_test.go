@@ -77,8 +77,8 @@ func TestLegacyGrowthAdapterCommitsCorrelatedGrowth(t *testing.T) {
 		BaseTopology:    initial.CommittedTopology,
 		Plan:            plan,
 		Joining: []enginegroup.JoiningReplica{{
-			ReplicaID:          "replica-1",
-			RuntimeIncarnation: "pod-1",
+			ReplicaID: "replica-1",
+			Members:   []enginegroup.NativeMemberIncarnation{{ID: "dp-1", RuntimeIncarnation: "pod-1"}},
 		}},
 	}
 	targetPreflight, err := adapter.ValidateTarget(ctx, "group-uid", target)
@@ -137,7 +137,7 @@ func TestLegacyGrowthAdapterDoesNotRedispatchFromStaleJournal(t *testing.T) {
 			target := enginegroup.MembershipTarget{
 				ControlRevision: 1, TransitionID: "grow-1-2", TargetDigest: "target-digest",
 				BaseTopology: initial.CommittedTopology, Plan: testGrowPlan(),
-				Joining: []enginegroup.JoiningReplica{{ReplicaID: "replica-1", RuntimeIncarnation: "pod-1"}},
+				Joining: []enginegroup.JoiningReplica{{ReplicaID: "replica-1", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-1", RuntimeIncarnation: "pod-1"}}}},
 			}
 
 			t.Log("persist an ambiguous result after dispatching the collective once")
@@ -208,7 +208,7 @@ func TestLegacyGrowthAdapterFailsClosedAfterAmbiguousDispatch(t *testing.T) {
 	target := enginegroup.MembershipTarget{
 		ControlRevision: 1, TransitionID: "grow-1-2", TargetDigest: "target-digest",
 		Validation: *preflight.Evidence, BaseTopology: initial.CommittedTopology, Plan: testGrowPlan(),
-		Joining: []enginegroup.JoiningReplica{{ReplicaID: "replica-1", RuntimeIncarnation: "pod-1"}},
+		Joining: []enginegroup.JoiningReplica{{ReplicaID: "replica-1", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-1", RuntimeIncarnation: "pod-1"}}}},
 	}
 	targetEvidence, err := adapter.ValidateTarget(ctx, "group-uid", target)
 	require.NoError(t, err)
@@ -239,10 +239,10 @@ func testAllocation(rank int) enginegroup.CapacityAllocation {
 	return enginegroup.CapacityAllocation{
 		Available: true,
 		Incarnation: enginegroup.ReplicaIncarnation{
-			ReplicaID:          enginegroup.ReplicaID(id),
-			SlotID:             enginegroup.CapacitySlotID(fmt.Sprintf("slot-%d", rank)),
-			RuntimeIncarnation: enginegroup.RuntimeIncarnationID(uid),
-			CapacityRefs:       []enginegroup.CapacityRef{{Name: uid, UID: enginegroup.PodUID(uid)}},
+			ReplicaID:    enginegroup.ReplicaID(id),
+			SlotID:       enginegroup.CapacitySlotID(fmt.Sprintf("slot-%d", rank)),
+			Members:      []enginegroup.NativeMemberIncarnation{{ID: enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", rank)), RuntimeIncarnation: enginegroup.RuntimeIncarnationID(uid)}},
+			CapacityRefs: []enginegroup.CapacityRef{{Name: uid, UID: enginegroup.PodUID(uid)}},
 		},
 	}
 }

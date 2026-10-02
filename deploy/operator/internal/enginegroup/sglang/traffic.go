@@ -129,9 +129,8 @@ func topologyFromCapacity(
 			return enginegroup.MembershipTopology{}, fmt.Errorf("SGLang rank %d has no correlated capacity", rank)
 		}
 		topology.Replicas = append(topology.Replicas, enginegroup.ReplicaMembership{
-			ReplicaID:          replicaID,
-			RuntimeIncarnation: allocation.Incarnation.RuntimeIncarnation,
-			NativeMembers:      []enginegroup.NativeMemberID{enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", rank))},
+			ReplicaID: replicaID,
+			Members:   append([]enginegroup.NativeMemberIncarnation(nil), allocation.Incarnation.Members...),
 		})
 	}
 	return topology, nil
@@ -150,7 +149,7 @@ func cloneMembership(source []enginegroup.ReplicaMembership) []enginegroup.Repli
 	cloned := make([]enginegroup.ReplicaMembership, len(source))
 	for i := range source {
 		cloned[i] = source[i]
-		cloned[i].NativeMembers = append([]enginegroup.NativeMemberID(nil), source[i].NativeMembers...)
+		cloned[i].Members = append([]enginegroup.NativeMemberIncarnation(nil), source[i].Members...)
 	}
 	return cloned
 }

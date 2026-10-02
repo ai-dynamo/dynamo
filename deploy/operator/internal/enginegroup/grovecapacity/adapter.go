@@ -27,8 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Adapter grows one PCSG-owned member clique with one Pod per logical replica.
-// Grove owns Pod creation and placement. Shrink and replacement are unsupported;
+// Adapter grows one PCSG-owned member clique with one Pod and native member per logical replica.
+// Grove owns Pod creation and placement. Packed profiles, shrink, and replacement are unsupported;
 // an exact incarnation never authorizes bootstrapping a replacement.
 // The journal stores only revision/digest fencing required by CapacityAdapter,
 // not the pod-count target already persisted in Grove. Child-clique annotations
@@ -225,11 +225,19 @@ func (a *Adapter) incarnation(pod *corev1.Pod) (enginegroup.ReplicaIncarnation, 
 	if err != nil || index < 0 || strconv.FormatInt(index, 10) != literal {
 		return enginegroup.ReplicaIncarnation{}, fmt.Errorf("Pod %s has an invalid Grove slot index %q", pod.Name, literal)
 	}
+	// Compatibility boundary: the growth-only SGLang API has no process lifetime ID. Its one-process allocation
+	// uses the initial Pod UID as a bootstrap token, but a container restart must never inherit that identity.
+	// Replace this approximation with backend-issued per-process IDs when native membership status is available.
+	for _, container := range pod.Status.ContainerStatuses {
+		if container.RestartCount > 0 {
+			return enginegroup.ReplicaIncarnation{}, fmt.Errorf("Pod %s restarted: the growth-only adapter cannot recover its process identity", pod.Name)
+		}
+	}
 	return enginegroup.ReplicaIncarnation{
-		ReplicaID:          enginegroup.ReplicaID("replica-" + literal),
-		SlotID:             enginegroup.CapacitySlotID("slot-" + literal),
-		RuntimeIncarnation: enginegroup.RuntimeIncarnationID(pod.UID),
-		CapacityRefs:       []enginegroup.CapacityRef{{Name: pod.Name, UID: enginegroup.PodUID(pod.UID)}},
+		ReplicaID:    enginegroup.ReplicaID("replica-" + literal),
+		SlotID:       enginegroup.CapacitySlotID("slot-" + literal),
+		Members:      []enginegroup.NativeMemberIncarnation{{ID: enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", index)), RuntimeIncarnation: enginegroup.RuntimeIncarnationID(pod.UID)}},
+		CapacityRefs: []enginegroup.CapacityRef{{Name: pod.Name, UID: enginegroup.PodUID(pod.UID)}},
 	}, nil
 }
 
