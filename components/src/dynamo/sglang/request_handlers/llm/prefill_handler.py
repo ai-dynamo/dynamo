@@ -23,6 +23,7 @@ from dynamo.sglang.engine_generate import (
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import (
+    _kv_cache_hit_engine_data,
     _native_payload_is_batched,
     _ordered_cancellation_request_id,
     _sampling_option_params,
@@ -254,33 +255,47 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
 
-        await task
+        final_meta_info = await task
+        if final_meta_info is None:
+            return
+        # Bootstrap happens before prefill runs, so the cache-hit report for
+        # this attempt needs its own trailing chunk.
+        kv_cache_hit = _kv_cache_hit_engine_data(final_meta_info)
+        if kv_cache_hit:
+            yield {"token_ids": [], "engine_data": {"kv_cache_hit": kv_cache_hit}}
 
     async def _consume_results(
         self,
         results: AsyncIterator[Any],
         submitted_request_id: str | None,
         context: Context,
-    ) -> None:
-        """Consume async generator results without processing.
+    ) -> Optional[Dict[str, Any]]:
+        """Consume async generator results without forwarding them.
 
         Args:
             results: Async generator from engine.async_generate.
             submitted_request_id: Exact engine ID known before output, when supported.
             context: Context object for cancellation handling.
+
+        Returns:
+            The finished result's ``meta_info``, or None when the request was
+            cancelled or never finished.
         """
         # Preserve the response ID as a fallback if SGLang replaces the submitted ID.
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        final_meta_info: Optional[Dict[str, Any]] = None
         async with self._cancellation_monitor(
             request_id_future, context, submitted_request_id
         ) as cancellation_task:
             async for res in self._stream_until_cancelled(results, cancellation_task):
+                meta_info = res.get("meta_info") or (
+                    res.get("engine_data", {})
+                    .get("sglang_response", {})
+                    .get("meta_info", {})
+                )
+                if meta_info.get("finish_reason"):
+                    final_meta_info = meta_info
                 if not request_id_future.done():
-                    meta_info = res.get("meta_info") or (
-                        res.get("engine_data", {})
-                        .get("sglang_response", {})
-                        .get("meta_info", {})
-                    )
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
@@ -288,3 +303,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 # The shared iterator briefly drains after abort so SGLang can
                 # clean up, then closes a stream that does not terminate.
+            if cancellation_task.done():
+                return None
+        return final_meta_info

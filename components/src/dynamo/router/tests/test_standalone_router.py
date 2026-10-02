@@ -19,11 +19,25 @@ def stub_module(name: str, **attributes: object) -> types.ModuleType:
     return module
 
 
+def load_token_ids_module():
+    module_path = Path(__file__).parents[2] / "common" / "utils" / "token_ids.py"
+    spec = importlib.util.spec_from_file_location(
+        "dynamo.common.utils.token_ids", module_path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_standalone_router_handler():
     placeholder_type = type("Placeholder", (), {})
     stubs = {
         "uvloop": stub_module("uvloop", run=lambda coroutine: coroutine),
         "dynamo": stub_module("dynamo"),
+        "dynamo.common": stub_module("dynamo.common"),
+        "dynamo.common.utils": stub_module("dynamo.common.utils"),
+        "dynamo.common.utils.token_ids": load_token_ids_module(),
         "dynamo.llm": stub_module(
             "dynamo.llm",
             AisPerfConfig=placeholder_type,
@@ -156,3 +170,20 @@ async def test_generate_forwards_request_and_response_fields() -> None:
         "model": "unknown",
         "routing": {"dp_rank": 2},
     }
+
+
+@pytest.mark.asyncio
+async def test_generate_forwards_packed_token_ids_untouched() -> None:
+    handler, router = handler_with_router()
+
+    async def worker_stream():
+        yield {"token_ids": [5]}
+
+    router.generate_from_request.return_value = worker_stream()
+    packed = b"".join(i.to_bytes(4, "little") for i in (1, 2, 3, 4))
+
+    async for _ in handler.generate({"token_ids": packed}):
+        pass
+
+    (forwarded,), _ = router.generate_from_request.call_args
+    assert forwarded["token_ids"] is packed
