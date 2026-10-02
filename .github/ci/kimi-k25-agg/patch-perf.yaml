@@ -21,9 +21,9 @@ spec:
       - name: perf
         env:
         - name: CONCURRENCIES
-          value: "1"
+          value: "128"
         - name: BENCHMARK_DURATION
-          value: "60"
+          value: "120"
       volumes:
       - name: model-cache
         persistentVolumeClaim:
