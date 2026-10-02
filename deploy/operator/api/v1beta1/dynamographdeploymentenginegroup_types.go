@@ -73,12 +73,18 @@ type DynamoGraphDeploymentEngineGroupStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 
-	// desiredNativeMembers is the exact identity set assigned to the desired replica slots.
-	// Survivor recovery does not rewrite this set; identities need not be contiguous.
+	// desiredNativeMembers is the canonical durable assignment of exact identities to the desired
+	// replica slots, not a projection of observed membership. Survivor recovery does not rewrite it.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
 	DesiredNativeMembers []string `json:"desiredNativeMembers,omitempty"`
+
+	// desiredAssignmentGeneration correlates the resolved assignment with a spec generation.
+	// A superseded or unresolved target cannot be reported as reached from an older assignment.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	DesiredAssignmentGeneration int64 `json:"desiredAssignmentGeneration,omitempty"`
 
 	// desiredNativeMemberCount is the cardinality of desiredNativeMembers.
 	// +optional
