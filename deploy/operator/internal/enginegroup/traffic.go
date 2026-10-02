@@ -279,6 +279,10 @@ func sameTrafficDrainTargets(left, right []TrafficDrainTarget) bool {
 }
 
 func trafficTargetConverged(target TrafficTarget, observation TrafficObservation) bool {
+	// Contradictory terminal evidence must never authorize membership mutation or physical release.
+	if err := validateTrafficObservation(observation); err != nil {
+		return false
+	}
 	if observation.AppliedRevision < target.ControlRevision ||
 		!sameMemberships(target.Admitted, observation.Admitted) {
 		return false

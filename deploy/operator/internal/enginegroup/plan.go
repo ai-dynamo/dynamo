@@ -755,6 +755,26 @@ func validateTrafficObservation(observation TrafficObservation) error {
 			return fmt.Errorf("validate %s traffic membership: %w", name, err)
 		}
 	}
+
+	// A terminal tombstone cannot also describe a process accepting traffic or still draining in-flight work.
+	drained := make(map[RuntimeIncarnationID]struct{})
+	for _, membership := range observation.Drained {
+		for _, member := range membership.Members {
+			drained[member.RuntimeIncarnation] = struct{}{}
+		}
+	}
+	for name, memberships := range map[string][]ReplicaMembership{
+		"admitted": observation.Admitted,
+		"draining": observation.Draining,
+	} {
+		for _, membership := range memberships {
+			for _, member := range membership.Members {
+				if _, found := drained[member.RuntimeIncarnation]; found {
+					return fmt.Errorf("process %q is both %s and drained", member.RuntimeIncarnation, name)
+				}
+			}
+		}
+	}
 	return nil
 }
 

@@ -209,6 +209,9 @@ func TestCoordinatorReassertsCompletedTargetsAfterObservedDrift(t *testing.T) {
 	t.Log("Remove an unsafe traffic drift by replaying the accepted target at the same revision")
 	trafficCalls := scenario.traffic.applyCalls
 	scenario.traffic.observation.Admitted = cloneReplicaMemberships(base.Replicas)
+	scenario.traffic.observation.Drained = subtractMemberships(
+		scenario.traffic.observation.Drained, scenario.traffic.observation.Admitted,
+	)
 	scenario.mustReconcile("reassert completed traffic target")
 	if scenario.traffic.applyCalls != trafficCalls+1 ||
 		!sameMemberships(scenario.traffic.observation.Admitted, committed.Replicas) {
@@ -787,6 +790,9 @@ func TestCoordinatorServingFailureDoesNotRewriteMembershipCommit(t *testing.T) {
 	t.Log("Reassert the accepted fail-closed traffic target after routing drifts while blocked")
 	trafficCalls := scenario.traffic.applyCalls
 	scenario.traffic.observation.Admitted = cloneReplicaMemberships(committed.Replicas)
+	scenario.traffic.observation.Drained = subtractMemberships(
+		scenario.traffic.observation.Drained, scenario.traffic.observation.Admitted,
+	)
 	scenario.mustReconcile("remove routing drift after verification failure")
 	if scenario.traffic.applyCalls != trafficCalls+1 || len(scenario.traffic.observation.Admitted) != 0 {
 		t.Fatalf(

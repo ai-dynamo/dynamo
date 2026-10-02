@@ -20,6 +20,8 @@ package enginegroup
 import (
 	"slices"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestCoordinatorPersistsEveryDirectiveBeforeCallingItsAdapter(t *testing.T) {
@@ -195,6 +197,13 @@ func TestCoordinatorWaitsForCompleteDrainBeforeMembershipMutation(t *testing.T) 
 	if !sameMemberships(scenario.traffic.observation.Draining, base.Replicas[1:]) {
 		t.Fatalf("selected replica is not observably draining: %#v", scenario.traffic.observation)
 	}
+
+	t.Log("Reject a stale terminal tombstone while the exact same process is still draining")
+	scenario.traffic.observation.Drained = cloneReplicaMemberships(scenario.traffic.observation.Draining)
+	require.False(t, trafficTargetConverged(*scenario.status.Traffic.Desired, scenario.traffic.observation))
+	require.ErrorContains(t, scenario.reconcile("reject contradictory drain evidence"), "both draining and drained")
+	require.Zero(t, scenario.membership.applyCalls)
+	require.Nil(t, scenario.status.Membership.Desired)
 
 	t.Log("Publish durable drain completion and allow membership application")
 	scenario.traffic.observation.Drained = cloneReplicaMemberships(scenario.traffic.observation.Draining)

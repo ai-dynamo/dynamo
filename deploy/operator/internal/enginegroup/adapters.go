@@ -105,6 +105,7 @@ type TrafficDrainTarget struct {
 }
 
 // TrafficObservation is the runtime's exact routing and drain state.
+// Drained is exclusive of Admitted and Draining for each process incarnation.
 type TrafficObservation struct {
 	// AppliedRevision is the last target revision durably accepted by the adapter, whether or not it has converged.
 	AppliedRevision int64
@@ -244,6 +245,8 @@ type TrafficAdapter interface {
 	Observe(ctx context.Context, groupID GroupID) (TrafficObservation, error)
 	// Apply converges toward the exact admitted set and preserves drain tombstones for every target in Drain. Graceful
 	// drain waits for in-flight work; ConfirmInactive proves a failed member non-routable without its participation.
+	// Readmission invalidates that process incarnation's previous tombstone; a later drain needs fresh completion
+	// evidence. Observe must never report the same incarnation as both Drained and Admitted or Draining.
 	// Revisions are group-global and monotonic. Repeating an equal revision and payload must repair observable drift; a
 	// lower revision or conflicting equal revision is definitively rejected. No engine membership or discovery event may
 	// implicitly admit an incarnation absent from the latest target.
