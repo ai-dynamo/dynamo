@@ -18,6 +18,7 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
+from aisimulate.resources import ResourceLimitError
 from aisimulate.runner import EngineReplayRunner, EngineReplayRunnerFactory
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
@@ -211,11 +212,17 @@ class DynamoReplayRunner:
             **self._goodput_sla_kwargs(spec),
         }
 
-        if self._is_trace(spec):
-            report = self._run_trace(spec, common, execution_model=execution_model)
-        else:
-            common.update(self._synthetic_kwargs(spec))
-            report = self._run_synthetic(spec, common)
+        try:
+            if self._is_trace(spec):
+                report = self._run_trace(spec, common, execution_model=execution_model)
+            else:
+                common.update(self._synthetic_kwargs(spec))
+                report = self._run_synthetic(spec, common)
+        except MemoryError as error:
+            failure = ResourceLimitError(str(error))
+            if hasattr(error, "fpm_query_coverage"):
+                setattr(failure, "fpm_query_coverage", error.fpm_query_coverage)
+            raise failure from error
 
         metrics, metadata = self._normalize_report(report, output_requirements)
         trace_format = spec.workload.get("trace_format")
