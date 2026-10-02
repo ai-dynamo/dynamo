@@ -51,8 +51,9 @@ SGLang's `--kv-events-config`, for example:
 
 The sidecar stays unready until every registered DP rank has replayed from
 sequence zero and applied the result to its local index. It subscribes before
-replay, merges overlapping batches in sequence order, and periodically requests
-retained history to repair a final dropped live batch even on an idle stream.
+replay and merges overlapping batches in sequence order during bootstrap.
+After bootstrap it consumes live ZMQ events without periodic replay or runtime
+sequence-gap recovery, trusting delivery as the existing live listener does.
 An empty completed replay is accepted only with positive retention: SGLang's
 publisher starts at zero, retains its latest batches, and does not otherwise
 clear the buffer within an engine lifetime. A timeout is uncertainty and keeps

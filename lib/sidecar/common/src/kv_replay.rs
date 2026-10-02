@@ -282,35 +282,36 @@ pub async fn run_source<T: RecoveryTarget + 'static>(
             .await?;
         }
         if cursor.gap().is_none() {
-            status.send_replace(RecoveryStatus::Ready);
+            break;
         }
-        // Consume live immediately. Periodic replay also repairs a lost final
-        // PUB batch when there is no subsequent live sequence to expose a gap.
-        let poll_at = tokio::time::Instant::now() + Duration::from_secs(1);
-        loop {
-            let message = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Ok(()),
-                _ = live_monitor.next() => bail!("KV live connection lost"),
-                _ = replay_monitor.next() => bail!("KV replay connection lost"),
-                _ = tokio::time::sleep_until(poll_at) => break,
-                message = live.next() => message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??,
-            };
-            let (sequence, payload) = decode_live(message)?;
-            apply_batch(
-                &mut cursor,
-                sequence,
-                payload,
-                &mut normalizer,
-                publisher.as_ref(),
-                WorkerWithDpRank::new(worker_id, source.dp_rank),
-                &status,
-            )
-            .await?;
-            if cursor.gap().is_some() {
-                break;
-            }
+        // Resolve overlap gaps before completing bootstrap. No replay is
+        // requested after this source enters live consumption.
+    }
+    drop(replay);
+    drop(replay_monitor);
+    let bootstrap_next = cursor.next();
+    drop(cursor);
+    status.send_replace(RecoveryStatus::Ready);
+    loop {
+        let message = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(()),
+            _ = live_monitor.next() => bail!("KV live connection lost"),
+            message = live.next() => message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??,
+        };
+        let (sequence, payload) = decode_live(message)?;
+        // Discard queued overlap with bootstrap; otherwise trust live PUB/SUB
+        // delivery, just like the ordinary KV listener. No runtime gap repair.
+        if sequence < bootstrap_next {
+            continue;
         }
+        apply_payload(
+            &payload,
+            &mut normalizer,
+            publisher.as_ref(),
+            WorkerWithDpRank::new(worker_id, source.dp_rank),
+        )
+        .await?;
     }
 }
 
@@ -339,24 +340,34 @@ async fn apply_batch<T: RecoveryTarget>(
         status.send_replace(RecoveryStatus::Recovering);
     }
     while let Some((_, payload)) = cursor.pop_contiguous()? {
-        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&payload)?;
-        anyhow::ensure!(
-            !batch
-                .data_parallel_rank
-                .is_some_and(|rank| rank < 0 || rank as u32 != worker.dp_rank),
-            "KV batch belongs to the wrong DP rank"
-        );
-        let mut events = Vec::with_capacity(batch.events.len());
-        for raw in batch.events {
-            if let Some(raw) = normalizer.preprocess(raw, worker)
-                && let Some(event) =
-                    normalizer.normalize_preprocessed(raw, publisher.next_event_id(), worker)
-            {
-                events.push(event);
-            }
-        }
-        publisher.apply(events).await?;
+        apply_payload(&payload, normalizer, publisher, worker).await?;
     }
+    Ok(())
+}
+
+async fn apply_payload<T: RecoveryTarget>(
+    payload: &[u8],
+    normalizer: &mut dynamo_kv_router::zmq_wire::ZmqEventNormalizer,
+    publisher: &T,
+    worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+) -> Result<()> {
+    let batch = dynamo_kv_router::zmq_wire::decode_event_batch(payload)?;
+    anyhow::ensure!(
+        !batch
+            .data_parallel_rank
+            .is_some_and(|rank| rank < 0 || rank as u32 != worker.dp_rank),
+        "KV batch belongs to the wrong DP rank"
+    );
+    let mut events = Vec::with_capacity(batch.events.len());
+    for raw in batch.events {
+        if let Some(raw) = normalizer.preprocess(raw, worker)
+            && let Some(event) =
+                normalizer.normalize_preprocessed(raw, publisher.next_event_id(), worker)
+        {
+            events.push(event);
+        }
+    }
+    publisher.apply(events).await?;
     Ok(())
 }
 
@@ -488,7 +499,7 @@ mod socket_tests {
     }
 
     #[tokio::test]
-    async fn replay_overlap_and_later_live_gap_are_recovered_in_order() {
+    async fn bootstrap_merges_overlap_then_consumes_live_without_replay() {
         let mut fixture = Fixture::new();
         let target = Arc::new(Target::default());
         let cancel = CancellationToken::new();
@@ -515,8 +526,8 @@ mod socket_tests {
         fixture.send(&id, -1, vec![]).await;
         until(&mut rx, |s| matches!(s, RecoveryStatus::Ready)).await;
         assert_eq!(target.events.lock().unwrap().len(), 2);
-        // A later live batch exposes a hole; replay supplies the missing batch
-        // and overlaps the live batch. Every batch is applied exactly once.
+        // A live gap after bootstrap does not request replay or withdraw
+        // readiness. Continuous repair is outside this scope.
         fixture
             .live
             .send(Multipart::from(vec![
@@ -526,19 +537,22 @@ mod socket_tests {
             ]))
             .await
             .unwrap();
-        let id = fixture.request(2).await;
-        fixture.send(&id, 2, payload(0)).await;
-        fixture.send(&id, 3, payload(0)).await;
-        fixture.send(&id, -1, vec![]).await;
-        until(&mut rx, |s| matches!(s, RecoveryStatus::Ready)).await;
         tokio::time::timeout(Duration::from_secs(5), async {
-            while target.events.lock().unwrap().len() < 4 {
+            while target.events.lock().unwrap().len() < 3 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
-        assert_eq!(target.events.lock().unwrap().len(), 4);
+        assert_eq!(target.events.lock().unwrap().len(), 3);
+        assert!(matches!(*rx.borrow(), RecoveryStatus::Ready));
+        // Longer than the former periodic replay interval.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1200), fixture.replay.next())
+                .await
+                .is_err()
+        );
+        assert!(matches!(*rx.borrow(), RecoveryStatus::Ready));
         cancel.cancel();
         task.await.unwrap().unwrap();
     }
