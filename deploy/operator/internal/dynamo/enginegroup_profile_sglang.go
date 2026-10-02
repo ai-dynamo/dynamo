@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -120,6 +121,14 @@ type SGLangProfileGeometrySource struct {
 	WorkloadRevisionDigest     string
 }
 
+// ResolvedSGLangElasticEPProfile contains the provider-neutral capacity
+// geometry and SGLang's hard live-membership bounds.
+type ResolvedSGLangElasticEPProfile struct {
+	Geometry        enginegroup.ResolvedProfileGeometry
+	InitialReplicas int32
+	MaximumReplicas int32
+}
+
 type parsedSGLangProfileGeometry struct {
 	tensorParallelSize   int64
 	pipelineParallelSize int64
@@ -182,28 +191,44 @@ var sglangProfileOptions = []sglangProfileOption{
 // A successful result establishes physical geometry for growth only; it does not prove bootstrap, rank placement,
 // retry-safe membership control, scale-down, or recovery conformance.
 func ResolveSGLangProfileGeometry(source SGLangProfileGeometrySource) (enginegroup.ResolvedProfileGeometry, error) {
+	profile, err := ResolveSGLangElasticEPProfile(source)
+	if err != nil {
+		return enginegroup.ResolvedProfileGeometry{}, err
+	}
+	return profile.Geometry, nil
+}
+
+// ResolveSGLangElasticEPProfile resolves both immutable capacity geometry and
+// the explicit SGLang membership bounds needed by a runtime adapter.
+func ResolveSGLangElasticEPProfile(source SGLangProfileGeometrySource) (ResolvedSGLangElasticEPProfile, error) {
 	// Require a valid creation-time target before comparing it with SGLang's launch-time assertions.
 	if source.InitialReplicas <= 0 {
-		return enginegroup.ResolvedProfileGeometry{}, fmt.Errorf("initial replicas must be positive, got %d", source.InitialReplicas)
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("initial replicas must be positive, got %d", source.InitialReplicas)
 	}
 
 	// Resolve only the exact, merged growth profile whose logical-to-physical mapping is statically known.
 	geometry, err := parseSGLangProfileGeometry(source.Command, source.Args)
 	if err != nil {
-		return enginegroup.ResolvedProfileGeometry{}, err
+		return ResolvedSGLangElasticEPProfile{}, err
 	}
 	if err := validateSGLangScaleUpGeometry(geometry, source.InitialReplicas, source.MainContainerGPUs); err != nil {
-		return enginegroup.ResolvedProfileGeometry{}, err
+		return ResolvedSGLangElasticEPProfile{}, err
+	}
+	if geometry.elasticMaximumSize > math.MaxInt32 {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf(
+			"SGLang maximum EP size %d exceeds the Engine Group replica range",
+			geometry.elasticMaximumSize,
+		)
 	}
 
 	// Bind immutable engine semantics while excluding creation-time and live replica targets.
 	engineGeometryDigest, err := digestSGLangEngineGeometry(geometry)
 	if err != nil {
-		return enginegroup.ResolvedProfileGeometry{}, err
+		return ResolvedSGLangElasticEPProfile{}, err
 	}
 
 	// The merged width-one profile maps one logical DP replica to one physical EP rank and one GPU.
-	return enginegroup.ResolveProfileGeometry(enginegroup.ProfileGeometryInput{
+	resolved, err := enginegroup.ResolveProfileGeometry(enginegroup.ProfileGeometryInput{
 		Backend:        sglangEngineGroupBackend,
 		GPUsPerReplica: 1,
 		CapacityRoles: []enginegroup.CapacityRoleGeometry{
@@ -217,6 +242,14 @@ func ResolveSGLangProfileGeometry(source SGLangProfileGeometrySource) (enginegro
 		EngineGeometryDigest:   engineGeometryDigest,
 		WorkloadRevisionDigest: source.WorkloadRevisionDigest,
 	})
+	if err != nil {
+		return ResolvedSGLangElasticEPProfile{}, err
+	}
+	return ResolvedSGLangElasticEPProfile{
+		Geometry:        resolved,
+		InitialReplicas: int32(geometry.elasticInitialSize),
+		MaximumReplicas: int32(geometry.elasticMaximumSize),
+	}, nil
 }
 
 func parseSGLangProfileGeometry(command, args []string) (parsedSGLangProfileGeometry, error) {
