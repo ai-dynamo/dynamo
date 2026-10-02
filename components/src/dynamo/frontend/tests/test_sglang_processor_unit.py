@@ -4982,19 +4982,19 @@ HARMONY_MARKERS = [
 
 
 @pytest.fixture(scope="module")
-def harmony_tokenizer():
-    harmony = copy.deepcopy(get_tokenizer(MODEL))
-    harmony.add_special_tokens({"additional_special_tokens": HARMONY_MARKERS})
-    return harmony
+def reasoning_tokenizer():
+    tokenizer = copy.deepcopy(get_tokenizer(MODEL))
+    # Cohere's channel markers are also single special tokens in its vocabulary.
+    tokenizer.add_special_tokens(
+        {
+            "additional_special_tokens": HARMONY_MARKERS
+            + ["<|START_TEXT|>", "<|END_TEXT|>", "<|START_ACTION|>", "<|END_ACTION|>"]
+        }
+    )
+    return tokenizer
 
 
 class TestReasoningTokenUsage:
-    """usage.completion_tokens_details.reasoning_tokens on the SGLang path.
-
-    A reasoning block counts from its opening marker through its closing
-    marker.
-    """
-
     REASONING = "Let me think about it."
     ANALYSIS = f"<|channel|>analysis<|message|>{REASONING}<|end|>"
     FINAL = "<|start|>assistant<|channel|>final<|message|>It is 4.<|return|>"
@@ -5040,6 +5040,57 @@ class TestReasoningTokenUsage:
         )
         assert count == len(self._ids(tokenizer, f"<think>{self.REASONING}</think>"))
 
+    @pytest.mark.parametrize(
+        ("parser_name", "prefix", "suffix", "force_reasoning"),
+        [
+            ("qwen3", "<think>", '<tool_call>{"name":"f"}</tool_call>', False),
+            ("qwen3", "", '<tool_call>{"name":"f"}</tool_call>', True),
+            ("glm45", "<think>", '<tool_call>{"name":"f"}</tool_call>', False),
+            ("kimi_k2", "<think>", "<|tool_calls_section_begin|>functions.f", False),
+            (
+                "cohere_command4",
+                "",
+                "<|START_TEXT|>The answer is 4.<|END_TEXT|>",
+                True,
+            ),
+            (
+                "cohere_command4",
+                "",
+                '<|START_ACTION|>{"name":"f"}<|END_ACTION|>',
+                True,
+            ),
+        ],
+        ids=[
+            "qwen3",
+            "forced-qwen3",
+            "glm45",
+            "kimi-k2",
+            "cohere-text",
+            "cohere-action",
+        ],
+    )
+    def test_implicit_reasoning_end_excludes_normal_tokens(
+        self, reasoning_tokenizer, parser_name, prefix, suffix, force_reasoning
+    ):
+        tokenizer = reasoning_tokenizer
+        reasoning_ids = self._ids(tokenizer, prefix + self.REASONING)
+        ids = reasoning_ids + self._ids(tokenizer, suffix)
+        for step in range(1, len(ids) + 1):
+            post = self._post(tokenizer, parser_name, force_reasoning)
+            self._feed(post, ids, step=step)
+            assert post.reasoning_token_count == len(reasoning_ids), step
+
+    def test_tool_marker_without_reasoning_counts_zero(self, tokenizer):
+        assert (
+            self._count(tokenizer, "qwen3", '<tool_call>{"name":"f"}</tool_call>') == 0
+        )
+
+    def test_tool_marker_ignored_by_detector_remains_reasoning(self, tokenizer):
+        reasoning = f"<think>{self.REASONING}<tool_call>literal</think>"
+        assert self._count(tokenizer, "deepseek-r1", reasoning + "It is 4.") == len(
+            self._ids(tokenizer, reasoning)
+        )
+
     def test_forced_reasoning_counts_from_first_token(self, tokenizer):
         post = self._post(tokenizer, "qwen3", force_reasoning=True)
         self._feed(post, self._ids(tokenizer, f"{self.REASONING}</think>\n\nIt is 4."))
@@ -5054,29 +5105,14 @@ class TestReasoningTokenUsage:
         assert post.reasoning_token_count == len(ids)
 
     @pytest.mark.parametrize("step", [1, 2, 3, 7])
-    def test_count_does_not_depend_on_chunking(self, harmony_tokenizer, step):
+    def test_count_does_not_depend_on_chunking(self, reasoning_tokenizer, step):
         count = self._count(
-            harmony_tokenizer,
+            reasoning_tokenizer,
             "gpt-oss",
             self.ANALYSIS + self.FINAL,
             step=step,
         )
-        assert count == len(self._ids(harmony_tokenizer, self.ANALYSIS))
-
-    def test_reasoning_after_content_counts_only_the_new_block(self, harmony_tokenizer):
-        second_block = (
-            "<|start|>assistant<|channel|>analysis<|message|>Check again.<|end|>"
-        )
-        text = (
-            self.ANALYSIS
-            + "<|start|>assistant<|channel|>commentary<|message|>Checking.<|end|>"
-            + second_block
-            + self.FINAL
-        )
-        count = self._count(harmony_tokenizer, "gpt-oss", text, step=2)
-        assert count == len(self._ids(harmony_tokenizer, self.ANALYSIS)) + len(
-            self._ids(harmony_tokenizer, second_block)
-        )
+        assert count == len(self._ids(reasoning_tokenizer, self.ANALYSIS))
 
     COMMENTARY = "<|start|>assistant<|channel|>commentary<|message|>Checking.<|end|>"
     SECOND = "<|start|>assistant<|channel|>analysis<|message|>Check again.<|end|>"
@@ -5090,18 +5126,18 @@ class TestReasoningTokenUsage:
         ],
         ids=["reasoning-content-reasoning", "consecutive-reasoning-blocks"],
     )
-    def test_count_is_identical_for_every_chunk_size(self, harmony_tokenizer, blocks):
+    def test_count_is_identical_for_every_chunk_size(self, reasoning_tokenizer, blocks):
         # Regression: when one chunk crossed several reasoning/content
         # boundaries, the count depended on the chunk size.
         text = "".join(blocks)
         expected = sum(
-            len(self._ids(harmony_tokenizer, block))
+            len(self._ids(reasoning_tokenizer, block))
             for block in blocks
             if "analysis" in block
         )
-        size = len(self._ids(harmony_tokenizer, text))
+        size = len(self._ids(reasoning_tokenizer, text))
         counts = {
-            step: self._count(harmony_tokenizer, "gpt-oss", text, step=step)
+            step: self._count(reasoning_tokenizer, "gpt-oss", text, step=step)
             for step in range(1, size + 1)
         }
         assert set(counts.values()) == {expected}, counts
@@ -5114,10 +5150,12 @@ class TestReasoningTokenUsage:
         ],
         ids=["empty-analysis", "no-analysis"],
     )
-    def test_harmony_without_reasoning_text_counts_zero(self, harmony_tokenizer, text):
-        assert self._count(harmony_tokenizer, "gpt-oss", text, step=2) == 0
+    def test_harmony_without_reasoning_text_counts_zero(
+        self, reasoning_tokenizer, text
+    ):
+        assert self._count(reasoning_tokenizer, "gpt-oss", text, step=2) == 0
 
-    def test_parser_failure_withdraws_the_count(self, harmony_tokenizer):
+    def test_parser_failure_withdraws_the_count(self, reasoning_tokenizer):
         class FailingParser:
             detector = types.SimpleNamespace(
                 think_start_token="<|channel|>analysis<|message|>",
@@ -5128,15 +5166,15 @@ class TestReasoningTokenUsage:
                 raise ValueError("malformed output")
 
         counter = sglang_prepost_module._ReasoningTokenCounter(
-            harmony_tokenizer,
+            reasoning_tokenizer,
             FailingParser(),
             start_marker_ids=self._ids(
-                harmony_tokenizer, "<|channel|>analysis<|message|>"
+                reasoning_tokenizer, "<|channel|>analysis<|message|>"
             ),
-            end_marker_ids=self._ids(harmony_tokenizer, "<|end|>"),
+            end_marker_ids=self._ids(reasoning_tokenizer, "<|end|>"),
         )
         counter.observe(
-            self._ids(harmony_tokenizer, self.ANALYSIS + self.FINAL), finished=True
+            self._ids(reasoning_tokenizer, self.ANALYSIS + self.FINAL), finished=True
         )
         assert counter.total is None
 

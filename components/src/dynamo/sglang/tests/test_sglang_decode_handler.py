@@ -1723,10 +1723,6 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
 async def test_process_token_stream_reports_reasoning_tokens(
     reasoning_tokens, expected_details
 ):
-    """SGLang's reasoning count becomes completion_tokens_details.
-
-    It never exceeds completion_tokens.
-    """
     handler = _new_decode_handler()
     meta_info = {
         "id": "request-1",

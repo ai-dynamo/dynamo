@@ -1046,7 +1046,9 @@ class _ReasoningTokenCounter:
     SGLang's scheduler counts. When the shadow reads a segment as both
     reasoning and content, counting starts at the opening marker, found by
     token id, or covers the whole segment when there is none. A segment still
-    open when generation ends is classified the same way.
+    open when generation ends is classified the same way. Detector-defined
+    tool/text/action starts also split segments, but their tokens belong to
+    normal output and are excluded when the parser leaves reasoning.
 
     Both the cut points and what the shadow is fed depend only on the token
     sequence, so the count is the same however the tokens were batched into
@@ -1071,7 +1073,22 @@ class _ReasoningTokenCounter:
         # in the same state, forced reasoning included.
         self._shadow = copy.deepcopy(reasoning_parser)
         self._start_marker_ids = start_marker_ids
-        self._end_marker_ids = end_marker_ids
+        self._end_markers: dict[int, list[tuple[str, list[int]]]] = {}
+        self._max_marker_width = 1
+        for attribute in (
+            "think_end_token",
+            "tool_start_token",
+            "TEXT_START_TOKEN",
+            "ACTION_START_TOKEN",
+        ):
+            ids = (
+                end_marker_ids
+                if attribute == "think_end_token"
+                else _reasoning_marker_ids(tokenizer, reasoning_parser, attribute)
+            )
+            if ids:
+                self._end_markers.setdefault(ids[0], []).append((attribute, ids))
+                self._max_marker_width = max(self._max_marker_width, len(ids))
         self._pending_ids: list[int] = []
         # Pending ids before this offset hold no closing marker.
         self._scanned = 0
@@ -1082,24 +1099,36 @@ class _ReasoningTokenCounter:
         if self.total is None:
             return
         self._pending_ids.extend(token_ids)
-        if self._end_marker_ids:
-            while (
-                split := _find_subsequence(
-                    self._pending_ids, self._end_marker_ids, self._scanned
-                )
-            ) >= 0:
-                self._classify(self._pending_ids[:split])
-                self._pending_ids = self._pending_ids[split:]
-                self._scanned = 0
-            self._scanned = max(
-                0, len(self._pending_ids) - len(self._end_marker_ids) + 1
-            )
+        consumed = 0
+        index = self._scanned
+        while index < len(self._pending_ids):
+            for attribute, marker in self._end_markers.get(
+                self._pending_ids[index], ()
+            ):
+                split = index + len(marker)
+                if self._pending_ids[index:split] == marker:
+                    self._classify(
+                        self._pending_ids[consumed:split], attribute, len(marker)
+                    )
+                    consumed = split
+                    index = split
+                    break
+            else:
+                index += 1
+        self._scanned = (
+            max(consumed, len(self._pending_ids) - self._max_marker_width + 1)
+            - consumed
+        )
+        if consumed:
+            del self._pending_ids[:consumed]
         if finished and self._pending_ids:
             self._classify(self._pending_ids)
             self._pending_ids = []
             self._scanned = 0
 
-    def _classify(self, segment: list[int]) -> None:
+    def _classify(
+        self, segment: list[int], end_attribute: str = "", marker_width: int = 0
+    ) -> None:
         if self.total is None:
             return
         text = self._tokenizer.decode(segment, skip_special_tokens=False)
@@ -1122,10 +1151,16 @@ class _ReasoningTokenCounter:
             if normal_text and self._start_marker_ids
             else -1
         )
-        if opening < 0:
-            self.total += len(segment)
-        else:
-            self.total += len(segment) - opening + len(self._start_marker_ids)
+        count = len(segment)
+        if opening >= 0:
+            count -= opening - len(self._start_marker_ids)
+        if end_attribute in ("TEXT_START_TOKEN", "ACTION_START_TOKEN") or (
+            end_attribute == "tool_start_token" and normal_text
+        ):
+            # A tool marker may be literal reasoning (e.g. a detector requiring
+            # it at line start). Exclude it only when the parser passes it on.
+            count -= marker_width
+        self.total += count
 
 
 def _reasoning_marker_ids(
