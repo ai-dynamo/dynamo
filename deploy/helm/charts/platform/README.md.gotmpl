@@ -52,27 +52,25 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ##### Reserved runtime init container name
 
-**Change:** Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates Dynamo
-sidecar mode. It must have an image and `restartPolicy: Always`. Dynamo defaults and
-runtime-version resolution target `spec.podTemplate.spec.initContainers[name=runtime]`;
-`spec.podTemplate.spec.containers[name=main]` runs the engine. These paths use the standalone
-v1beta1 DCD layout; for DGD components, replace the leading `spec.podTemplate` with
-`spec.components[*].podTemplate`. In v1alpha1, the corresponding paths are
-`spec.extraPodSpec.initContainers[name=runtime]` and `spec.extraPodSpec.mainContainer`;
-for DGD services, replace the leading `spec.extraPodSpec` with
-`spec.services.<service-name>.extraPodSpec`.
-Only worker, prefill, and decode components support this mode. Multinode, enabled checkpoint,
-GPU memory service, and failover are rejected because they are not currently supported in this
-mode. Support for these features is planned for a future release.
+**Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo
+sidecar mode for that component. The runtime container must specify an image and `restartPolicy: Always`.
+Dynamo defaults and runtime-version resolution target this container;
+`spec.components[*].podTemplate.spec.containers[name=main]` runs the engine.
 
-**Affected:** Any deployment with `spec.podTemplate.spec.initContainers[name=runtime]`,
+In v1alpha1, the corresponding paths are `spec.services.<service-name>.extraPodSpec.initContainers[name=runtime]`
+and `spec.services.<service-name>.extraPodSpec.mainContainer`.
+
+Only worker, prefill, and decode components support this mode. Multinode, enabled checkpoint, GPU memory
+service, and failover are currently unsupported and rejected. Support for these features is planned for a future release.
+
+**Affected:** Any deployment with `spec.components[*].podTemplate.spec.initContainers[name=runtime]`,
 including an unrelated setup container using that name.
 
 **Action:** Before upgrading, rename unrelated containers at
-`spec.podTemplate.spec.initContainers[name=runtime]`. For native Dynamo sidecars, declare
-`spec.podTemplate.spec.initContainers[name=runtime]` and specify `restartPolicy: Always`.
+`spec.components[*].podTemplate.spec.initContainers[name=runtime]`. For native Dynamo sidecars, declare
+`spec.components[*].podTemplate.spec.initContainers[name=runtime]` and specify `restartPolicy: Always`.
 
-**Existing deployments:** Components without `spec.podTemplate.spec.initContainers[name=runtime]`
+**Existing deployments:** Components without `spec.components[*].podTemplate.spec.initContainers[name=runtime]`
 retain their current mode. Existing components with that entry adopt sidecar behavior when
 reconciled, which can change the rendered pod and trigger a rollout. Invalid combinations are
 rejected on updates.
@@ -82,13 +80,12 @@ rejected on updates.
 ##### Frontend sidecar identity in container discovery mode
 
 **Change:** The operator now sets `CONTAINER_NAME` to the container selected by
-`spec.frontendSidecar`, rather than the name of `spec.podTemplate.spec.containers[name=main]`.
+`spec.components[*].frontendSidecar`, rather than `main`.
 In container discovery mode, the frontend registers as `{pod}-<name>`, where `<name>` is
-`spec.frontendSidecar`, instead of sharing the `{pod}` identity.
+`spec.components[*].frontendSidecar`, instead of sharing the `{pod}` identity.
 
-**Affected:** Existing components with `spec.frontendSidecar` and
-`nvidia.com/dynamo-kube-discovery-mode: container`. For DGD components, replace the leading
-`spec` in these field paths with `spec.components[*]`.
+**Affected:** Existing components with `spec.components[*].frontendSidecar` and
+`nvidia.com/dynamo-kube-discovery-mode: container`.
 
 **Action:** Plan for a one-time rollout of affected worker pods when upgrading the operator
 to v1.6.0. Update any tooling that depends on the frontend's previous registration identity.
