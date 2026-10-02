@@ -693,6 +693,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             reasoning_parser_name=preproc_result.effective_reasoning_parser_name,
             force_reasoning=preproc_result.force_reasoning,
+            tokenizer=self.tokenizer,
         )
 
         post = SglangStreamingPostProcessor(

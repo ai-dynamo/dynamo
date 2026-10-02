@@ -58,7 +58,7 @@ targets:
     type: trace-replay
     traffic: Mooncake chat trace, 8K ISL / 1K OSL, 1,805 requests, concurrency 14; the trace is designed for ~70% prefix reuse but achieves ~8.8% on this topology (working set oversubscribed against KV capacity)
   deploy:
-    asset: recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-generic.yaml
+    asset: recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-ib.yaml
   benchmark:
     tool: aiperf
     asset: recipes/k-exaone-2.0/perf/perf.yaml

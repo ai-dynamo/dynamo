@@ -179,6 +179,7 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     );
 }
 
+#[path = "../../tests/common/mod.rs"]
 mod common;
 
 #[tokio::test]
