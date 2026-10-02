@@ -97,6 +97,10 @@ spec:
               value: /tmp/hf_modules
             - name: NCCL_GRAPH_MIXING_SUPPORT
               value: "0"
+            # Avoid sending a local EAGLE3 canary through every attention-DP rank.
+            # Endpoint registration still gates worker readiness after engine init.
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
             # KV transfer (UCX zcopy on; no staging buffer required)
             - name: TRTLLM_TRY_ZCOPY_FOR_KVCACHE_TRANSFER
               value: "1"
@@ -267,7 +271,6 @@ data:
     trust_remote_code: true
     cuda_graph_config: null
     disable_overlap_scheduler: true
-    enable_autotuner: false
     moe_config:
       backend: TRTLLM
     kv_cache_config:
