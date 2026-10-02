@@ -78,5 +78,3 @@ metrics, or `--fpm-trace` or `DYN_FORWARDPASS_METRIC_PORT` when the Planner
 needs those metrics without the Prometheus surface. The deprecated
 `--publish-events-and-metrics` flag enables both publishing controls for one
 compatibility release.
-
-<Note>Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.</Note>
