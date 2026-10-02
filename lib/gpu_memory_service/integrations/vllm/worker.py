@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 import os
@@ -175,6 +176,54 @@ def _resolve_gms_visible_device(local_rank: int, parallel_config, platform) -> i
 
 class GMSWorker(_BaseWorker):
     """vLLM Worker subclass with GMS integration."""
+
+    def gms_fence_predecessor_cpu_writers(self) -> bool:
+        """Join the all-rank admission barrier without waiting for GPU proof."""
+        if not shared_kv_enabled():
+            raise RuntimeError("GMS CPU-writer fence requires shared KV")
+        from gpu_memory_service.integrations.vllm.writer_lifecycle import (
+            fence_joined_writer_cohort,
+        )
+
+        predecessor = asyncio.run(fence_joined_writer_cohort())
+        self._gms_predecessor_cohort = (
+            str(predecessor) if predecessor is not None else None
+        )
+        if int(self.rank) != 0:
+            from dynamo.common.gms_failover import classify_frozen_vllm_worker_rank
+
+            classify_frozen_vllm_worker_rank(self._gms_predecessor_cohort)
+        return True
+
+    def gms_prove_predecessor_gpu_quiescence(self) -> bool:
+        """Fence this rank's old CUDA client before mapped shadow KV is used."""
+        from gpu_memory_service.integrations.common.gpu_quiescence import (
+            gpu_quiescence_provider_configured,
+            prove_predecessor_gpu_quiescence_sync,
+        )
+
+        if not shared_kv_enabled() or not gpu_quiescence_provider_configured("vllm"):
+            raise RuntimeError(
+                "GMS mapped-KV takeover requires a local GPU-quiescence provider"
+            )
+        proof = prove_predecessor_gpu_quiescence_sync(
+            backend_name="vllm",
+            predecessor_cohort=getattr(self, "_gms_predecessor_cohort", None),
+            device=self._gms_device,
+        )
+        if not proof.quiesced:
+            raise RuntimeError(
+                "GMS refused persistent KV reuse without local GPU "
+                f"quiescence proof: {proof.detail}"
+            )
+        logger.info(
+            "[GMS] vLLM rank-local GPU quiescence proven provider=%s "
+            "elapsed_ms=%.2f detail=%s",
+            proof.provider,
+            proof.elapsed_ms,
+            proof.detail,
+        )
+        return True
 
     def init_device(self) -> None:
         """Initialize device with early GMS connection.
@@ -460,27 +509,12 @@ class GMSWorker(_BaseWorker):
             if shared_kv_enabled():
                 from gpu_memory_service.integrations.common.gpu_quiescence import (
                     gms_mps_provider_enabled,
-                    prove_predecessor_gpu_quiescence_sync,
                 )
 
-                if gms_mps_provider_enabled("vllm"):
-                    proof = prove_predecessor_gpu_quiescence_sync(
-                        backend_name="vllm",
-                        predecessor_cohort=None,
-                        device=self._gms_device,
-                    )
-                    if not proof.quiesced:
-                        raise RuntimeError(
-                            "GMS refused persistent KV remap without local GPU "
-                            f"quiescence proof: {proof.detail}"
-                        )
-                    logger.info(
-                        "[GMS] vLLM local GPU quiescence proven before KV remap "
-                        "provider=%s elapsed_ms=%.2f detail=%s",
-                        proof.provider,
-                        proof.elapsed_ms,
-                        proof.detail,
-                    )
+                if gms_mps_provider_enabled("vllm") or getattr(
+                    self, "_gms_predecessor_cohort", None
+                ):
+                    self.gms_prove_predecessor_gpu_quiescence()
             kv_manager.connect(RequestedLockType.RW_PERSISTENT)
             kv_manager.remap_persistent_vas(engine_id, shared=shared_kv_enabled())
             logger.info("[GMS] vLLM KV wake_up remap done")

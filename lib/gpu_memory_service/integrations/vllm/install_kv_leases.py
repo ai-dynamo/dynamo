@@ -221,6 +221,44 @@ def install_gms_engine_core_sleep() -> bool:
         logger.debug("[GMS] EngineCore sleep utility patch skipped", exc_info=True)
         return False
 
+    if not hasattr(EngineCore, "gms_fence_all_rank_cpu_writers"):
+
+        def gms_fence_all_rank_cpu_writers(self):
+            """Wait until no predecessor rank can submit writes to shared KV."""
+            results = self.model_executor.collective_rpc(
+                "gms_fence_predecessor_cpu_writers"
+            )
+            expected = self.vllm_config.parallel_config.world_size
+            if len(results) != expected or any(
+                result is not True for result in results
+            ):
+                raise RuntimeError(
+                    "GMS KV takeover lacks CPU-writer fences from every "
+                    f"vLLM worker (received {len(results)}/{expected})"
+                )
+            return None
+
+        EngineCore.gms_fence_all_rank_cpu_writers = gms_fence_all_rank_cpu_writers
+
+    if not hasattr(EngineCore, "gms_prove_all_rank_gpu_quiescence"):
+
+        def gms_prove_all_rank_gpu_quiescence(self):
+            """Do not resume mapped KV until every TP worker proves its local GPU safe."""
+            results = self.model_executor.collective_rpc(
+                "gms_prove_predecessor_gpu_quiescence"
+            )
+            expected = self.vllm_config.parallel_config.world_size
+            if len(results) != expected or any(
+                result is not True for result in results
+            ):
+                raise RuntimeError(
+                    "GMS KV takeover lacks GPU-quiescence proof from every "
+                    f"vLLM worker (received {len(results)}/{expected})"
+                )
+            return None
+
+        EngineCore.gms_prove_all_rank_gpu_quiescence = gms_prove_all_rank_gpu_quiescence
+
     if hasattr(EngineCore, "gms_sleep_no_clear"):
         return False
 
@@ -1176,7 +1214,12 @@ def _borrow_hbm_blocks(self, native_keys, entries, token):
             self._gms_kv_read_pins_by_block[lease.block_id] = (read_claim, claim)
             installed.append(block)
             out.append(block)
-        logger.info("[GMS-KVDirectory] vLLM borrowed_hbm_blocks=%d", len(out))
+        log_borrow = (
+            logger.warning
+            if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS")
+            else logger.info
+        )
+        log_borrow("[GMS-KVDirectory] vLLM borrowed_hbm_blocks=%d", len(out))
         return out
     except Exception:  # noqa: BLE001
         for block in installed:
@@ -1235,6 +1278,28 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
         for group_id in kv_cache_group_ids
     ]
     keys = [_directory_key(key) for key in native_keys]
+    frozen_successor = (
+        os.environ.get("DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", "").lower()
+        not in {"", "0", "false", "no", "off"}
+        and _failover_directory_standby() is True
+        and directory.authoritative
+        and getattr(self, "_gms_hydrate_hbm", False)
+    )
+    if frozen_successor:
+        # A directory promotion does not imply that the predecessor's queued
+        # GPU reads have retired. Borrow exact SEALED generations before any
+        # bulk writable-adoption attempt changes their directory state.
+        frozen_entries, frozen_token = directory.lookup_and_read_claim(keys)
+        try:
+            borrowed = _borrow_hbm_blocks(
+                self, native_keys, frozen_entries, frozen_token
+            )
+            if borrowed is not None:
+                frozen_token = None
+                return borrowed
+        finally:
+            if frozen_token is not None:
+                directory.release_claim(frozen_token)
     if directory.authoritative:
         _hydrate_hbm_directory(self, set(native_keys))
     token = None
@@ -1293,10 +1358,38 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
 
         acquired = client.adopt(old_leases)
         if acquired != expected:
-            if not acquired and _exact_leases_remain_readable(client, old_leases):
+            recoverable = not acquired and _exact_leases_remain_readable(
+                client, old_leases
+            )
+            if recoverable:
                 _restore_directory_hashes(directory, list(zip(keys, entries)))
                 restored = True
                 self._gms_hydrate_hbm = True
+                # A predecessor may still have submitted GPU reads of these
+                # immutable generations. The ring keeps such pages frozen, so
+                # ownership adoption is intentionally unavailable until proof.
+                # Borrow them read-only for this request instead of recomputing
+                # its entire sealed prefix. Each pin protects its exact lease.
+                read_token = None
+                try:
+                    read_entries, read_token = directory.lookup_and_read_claim(keys)
+                    borrowed = _borrow_hbm_blocks(
+                        self, native_keys, read_entries, read_token
+                    )
+                    if borrowed is not None:
+                        read_token = None
+                        return borrowed
+                    logger.warning(
+                        "[GMS-KVLease] exact HBM generations remain recoverable "
+                        "but read-only borrowing failed entries=%d matched=%d "
+                        "claim=%s",
+                        len(read_entries),
+                        sum(entry is not None for entry in read_entries),
+                        read_token is not None,
+                    )
+                finally:
+                    if read_token is not None:
+                        directory.release_claim(read_token)
             raise RuntimeError("GMS HBM adoption returned unexpected leases")
 
         out = []
@@ -1537,10 +1630,12 @@ def _reserve_dormant_headroom(self, recent_blocks: int, candidates=()) -> int:
             min(int(recent_blocks) * concurrency, int(self.num_gpu_blocks) // 8),
         )
         low = max(int(recent_blocks), low)
-        # Refill in batches: do not pay a directory RPC after every request.
+        # A two-wave refill crosses the low watermark again after just one
+        # concurrent wave on a recovered, nearly-full cache. Keep three waves
+        # between refills, capped so headroom cannot consume the prefix cache.
         high = min(
             int(self.num_gpu_blocks) - 1,
-            max(low, min(2 * low, int(self.num_gpu_blocks) // 4)),
+            max(low, min(4 * low, int(self.num_gpu_blocks) // 4)),
         )
     else:
         low = max(int(recent_blocks), max(1, int(configured)))

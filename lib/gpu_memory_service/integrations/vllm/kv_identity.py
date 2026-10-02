@@ -22,6 +22,20 @@ def shared_kv_enabled() -> bool:
 
 
 def failover_hooks_required() -> bool:
+    mode = (
+        os.environ.get(
+            "GMS_VLLM_KV_RECOVERY_MODE",
+            os.environ.get("GMS_KV_RECOVERY_MODE", "granular"),
+        )
+        .strip()
+        .lower()
+    )
+    if mode != "granular":
+        raise ValueError(
+            f"unsupported vLLM KV recovery mode {mode!r}; "
+            "only the lease-backed global-writer path remains "
+            "(legacy mode value 'granular')"
+        )
     return (
         shared_kv_enabled()
         or os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower()

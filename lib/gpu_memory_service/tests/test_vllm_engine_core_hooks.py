@@ -21,18 +21,40 @@ def test_sleep_utility_is_visible_on_spawned_engine_core_proc():
     from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
     original = EngineCore.__dict__.get("gms_sleep_no_clear")
+    original_proof = EngineCore.__dict__.get("gms_prove_all_rank_gpu_quiescence")
     if original is not None:
         delattr(EngineCore, "gms_sleep_no_clear")
+    if original_proof is not None:
+        delattr(EngineCore, "gms_prove_all_rank_gpu_quiescence")
     try:
         assert install_gms_engine_core_sleep()
         assert "gms_sleep_no_clear" in EngineCore.__dict__
         assert hasattr(EngineCoreProc, "gms_sleep_no_clear")
+        assert hasattr(EngineCoreProc, "gms_prove_all_rank_gpu_quiescence")
         assert not install_gms_engine_core_sleep()
+
+        executor = SimpleNamespace(collective_rpc=lambda method: [True, True])
+        core = SimpleNamespace(
+            model_executor=executor,
+            vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(world_size=2)),
+        )
+        prove = EngineCore.gms_prove_all_rank_gpu_quiescence
+        assert prove(core) is None
+        executor.collective_rpc = lambda method: [True]
+        with pytest.raises(RuntimeError, match="received 1/2"):
+            prove(core)
+        executor.collective_rpc = lambda method: [True, False]
+        with pytest.raises(RuntimeError, match="every vLLM worker"):
+            prove(core)
     finally:
         if hasattr(EngineCore, "gms_sleep_no_clear"):
             delattr(EngineCore, "gms_sleep_no_clear")
         if original is not None:
             EngineCore.gms_sleep_no_clear = original
+        if hasattr(EngineCore, "gms_prove_all_rank_gpu_quiescence"):
+            delattr(EngineCore, "gms_prove_all_rank_gpu_quiescence")
+        if original_proof is not None:
+            EngineCore.gms_prove_all_rank_gpu_quiescence = original_proof
 
 
 def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
@@ -415,11 +437,11 @@ def test_dormant_headroom_preserves_concurrent_admission(monkeypatch):
         lambda _pool, count: evictions.append(count) or count,
     )
 
-    assert leases_mod._reserve_dormant_headroom(pool, 8) == 180
-    assert evictions == [180]
+    assert leases_mod._reserve_dormant_headroom(pool, 8) == 380
+    assert evictions == [380]
     monkeypatch.setenv("GMS_VLLM_DORMANT_HEADROOM_BLOCKS", "256")
     assert leases_mod._reserve_dormant_headroom(pool, 8) == 236
-    assert evictions == [180, 236]
+    assert evictions == [380, 236]
 
 
 def test_completed_hbm_blocks_use_daemon_owned_publication_pipeline():
@@ -618,10 +640,15 @@ def test_bulk_hydration_invalidates_directory_if_native_install_fails():
     assert directory.released == []
 
 
-def test_read_pinned_hbm_adoption_remains_retryable(monkeypatch):
+@pytest.mark.parametrize("frozen", [False, True])
+def test_read_pinned_hbm_adoption_remains_retryable(monkeypatch, frozen):
     import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
     from gpu_memory_service.integrations.common.kv_lease_client import KVLease
     from vllm.v1.core import kv_cache_utils
+
+    monkeypatch.setenv("GMS_KV_DIRECTORY_DIAGNOSTICS", "1")
+    diagnostic = MagicMock()
+    monkeypatch.setattr(leases_mod.logger, "warning", diagnostic)
 
     native_key = b"n" * 36
     content_hash = leases_mod._directory_key(native_key)
@@ -643,8 +670,13 @@ def test_read_pinned_hbm_adoption_remains_retryable(monkeypatch):
             self.published = []
 
         def lookup_and_claim(self, keys):
+            assert not frozen, "frozen successor must borrow before writer adoption"
             assert keys == [content_hash]
             return [dict(old_entry)], "claim"
+
+        def lookup_and_read_claim(self, keys):
+            assert keys == [content_hash]
+            return [dict(old_entry)], "read-claim"
 
         def adopt_claim(self, token, items):
             assert token == "claim"
@@ -663,6 +695,7 @@ def test_read_pinned_hbm_adoption_remains_retryable(monkeypatch):
             self.unpinned = []
 
         def adopt(self, leases):
+            assert not frozen, "frozen successor must not adopt for writing"
             assert leases == [KVLease(1, 7)]
             return []
 
@@ -675,23 +708,38 @@ def test_read_pinned_hbm_adoption_remains_retryable(monkeypatch):
 
     directory = Directory()
     client = Client()
+    block = SimpleNamespace(ref_cnt=0, block_hash=None, block_id=1)
     pool = SimpleNamespace(
         _gms_hydrate_hbm=True,
         _gms_kv_directory=directory,
         _gms_kv_lease_client=client,
         _gms_kv_leases_by_block={},
         _gms_kv_directory_slot_by_hash={},
+        _gms_kv_read_pins_by_block={},
+        blocks=[SimpleNamespace(), block],
+        hash_block_size=4,
+        _insert_block_hash=lambda key, value, _size: setattr(value, "block_hash", key),
+        _maybe_evict_cached_block=lambda _block: None,
     )
     monkeypatch.setattr(leases_mod, "_hydrate_hbm_directory", lambda *_args: 0)
+    if frozen:
+        monkeypatch.setenv("DYN_GMS_FAILOVER_FROZEN_PREDECESSOR", "1")
+        monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+        monkeypatch.setenv("ENGINE_ID", "1")
+        monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
     monkeypatch.setattr(
         kv_cache_utils,
         "make_block_hash_with_group_id",
         lambda *_args: native_key,
     )
 
-    assert leases_mod._get_cached_block(pool, lambda *_args: None, b"hash", [0]) is None
-    assert client.unpinned == [(KVLease(1, 7),)]
-    assert directory.published == [
+    assert leases_mod._get_cached_block(pool, lambda *_args: None, b"hash", [0]) == [
+        block
+    ]
+    diagnostic.assert_called_with("[GMS-KVDirectory] vLLM borrowed_hbm_blocks=%d", 1)
+    assert client.unpinned == ([] if frozen else [(KVLease(1, 7),)])
+    assert 1 in pool._gms_kv_read_pins_by_block
+    expected_restoration = [
         {
             "content_hash": content_hash,
             "engine_id": "primary",
@@ -703,6 +751,7 @@ def test_read_pinned_hbm_adoption_remains_retryable(monkeypatch):
             "local_key": native_key,
         }
     ]
+    assert directory.published == ([] if frozen else expected_restoration)
     assert pool._gms_hydrate_hbm is True
 
 
