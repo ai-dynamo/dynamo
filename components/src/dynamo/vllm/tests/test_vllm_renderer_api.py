@@ -238,6 +238,8 @@ class TestVllmRendererApi:
         """
         process_inputs_sig = inspect.signature(InputProcessor.process_inputs)
         process_inputs_params = list(process_inputs_sig.parameters)
+        if "kv_hints" in process_inputs_sig.parameters:
+            assert process_inputs_sig.parameters["kv_hints"].default is None
 
         expected_prefix = ["self", "request_id", "prompt", "params"]
         assert process_inputs_params[:4] == expected_prefix, (
@@ -394,6 +396,12 @@ class TestVllmRendererApi:
         core_request_fields = core_request_fields + tuple(
             (*fields, "session_id") for fields in core_request_fields
         )
+        # Nightly ac9126e adds optional KV hints after session_id. Dynamo
+        # does not pass hints to InputProcessor, which defaults them to None.
+        # This native field precedes any Omni extensions.
+        core_request_fields = core_request_fields + tuple(
+            (*fields, "kv_hints") for fields in core_request_fields
+        )
         # vllm-omni monkey-patches EngineCoreRequest with an extra field, which
         # lands after every field vLLM declares.
         valid_request_fields = core_request_fields + tuple(
@@ -412,7 +420,7 @@ class TestVllmRendererApi:
             f"Actual:          {actual_request_fields}\n"
             "Update request construction in components/src/dynamo/frontend/vllm_processor.py"
         )
-        if "session_id" in actual_request_fields:
+        if {"session_id", "kv_hints"}.intersection(actual_request_fields):
             request_defaults = dict(
                 zip(
                     actual_request_fields[
@@ -422,7 +430,9 @@ class TestVllmRendererApi:
                     strict=True,
                 )
             )
-            assert request_defaults["session_id"] is None
+            for field in ("session_id", "kv_hints"):
+                if field in actual_request_fields:
+                    assert request_defaults[field] is None
 
         base_output_fields = (
             "request_id",
