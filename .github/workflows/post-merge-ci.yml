@@ -217,9 +217,6 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
-      # Lets sidecar-vllm-test (pr.yaml) fall back to this floating tag via its
-      # source_ref input instead of rebuilding vllm-runtime on every
-      # lib/sidecar/**-only PR.
       test_extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime-test' || '' }}
       archive_sources: false
@@ -287,9 +284,6 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
-      # Lets sidecar-sglang-test (pr.yaml) fall back to this floating tag via
-      # its source_ref input instead of rebuilding sglang-runtime on every
-      # lib/sidecar/**-only PR.
       test_extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime-test' || '' }}
       archive_sources: false
@@ -357,9 +351,6 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
-      # Lets sidecar-trtllm-test (pr.yaml) fall back to this floating tag via
-      # its source_ref input instead of rebuilding trtllm-runtime on every
-      # lib/sidecar/**-only PR.
       test_extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime-test' || '' }}
       archive_sources: false
@@ -491,7 +482,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('(pre_merge or post_merge) and sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('post_merge and sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       sidecar_backend: vllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
@@ -515,7 +506,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('(pre_merge or post_merge) and sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('post_merge and sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       sidecar_backend: sglang
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
@@ -529,13 +520,13 @@ jobs:
       dd_env: post-merge
       test_suite_name: trtllm
       framework: trtllm
-      test_type: Sidecar E2E Test
+      test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
       amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and sidecar and trtllm and gpu_1'
+      gpu_test_markers: 'post_merge and sidecar and trtllm and gpu_1'
       gpu_test_timeout_minutes: 45
       sidecar_backend: trtllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
@@ -556,9 +547,7 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      # not sidecar: sidecar-marked tests need dynamo-vllm-sidecar layered onto
-      # the image (see pr.yaml's sidecar-vllm-test), which this plain
-      # vllm-runtime image doesn't have.
+      # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
@@ -637,9 +626,7 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      # not sidecar: sidecar-marked tests need dynamo-sglang-sidecar layered
-      # onto the image (see pr.yaml's sidecar-sglang-test), which this plain
-      # sglang-runtime image doesn't have.
+      # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
@@ -682,9 +669,7 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      # not sidecar: sidecar-marked tests need dynamo-trtllm-sidecar layered
-      # onto the image (see pr.yaml's sidecar-trtllm-test), which this plain
-      # trtllm-runtime image doesn't have.
+      # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
