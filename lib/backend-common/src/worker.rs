@@ -507,8 +507,11 @@ impl Worker {
     /// `engine.cleanup()` is guaranteed to run exactly once if
     /// `engine.start()` succeeded, regardless of which path led to shutdown.
     pub async fn run(mut self, runtime: Runtime) -> Result<(), DynamoError> {
-        let mut watchdog = None;
-        let result = self.run_lifecycle(runtime.clone(), &mut watchdog).await;
+        let watchdog = Arc::new(std::sync::Mutex::new(None));
+        let mut signal_handle = None;
+        let result = self
+            .run_lifecycle(runtime.clone(), watchdog.clone(), &mut signal_handle)
+            .await;
         let teardown_bound = self
             .shutdown_budget
             .and_then(|budget| budget.remaining())
@@ -544,6 +547,10 @@ impl Worker {
         );
         outcome.log();
         self.observe_stage(&outcome);
+        if let Some(handle) = signal_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
         if timed_out {
             // Do not disarm the watchdog when transport teardown is unfinished.
             return Err(DynamoError::builder()
@@ -552,7 +559,7 @@ impl Worker {
                 .build());
         }
         if !self.cleanup_abandoned
-            && let Some(watchdog) = watchdog
+            && let Some(watchdog) = watchdog.lock().unwrap_or_else(|e| e.into_inner()).take()
         {
             let _ = watchdog.send(());
         }
@@ -562,7 +569,8 @@ impl Worker {
     async fn run_lifecycle(
         &mut self,
         runtime: Runtime,
-        watchdog: &mut Option<std::sync::mpsc::Sender<()>>,
+        watchdog: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+        signal_handle: &mut Option<tokio_util::task::AbortOnDropHandle<()>>,
     ) -> Result<(), DynamoError> {
         // Validate the worker config up front so misconfiguration surfaces
         // before any signal handlers, tokio tasks, or runtime construction.
@@ -572,6 +580,10 @@ impl Worker {
         // a listener task just to get an InvalidArgument error.
         validate_model_input(self.config.model_input, &self.engine)?;
         validate_route_to_encoder(&self.config)?;
+        self.config
+            .shutdown
+            .validate()
+            .map_err(|message| err(ErrorType::Backend(BackendError::InvalidArgument), message))?;
 
         // Install the OS signal handlers synchronously, before spawning
         // anything, so a SIGTERM delivered between this point and the
@@ -594,34 +606,42 @@ impl Worker {
             })?;
 
         // Single shared shutdown signal observed across all phases. The
-        // background task only flips the token; lifecycle transitions stay
-        // on this owned Worker instance.
+        // listener starts the watchdog and flips the token; lifecycle transitions
+        // stay on this owned Worker instance.
         let shutdown_token = CancellationToken::new();
         let signal_token = shutdown_token.clone();
-        let signal_handle = tokio::spawn(async move {
-            tokio::select! {
-                _ = sigterm.recv() => tracing::info!("SIGTERM received"),
-                _ = sigint.recv() => tracing::info!("SIGINT received"),
-            }
-            signal_token.cancel();
+        let shutdown_config = self.config.shutdown;
+        let started_at = Arc::clone(&self.shutdown_started_at);
+        *signal_handle = Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+            async move {
+                tokio::select! {
+                    _ = sigterm.recv() => tracing::info!("SIGTERM received"),
+                    _ = sigint.recv() => tracing::info!("SIGINT received"),
+                }
+                let _ = started_at.set(std::time::Instant::now());
+                *watchdog.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                    Self::arm_hard_watchdog(force_exit_deadline(&shutdown_config)),
+                );
+                signal_token.cancel();
 
-            // Keep listening. Tokio installs its `sigaction` process-wide and
-            // never removes it, so once this task ended a second SIGTERM — or a
-            // second Ctrl-C — was delivered to tokio's handler and discarded
-            // rather than falling through to the OS default. An operator
-            // watching a drain they know will not finish had no escalation
-            // short of SIGKILL.
-            tokio::select! {
-                _ = sigterm.recv() => {}
-                _ = sigint.recv() => {}
-            }
-            tracing::warn!(
-                "Second shutdown signal received during graceful shutdown; \
+                // Keep listening. Tokio installs its `sigaction` process-wide and
+                // never removes it, so once this task ended a second SIGTERM — or a
+                // second Ctrl-C — was delivered to tokio's handler and discarded
+                // rather than falling through to the OS default. An operator
+                // watching a drain they know will not finish had no escalation
+                // short of SIGKILL.
+                tokio::select! {
+                    _ = sigterm.recv() => {}
+                    _ = sigint.recv() => {}
+                }
+                tracing::warn!(
+                    "Second shutdown signal received during graceful shutdown; \
                  exiting immediately with code {}. Engine cleanup may not have run.",
-                EXIT_CODE_SHUTDOWN_TIMEOUT
-            );
-            std::process::exit(EXIT_CODE_SHUTDOWN_TIMEOUT);
-        });
+                    EXIT_CODE_SHUTDOWN_TIMEOUT
+                );
+                std::process::exit(EXIT_CODE_SHUTDOWN_TIMEOUT);
+            },
+        )));
 
         // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
         // once a signal arrives, the orchestrator + cleanup must finish
@@ -629,10 +649,6 @@ impl Worker {
         // otherwise we force-exit. Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
         // is cancelled.
-        let shutdown_config = self.config.shutdown;
-        // Cloned out before `run_inner` borrows `self`, so the cancellation arm
-        // can stamp the watchdog's start instant without touching `self`.
-        let started_at = Arc::clone(&self.shutdown_started_at);
         let outcome = {
             let inner_fut = self.run_inner(runtime, &shutdown_token);
             tokio::pin!(inner_fut);
@@ -640,16 +656,8 @@ impl Worker {
             tokio::select! {
                 result = &mut inner_fut => result,
                 _ = shutdown_token.cancelled() => {
-                    // Stamp the origin the stage budget will measure from. Both
-                    // clocks must start here: the orchestrator is not reached
-                    // until `begin_engine_route_shutdown` and the RL endpoint
-                    // teardown finish, and neither is bounded, so a budget armed
-                    // on arrival there would run past this watchdog by exactly
-                    // that skew.
-                    let _ = started_at.set(std::time::Instant::now());
-                    // Cleanup is reserved inside this same total deadline.
+                    // The signal listener already started the absolute watchdog.
                     let deadline = force_exit_deadline(&shutdown_config);
-                    *watchdog = Some(Self::arm_hard_watchdog(deadline));
                     tracing::debug!(
                         "graceful shutdown started; deadline {}s",
                         deadline.as_secs(),
@@ -669,9 +677,6 @@ impl Worker {
                 }
             }
         };
-
-        signal_handle.abort();
-        let _ = signal_handle.await;
 
         // Final safety net: guarantee engine.cleanup() runs if start()
         // succeeded. No-op if cleanup already ran via the orchestrator.
@@ -1118,10 +1123,9 @@ impl Worker {
             .get()
             .copied()
             .unwrap_or_else(std::time::Instant::now);
-        let budget = *self
+        *self
             .shutdown_budget
-            .get_or_insert_with(|| ShutdownBudget::from_config_starting_at(&config, origin));
-        budget
+            .get_or_insert_with(|| ShutdownBudget::from_config_starting_at(&config, origin))
     }
 
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all

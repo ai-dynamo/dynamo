@@ -410,11 +410,13 @@ mod tests {
         let (release, released) = tokio::sync::oneshot::channel();
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let completion = finished.clone();
-        runtime.register_teardown_task(tokio::spawn(async move {
+        let guard = runtime.teardown_guard().unwrap();
+        tokio::spawn(async move {
+            let _guard = guard;
             token.cancelled().await;
             released.await.unwrap();
             completion.store(true, Ordering::SeqCst);
-        }));
+        });
         let started = tokio::time::Instant::now();
         assert!(
             shutdown_runtime(&runtime, Duration::from_secs(1))

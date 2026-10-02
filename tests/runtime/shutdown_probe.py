@@ -20,6 +20,8 @@ class ProbeEngine(RawEngine):
         raise NotImplementedError
 
     async def start(self, worker_id):
+        if sys.argv[1] == "sdk-error-signal":
+            raise RuntimeError("synthetic startup failure")
         # Signal after the Rust listener is installed but before start returns.
         asyncio.get_running_loop().call_soon(os.kill, os.getpid(), signal.SIGTERM)
         await asyncio.sleep(0.05)
@@ -30,6 +32,11 @@ class ProbeEngine(RawEngine):
 
     async def cleanup(self):
         print("CLEANUP_STARTED", flush=True)
+        if sys.argv[1] == "sdk-error-signal":
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(10)
         if sys.argv[1] == "sdk-wedged":
             ctypes.PyDLL(None).sleep(30)
         print("ENGINE_CLEANED", flush=True)

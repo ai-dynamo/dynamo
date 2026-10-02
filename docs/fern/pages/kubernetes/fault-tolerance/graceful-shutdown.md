@@ -64,7 +64,7 @@ The total now includes router grace and cleanup: neither is added afterward. Inc
 >
 > The frontend's `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` is separate; it bounds a different process.
 
-The operator validates explicit literal total-budget settings after pod overrides are merged. It rejects an insufficient pod grace period or an unresolved `valueFrom` total. It does not change existing templates to inject a budget. For budgets set through `envFrom`, image defaults, or shell exports, declare a literal total in the pod template as well; otherwise the operator cannot validate the effective value. Programmatic SDK overrides must also be reflected in the pod configuration.
+The operator validates total-budget settings after pod overrides are merged, using the 30-second worker default when no non-empty literal setting is present. It rejects an insufficient pod grace period or an unresolved `valueFrom` total. It does not inject a budget into templates. For budgets set through `envFrom`, image defaults, or shell exports, declare a literal total in the pod template as well; otherwise validation only checks the default, not the effective value. Programmatic SDK overrides must also be reflected in the pod configuration.
 
 </Step>
 

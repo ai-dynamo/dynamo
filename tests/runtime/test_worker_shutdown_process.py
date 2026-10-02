@@ -18,14 +18,14 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("mode", ["sdk-host", "sdk-wedged"])
+@pytest.mark.parametrize("mode", ["sdk-host", "sdk-wedged", "sdk-error-signal"])
 def test_sdk_shutdown_watchdog_lifetime(mode):
     # Regression: a completed Worker.run killed its embedding host; disarming
     # early instead would leave blocked cleanup without its native watchdog.
     result = subprocess.run(
         [sys.executable, str(Path(__file__).with_name("shutdown_probe.py")), mode],
         env={
-            **os.environ,
+            **{key: value for key, value in os.environ.items() if key != "NATS_SERVER"},
             "DYN_SYSTEM_PORT": "0",
             "DYN_REQUEST_PLANE": "tcp",
             "DYN_TCP_RPC_PORT": "0",
@@ -36,7 +36,7 @@ def test_sdk_shutdown_watchdog_lifetime(mode):
         timeout=20,
     )
     assert "CLEANUP_STARTED" in result.stdout, result.stdout + result.stderr
-    expected_code = 70 if mode == "sdk-wedged" else 0
+    expected_code = 70 if mode in ("sdk-wedged", "sdk-error-signal") else 0
     assert result.returncode == expected_code, result.stdout + result.stderr
     if mode == "sdk-host":
         assert "ENGINE_CLEANED" in result.stdout
