@@ -70,22 +70,22 @@ async def init_multimodal_encode_worker(
         cache_publisher,
         shutdown_event,
     )
-    server_args = config.use_resolved_server_args(handler.encoder.server_args)
-
-    if handler._embedding_cache is not None:
-        register_embedding_cache_metrics(
-            endpoint=generate_endpoint,
-            cache=handler._embedding_cache,
-            model_name=server_args.served_model_name,
-            component_name=dynamo_args.component,
-        )
-
-    await pd_worker_client.wait_for_instances()
-
-    ready_event = asyncio.Event()
-
-    register_model_taint_route(runtime, generate_endpoint)
     try:
+        server_args = config.use_resolved_server_args(handler.encoder.server_args)
+
+        if handler._embedding_cache is not None:
+            register_embedding_cache_metrics(
+                endpoint=generate_endpoint,
+                cache=handler._embedding_cache,
+                model_name=server_args.served_model_name,
+                component_name=dynamo_args.component,
+            )
+
+        await pd_worker_client.wait_for_instances()
+
+        ready_event = asyncio.Event()
+
+        register_model_taint_route(runtime, generate_endpoint)
         _ = await asyncio.gather(
             serve_endpoint(
                 generate_endpoint,
@@ -153,38 +153,39 @@ async def init_multimodal_worker(
     shutdown_endpoints[:] = [generate_endpoint]
 
     engine = sgl.Engine(server_args=server_args)
-    server_args = config.use_resolved_server_args(engine.server_args)
-
-    if config.serving_mode == DisaggregationMode.DECODE:
-        logging.info("Initializing prefill client for multimodal decode worker")
-        prefill_client = await runtime.endpoint(
-            f"{dynamo_args.namespace}.prefill.generate"
-        ).client()
-        handler = MultimodalWorkerHandler(
-            engine, config, prefill_client, shutdown_event
-        )
-    else:
-        handler = MultimodalWorkerHandler(engine, config, None, shutdown_event)
-
-    if config.serving_mode == DisaggregationMode.DECODE:
-        health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
-    else:
-        health_check_payload = SglangHealthCheckPayload(engine).to_dict()
-
-    # This worker has no OpenAI surface (ModelType.Empty); it is reached only
-    # through the encode worker's client, never by the frontend. It registers a
-    # topology card so the serving-readiness gate counts it — the model is not
-    # advertised until this worker AND the encode worker (and the prefill
-    # worker, in disaggregated mode) are live.
-    if config.serving_mode == DisaggregationMode.DECODE:
-        readiness_worker_type = WorkerType.Decode
-        readiness_needs: list[list[WorkerType]] = [[WorkerType.Prefill]]
-    else:
-        readiness_worker_type = WorkerType.Aggregated
-        readiness_needs = [[WorkerType.Encode]]
-
-    register_model_taint_route(runtime, generate_endpoint)
+    handler = None
     try:
+        server_args = config.use_resolved_server_args(engine.server_args)
+
+        if config.serving_mode == DisaggregationMode.DECODE:
+            logging.info("Initializing prefill client for multimodal decode worker")
+            prefill_client = await runtime.endpoint(
+                f"{dynamo_args.namespace}.prefill.generate"
+            ).client()
+            handler = MultimodalWorkerHandler(
+                engine, config, prefill_client, shutdown_event
+            )
+        else:
+            handler = MultimodalWorkerHandler(engine, config, None, shutdown_event)
+
+        if config.serving_mode == DisaggregationMode.DECODE:
+            health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
+        else:
+            health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+
+        # This worker has no OpenAI surface (ModelType.Empty); it is reached only
+        # through the encode worker's client, never by the frontend. It registers a
+        # topology card so the serving-readiness gate counts it — the model is not
+        # advertised until this worker AND the encode worker (and the prefill
+        # worker, in disaggregated mode) are live.
+        if config.serving_mode == DisaggregationMode.DECODE:
+            readiness_worker_type = WorkerType.Decode
+            readiness_needs: list[list[WorkerType]] = [[WorkerType.Prefill]]
+        else:
+            readiness_worker_type = WorkerType.Aggregated
+            readiness_needs = [[WorkerType.Encode]]
+
+        register_model_taint_route(runtime, generate_endpoint)
         await asyncio.gather(
             serve_endpoint(
                 generate_endpoint,
@@ -209,7 +210,10 @@ async def init_multimodal_worker(
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
-        handler.cleanup()
+        if handler is not None:
+            handler.cleanup()
+        else:
+            engine.shutdown()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")
             await run_deferred_handlers()

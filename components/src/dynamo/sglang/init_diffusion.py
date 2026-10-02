@@ -65,37 +65,39 @@ async def init_llm_diffusion(
     set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
 
     engine = sgl.Engine(server_args=server_args)
-    server_args = config.use_resolved_server_args(engine.server_args)
-
-    shutdown_endpoints[:] = [generate_endpoint]
-
-    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, generate_endpoint
-    )
-    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
-    # which take a different init path entirely. Narrow for mypy.
-    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
-
-    if server_args.node_rank >= 1:
-        await handle_non_leader_node(engine, publisher, metrics_task)
-        return
-
-    ready_event = asyncio.Event()
-
-    handler = DiffusionWorkerHandler(
-        engine, config, publisher, generate_endpoint, shutdown_event
-    )
-    handler.register_engine_routes(runtime)
-
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
-    ).to_dict()
-
-    logging.info(
-        f"Registering diffusion model with endpoint types: {dynamo_args.endpoint_types}"
-    )
-
+    handler = None
+    metrics_task = None
     try:
+        server_args = config.use_resolved_server_args(engine.server_args)
+
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+            engine, config, generate_endpoint
+        )
+        # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+        # which take a different init path entirely. Narrow for mypy.
+        assert publisher is not None, "setup_sgl_metrics returned None on chat path"
+
+        if server_args.node_rank >= 1:
+            await handle_non_leader_node(engine, publisher, metrics_task)
+            return
+
+        ready_event = asyncio.Event()
+
+        handler = DiffusionWorkerHandler(
+            engine, config, publisher, generate_endpoint, shutdown_event
+        )
+        handler.register_engine_routes(runtime)
+
+        health_check_payload = SglangHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
+
+        logging.info(
+            f"Registering diffusion model with endpoint types: {dynamo_args.endpoint_types}"
+        )
+
         await asyncio.gather(
             serve_endpoint(
                 generate_endpoint,
@@ -120,13 +122,16 @@ async def init_llm_diffusion(
         logging.error(f"Failed to serve diffusion endpoints: {e}")
         raise
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
+        if metrics_task is not None:
+            metrics_task.cancel()
+            try:
+                await metrics_task
+            except asyncio.CancelledError:
+                logging.info("Metrics task successfully cancelled")
+        if handler is not None:
+            handler.cleanup()
+        else:
+            engine.shutdown()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")
             await run_deferred_handlers()

@@ -529,18 +529,17 @@ impl Worker {
             Duration::ZERO,
             &budget,
         ));
-        let timed_out = tokio::time::timeout(
+        let teardown = tokio::time::timeout(
             teardown_bound,
             runtime.shutdown_and_wait(Some(teardown_bound)),
         )
-        .await
-        .is_err();
+        .await;
         let outcome = StageOutcome::new(
             Stage::Runtime,
-            if timed_out {
-                StageReason::TimedOut
-            } else {
-                StageReason::Completed
+            match &teardown {
+                Err(_) => StageReason::TimedOut,
+                Ok(Err(_)) => StageReason::Failed,
+                Ok(Ok(())) => StageReason::Completed,
             },
             runtime_started.elapsed(),
             &budget,
@@ -551,11 +550,16 @@ impl Worker {
             handle.abort();
             let _ = handle.await;
         }
-        if timed_out {
+        let teardown_error = match teardown {
+            Err(_) => Some("runtime teardown exceeded shutdown cleanup budget".to_string()),
+            Ok(Err(error)) => Some(error.to_string()),
+            Ok(Ok(())) => None,
+        };
+        if let Some(error) = teardown_error {
             // Do not disarm the watchdog when transport teardown is unfinished.
             return Err(DynamoError::builder()
                 .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                .message("runtime teardown exceeded shutdown cleanup budget")
+                .message(error)
                 .build());
         }
         if !self.cleanup_abandoned
@@ -1507,9 +1511,10 @@ impl Worker {
             if let Err(error) = primary_endpoint.shutdown().await {
                 tracing::warn!(%error, "primary endpoint shutdown failed");
             }
-            // No tracker: this path never began serving, so there is no
-            // admission gate to close or in-flight count to wait on.
-            self.orchestrator_steps(&endpoint, None).await;
+            // The local engine can already serve canary requests even before
+            // readiness is published. Close its admission gate as well.
+            self.orchestrator_steps(&endpoint, Some(&request_tracker))
+                .await;
             return Ok(());
         }
 

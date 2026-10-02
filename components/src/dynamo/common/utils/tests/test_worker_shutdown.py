@@ -51,6 +51,9 @@ def test_shutdown_drains_admitted_stream_before_engine_and_runtime(shutdown_env)
         stop = asyncio.Event()
 
         class Runtime:
+            async def shutdown_engine_routes(self):
+                pass
+
             async def shutdown_and_wait(self):
                 assert events[-1] == "engine"
                 events.append("runtime")
@@ -111,6 +114,9 @@ def test_prefill_reserves_cleanup_inside_total(shutdown_env, monkeypatch):
         started = asyncio.Event()
 
         class Runtime:
+            async def shutdown_engine_routes(self):
+                pass
+
             async def shutdown_and_wait(self):
                 assert cleaned.is_set()
 
@@ -150,6 +156,9 @@ def test_cleanup_timeout_is_failure_and_does_not_extend_stage(
         finish = asyncio.Event()
 
         class Runtime:
+            async def shutdown_engine_routes(self):
+                pass
+
             async def shutdown_and_wait(self):
                 pass
 
@@ -230,7 +239,10 @@ def test_canonical_budget_overrides_alias_and_reserves_cleanup(
     asyncio.run(run())
 
 
-def test_unregister_failure_is_observed_without_stopping_teardown(shutdown_env):
+@pytest.mark.parametrize("runtime_fails", [False, True])
+def test_unregister_failure_is_observed_without_stopping_teardown(
+    shutdown_env, runtime_fails
+):
     # Regression: swallowed discovery errors reported a successful withdrawal.
     async def run():
         class Endpoint:
@@ -238,8 +250,12 @@ def test_unregister_failure_is_observed_without_stopping_teardown(shutdown_env):
                 raise RuntimeError("discovery unavailable")
 
         class Runtime:
-            async def shutdown_and_wait(self):
+            async def shutdown_engine_routes(self):
                 pass
+
+            async def shutdown_and_wait(self):
+                if runtime_fails:
+                    raise RuntimeError("runtime teardown incomplete")
 
         shutdown = ws.WorkerShutdown(Runtime(), [Endpoint()], asyncio.Event())
         shutdown._metrics = Mock()
@@ -250,15 +266,24 @@ def test_unregister_failure_is_observed_without_stopping_teardown(shutdown_env):
         task = asyncio.create_task(shutdown.run(worker(), install_signals=False))
         await asyncio.sleep(0)
         shutdown.request_shutdown()
-        await task
+        if runtime_fails:
+            with pytest.raises(RuntimeError, match="worker shutdown did not complete"):
+                await task
+        else:
+            await task
         outcomes = [
             (call.args[0], call.args[1])
             for call in shutdown._metrics.record_stage.call_args_list
         ]
         assert ("unregister", "failed") in outcomes
         assert ("unregister", "completed") not in outcomes
-        assert ("runtime", "completed") in outcomes
-        shutdown_env.finish.assert_called_once()
+        if runtime_fails:
+            assert ("runtime", "failed") in outcomes
+            assert ("runtime", "completed") not in outcomes
+            shutdown_env.finish.assert_not_called()
+        else:
+            assert ("runtime", "completed") in outcomes
+            shutdown_env.finish.assert_called_once()
 
     asyncio.run(run())
 
@@ -286,6 +311,9 @@ def test_sglang_deferred_signals_run_after_runtime_teardown(shutdown_env):
         started = asyncio.Event()
 
         class Runtime:
+            async def shutdown_engine_routes(self):
+                pass
+
             async def shutdown_and_wait(self):
                 events.append("runtime")
 

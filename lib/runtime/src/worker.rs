@@ -149,7 +149,7 @@ fn remaining_shutdown_budget() -> std::time::Duration {
 async fn shutdown_runtime(runtime: &Runtime, remaining: std::time::Duration) -> anyhow::Result<()> {
     tokio::time::timeout(remaining, runtime.shutdown_and_wait(Some(remaining)))
         .await
-        .map_err(|_| anyhow::anyhow!("runtime teardown exceeded the worker shutdown deadline"))
+        .map_err(|_| anyhow::anyhow!("runtime teardown exceeded the worker shutdown deadline"))?
 }
 
 #[derive(Debug, Clone)]
@@ -426,7 +426,7 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::from_secs(1));
         assert!(!finished.load(Ordering::SeqCst));
         release.send(()).unwrap();
-        runtime.shutdown_and_wait(None).await;
+        runtime.shutdown_and_wait(None).await.unwrap();
         assert!(finished.load(Ordering::SeqCst));
     }
 }

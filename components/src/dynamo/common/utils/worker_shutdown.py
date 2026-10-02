@@ -76,6 +76,7 @@ class WorkerShutdown:
         self.prefill = prefill
         self.pre_shutdown = pre_shutdown
         self.post_shutdown: Callable[[], Awaitable[None]] | None = None
+        self.pre_unregister: Callable[[], Awaitable[None]] | None = None
         # Gateway parents delegate discovery and request draining to children.
         self.notify_children: Callable[[], None] | None = None
         self.wait_for_children: Callable[[], Awaitable[None]] | None = None
@@ -242,6 +243,19 @@ class WorkerShutdown:
                 raise
 
     async def _shutdown(self) -> None:
+        assert self._worker is not None
+
+        async def stop_controls():
+            await self.runtime.shutdown_engine_routes()
+            if self.pre_unregister is not None:
+                await self.pre_unregister()
+
+        # Controls may resume generation or republish discovery. Join them before
+        # withdrawal, without cancelling the transports needed for engine cleanup.
+        if not await self._stage("engine_controls", stop_controls(), self._remaining()):
+            raise RuntimeError(
+                "engine control callbacks did not stop; cleanup is unsafe"
+            )
         if self.notify_children is not None:
             self.notify_children()
         await self._stage(

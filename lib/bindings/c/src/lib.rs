@@ -189,14 +189,19 @@ pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
     // down after a partial init, where `DRT` was never populated.
     let runtime = wk.runtime().clone();
     let bound = Some(dynamo_runtime::worker::graceful_shutdown_timeout());
-    match DRT.get() {
+    let result = match DRT.get() {
         Some(drt) => runtime.secondary().block_on(drt.shutdown_and_wait(bound)),
         None => runtime
             .secondary()
             .block_on(runtime.shutdown_and_wait(bound)),
+    };
+    match result {
+        Ok(()) => DynamoLlmResult::OK,
+        Err(error) => {
+            tracing::error!(%error, "Runtime teardown incomplete");
+            DynamoLlmResult::ERR
+        }
     }
-
-    DynamoLlmResult::OK
 }
 
 #[unsafe(no_mangle)]

@@ -167,6 +167,8 @@ async def init_decode(
         )
         handler.register_engine_routes(runtime)
         if attached_engine is not None:
+            if shutdown is not None:
+                shutdown.pre_unregister = handler.wait_for_discovery_sync
             handler.follow_shared_pause_state()
 
         if config.serving_mode == DisaggregationMode.DECODE:
@@ -370,6 +372,8 @@ async def init_prefill(
         )
         handler.register_engine_routes(runtime)
         if attached_engine is not None:
+            if shutdown is not None:
+                shutdown.pre_unregister = handler.wait_for_discovery_sync
             handler.follow_shared_pause_state()
 
         health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()

@@ -703,6 +703,10 @@ async fn engine_route_handler(
         }
     };
 
+    if state.drt().engine_routes().is_closed() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Worker is shutting down").into_response();
+    }
+
     // Look up callback
     let callback = match state.drt().engine_routes().get(&path) {
         Some(cb) => cb,

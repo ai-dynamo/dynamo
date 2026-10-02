@@ -336,6 +336,9 @@ if __name__ == "__main__":
 
         async def failed_probe():
             class Runtime:
+                async def shutdown_engine_routes(self):
+                    pass
+
                 async def shutdown_and_wait(self):
                     print("RUNTIME_FINISHED", flush=True)
 

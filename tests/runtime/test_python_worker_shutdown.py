@@ -83,7 +83,32 @@ async def test_python_draining_rejection_survives_transport(
             async for _ in stream:
                 pytest.fail("a draining worker emitted data")
         requested = True
-        shutdown.request_shutdown()
+        if request_plane == "tcp" and not push:
+            entered = asyncio.Event()
+            release_control = asyncio.Event()
+
+            async def control(body):
+                entered.set()
+                await release_control.wait()
+                assert not cleanup_entered.is_set()
+                return {"status": "ok"}
+
+            runtime.register_engine_route("test_shutdown", control)
+            async with httpx.AsyncClient(timeout=2, trust_env=False) as http:
+                url = f"http://127.0.0.1:{system_port}/engine/test_shutdown"
+                admitted = asyncio.create_task(http.post(url, json={}))
+                try:
+                    await entered.wait()
+                    shutdown.request_shutdown()
+                    while not runtime.engine_routes_closed():
+                        await asyncio.sleep(0)
+                    assert not cleanup_entered.is_set()
+                    assert (await http.post(url, json={})).status_code == 503
+                finally:
+                    release_control.set()
+                    await admitted
+        else:
+            shutdown.request_shutdown()
         await cleanup_entered.wait()
         if request_plane == "tcp" and not push:
             # One representative case checks publication through the shared handle.

@@ -1478,7 +1478,8 @@ impl DistributedRuntime {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
                 .shutdown_and_wait(Some(dynamo_runtime::worker::graceful_shutdown_timeout()))
-                .await;
+                .await
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             Ok(())
         })
     }
@@ -1495,6 +1496,20 @@ impl DistributedRuntime {
         self.inner
             .system_status_server_info()
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
+    }
+
+    /// Stop engine-control admission and join already-admitted callbacks.
+    fn shutdown_engine_routes<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let routes = self.inner.engine_routes().clone();
+        routes.close();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            routes.wait_for_idle().await;
+            Ok(())
+        })
+    }
+
+    fn engine_routes_closed(&self) -> bool {
+        self.inner.engine_routes().is_closed()
     }
 
     /// Register an async Python callback for /engine/{route_name}
