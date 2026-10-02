@@ -13,7 +13,6 @@ from typing import Any
 import torch
 
 from dynamo.vllm.multimodal_utils.custom_encoder import VisionEncoderBackend
-
 from examples.custom_encoder.hitchhikers_vision_encoder import HitchhikersVisionEncoder
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
