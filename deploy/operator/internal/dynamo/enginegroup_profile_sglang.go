@@ -45,6 +45,7 @@ const (
 	sglangMoEDataParallelSizeOption     = "--moe-dp-size"
 	sglangExpertParallelSizeOption      = "--ep-size"
 	sglangNodesOption                   = "--nnodes"
+	sglangNodeRankOption                = "--node-rank"
 	sglangElasticBackendOption          = "--elastic-ep-backend"
 	sglangMoEA2ABackendOption           = "--moe-a2a-backend"
 	sglangElasticInitialSizeOption      = "--elastic-ep-initial-size"
@@ -64,6 +65,10 @@ const (
 	sglangConfigOption                  = "--config"
 	sglangCUDAGraphConfigOption         = "--cuda-graph-config"
 )
+
+// SGLangElasticEPBootstrapModule is the typed, width-one Grove bootstrap entrypoint.
+// It preserves the declared initial geometry and derives joining roles from native Grove identity.
+const SGLangElasticEPBootstrapModule = "dynamo.sglang.elastic_ep_bootstrap"
 
 // ErrUnsupportedSGLangProfileSource classifies SGLang declarations whose geometry cannot be proven statically.
 var ErrUnsupportedSGLangProfileSource = errors.New("unsupported SGLang Engine Group profile source")
@@ -169,6 +174,7 @@ var sglangProfileOptions = []sglangProfileOption{
 	{canonical: sglangMoEDataParallelSizeOption, aliases: []string{sglangMoEDataParallelSizeOption, "--moe-data-parallel-size"}},
 	{canonical: sglangExpertParallelSizeOption, aliases: []string{sglangExpertParallelSizeOption, "--expert-parallel-size", "--ep"}},
 	{canonical: sglangNodesOption, aliases: []string{sglangNodesOption}},
+	{canonical: sglangNodeRankOption, aliases: []string{sglangNodeRankOption}},
 	{canonical: sglangElasticBackendOption, aliases: []string{sglangElasticBackendOption}},
 	{canonical: sglangMoEA2ABackendOption, aliases: []string{sglangMoEA2ABackendOption}},
 	{canonical: sglangElasticInitialSizeOption, aliases: []string{sglangElasticInitialSizeOption}},
@@ -254,7 +260,7 @@ func ResolveSGLangElasticEPProfile(source SGLangProfileGeometrySource) (Resolved
 
 func parseSGLangProfileGeometry(command, args []string) (parsedSGLangProfileGeometry, error) {
 	// Resolve the exact engine invocation before inspecting any options.
-	argv, err := resolveSGLangProfileArguments(command, args)
+	argv, groveBootstrap, err := resolveSGLangProfileArguments(command, args)
 	if err != nil {
 		return parsedSGLangProfileGeometry{}, err
 	}
@@ -328,6 +334,18 @@ func parseSGLangProfileGeometry(command, args []string) (parsedSGLangProfileGeom
 	// Validate non-geometric switches that make this declaration the merged growth-only implementation.
 	if err := validateSGLangScaleUpContract(values, flags, tokenizerWorkers); err != nil {
 		return parsedSGLangProfileGeometry{}, err
+	}
+
+	// The typed compatibility entrypoint has deliberately narrower geometry than native SGLang.
+	if groveBootstrap {
+		_, explicitNodeRank := values[sglangNodeRankOption]
+		if tensorParallelSize != 1 || dataParallelSize != 1 || nodes != 1 ||
+			elasticInitialSize != 1 || elasticMaximumSize != 2 || explicitNodeRank {
+			return parsedSGLangProfileGeometry{}, &UnsupportedSGLangProfileSourceError{
+				Reason: UnsupportedSGLangProfileSourceReasonScaleUpContract,
+				Detail: "Grove bootstrap requires EP1 -> EP2 with an implicit native allocation role",
+			}
+		}
 	}
 
 	return parsedSGLangProfileGeometry{
@@ -455,13 +473,13 @@ func validateSGLangScaleUpGeometry(geometry parsedSGLangProfileGeometry, initial
 	return nil
 }
 
-func resolveSGLangProfileArguments(command, args []string) ([]string, error) {
+func resolveSGLangProfileArguments(command, args []string) ([]string, bool, error) {
 	// Preserve caller-owned slices while examining one combined exec-form invocation.
 	argv := make([]string, 0, len(command)+len(args))
 	argv = append(argv, command...)
 	argv = append(argv, args...)
 	if len(argv) == 0 {
-		return nil, &UnsupportedSGLangProfileSourceError{
+		return nil, false, &UnsupportedSGLangProfileSourceError{
 			Reason: UnsupportedSGLangProfileSourceReasonCommandForm,
 			Detail: "an explicit SGLang executable is required",
 		}
@@ -470,24 +488,24 @@ func resolveSGLangProfileArguments(command, args []string) ([]string, error) {
 	// Reject launchers that can rewrite or interpolate the effective command.
 	executable := filepath.Base(argv[0])
 	if isProfileShellOrWrapper(executable) {
-		return nil, &UnsupportedSGLangProfileSourceError{
+		return nil, false, &UnsupportedSGLangProfileSourceError{
 			Reason: UnsupportedSGLangProfileSourceReasonShell,
 			Detail: fmt.Sprintf("%s owns the effective SGLang argv", executable),
 		}
 	}
 
-	// Accept Dynamo's module, SGLang's upstream module, or the documented `sglang serve` command.
+	// Recognize the typed bootstrap explicitly; opaque shell entrypoints remain unsupported.
 	if isSupportedProfilePythonExecutable(executable) && len(argv) >= 3 && argv[1] == "-m" &&
-		(argv[2] == sglangDynamoModule || argv[2] == sglangUpstreamModule) {
-		return argv[3:], nil
+		(argv[2] == sglangDynamoModule || argv[2] == sglangUpstreamModule || argv[2] == SGLangElasticEPBootstrapModule) {
+		return argv[3:], argv[2] == SGLangElasticEPBootstrapModule, nil
 	}
 	if executable == "sglang" && len(argv) >= 2 && argv[1] == sglangServeSubcommand {
-		return argv[2:], nil
+		return argv[2:], false, nil
 	}
 
-	return nil, &UnsupportedSGLangProfileSourceError{
+	return nil, false, &UnsupportedSGLangProfileSourceError{
 		Reason: UnsupportedSGLangProfileSourceReasonCommandForm,
-		Detail: "expected python -m dynamo.sglang, python -m sglang.launch_server, or sglang serve",
+		Detail: "expected a supported Dynamo/SGLang Python module or sglang serve",
 	}
 }
 

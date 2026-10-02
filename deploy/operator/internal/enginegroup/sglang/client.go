@@ -15,11 +15,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const (
-	scalePath = "/engine/control/scale_elastic_ep"
-	statePath = "/engine/control/is_scaling_elastic_ep"
+	scalePath                 = "/engine/control/scale_elastic_ep"
+	statePath                 = "/engine/control/is_scaling_elastic_ep"
+	defaultObservationTimeout = 5 * time.Second
+	defaultScaleTimeout       = 12 * time.Minute
 )
 
 // ScaleState is SGLang's current engine-authoritative Elastic EP state.
@@ -45,8 +48,10 @@ type ScaleResponse struct {
 // Client calls the Dynamo SGLang worker's backend-neutral system routes.
 // BaseURL identifies one primary worker and must not contain a route path.
 type Client struct {
-	BaseURL    *url.URL
-	HTTPClient *http.Client
+	BaseURL            *url.URL
+	HTTPClient         *http.Client
+	ObservationTimeout time.Duration
+	ScaleTimeout       time.Duration
 }
 
 // NewClient validates and constructs a control client.
@@ -65,11 +70,18 @@ func NewClient(rawBaseURL string, httpClient *http.Client) (*Client, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{BaseURL: parsed, HTTPClient: httpClient}, nil
+	return &Client{
+		BaseURL: parsed, HTTPClient: httpClient,
+		ObservationTimeout: defaultObservationTimeout, ScaleTimeout: defaultScaleTimeout,
+	}, nil
 }
 
 // Observe returns SGLang's current Elastic EP state.
 func (c *Client) Observe(ctx context.Context) (ScaleState, error) {
+	// Status reads must not inherit the long budget required by the legacy resize POST.
+	ctx, cancel := context.WithTimeout(ctx, c.ObservationTimeout)
+	defer cancel()
+
 	var state ScaleState
 	if err := c.doJSON(ctx, http.MethodGet, statePath, nil, &state); err != nil {
 		return ScaleState{}, err
@@ -89,6 +101,10 @@ func (c *Client) Scale(ctx context.Context, target int32) (ScaleResponse, error)
 	if target <= 0 {
 		return ScaleResponse{}, fmt.Errorf("SGLang EP target must be positive, got %d", target)
 	}
+	// Bound synchronous legacy dispatch without weakening the caller's deadline.
+	ctx, cancel := context.WithTimeout(ctx, c.ScaleTimeout)
+	defer cancel()
+
 	request := struct {
 		NewEPSize int32 `json:"new_ep_size"`
 	}{NewEPSize: target}

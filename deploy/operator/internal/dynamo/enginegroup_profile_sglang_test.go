@@ -479,6 +479,47 @@ func newTestSGLangProfileGeometrySource() SGLangProfileGeometrySource {
 	}
 }
 
+func TestResolveSGLangProfileGeometryGroveBootstrap(t *testing.T) {
+	// The compatibility launcher is intentionally narrower than the native engine resolver.
+	cases := []struct {
+		name        string
+		option      string
+		value       string
+		unsupported bool
+	}{
+		{name: "one-GPU EP1 to EP2"},
+		{name: "wider launch is not implemented", option: sglangTensorParallelSizeOption, value: "2", unsupported: true},
+		{name: "additional append steps are not implemented", option: sglangMaximumEPSizeOption, value: "4", unsupported: true},
+		{name: "native node rank conflicts with slot identity", option: sglangNodeRankOption, value: "0", unsupported: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("construct the shared Grove bootstrap template with one narrow profile")
+			source := newTestSGLangProfileGeometrySource()
+			source.Command = []string{"python3", "-m", SGLangElasticEPBootstrapModule}
+			source.InitialReplicas = 1
+			for _, option := range []string{sglangTensorParallelSizeOption, sglangDataParallelSizeOption,
+				sglangNodesOption, sglangElasticInitialSizeOption} {
+				source.Args = setTestSGLangOption(source.Args, option, "1")
+			}
+			source.Args = setTestSGLangOption(source.Args, sglangMaximumEPSizeOption, "2")
+			if tc.option != "" {
+				source.Args = setTestSGLangOption(source.Args, tc.option, tc.value)
+			}
+
+			t.Log("resolve only geometry that the actual typed launcher implements")
+			resolved, err := ResolveSGLangElasticEPProfile(source)
+			if tc.unsupported {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, int32(1), resolved.InitialReplicas)
+			assert.Equal(t, int32(2), resolved.MaximumReplicas)
+		})
+	}
+}
+
 func cloneTestSGLangProfileGeometrySource(source SGLangProfileGeometrySource) SGLangProfileGeometrySource {
 	cloned := source
 	cloned.Command = append([]string(nil), source.Command...)

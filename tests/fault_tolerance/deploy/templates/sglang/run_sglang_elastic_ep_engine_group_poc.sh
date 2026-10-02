@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Attach the running EP1 SGLang DGD worker to an Engine Group, request EP2
+# Bind the running EP1 Grove member clique to an Engine Group, request EP2
 # through the Kubernetes Scale subresource, and verify committed serving.
 
 set -euo pipefail
@@ -12,9 +12,9 @@ DEPLOYMENT_NAME="${2:-sglang-elastic-ep-poc}"
 GROUP_NAME="${3:-sglang-elastic-ep-poc}"
 MODEL="${MODEL:-deepseek-ai/DeepSeek-V2-Lite}"
 
-worker_pod() {
+primary_pod() {
   kubectl get pods -n "$NS" \
-    -l "nvidia.com/dynamo-component=SGLangDecodeWorker,nvidia.com/dynamo-graph-deployment-name=$DEPLOYMENT_NAME" \
+    -l "nvidia.com/dynamo-engine-group=$GROUP_NAME,grove.io/podclique-pod-index=0" \
     --field-selector=status.phase=Running \
     --sort-by=.metadata.name \
     -o jsonpath='{.items[0].metadata.name}'
@@ -30,22 +30,20 @@ frontend_pod() {
 
 echo "Waiting for the EP1 primary and frontend"
 kubectl wait -n "$NS" --for=condition=Ready pod \
-  -l "nvidia.com/dynamo-component=SGLangDecodeWorker,nvidia.com/dynamo-graph-deployment-name=$DEPLOYMENT_NAME" \
+  -l "nvidia.com/dynamo-engine-group=$GROUP_NAME,grove.io/podclique-pod-index=0" \
   --timeout=1200s
 kubectl wait -n "$NS" --for=condition=Ready pod \
   -l "nvidia.com/dynamo-component=Frontend,nvidia.com/dynamo-graph-deployment-name=$DEPLOYMENT_NAME" \
   --timeout=1200s
 
-PRIMARY="$(worker_pod)"
+PRIMARY="$(primary_pod)"
+PRIMARY_UID="$(kubectl get pod -n "$NS" "$PRIMARY" -o jsonpath='{.metadata.uid}')"
+CLIQUE="$(kubectl get pod -n "$NS" "$PRIMARY" -o jsonpath='{.metadata.labels.grove\.io/podclique}')"
+CLIQUE_UID="$(kubectl get podclique -n "$NS" "$CLIQUE" -o jsonpath='{.metadata.uid}')"
+WORLD="$(kubectl get podclique -n "$NS" "$CLIQUE" -o jsonpath='{.metadata.ownerReferences[?(@.controller==true)].name}')"
 FRONTEND_IP="$(kubectl get pod -n "$NS" "$(frontend_pod)" -o jsonpath='{.status.podIP}')"
 
-echo "Binding $PRIMARY to Engine Group $GROUP_NAME"
-kubectl label pod -n "$NS" "$PRIMARY" --overwrite \
-  "nvidia.com/dynamo-engine-group=$GROUP_NAME" \
-  "nvidia.com/dynamo-engine-group-replica=replica-0" \
-  "nvidia.com/dynamo-engine-group-slot=slot-0" \
-  "nvidia.com/dynamo-engine-group-role=primary" \
-  "nvidia.com/dynamo-scale-representative=true"
+echo "Binding Grove member clique $CLIQUE (UID $CLIQUE_UID) to Engine Group $GROUP_NAME"
 
 kubectl apply -n "$NS" -f - <<EOF
 apiVersion: nvidia.com/v1beta1
@@ -55,6 +53,8 @@ metadata:
   labels:
     nvidia.com/dynamo-engine-group-runtime: sglang-elastic-ep
   annotations:
+    nvidia.com/dynamo-engine-group-pod-clique: $CLIQUE
+    nvidia.com/dynamo-engine-group-pod-clique-uid: $CLIQUE_UID
     nvidia.com/dynamo-engine-group-control-port: "9090"
     nvidia.com/dynamo-engine-group-verify-url: http://$FRONTEND_IP:8000/v1/completions
     nvidia.com/dynamo-engine-group-verify-model: $MODEL
@@ -95,5 +95,14 @@ if [[ "${active:-}" != "2" || "${available:-}" != "2" || "${reached:-}" != "True
 fi
 
 echo "EP1 -> EP2 completed"
+# Growth must preserve the primary incarnation and scale capacity, not world count.
+CURRENT_PRIMARY_UID="$(kubectl get pod -n "$NS" "$(primary_pod)" -o jsonpath='{.metadata.uid}')"
+CLIQUE_SIZE="$(kubectl get podclique -n "$NS" "$CLIQUE" -o jsonpath='{.spec.replicas}')"
+WORLD_COUNT="$(kubectl get podcliquescalinggroup -n "$NS" "$WORLD" -o jsonpath='{.spec.replicas}')"
+[[ "$CURRENT_PRIMARY_UID" == "$PRIMARY_UID" && "$CLIQUE_SIZE" == "2" && "$WORLD_COUNT" == "1" ]] || {
+  echo "Grove growth changed the primary or the world-count dimension" >&2
+  exit 1
+}
 kubectl get dynamographdeploymentenginegroup -n "$NS" "$GROUP_NAME"
+kubectl get podclique -n "$NS" "$CLIQUE"
 kubectl get pods -n "$NS" -l "nvidia.com/dynamo-engine-group=$GROUP_NAME" -o wide

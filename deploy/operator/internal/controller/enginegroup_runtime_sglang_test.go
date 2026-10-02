@@ -11,7 +11,11 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/grovecapacity"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -19,22 +23,28 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestProductionRuntimeProviderResolvesSGLangEP1Profile(t *testing.T) {
+	t.Log("create a Grove-owned primary with one stable member-clique binding")
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
 	primary := testSGLangPrimaryPod()
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(primary).Build()
-	provider := newProductionEngineGroupRuntimeProvider(kubeClient)
+	clique := testSGLangMemberClique(primary)
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(primary, clique).Build()
+	provider := newEngineGroupRuntimeProvider(kubeClient)
 	group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "test", Name: "group", UID: types.UID("group-uid"),
 			Labels: map[string]string{consts.KubeLabelDynamoEngineGroupRuntime: consts.KubeLabelDynamoEngineGroupSGLang},
 			Annotations: map[string]string{
-				consts.KubeAnnotationDynamoEngineGroupVerifyURL:   "http://frontend.test:8000/v1/completions",
-				consts.KubeAnnotationDynamoEngineGroupVerifyModel: "model",
+				consts.KubeAnnotationDynamoEngineGroupVerifyURL:    "http://frontend.test:8000/v1/completions",
+				consts.KubeAnnotationDynamoEngineGroupVerifyModel:  "model",
+				consts.KubeAnnotationDynamoEngineGroupPodClique:    clique.Name,
+				consts.KubeAnnotationDynamoEngineGroupPodCliqueUID: string(clique.UID),
 			},
 		},
 	}
@@ -46,10 +56,49 @@ func TestProductionRuntimeProviderResolvesSGLangEP1Profile(t *testing.T) {
 	assert.Equal(t, int32(1), resolved.Profile.PodsPerReplica)
 	assert.Equal(t, int32(2), resolved.Profile.MaxSupportedReplicas)
 	assert.NotNil(t, resolved.Capacity)
+	_, groveCapacity := resolved.Capacity.(*grovecapacity.Adapter)
+	assert.True(t, groveCapacity)
 	assert.NotNil(t, resolved.Membership)
 	assert.NotNil(t, resolved.Traffic)
 	assert.NotNil(t, resolved.Verifier)
 	assert.NotNil(t, resolved.Planner)
+}
+
+func TestProductionRuntimeProviderRequiresGroveBootstrap(t *testing.T) {
+	// Each case changes one input on an otherwise valid native Grove binding.
+	cases := []struct {
+		name     string
+		command  []string
+		boundUID types.UID
+		want     string
+	}{
+		{name: "ordinary worker cannot launch joiners from its template", command: []string{"python3", "-m", "dynamo.sglang"}, boundUID: "clique-uid", want: "template-invariant bootstrap"},
+		{name: "clique recreation cannot reuse the old group", command: []string{"python3", "-m", dynamo.SGLangElasticEPBootstrapModule}, boundUID: "previous-clique-uid", want: "replaced"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("create a fresh group and its Grove workload with the selected invalid binding")
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, grovev1alpha1.AddToScheme(scheme))
+			primary := testSGLangPrimaryPod()
+			primary.Spec.Containers[0].Command = tc.command
+			clique := testSGLangMemberClique(primary)
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(primary, clique).Build()
+			group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "test", Name: "group", UID: "group-uid",
+				Labels: map[string]string{consts.KubeLabelDynamoEngineGroupRuntime: consts.KubeLabelDynamoEngineGroupSGLang},
+				Annotations: map[string]string{
+					consts.KubeAnnotationDynamoEngineGroupPodClique:    clique.Name,
+					consts.KubeAnnotationDynamoEngineGroupPodCliqueUID: string(tc.boundUID),
+				},
+			}}
+
+			t.Log("refuse to construct a runtime whose capacity or bootstrap cannot be proven")
+			_, err := newEngineGroupRuntimeProvider(kubeClient).Resolve(t.Context(), group)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
 }
 
 func TestSGLangGrowthPlannerBuildsContiguousIdentityPlan(t *testing.T) {
@@ -86,16 +135,19 @@ func testSGLangPrimaryPod() *corev1.Pod {
 			Namespace: "test", Name: "primary", UID: types.UID("primary-uid"),
 			Labels: map[string]string{
 				consts.KubeLabelDynamoEngineGroup:         "group",
-				consts.KubeLabelDynamoEngineGroupReplica:  "replica-0",
-				consts.KubeLabelDynamoEngineGroupSlot:     "slot-0",
-				consts.KubeLabelDynamoEngineGroupRole:     consts.KubeLabelDynamoEngineGroupRolePrimary,
 				consts.KubeLabelDynamoScaleRepresentative: consts.KubeLabelDynamoScaleRepresentativeYes,
-				consts.KubeLabelDynamoWorkerHash:          "worker-revision",
+				grovecommon.LabelPodClique:                "world-0-members",
+				grovecommon.LabelPodCliquePodIndex:        "0",
+				grovecommon.LabelPodTemplateHash:          "worker-revision",
 			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodClique",
+				Name: "world-0-members", UID: "clique-uid", Controller: ptr.To(true),
+			}},
 		},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, Containers: []corev1.Container{{
 			Name:    consts.MainContainerName,
-			Command: []string{"python3", "-m", "dynamo.sglang"},
+			Command: []string{"python3", "-m", dynamo.SGLangElasticEPBootstrapModule},
 			Args: []string{
 				"--model-path", "model", "--served-model-name", "model",
 				"--tp", "1", "--dp", "1", "--nnodes", "1",
@@ -108,5 +160,19 @@ func testSGLangPrimaryPod() *corev1.Pod {
 			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": gpu}},
 		}}},
 		Status: corev1.PodStatus{PodIP: "10.0.0.8"},
+	}
+}
+
+func testSGLangMemberClique(primary *corev1.Pod) *grovev1alpha1.PodClique {
+	return &grovev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: primary.Namespace, Name: "world-0-members", UID: "clique-uid",
+			Labels: map[string]string{consts.KubeLabelDynamoEngineGroup: "group"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueScalingGroup",
+				Name: "world", UID: "world-uid", Controller: ptr.To(true),
+			}},
+		},
+		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1, MinAvailable: ptr.To(int32(1)), PodSpec: *primary.Spec.DeepCopy()},
 	}
 }

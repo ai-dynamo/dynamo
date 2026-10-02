@@ -69,11 +69,7 @@ func (v *ServingVerifier) Verify(
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return enginegroup.VerificationResult{Failure: &enginegroup.Failure{
-			Classification: enginegroup.FailureClassificationRetryable,
-			Reason:         "ServingRequestFailed",
-			Message:        fmt.Sprintf("serving path returned HTTP %d", response.StatusCode),
-		}}, nil
+		return enginegroup.VerificationResult{}, fmt.Errorf("serving path returned HTTP %d", response.StatusCode)
 	}
 	var result struct {
 		Choices []json.RawMessage `json:"choices"`
@@ -82,11 +78,7 @@ func (v *ServingVerifier) Verify(
 		return enginegroup.VerificationResult{}, fmt.Errorf("decode SGLang serving response: %w", err)
 	}
 	if len(result.Choices) == 0 {
-		return enginegroup.VerificationResult{Failure: &enginegroup.Failure{
-			Classification: enginegroup.FailureClassificationRetryable,
-			Reason:         "NoServingProgress",
-			Message:        "serving response contained no completion choices",
-		}}, nil
+		return enginegroup.VerificationResult{}, fmt.Errorf("serving response contained no completion choices")
 	}
 	return enginegroup.VerificationResult{Proof: &enginegroup.ServingProof{
 		TopologyGeneration: topology.Generation,

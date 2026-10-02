@@ -16,10 +16,13 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
 )
 
-// TrafficAdapter records the identity-level traffic projection around SGLang's
+// TrafficProjection records the identity-level traffic projection around SGLang's
 // group endpoint. SGLang currently admits new ranks internally at commit, so
 // this adapter does not claim to provide a pre-admission pause for joiners.
-type TrafficAdapter struct {
+// Its journal is a PoC-only projection, not independently observed routing or
+// drain evidence. Production integration must replace this adapter with actual
+// admission control and observation; membership operation IDs alone do not fix it.
+type TrafficProjection struct {
 	Client   *Client
 	Capacity CapacityObserver
 	Journal  kubejournal.Store
@@ -33,21 +36,22 @@ type trafficJournal struct {
 
 // Observe returns the durable projection, or bootstraps it from the engine's
 // current effective ranks before the first transition.
-func (a *TrafficAdapter) Observe(
+func (a *TrafficProjection) Observe(
 	ctx context.Context,
 	groupID enginegroup.GroupID,
 ) (enginegroup.TrafficObservation, error) {
 	state := trafficJournal{}
-	found, err := a.Journal.Load(ctx, &state)
+	snapshot, err := a.Journal.Load(ctx, &state)
 	if err != nil {
 		return enginegroup.TrafficObservation{}, err
 	}
-	if found {
+	if snapshot.Exists() {
+		if len(state.Target.Drain) != 0 {
+			return enginegroup.TrafficObservation{}, fmt.Errorf("the traffic projection cannot prove drain completion")
+		}
 		return enginegroup.TrafficObservation{
 			AppliedRevision: state.AppliedRevision,
 			Admitted:        cloneMembership(state.Target.Admitted),
-			Draining:        drainMembership(state.Target.Drain),
-			Drained:         drainedMembership(state.Target.Drain),
 		}, nil
 	}
 	if a.Client == nil || a.Capacity == nil {
@@ -66,7 +70,7 @@ func (a *TrafficAdapter) Observe(
 
 // Apply accepts an absolute logical projection. Drain is unsupported because
 // the merged SGLang slice is growth-only.
-func (a *TrafficAdapter) Apply(
+func (a *TrafficProjection) Apply(
 	ctx context.Context,
 	_ enginegroup.GroupID,
 	target enginegroup.TrafficTarget,
@@ -79,11 +83,11 @@ func (a *TrafficAdapter) Apply(
 		return enginegroup.ApplyResult{}, err
 	}
 	state := trafficJournal{}
-	found, err := a.Journal.Load(ctx, &state)
+	snapshot, err := a.Journal.Load(ctx, &state)
 	if err != nil {
 		return enginegroup.ApplyResult{}, err
 	}
-	if found {
+	if snapshot.Exists() {
 		switch {
 		case target.ControlRevision < state.AppliedRevision:
 			return rejectedApply("StaleTrafficRevision", "traffic target revision is older than the accepted revision"), nil
@@ -92,7 +96,7 @@ func (a *TrafficAdapter) Apply(
 		}
 	}
 	state = trafficJournal{AppliedRevision: target.ControlRevision, TargetDigest: digest, Target: target}
-	if err := a.Journal.Save(ctx, state); err != nil {
+	if _, err := a.Journal.Save(ctx, snapshot, state); err != nil {
 		return enginegroup.ApplyResult{}, err
 	}
 	return enginegroup.ApplyResult{}, nil
@@ -149,18 +153,4 @@ func cloneMembership(source []enginegroup.ReplicaMembership) []enginegroup.Repli
 		cloned[i].NativeMembers = append([]enginegroup.NativeMemberID(nil), source[i].NativeMembers...)
 	}
 	return cloned
-}
-
-func drainMembership(source []enginegroup.TrafficDrainTarget) []enginegroup.ReplicaMembership {
-	result := make([]enginegroup.ReplicaMembership, 0, len(source))
-	for _, target := range source {
-		result = append(result, target.Membership)
-	}
-	return result
-}
-
-func drainedMembership(source []enginegroup.TrafficDrainTarget) []enginegroup.ReplicaMembership {
-	// A persisted drain target is terminal evidence only for this adapter's
-	// unsupported path; kept separate for future backend drain integration.
-	return drainMembership(source)
 }

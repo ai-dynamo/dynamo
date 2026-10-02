@@ -37,3 +37,31 @@ func TestServingVerifierReturnsCanonicalTopologyProof(t *testing.T) {
 	assert.Equal(t, enginegroup.TopologyRuntimeDigest(topology), result.Proof.RuntimeDigest)
 	assert.Equal(t, now, result.Proof.ObservedAt)
 }
+
+func TestServingVerifierRetriesInconclusiveProgress(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+	}{
+		{name: "warming serving endpoint", statusCode: http.StatusServiceUnavailable, body: `{}`},
+		{name: "no completion progress", statusCode: http.StatusOK, body: `{"choices":[]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("return transient serving evidence rather than a definitive topology rejection")
+			verifier, err := NewServingVerifier("http://sglang.test/v1/completions", "model", &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				response := jsonResponse(test.body)
+				response.StatusCode = test.statusCode
+				return response, nil
+			})})
+			require.NoError(t, err)
+
+			t.Log("leave verification pending by returning an ordinary retryable error")
+			result, err := verifier.Verify(t.Context(), "group", enginegroup.MembershipTopology{Generation: 2})
+			require.Error(t, err)
+			assert.Nil(t, result.Proof)
+			assert.Nil(t, result.Failure)
+		})
+	}
+}

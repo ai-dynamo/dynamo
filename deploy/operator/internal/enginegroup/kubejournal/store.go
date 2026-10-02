@@ -17,19 +17,32 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const stateDataKey = "state.json"
 
 // Store persists one typed state document in a ConfigMap owned by an Engine Group.
-// Callers remain responsible for validating their own state machine.
+// Use it only for evidence the backend cannot expose after restart, not for
+// desired levels already persisted in Engine Group status or native workloads.
+// Callers own state-machine validation and serialization. Writes are fenced by
+// the loaded snapshot; conflicts require re-observation before any backend effect.
 type Store struct {
 	Client    client.Client
 	Namespace string
 	Name      string
 	Owner     metav1.OwnerReference
+}
+
+// Snapshot fences a write to the exact journal version used to derive it.
+// The zero value represents absence and permits only atomic creation.
+type Snapshot struct {
+	object *corev1.ConfigMap
+}
+
+// Exists distinguishes a loaded journal from an absent one.
+func (s Snapshot) Exists() bool {
+	return s.object != nil
 }
 
 // NewStore constructs a store with a DNS-safe deterministic name.
@@ -57,74 +70,71 @@ func NewStore(
 	}
 }
 
-// Load decodes the current state. found is false only when the journal does not exist.
-func (s Store) Load(ctx context.Context, out any) (found bool, err error) {
+// Load decodes state and returns the snapshot required to persist its successor.
+// A stale absence cannot overwrite an existing journal: Save will fail creation.
+func (s Store) Load(ctx context.Context, out any) (Snapshot, error) {
 	if err := s.validate(); err != nil {
-		return false, err
+		return Snapshot{}, err
 	}
 	journal := &corev1.ConfigMap{}
 	if err := s.Client.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: s.Name}, journal); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return Snapshot{}, nil
 		}
-		return false, fmt.Errorf("get journal %s/%s: %w", s.Namespace, s.Name, err)
+		return Snapshot{}, fmt.Errorf("get journal %s/%s: %w", s.Namespace, s.Name, err)
 	}
 	if !ownedBy(journal, s.Owner) {
-		return false, fmt.Errorf("journal %s/%s is not owned by Engine Group UID %s", s.Namespace, s.Name, s.Owner.UID)
+		return Snapshot{}, fmt.Errorf("journal %s/%s is not owned by Engine Group UID %s", s.Namespace, s.Name, s.Owner.UID)
 	}
 	payload, present := journal.Data[stateDataKey]
 	if !present || payload == "" {
-		return false, fmt.Errorf("journal %s/%s has no %s payload", s.Namespace, s.Name, stateDataKey)
+		return Snapshot{}, fmt.Errorf("journal %s/%s has no %s payload", s.Namespace, s.Name, stateDataKey)
 	}
 	if err := json.Unmarshal([]byte(payload), out); err != nil {
-		return false, fmt.Errorf("decode journal %s/%s: %w", s.Namespace, s.Name, err)
+		return Snapshot{}, fmt.Errorf("decode journal %s/%s: %w", s.Namespace, s.Name, err)
 	}
-	return true, nil
+	return Snapshot{object: journal}, nil
 }
 
-// Save atomically replaces the journal payload while preserving Kubernetes metadata.
-func (s Store) Save(ctx context.Context, value any) error {
+// Save compares against snapshot without fetching or retrying newer state.
+// Use the returned snapshot for a subsequent write in the same invocation.
+func (s Store) Save(ctx context.Context, snapshot Snapshot, value any) (Snapshot, error) {
 	if err := s.validate(); err != nil {
-		return err
+		return Snapshot{}, err
 	}
 	payload, err := json.Marshal(value)
 	if err != nil {
-		return fmt.Errorf("encode journal %s/%s: %w", s.Namespace, s.Name, err)
+		return Snapshot{}, fmt.Errorf("encode journal %s/%s: %w", s.Namespace, s.Name, err)
 	}
 
-	key := client.ObjectKey{Namespace: s.Namespace, Name: s.Name}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		journal := &corev1.ConfigMap{}
-		err := s.Client.Get(ctx, key, journal)
-		if apierrors.IsNotFound(err) {
-			journal = &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace:       s.Namespace,
-					Name:            s.Name,
-					OwnerReferences: []metav1.OwnerReference{s.Owner},
-				},
-				Data: map[string]string{stateDataKey: string(payload)},
-			}
-			if err := s.Client.Create(ctx, journal); err != nil {
-				return fmt.Errorf("create journal %s/%s: %w", s.Namespace, s.Name, err)
-			}
-			return nil
+	// An absent snapshot must create, never adopt evidence hidden by cache lag.
+	if !snapshot.Exists() {
+		journal := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: s.Namespace, Name: s.Name,
+				OwnerReferences: []metav1.OwnerReference{s.Owner},
+			},
+			Data: map[string]string{stateDataKey: string(payload)},
 		}
-		if err != nil {
-			return fmt.Errorf("get journal %s/%s for update: %w", s.Namespace, s.Name, err)
+		if err := s.Client.Create(ctx, journal); err != nil {
+			return Snapshot{}, fmt.Errorf("create journal %s/%s: %w", s.Namespace, s.Name, err)
 		}
-		if !ownedBy(journal, s.Owner) {
-			return fmt.Errorf("journal %s/%s is not owned by Engine Group UID %s", s.Namespace, s.Name, s.Owner.UID)
-		}
-		if journal.Data == nil {
-			journal.Data = make(map[string]string, 1)
-		}
-		journal.Data[stateDataKey] = string(payload)
-		if err := s.Client.Update(ctx, journal); err != nil {
-			return fmt.Errorf("update journal %s/%s: %w", s.Namespace, s.Name, err)
-		}
-		return nil
-	})
+		return Snapshot{object: journal}, nil
+	}
+
+	// Preserve metadata and the loaded UID/resource version while replacing only state.
+	journal := snapshot.object.DeepCopy()
+	if journal.Namespace != s.Namespace || journal.Name != s.Name || !ownedBy(journal, s.Owner) {
+		return Snapshot{}, fmt.Errorf("snapshot does not belong to journal %s/%s", s.Namespace, s.Name)
+	}
+	if journal.Data == nil {
+		journal.Data = make(map[string]string, 1)
+	}
+	journal.Data[stateDataKey] = string(payload)
+	if err := s.Client.Update(ctx, journal); err != nil {
+		return Snapshot{}, fmt.Errorf("update journal %s/%s: %w", s.Namespace, s.Name, err)
+	}
+	return Snapshot{object: journal}, nil
 }
 
 func ownedBy(object metav1.Object, owner metav1.OwnerReference) bool {

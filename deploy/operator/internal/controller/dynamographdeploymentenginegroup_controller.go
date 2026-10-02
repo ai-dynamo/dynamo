@@ -98,7 +98,9 @@ type DynamoGraphDeploymentEngineGroupReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentenginegroups,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentenginegroups/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentenginegroups/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=grove.io,resources=podcliques,verbs=get;list;watch
+// +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 
 // Reconcile implements the level-based control loop for one independently resizable engine world.

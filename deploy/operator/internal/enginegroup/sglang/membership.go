@@ -21,10 +21,14 @@ type CapacityObserver interface {
 	Observe(context.Context, enginegroup.GroupID) (enginegroup.CapacityObservation, error)
 }
 
-// MembershipAdapter translates the generic compare-and-apply contract to
-// SGLang's growth-only API. Its ConfigMap ledger is a compatibility boundary
-// for the current SGLang API, which does not yet expose operation identities.
-type MembershipAdapter struct {
+// LegacyGrowthAdapter translates the generic compare-and-apply contract to
+// SGLang's growth-only API. The journal is temporary compatibility evidence:
+// the legacy API does not expose durable operation IDs, topology generations,
+// or terminal results. After an ambiguous call, it prevents a competing resize
+// but cannot prove whether the engine accepted the request. Replace it with
+// authoritative engine observations once that lifecycle contract is available;
+// it is not a second source of desired state or a requirement for other adapters.
+type LegacyGrowthAdapter struct {
 	Client             *Client
 	Capacity           CapacityObserver
 	ProfileFingerprint string
@@ -49,7 +53,7 @@ type transitionJournal struct {
 }
 
 // ValidatePlan accepts only the merged SGLang width-one growth semantics.
-func (a *MembershipAdapter) ValidatePlan(
+func (a *LegacyGrowthAdapter) ValidatePlan(
 	_ context.Context,
 	_ enginegroup.GroupID,
 	request enginegroup.PlanValidationRequest,
@@ -66,7 +70,7 @@ func (a *MembershipAdapter) ValidatePlan(
 }
 
 // ValidateTarget binds validation to the exact joining runtime identities.
-func (a *MembershipAdapter) ValidateTarget(
+func (a *LegacyGrowthAdapter) ValidateTarget(
 	_ context.Context,
 	_ enginegroup.GroupID,
 	target enginegroup.MembershipTarget,
@@ -105,19 +109,20 @@ func (a *MembershipAdapter) ValidateTarget(
 }
 
 // Observe correlates SGLang's engine state with one requested transition.
-func (a *MembershipAdapter) Observe(
+func (a *LegacyGrowthAdapter) Observe(
 	ctx context.Context,
 	groupID enginegroup.GroupID,
 	transitionID string,
 ) (enginegroup.MembershipObservation, error) {
-	state, engineState, err := a.observeState(ctx)
+	state, snapshot, engineState, err := a.observeState(ctx)
 	if err != nil {
 		return enginegroup.MembershipObservation{}, err
 	}
 	if state.TopologyGeneration == 0 {
 		state.TopologyGeneration = 1
 		state.EffectiveEPSize = engineState.EffectiveEPSize
-		if err := a.Journal.Save(ctx, state); err != nil {
+		snapshot, err = a.Journal.Save(ctx, snapshot, state)
+		if err != nil {
 			return enginegroup.MembershipObservation{}, err
 		}
 	}
@@ -134,7 +139,7 @@ func (a *MembershipAdapter) Observe(
 		}
 		committedGeneration = state.Transition.BaseTopology.Generation + 1
 	}
-	committed, err := a.topology(ctx, groupID, committedGeneration, engineState.EffectiveEPSize)
+	committed, err := topologyFromCapacity(ctx, a.Capacity, groupID, committedGeneration, engineState.EffectiveEPSize)
 	if err != nil {
 		return enginegroup.MembershipObservation{}, err
 	}
@@ -189,7 +194,7 @@ func (a *MembershipAdapter) Observe(
 		changed = true
 	}
 	if changed {
-		if err := a.Journal.Save(ctx, state); err != nil {
+		if _, err := a.Journal.Save(ctx, snapshot, state); err != nil {
 			return enginegroup.MembershipObservation{}, err
 		}
 	}
@@ -212,12 +217,12 @@ func (a *MembershipAdapter) Observe(
 
 // Apply persists the exact target before invoking SGLang. It never reissues a
 // Pending or Unknown request because the current backend API cannot correlate it.
-func (a *MembershipAdapter) Apply(
+func (a *LegacyGrowthAdapter) Apply(
 	ctx context.Context,
 	groupID enginegroup.GroupID,
 	target enginegroup.MembershipTarget,
 ) error {
-	state, engineState, err := a.observeState(ctx)
+	state, snapshot, engineState, err := a.observeState(ctx)
 	if err != nil {
 		return err
 	}
@@ -237,12 +242,12 @@ func (a *MembershipAdapter) Apply(
 			return fmt.Errorf("membership transition %q is still %s", record.TransitionID, record.Phase)
 		}
 	}
-	current, err := a.topology(ctx, groupID, state.TopologyGeneration, engineState.EffectiveEPSize)
+	current, err := topologyFromCapacity(ctx, a.Capacity, groupID, state.TopologyGeneration, engineState.EffectiveEPSize)
 	if err != nil {
 		return err
 	}
 	if !enginegroup.SameTopology(current, target.BaseTopology) {
-		return a.persistRejection(ctx, state, target, "BaseTopologyChanged", "SGLang topology no longer matches the validated base")
+		return a.persistRejection(ctx, state, snapshot, target, "BaseTopologyChanged", "SGLang topology no longer matches the validated base")
 	}
 	targetSize := target.BaseTopology.ReplicaCount() + int32(len(target.Joining))
 	state.Transition = &transitionJournal{
@@ -253,7 +258,8 @@ func (a *MembershipAdapter) Apply(
 		TargetEPSize:    targetSize,
 		Phase:           enginegroup.MembershipTransitionPhasePending,
 	}
-	if err := a.Journal.Save(ctx, state); err != nil {
+	snapshot, err = a.Journal.Save(ctx, snapshot, state)
+	if err != nil {
 		return err
 	}
 
@@ -265,43 +271,34 @@ func (a *MembershipAdapter) Apply(
 			Reason:         "ScaleRequestAmbiguous",
 			Message:        err.Error(),
 		}
-		if saveErr := a.Journal.Save(ctx, state); saveErr != nil {
+		if _, saveErr := a.Journal.Save(ctx, snapshot, state); saveErr != nil {
 			return fmt.Errorf("SGLang scale request failed (%v) and persist Unknown failed: %w", err, saveErr)
 		}
 		return err
 	}
 	if response.Status != "ok" {
-		return a.persistRejection(ctx, state, target, "ScaleRejected", response.Message)
+		return a.persistRejection(ctx, state, snapshot, target, "ScaleRejected", response.Message)
 	}
 	return nil
 }
 
-func (a *MembershipAdapter) observeState(ctx context.Context) (membershipJournal, ScaleState, error) {
+func (a *LegacyGrowthAdapter) observeState(ctx context.Context) (membershipJournal, kubejournal.Snapshot, ScaleState, error) {
 	if a.Client == nil || a.Capacity == nil {
-		return membershipJournal{}, ScaleState{}, fmt.Errorf("SGLang membership client and capacity observer are required")
+		return membershipJournal{}, kubejournal.Snapshot{}, ScaleState{}, fmt.Errorf("SGLang membership client and capacity observer are required")
 	}
 	state := membershipJournal{}
-	_, err := a.Journal.Load(ctx, &state)
+	snapshot, err := a.Journal.Load(ctx, &state)
 	if err != nil {
-		return membershipJournal{}, ScaleState{}, err
+		return membershipJournal{}, kubejournal.Snapshot{}, ScaleState{}, err
 	}
 	engineState, err := a.Client.Observe(ctx)
 	if err != nil {
-		return membershipJournal{}, ScaleState{}, err
+		return membershipJournal{}, kubejournal.Snapshot{}, ScaleState{}, err
 	}
-	return state, engineState, nil
+	return state, snapshot, engineState, nil
 }
 
-func (a *MembershipAdapter) topology(
-	ctx context.Context,
-	groupID enginegroup.GroupID,
-	generation int64,
-	size int32,
-) (enginegroup.MembershipTopology, error) {
-	return topologyFromCapacity(ctx, a.Capacity, groupID, generation, size)
-}
-
-func (a *MembershipAdapter) validatePlan(
+func (a *LegacyGrowthAdapter) validatePlan(
 	base enginegroup.MembershipTopology,
 	plan enginegroup.ResolvedPlan,
 ) *enginegroup.Failure {
@@ -342,9 +339,10 @@ func (a *MembershipAdapter) validatePlan(
 	return nil
 }
 
-func (a *MembershipAdapter) persistRejection(
+func (a *LegacyGrowthAdapter) persistRejection(
 	ctx context.Context,
 	state membershipJournal,
+	snapshot kubejournal.Snapshot,
 	target enginegroup.MembershipTarget,
 	reason string,
 	message string,
@@ -357,7 +355,8 @@ func (a *MembershipAdapter) persistRejection(
 		Phase:           enginegroup.MembershipTransitionPhaseRejected,
 		Failure:         terminalFailure(reason, message),
 	}
-	return a.Journal.Save(ctx, state)
+	_, err := a.Journal.Save(ctx, snapshot, state)
+	return err
 }
 
 func rejectedPreflight(reason, message string) enginegroup.PreflightResult {

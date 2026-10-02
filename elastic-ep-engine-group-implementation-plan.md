@@ -1,6 +1,6 @@
 # Elastic EP Engine Group implementation plan
 
-Status: working draft, updated 2026-10-01
+Status: working draft, updated 2026-10-02
 
 This plan tracks Dynamo work for [DEP #13121](https://github.com/ai-dynamo/dynamo/issues/13121).
 It separates the dependency-independent orchestration foundation from production engine and
@@ -24,10 +24,10 @@ production backend conformant.
 | Slice | Pull request | Status |
 |---|---|---|
 | Reconciliation foundation | [#14816](https://github.com/ai-dynamo/dynamo/pull/14816) | Implemented and reviewed; remains a draft while DEP #13121 is proposed. |
-| Profile geometry resolver | [#14819](https://github.com/ai-dynamo/dynamo/pull/14819) | Implemented as a stacked draft. The merged SGLang growth profile resolves; current vLLM Elastic EP ownership is rejected explicitly; under review. |
+| Profile geometry resolver | [#14819](https://github.com/ai-dynamo/dynamo/pull/14819) | Implemented as a stacked draft. The merged SGLang growth profile resolves; vLLM remains explicitly unsupported, without a speculative parser; under review. |
 | Engine Group API and `/scale` | [#14896](https://github.com/ai-dynamo/dynamo/pull/14896) | Implemented as a stacked draft with v1beta1 CRD, logical-replica Scale surface, identity status, generated artifacts, and real API-server coverage. |
 | Kubernetes controller | [#14939](https://github.com/ai-dynamo/dynamo/pull/14939) | Implemented as a stacked draft with durable restart journal, per-member status projection, and periodic observation covering runtime-only failure, drift, and incarnation changes. |
-| SGLang growth integration | [#15545](https://github.com/ai-dynamo/dynamo/pull/15545) | EP1 → EP2 adapters, ConfigMap journals, pod capacity, representative labels, serving verification, and a standalone Scale fixture are implemented. Live GPU validation remains pending; engine-side correlation and admission limitations are isolated in the SGLang integration. |
+| SGLang growth integration | [#15545](https://github.com/ai-dynamo/dynamo/pull/15545) | EP1 → EP2 adapters, snapshot-fenced ConfigMap journals, Grove PodClique capacity, template-invariant bootstrap, representative labels, serving verification, and a standalone Scale fixture are implemented. Live GPU validation remains pending; engine-side correlation and admission limitations are isolated in the SGLang integration. |
 | DGD lifecycle | Not opened | Creation/retirement of child groups and representative-label integration with production workload managers remain separate slices. |
 | Mocker-backed process integration | Not opened | Follows the controller skeleton. |
 
@@ -37,7 +37,11 @@ explicitly rejected until its lifecycle slice exists. Engine Group status separa
 active native members from allocated replicas, and projects per-member membership/traffic plus
 current/candidate allocation fields. Packed partial-survival status is tested, but executing packed
 recovery, candidate promotion, and member-level retirement remains backend-gated work; the SGLang
-growth PoC still supports one native member per allocation.
+growth PoC still supports one native member per allocation. Desired native-member assignment is
+owned by reconciliation and correlated with the spec generation, not inferred by status projection.
+Runtime-resolution and observation failures invalidate current health claims while retaining
+historical evidence. The coordinator is organized by capacity, membership, traffic, and verification;
+the legacy SGLang growth adapter and traffic projection remain explicitly non-production bridges.
 
 ## Track 1: Reconciliation foundation
 

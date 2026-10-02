@@ -42,7 +42,7 @@ func (o DynamoGraphDeploymentEngineGroupSetupOptions) runtimeProvider(mgr ctrl.M
 	if o.RuntimeProvider != nil {
 		return o.RuntimeProvider
 	}
-	return newProductionEngineGroupRuntimeProvider(mgr.GetClient())
+	return newEngineGroupRuntimeProvider(mgr.GetClient())
 }
 
 type DynamoGraphDeploymentRequestSetupOptions struct {

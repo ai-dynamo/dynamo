@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,56 @@ func TestClientObservesElasticEPState(t *testing.T) {
 	assert.Equal(t, int32(2), state.EffectiveEPSize)
 	assert.False(t, state.Scaling)
 	assert.Equal(t, "serving_expanded", state.Phase)
+}
+
+func TestClientUsesSeparateObservationAndScaleBudgets(t *testing.T) {
+	tests := []struct {
+		name         string
+		parentBudget time.Duration
+	}{
+		{name: "independent request deadlines"},
+		{name: "shorter caller deadline", parentBudget: time.Second},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("inspect the deadline on each real control request")
+			var observedDeadline, scaleDeadline time.Time
+			control, err := NewClient("http://sglang.test:9090", &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				deadline, ok := request.Context().Deadline()
+				require.True(t, ok)
+				if request.Method == http.MethodGet {
+					observedDeadline = deadline
+					return jsonResponse(`{"effective_ep_size":1}`), nil
+				}
+				scaleDeadline = deadline
+				return jsonResponse(`{"status":"ok"}`), nil
+			})})
+			require.NoError(t, err)
+			ctx := t.Context()
+			if test.parentBudget > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, test.parentBudget)
+				defer cancel()
+			}
+
+			t.Log("observe with a short budget and dispatch with the legacy resize budget")
+			started := time.Now()
+			_, err = control.Observe(ctx)
+			require.NoError(t, err)
+			_, err = control.Scale(ctx, 2)
+			require.NoError(t, err)
+
+			t.Log("preserve a shorter caller deadline and otherwise separate the two budgets")
+			if test.parentBudget > 0 {
+				deadline, _ := ctx.Deadline()
+				assert.Equal(t, deadline, observedDeadline)
+				assert.Equal(t, deadline, scaleDeadline)
+			} else {
+				assert.WithinDuration(t, started.Add(defaultObservationTimeout), observedDeadline, time.Second)
+				assert.WithinDuration(t, started.Add(defaultScaleTimeout), scaleDeadline, time.Second)
+			}
+		})
+	}
 }
 
 func TestClientRequestsAbsoluteElasticEPTarget(t *testing.T) {
