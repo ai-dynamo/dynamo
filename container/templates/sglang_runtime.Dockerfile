@@ -165,11 +165,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # Replace the FFmpeg builds shipped inside the base image's PyAV and
 # opencv-python-headless wheels. These pins bundle FFmpeg 8.1.2.
 # Exact versions and --no-deps keep a later wheel from being selected.
+# The base image's SGLang package still declares av==16.1.0 for aarch64;
+# rewrite that declared requirement so it matches the installed pin.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --upgrade --no-deps \
         "av==18.1.0" \
-        "opencv-python-headless==4.14.0.94"
+        "opencv-python-headless==4.14.0.94" && \
+    python3 -c "exec('import importlib.metadata as md\nimport re\nimport sglang\nfrom pathlib import Path\npkg = Path(sglang.__file__).resolve()\nmeta = Path(md.distribution(\"sglang\").locate_file(\"\")).resolve()\nroots = [meta, pkg.parents[1], pkg.parents[1] / \"sglang.egg-info\", pkg.parents[2] / \"sglang.egg-info\"]\nfiles = [root / name for root in roots for name in (\"METADATA\", \"PKG-INFO\", \"requires.txt\")]\nupdated = []\nfor path in files:\n    if not path.is_file():\n        continue\n    text = path.read_text(encoding=\"utf-8\")\n    revised = re.sub(r\"av\\\\s*==\\\\s*16\\\\.1\\\\.0\", \"av==18.1.0\", text)\n    if revised == text:\n        continue\n    path.write_text(revised, encoding=\"utf-8\")\n    updated.append(str(path))\nif not updated:\n    raise SystemExit(\"installed SGLang metadata does not declare av==16.1.0\")\nprint(\"\\\\n\".join(updated))')"
 
 {% if device == "cuda" %}
 
