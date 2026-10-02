@@ -91,7 +91,7 @@ func TestDynamoGraphDeploymentEngineGroupAPIServerContract(t *testing.T) {
 	t.Log("Write allocated, available, active, and representative-selector status")
 	current.Status.Replicas = 3
 	current.Status.AvailableReplicas = 2
-	current.Status.ActiveReplicas = 2
+	current.Status.ActiveNativeMemberCount = 2
 	current.Status.Selector = "nvidia.com/dynamo-engine-group=group-0,nvidia.com/dynamo-scale-representative=true"
 	current.Status.ScaleUnit = EngineGroupScaleUnitReplicas
 	if err := kubeClient.Status().Update(ctx, current); err != nil {
@@ -152,6 +152,9 @@ func TestDynamoGraphDeploymentEngineGroupAPIServerContract(t *testing.T) {
 	t.Log("Reject scale-to-zero even when no policy bounds are declared")
 	requireScaleTargetRejected(t, ctx, kubeClient, invalidTarget, 0)
 
+	t.Run("packed member status", func(t *testing.T) {
+		requirePackedEngineGroupStatusRoundTrip(t, ctx, kubeClient, namespace.Name)
+	})
 	t.Log("Exercise identity, generation, native-member, and count validation through status")
 	invalidCases := []struct {
 		name   string
@@ -203,6 +206,31 @@ func TestDynamoGraphDeploymentEngineGroupAPIServerContract(t *testing.T) {
 			name:   "negative observed generation",
 			status: DynamoGraphDeploymentEngineGroupStatus{ObservedGeneration: -1},
 		},
+		{
+			name:   "negative desired native-member count",
+			status: DynamoGraphDeploymentEngineGroupStatus{DesiredNativeMemberCount: -1},
+		},
+		{
+			name:   "negative active native-member count",
+			status: DynamoGraphDeploymentEngineGroupStatus{ActiveNativeMemberCount: -1},
+		},
+		{
+			name: "empty per-member identity",
+			status: DynamoGraphDeploymentEngineGroupStatus{ReplicaStates: []EngineGroupReplicaStatus{{
+				ReplicaID: "replica-0", SlotID: "slot-0",
+				NativeMembers: []EngineGroupNativeMemberStatus{{Membership: EngineGroupReplicaMembershipActive, Traffic: EngineGroupMemberTrafficAdmitted}},
+			}}},
+		},
+		{
+			name: "candidate allocation without exact Pod UID",
+			status: DynamoGraphDeploymentEngineGroupStatus{ReplicaStates: []EngineGroupReplicaStatus{{
+				ReplicaID: "replica-0", SlotID: "slot-0",
+				CandidateAllocation: &EngineGroupReplicaAllocationStatus{
+					CapacityRefs: []EngineGroupCapacityRef{{Name: "replacement-0"}},
+					Availability: EngineGroupReplicaAvailabilityUnknown, Health: EngineGroupAllocationHealthUnknown,
+				},
+			}}},
+		},
 	}
 	for _, tt := range invalidCases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -219,6 +247,108 @@ func TestDynamoGraphDeploymentEngineGroupAPIServerContract(t *testing.T) {
 				t.Fatalf("status update error = %v, want Invalid", err)
 			}
 		})
+	}
+
+	t.Run("immutable DGD creation seed", func(t *testing.T) {
+		requireDGDInitialSizeSchema(t, ctx, kubeClient, namespace.Name)
+	})
+}
+
+func requirePackedEngineGroupStatusRoundTrip(t *testing.T, ctx context.Context, kubeClient client.Client, namespace string) {
+	t.Helper()
+
+	t.Log("Round-trip packed EP7 status and a dormant replacement without conflating allocation and membership")
+	packed := &DynamoGraphDeploymentEngineGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "packed-status", Namespace: namespace},
+		Spec:       DynamoGraphDeploymentEngineGroupSpec{Replicas: 2},
+	}
+	if err := kubeClient.Create(ctx, packed); err != nil {
+		t.Fatal(err)
+	}
+	packed.Status = DynamoGraphDeploymentEngineGroupStatus{
+		Replicas: 2, AvailableReplicas: 1,
+		DesiredNativeMembers:     []string{"dp-0", "dp-1", "dp-2", "dp-3", "dp-4", "dp-5", "dp-6", "dp-7"},
+		DesiredNativeMemberCount: 8,
+		ActiveNativeMemberCount:  7,
+		Profile: &EngineGroupProfileStatus{
+			Backend: "vllm", Fingerprint: "packed-tp1", GPUsPerReplica: 4, PodsPerReplica: 1,
+			NativeMembersPerReplica: 4, MinSafeServingNativeMembers: 4,
+			MinSupportedReplicas: 1, MaxSupportedReplicas: 16,
+		},
+		ReplicaStates: []EngineGroupReplicaStatus{{
+			ReplicaID: "replica-1", SlotID: "slot-1",
+			CurrentAllocation: &EngineGroupReplicaAllocationStatus{
+				RuntimeIncarnation: "runtime-1",
+				CapacityRefs:       []EngineGroupCapacityRef{{Name: "worker-1", UID: types.UID("pod-uid-1")}},
+				Availability:       EngineGroupReplicaAvailabilityAvailable,
+				Health:             EngineGroupAllocationHealthDegraded,
+			},
+			CandidateAllocation: &EngineGroupReplicaAllocationStatus{
+				CapacityRefs: []EngineGroupCapacityRef{{Name: "replacement-1", UID: types.UID("candidate-uid-1")}},
+				Availability: EngineGroupReplicaAvailabilityAvailable,
+				Health:       EngineGroupAllocationHealthHealthy,
+			},
+			NativeMembers: []EngineGroupNativeMemberStatus{
+				{ID: "dp-4", Membership: EngineGroupReplicaMembershipActive, Traffic: EngineGroupMemberTrafficAdmitted},
+				{ID: "dp-5", Membership: EngineGroupReplicaMembershipMasked, Traffic: EngineGroupMemberTrafficDrained},
+				{ID: "dp-6", Membership: EngineGroupReplicaMembershipActive, Traffic: EngineGroupMemberTrafficAdmitted},
+				{ID: "dp-7", Membership: EngineGroupReplicaMembershipActive, Traffic: EngineGroupMemberTrafficAdmitted},
+			},
+		}},
+	}
+	if err := kubeClient.Status().Update(ctx, packed); err != nil {
+		t.Fatal(err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(packed), packed); err != nil {
+		t.Fatal(err)
+	}
+	if packed.Status.Replicas != 2 || packed.Status.AvailableReplicas != 1 || packed.Status.DesiredNativeMemberCount != 8 || packed.Status.ActiveNativeMemberCount != 7 {
+		t.Fatalf("packed status lost independent allocation/member counters: %+v", packed.Status)
+	}
+	if len(packed.Status.ReplicaStates) != 1 || packed.Status.ReplicaStates[0].CandidateAllocation == nil || packed.Status.ReplicaStates[0].CandidateAllocation.RuntimeIncarnation != "" {
+		t.Fatalf("dormant replacement did not survive status round-trip: %+v", packed.Status.ReplicaStates)
+	}
+	if len(packed.Status.ReplicaStates[0].NativeMembers) != 4 || packed.Status.ReplicaStates[0].NativeMembers[1].Membership != EngineGroupReplicaMembershipMasked {
+		t.Fatalf("per-member state did not survive status round-trip: %+v", packed.Status.ReplicaStates[0].NativeMembers)
+	}
+
+}
+
+func requireDGDInitialSizeSchema(t *testing.T, ctx context.Context, kubeClient client.Client, namespace string) {
+	t.Helper()
+
+	t.Log("Validate the DGD creation seed through CRD rules without enabling its gated workload pathway")
+	dgd := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "engine-group-seed", Namespace: namespace},
+		Spec: DynamoGraphDeploymentSpec{Components: []DynamoComponentDeploymentSharedSpec{{
+			ComponentName: "worker", Replicas: ptr.To[int32](2),
+			EngineGroup: &ComponentEngineGroupSpec{InitialSize: 2},
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: "main", Image: "test:1.6.0",
+			}}}},
+		}}},
+	}
+	if err := kubeClient.Create(ctx, dgd); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Change the world count without changing the size seeded into new worlds")
+	dgd.Spec.Components[0].Replicas = ptr.To[int32](3)
+	if err := kubeClient.Update(ctx, dgd); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Reject changing or removing the established immutable initialSize")
+	for _, remove := range []bool{false, true} {
+		candidate := dgd.DeepCopy()
+		if remove {
+			candidate.Spec.Components[0].EngineGroup = nil
+		} else {
+			candidate.Spec.Components[0].EngineGroup.InitialSize = 4
+		}
+		if err := kubeClient.Update(ctx, candidate); !apierrors.IsInvalid(err) {
+			t.Fatalf("initialSize update (remove=%v) error = %v, want Invalid", remove, err)
+		}
 	}
 }
 
