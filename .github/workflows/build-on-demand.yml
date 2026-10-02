@@ -26,6 +26,18 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      run_kimi_disagg:
+        description: 'Run only the Kimi K2.5 disaggregated recipe'
+        type: boolean
+        default: false
+      kimi_image_tag:
+        description: 'Published ACR TensorRT-LLM nightly tag for the Kimi recipe'
+        type: string
+        default: ''
+      kimi_preflight_only:
+        description: 'Validate the Kimi recipe without deploying'
+        type: boolean
+        default: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -33,6 +45,7 @@ env:
 jobs:
 
   init:
+    if: ${{ !inputs.run_kimi_disagg }}
     runs-on: ubuntu-slim
     outputs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
@@ -211,13 +224,27 @@ jobs:
           done
 
   # ============================================================================
+  # RECIPE-ONLY MANUAL RUN
+  # ============================================================================
+
+  kimi-disagg-perf:
+    name: Kimi K2.5 disaggregated
+    if: ${{ inputs.run_kimi_disagg }}
+    uses: ./.github/workflows/kimi-k25-disagg-nightly.yml
+    with:
+      source_ref: ${{ github.sha }}
+      image_tag: ${{ inputs.kimi_image_tag }}
+      preflight_only: ${{ inputs.kimi_preflight_only }}
+    secrets: inherit
+
+  # ============================================================================
   # CLEANUP
   # ============================================================================
 
   clean-k8s-builder:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
-    if: always()
+    if: ${{ always() && !inputs.run_kimi_disagg }}
     needs: [init, vllm-build, sglang-build, trtllm-build, triton-build, operator]
     steps:
     - name: Checkout repository
