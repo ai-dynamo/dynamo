@@ -37,10 +37,8 @@ pub(super) struct PreparedRequest {
     /// what a real generation worker does with the handoff. The sidecar drops
     /// the prefill leg's tokens, so the token is delivered to the client once.
     replayed_first_token: Option<u32>,
-    /// The replayed token's logprob, when the context phase computed one. A
-    /// decode leg asked for logprobs after a context leg that was not reports
-    /// its first token without one, exactly as a real engine does.
-    replayed_first_logprob: Option<f64>,
+    /// Selected and candidate logprobs from the context phase, absent if not requested.
+    replayed_first_logprobs: Option<Vec<pb::LogProb>>,
     prompt_tokens: Vec<u32>,
     pub(super) max_output_tokens: usize,
     /// Token IDs that end the request with `STOP` instead of `LENGTH`. Stop
@@ -128,7 +126,12 @@ impl PreparedRequest {
             session_id,
             seed: config.seed,
             replayed_first_token: kv.session.as_ref().and_then(handoff::first_gen_token),
-            replayed_first_logprob: kv.session.as_ref().and_then(handoff::first_gen_logprob),
+            replayed_first_logprobs: kv
+                .session
+                .as_ref()
+                .map(handoff::first_gen_logprobs)
+                .transpose()?
+                .flatten(),
             request_id,
             prompt_tokens,
             max_output_tokens,
@@ -202,21 +205,16 @@ impl PreparedRequest {
     /// to: output tokens and prompt tokens are configured separately, and using
     /// one for the other silently returns nothing when only the other was asked
     /// for.
-    ///
-    /// `logprob` is an override rather than a computation for one case only --
-    /// the replayed first token of a decode request, whose value was produced
-    /// by the context phase and arrives in the handoff.
     fn token_info(
         &self,
         token_id: u32,
         with_logprobs: bool,
         selection: Option<&pb::CandidateTokenSelection>,
-        logprob: Option<f64>,
     ) -> pb::TokenInfo {
         pb::TokenInfo {
             token_id,
             token: token_text(token_id),
-            logprob: with_logprobs.then(|| logprob.unwrap_or_else(|| selected_logprob(token_id))),
+            logprob: with_logprobs.then(|| selected_logprob(token_id)),
             rank: with_logprobs.then_some(1),
             candidates: if with_logprobs {
                 candidates(token_id, selection)
@@ -226,31 +224,47 @@ impl PreparedRequest {
         }
     }
 
-    /// Output position 0 of a decode request is the token the context phase
-    /// already produced, so its logprob belongs to the handoff rather than to
-    /// this engine: replay the received value instead of regenerating one, and
-    /// if the context phase computed none, leave the hole it left.
-    ///
-    /// Keyed on the position, not the token id. The same token can be sampled
-    /// again later in the stream, and those occurrences are this engine's own
-    /// -- they must not inherit the replayed token's logprob or its absence.
-    fn replayed_logprob(&self, token_id: u32, position: usize) -> Option<Replayed> {
-        if position != 0 || self.replayed_first_token != Some(token_id) {
-            return None;
-        }
-        Some(Replayed(self.replayed_first_logprob))
-    }
-
     pub(super) fn token_output(&self, token_id: u32, position: usize) -> pb::TokenOutput {
-        let replayed = self.replayed_logprob(token_id, position);
-        let with_logprobs =
-            self.return_output_logprobs && !matches!(replayed, Some(Replayed(None)));
-        let info = self.token_info(
+        let is_replayed = position == 0 && self.replayed_first_token == Some(token_id);
+        let mut info = self.token_info(
             token_id,
-            with_logprobs,
+            self.return_output_logprobs && !is_replayed,
             self.output_candidates.as_ref(),
-            replayed.and_then(|Replayed(logprob)| logprob),
         );
+        if is_replayed
+            && self.return_output_logprobs
+            && let Some(logprobs) = &self.replayed_first_logprobs
+        {
+            if let Some(selected) = logprobs.iter().find(|entry| entry.token_id == token_id) {
+                info.logprob = Some(selected.logprob);
+                info.rank = selected.rank;
+            }
+            info.candidates = logprobs
+                .iter()
+                .filter(|entry| {
+                    match self
+                        .output_candidates
+                        .as_ref()
+                        .and_then(|selection| selection.selection.as_ref())
+                    {
+                        Some(pb::candidate_token_selection::Selection::TopN(count)) => {
+                            entry.rank.is_some_and(|rank| rank <= *count)
+                        }
+                        Some(pb::candidate_token_selection::Selection::TokenIds(ids)) => {
+                            ids.ids.contains(&entry.token_id)
+                        }
+                        Some(pb::candidate_token_selection::Selection::All(_)) => true,
+                        None => false,
+                    }
+                })
+                .cloned()
+                .map(|mut candidate| {
+                    candidate.token = token_text(candidate.token_id);
+                    candidate
+                })
+                .collect();
+            info.candidates.sort_by_key(|entry| entry.rank);
+        }
         pb::TokenOutput {
             output_index: Some(0),
             text: info.token.clone(),
@@ -263,9 +277,7 @@ impl PreparedRequest {
             tokens: self
                 .prompt_tokens
                 .iter()
-                .map(|token_id| {
-                    self.token_info(*token_id, true, self.prompt_candidates.as_ref(), None)
-                })
+                .map(|token_id| self.token_info(*token_id, true, self.prompt_candidates.as_ref()))
                 .collect(),
         })
     }
@@ -320,9 +332,11 @@ impl PreparedRequest {
                 self.session_id.clone(),
                 &self.request_id,
                 self.prompt_len(),
-                first_token,
-                self.return_output_logprobs
-                    .then(|| selected_logprob(first_token)),
+                &self.token_info(
+                    first_token,
+                    self.return_output_logprobs,
+                    self.output_candidates.as_ref(),
+                ),
             )),
         }
     }
@@ -446,11 +460,6 @@ fn validate_role(
     }
     Ok(())
 }
-
-/// A replayed position's logprob: `None` inside means the context phase
-/// computed none, which is different from this position not being a replay.
-#[derive(Clone, Copy)]
-struct Replayed(Option<f64>);
 
 fn token_text(token_id: u32) -> String {
     format!("<token:{token_id}>")

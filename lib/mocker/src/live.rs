@@ -17,9 +17,7 @@ use futures::future::{BoxFuture, FutureExt, Shared};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::runtime::Handle;
-#[cfg(test)]
-use tokio::sync::watch;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -49,8 +47,8 @@ use handoff::{
     shutdown_handoff_routes, supervise_lifecycle_dispatcher,
 };
 use request::{
-    ObservedOutput, OutputDelivery, RequestCancellation, RequestRoute, RequestRoutes, Routes,
-    remove_route, route_is_registered, shutdown_routes,
+    ObservedOutput, OutputDelivery, RequestCancellation, RequestLifecycle, RequestRoute,
+    RequestRoutes, Routes, remove_route, route_is_registered, shutdown_routes,
 };
 
 const DEFAULT_REQUEST_OUTPUT_CAPACITY: usize = 8;
@@ -647,6 +645,7 @@ impl LiveEngine {
             client_id,
             rx,
             route: Arc::downgrade(&route),
+            lifecycle_rx: route.lifecycle_receiver(),
             routes: Arc::clone(&self.inner.routes),
             command_tx: self.inner.command_tx.clone(),
             cancellation_tx: self.inner.cancellation_tx.clone(),
@@ -729,7 +728,7 @@ impl LiveEngine {
         // ID-based cancellation is an Abort boundary: stop forwarding the
         // response immediately so a backpressured dispatcher cannot delay the
         // scheduler cancellation acknowledgement.
-        route.abandon_stream();
+        route.abort();
         await_cancellation(spawn_cancellation(
             &self.inner.runtime,
             self.inner.command_tx.clone(),
@@ -927,6 +926,7 @@ pub struct LiveRequest {
     client_id: Uuid,
     rx: mpsc::Receiver<ObservedOutput>,
     route: Weak<RequestRoute>,
+    lifecycle_rx: watch::Receiver<RequestLifecycle>,
     routes: Routes,
     command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
@@ -938,6 +938,11 @@ pub struct LiveRequest {
 impl LiveRequest {
     pub fn id(&self) -> Uuid {
         self.client_id
+    }
+
+    /// Whether an explicit abort closed this request's output route.
+    pub fn is_aborted(&self) -> bool {
+        self.lifecycle_rx.borrow().is_aborted
     }
 
     pub async fn recv(&mut self) -> Option<OutputSignal> {
@@ -961,7 +966,7 @@ impl LiveRequest {
         let Some(route) = request.route.upgrade() else {
             return Ok(false);
         };
-        route.abandon_stream();
+        route.abort();
         await_cancellation(spawn_cancellation(
             &request.runtime,
             request.command_tx.clone(),

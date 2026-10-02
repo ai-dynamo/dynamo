@@ -374,6 +374,7 @@ async fn streams_planned_tokens_to_the_owning_request() {
             ]
         );
         assert!(request.recv().await.is_none());
+        assert!(!request.is_aborted());
         assert_eq!(engine.active_request_count(), 0);
     }
 }
@@ -407,6 +408,7 @@ async fn dropping_engine_closes_outstanding_request_streams() {
     })
     .await
     .expect("engine shutdown should close every outstanding output route");
+    assert!(!request.is_aborted());
 }
 
 #[tokio::test]
@@ -768,6 +770,7 @@ async fn pass_boundary_waits_for_gated_route_delivery_before_id_reuse() {
         old_output.is_none(),
         "cancellation abandons the old stream before route cleanup"
     );
+    assert!(old.is_aborted());
     assert!(!cancellation.await.unwrap().unwrap());
     drop(old);
 
@@ -788,6 +791,7 @@ async fn pass_boundary_waits_for_gated_route_delivery_before_id_reuse() {
     assert_eq!(output.token_id, Some(22));
     assert!(output.completed);
     assert!(replacement.recv().await.is_none());
+    assert!(!replacement.is_aborted());
 }
 
 #[tokio::test]
@@ -834,6 +838,7 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
     assert!(fast_output.completed);
     assert_eq!(slow.recv().await.unwrap().token_id, Some(7));
     assert!(slow.recv().await.is_none());
+    assert!(!slow.is_aborted());
     wait_for_idle(&engine).await;
     assert_eq!(
         fpm.0.load(Ordering::Relaxed),
