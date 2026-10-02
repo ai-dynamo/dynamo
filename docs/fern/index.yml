@@ -106,6 +106,8 @@ navigation:
               path: pages/kubernetes/installation/rdma-setup/infiniband-on-azure.mdx
             - page: EFA on AWS
               path: pages/kubernetes/installation/rdma-setup/efa-on-aws.mdx
+            - page: DRANET (DRA-native EFA) on AWS
+              path: pages/kubernetes/installation/rdma-setup/dranet-on-aws.mdx
         - section: Model Storage
           contents:
             - page: Overview
