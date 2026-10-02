@@ -35,13 +35,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from dynamo.aisimulate.output.dgd.kube_status import (
-    CandidateOutcome,
-    CandidateStatusEntry,
-    SweeperStatusSnapshot,
-    SweepRunStatus,
-    write_sweeper_status,
-)
 from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,
     DGDGenerationOptions,
@@ -49,6 +42,13 @@ from dynamo.aisimulate.output.dgd.renderers import (
     render_dgd,
 )
 from dynamo.aisimulate.output.dgd.writers.atomic import replace_text
+from dynamo.aisimulate.output.dgdr.kube_status import (
+    CandidateOutcome,
+    CandidateStatusEntry,
+    SweeperStatusSnapshot,
+    SweepRunStatus,
+    write_sweeper_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -333,9 +333,7 @@ class DGDRAdapter:
         # order (which is merely "most-recently-updated-or-inserted" and
         # has no relationship to score). `_retained` itself stays an
         # unordered dict -- only this snapshot pass needs the order.
-        for record in sorted(
-            self._retained.values(), key=_retention_key, reverse=True
-        ):
+        for record in sorted(self._retained.values(), key=_retention_key, reverse=True):
             try:
                 rendered = render_dgd(
                     record,

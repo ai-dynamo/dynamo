@@ -7,13 +7,13 @@ import time
 import pytest
 import yaml
 
-from dynamo.aisimulate.output.dgd import dgdradapter as adapter_module
-from dynamo.aisimulate.output.dgd.dgdradapter import DGDRAdapter
-from dynamo.aisimulate.output.dgd.kube_status import STATUS_FILE_NAME
 from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,
     DGDGenerationOptions,
 )
+from dynamo.aisimulate.output.dgdr import dgdradapter as adapter_module
+from dynamo.aisimulate.output.dgdr.dgdradapter import DGDRAdapter
+from dynamo.aisimulate.output.dgdr.kube_status import STATUS_FILE_NAME
 
 pytestmark = [
     pytest.mark.unit,
