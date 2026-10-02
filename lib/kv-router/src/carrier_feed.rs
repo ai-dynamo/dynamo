@@ -309,7 +309,7 @@ mod tests {
 
     fn plhs(blocks: u32) -> TestResult<Vec<PositionalLineageHash>> {
         Ok(dynamo_kv_hashing::Request::builder()
-            .tokens((0..blocks * BLOCK_SIZE).collect())
+            .tokens((0..blocks * BLOCK_SIZE).collect::<Vec<_>>())
             .build()?
             .positional_lineage_hashes(BLOCK_SIZE)?)
     }
