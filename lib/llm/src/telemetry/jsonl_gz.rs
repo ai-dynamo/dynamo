@@ -303,9 +303,6 @@ impl<T: Serialize> GzipBatchWriter<T> {
     }
 
     async fn maintain_retention(&mut self, now: SystemTime) -> anyhow::Result<()> {
-        if self.options.max_bytes.is_none() && self.options.max_age.is_none() {
-            return Ok(());
-        }
         // Called after flushing. Close an idle segment before it expires, so
         // retention still progresses when no more requests arrive.
         if let (Some(max_age), Some(last_write)) = (self.options.max_age, self.last_write_time)
@@ -463,30 +460,27 @@ fn prune_retained_segments(
         if !metadata.is_file() {
             continue;
         }
-        let modified = metadata.modified()?;
-        total_bytes = total_bytes.saturating_add(metadata.len());
-        segments.push((index, path, metadata.len(), modified));
-    }
-    // Segment indices preserve producer order across restarts. Remove expired
-    // files first, then the oldest closed files until the byte budget is met.
-    segments.retain(|(index, _, _, _)| Some(*index) != active_index);
-    for (_, path, bytes, modified) in &segments {
-        if max_age.is_some_and(|limit| now.duration_since(*modified).is_ok_and(|age| age >= limit))
+        let is_active = Some(index) == active_index;
+        if !is_active
+            && let Some(limit) = max_age
+            && now
+                .duration_since(metadata.modified()?)
+                .is_ok_and(|age| age >= limit)
         {
-            std::fs::remove_file(path)
+            std::fs::remove_file(&path)
                 .with_context(|| format!("expiring gzip jsonl segment {}", path.display()))?;
-            total_bytes = total_bytes.saturating_sub(*bytes);
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        if !is_active {
+            segments.push((path, metadata.len()));
         }
     }
+    // Only unexpired closed segments remain, ordered by index across restarts.
     if let Some(limit) = max_bytes {
-        for (_, path, bytes, modified) in segments {
+        for (path, bytes) in segments {
             if total_bytes <= limit {
                 break;
-            }
-            if max_age
-                .is_some_and(|limit| now.duration_since(modified).is_ok_and(|age| age >= limit))
-            {
-                continue;
             }
             std::fs::remove_file(&path)
                 .with_context(|| format!("pruning gzip jsonl segment {}", path.display()))?;
