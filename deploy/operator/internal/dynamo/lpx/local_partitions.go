@@ -78,19 +78,19 @@ func selectRemotePartitions(
 }
 
 // applyLocalPartitionIDs publishes the projection's GPU-local partitions into one
-// Cyborg container. A projection without local partitions leaves the container unchanged.
+// Cyborg container. The operator owns the variable: it removes any authored value
+// and sets it only when the projection has local partitions.
 func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection) {
+	container.Env = slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool {
+		return variable.Name == localPartitionIDsEnv
+	})
 	if len(projection.localPartitionIDs) == 0 {
 		return
 	}
 
-	// Replace any authored value with the operator's resolved selection.
 	ids := make([]string, len(projection.localPartitionIDs))
 	for index, id := range projection.localPartitionIDs {
 		ids[index] = strconv.Itoa(id)
 	}
-	env := slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool {
-		return variable.Name == localPartitionIDsEnv
-	})
-	container.Env = append(env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
+	container.Env = append(container.Env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
 }

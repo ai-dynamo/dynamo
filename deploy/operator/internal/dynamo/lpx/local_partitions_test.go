@@ -18,22 +18,16 @@ const testPart11Path = "part-11"
 func TestProjectModelV2LocalPartitions(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name              string
-		pipeline          Pipeline
-		selection         *dynamov1beta1.LPXLocalPartitions
-		wantErr           string
-		wantAgents        int
-		wantCompilerIDs   []int64
-		wantConnectors    int
-		wantRuntimeIDs    string
-		wantLocalIDs      []int
-		wantSameAsAllLPUs bool
+		name            string
+		pipeline        Pipeline
+		selection       *dynamov1beta1.LPXLocalPartitions
+		wantErr         string
+		wantAgents      int
+		wantCompilerIDs []int64
+		wantConnectors  int
+		wantRuntimeIDs  string
+		wantLocalIDs    []int
 	}{
-		{
-			name: "omitted selection keeps every partition on LPUs", pipeline: PipelineLPX,
-			wantAgents: 17, wantCompilerIDs: []int64{7, 8, 11}, wantConnectors: 1,
-			wantRuntimeIDs: "7\n11", wantSameAsAllLPUs: true,
-		},
 		{
 			name: "independent partition runs locally", pipeline: PipelineLPX,
 			selection:  &dynamov1beta1.LPXLocalPartitions{IDs: []int64{11}},
@@ -116,9 +110,9 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			require.Equal(t, test.wantRuntimeIDs, resolvedPartitionData([]*ModelProjection{projection})["partition_ids"])
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
-			t.Log("Keep the digest of an unselected workload stable")
+			t.Log("Change the workload digest when partitions move to the GPU")
 			baseline := projectTestBuild(t, normalized, PipelineLPX)
-			require.Equal(t, test.wantSameAsAllLPUs, projection.Digest() == baseline.Digest())
+			require.NotEqual(t, baseline.Digest(), projection.Digest())
 		})
 	}
 }
@@ -132,9 +126,9 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		wantEnv  []corev1.EnvVar
 	}{
 		{
-			name:    "no local partitions leaves authored values",
-			env:     []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}},
-			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}},
+			name:    "no local partitions removes authored values",
+			env:     []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
+			wantEnv: []corev1.EnvVar{{Name: "OTHER", Value: "kept"}},
 		},
 		{
 			name:     "resolved selection replaces authored values",
@@ -233,4 +227,28 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			require.Equal(t, test.wantLocalEnv, localEnv)
 		})
 	}
+}
+
+func TestProjectModelV2LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Create a hybrid build with one more physical partition than the LPX limit")
+	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+	build := normalized.build
+	build.CompilationMode = BuildCompilationModeHybrid
+	build.SelectedPropSyncChains = nil
+	template := build.Partitions[0]
+	build.Partitions = make([]BuildPartition, 0, maxLPXPartitions+1)
+	for id := range maxLPXPartitions + 1 {
+		partition := template
+		partition.SourcePartitionID = id
+		build.Partitions = append(build.Partitions, partition)
+	}
+
+	t.Log("Reject the oversized build even when every partition runs locally")
+	_, err := appendModelProjections(nil, ModelProjectionInput{
+		Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+		LocalPartitions: &dynamov1beta1.LPXLocalPartitions{All: true},
+	})
+	require.EqualError(t, err, "LPX projection has 257 partitions, limit is 1..256")
 }

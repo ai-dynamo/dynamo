@@ -44,12 +44,15 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	}
 	// Bound the component's physical build before runtime expansion and request publication.
 	projection := projections[len(dst)]
-	minPartitions := 1
+	boundedPartitions := len(projection.partitions)
 	if len(projection.localPartitionIDs) > 0 {
-		minPartitions = 0
+		// A local selection may leave no remote partitions, but the build itself stays bounded.
+		boundedPartitions = len(intent.BuildSnapshot.build.Partitions)
+	} else if boundedPartitions < 1 {
+		return nil, fmt.Errorf("LPX projection has %d partitions, limit is 1..%d", boundedPartitions, maxLPXPartitions)
 	}
-	if len(projection.partitions) < minPartitions || len(projection.partitions) > maxLPXPartitions {
-		return nil, fmt.Errorf("LPX projection has %d partitions, limit is 1..%d", len(projection.partitions), maxLPXPartitions)
+	if boundedPartitions > maxLPXPartitions {
+		return nil, fmt.Errorf("LPX projection has %d partitions, limit is 1..%d", boundedPartitions, maxLPXPartitions)
 	}
 	return projections, nil
 }
