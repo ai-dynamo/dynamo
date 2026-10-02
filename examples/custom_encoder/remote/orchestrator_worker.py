@@ -24,8 +24,7 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     config = RemoteEncoderConfig.from_env()
 
-    generator_client = await runtime.endpoint(config.generator_endpoint).client()
-    await generator_client.wait_for_instances()
+    generator = await LLMUnaryClient.connect(runtime, config.generator_endpoint)
 
     handoff = ExternalEncoderHandoff(
         config.encoder_class(),
@@ -35,7 +34,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         handoff.load(config.model)
         orchestrator = ExternalEncoderOrchestrator(
             handoff,
-            LLMUnaryClient(generator_client),
+            generator,
             DummyClassifier(),
             config.generator_model_name,
         )
