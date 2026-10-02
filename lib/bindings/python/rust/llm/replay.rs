@@ -2675,8 +2675,8 @@ fn take_runtime_observers(
 
 /// Convert a replay error back into a `PyErr`, preserving the original Python
 /// exception (its type and traceback) when a scaling or telemetry callback
-/// failed. Non-Python errors (e.g. a simulation dead-end) fall back to the
-/// generic conversion.
+/// failed. AISim replay errors retain their resource/coverage classification
+/// when the AISim integration is enabled.
 fn replay_run_err_to_pyerr(
     err: anyhow::Error,
     callback_error: Option<&PyCallbackErrorSlot>,
@@ -2690,7 +2690,16 @@ fn replay_run_err_to_pyerr(
     }
     match err.downcast::<PyErr>() {
         Ok(py_err) => py_err,
-        Err(other) => to_pyerr(other),
+        Err(other) => {
+            #[cfg(feature = "ais-forward-pass")]
+            {
+                aisimulate_core::replay_python_error(other)
+            }
+            #[cfg(not(feature = "ais-forward-pass"))]
+            {
+                to_pyerr(other)
+            }
+        }
     }
 }
 

@@ -144,12 +144,12 @@ class DynamoReplayRunner:
         if self._requires_canonical_replay(spec, affinity):
             if planner_config is not None:
                 raise ValueError(
-                    "conversation affinity, AgentX profiles and attention-DP "
+                    "conversation affinity, AgentX profiles and state-cache "
                     "replay require static worker pools without a Planner"
                 )
             if router_mode != "kv_router":
                 raise ValueError(
-                    "Dynamo AgentX profile/affinity and attention-DP replay "
+                    "Dynamo AgentX profile/affinity and state-cache replay "
                     "require router.policy='kv_router'"
                 )
             if spec.backend_deployment.backend not in {"vllm", "sglang"}:
@@ -261,11 +261,6 @@ class DynamoReplayRunner:
                 continue
             rank = args.get("rank", args)
             if isinstance(rank, dict) and rank.get("state_cache") is not None:
-                return True
-            if deployment.deployment_mode == "disagg" and any(
-                isinstance(value, (int, float)) and value > 1
-                for value in (args.get("dp_size"), args.get("aic_attention_dp_size"))
-            ):
                 return True
         return False
 
