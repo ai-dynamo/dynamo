@@ -5024,9 +5024,10 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
             )
             # Native for MoE with or without EP, or recurrent-state layers; dense
-            # attention-only stays synthetic. TP-only MoE stays native, not balanced by
-            # construction: Inkling's convolution cache is a SlidingWindowSpec that the
-            # layout cannot tell apart from other finite windows, and must stay exact.
+            # attention-only stays synthetic. TP-only MoE with a qualifying layout
+            # stays native, not balanced by construction: Inkling's convolution cache
+            # is a SlidingWindowSpec that the layout cannot tell apart from other
+            # finite windows, and must stay exact.
             self._kvwarm_native = self._kvwarm_native_layout() and (
                 has_experts or bool(self._kvwarm_state_layer_groups())
             )
@@ -5865,10 +5866,14 @@ class InstrumentedScheduler(AsyncScheduler):
             else:
                 pending = True
         if vanished:
-            # A partially built fleet cannot serve its rung: surviving chains
-            # would only pin KV that fake injection needs. Fail the whole
-            # stage (every point of this rung takes the fake-injection
-            # fallback) and release the survivors.
+            # A partially built fleet cannot serve its stage: surviving chains
+            # would only pin KV that the next stage or fake injection needs. Fail
+            # the whole stage and release the survivors. The points the stage
+            # served lose real-KV coverage: every point of the batch rung for
+            # shared chains, the one point for native prefills. Outside
+            # attention-DP they take the fake-injection fallback; under
+            # attention-DP they are skipped, because fake injection is not
+            # rank-consistent.
             logger.warning(
                 "KVWARM: %d chain(s) of stage batch=%s vanished during the "
                 "build; failing the stage, its points fall back to fake injection "
@@ -5986,9 +5991,12 @@ class InstrumentedScheduler(AsyncScheduler):
         return True
 
     def _kvwarm_stage_settle(self, batch: int | None, ok: bool, detail: dict) -> None:
-        """Record the final outcome of a stage. A failed rung has its plan
-        depth zeroed so every point of the rung takes the fake-injection
-        fallback (``_kvwarm_plan_covers`` reads the plan)."""
+        """Record the final outcome of a stage. A failed stage has its plan
+        depth zeroed, so the points it served lose coverage
+        (``_kvwarm_plan_covers`` reads the plan): the whole batch rung for
+        shared chains, the one point for native prefills. Outside attention-DP
+        they take the fake-injection fallback; under attention-DP they are
+        skipped, because fake injection is not rank-consistent."""
         meta = self._kvwarm_meta_init()
         if ok:
             meta["stages"].append({"batch": batch, **detail})
@@ -6589,9 +6597,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 meta["points_real_kv"] += 1
                 stamp = "kvwarm_real_kv"
             elif meta.get("warm_eligible") is False:
-                # The gate rejected the configuration: synthetic KV is the
-                # design, not a fallback, and the row regime reads
-                # skip:<reason> (``_kvwarm_seed_regime``).
+                # The gate rejected the whole configuration, so every point uses
+                # synthetic KV and none fell back: no real-KV attempt existed. The
+                # row regime reads skip:<reason> (``_kvwarm_seed_regime``); the
+                # reason says why, for example dense_model_content_insensitive
+                # (synthetic KV is correct by construction) or dataset_empty.
                 meta["points_gate_skipped"] += 1
                 stamp = None
             else:

@@ -108,9 +108,11 @@ def _install_test_capacity_preflight(stub, capacity=None):
     capacity = capacity or _benchmark_capacity()
     stub._bench_make_local_capacity = lambda: capacity
     stub._bench_synchronizer = None
-    stub.kv_cache_manager = SimpleNamespace(
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[])
-    )
+    if getattr(stub, "kv_cache_manager", None) is None:
+        # Keep a caller's manager: _bench_blocks_per_req reads its groups.
+        stub.kv_cache_manager = SimpleNamespace(
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[])
+        )
     # ``_bench_build_grid`` re-filters the decode capture list against the
     # negotiated request limit before generating the grid; stubs that don't
     # model captures still need the attribute to exist.
@@ -6089,7 +6091,7 @@ def test_kvwarm_native_capacity_fallback_saves_available_steady_samples(monkeypa
     assert stub._bench_expected_fpms == 4
     assert stub.kv_cache_manager.block_pool.get_num_free_blocks() == 0
     assert stub._bench_step_decode() is None
-    assert stub._bench_results == []  # Wait for the normal result deadline.
+    assert stub._bench_results == []
     stub._bench_point_deadline = time.monotonic() - 1
     assert stub._bench_step_decode() is None
     assert len(stub._bench_results) == 1
