@@ -40,7 +40,7 @@ def test_false_enable_switches_to_collect_only(monkeypatch, value):
 
     assert allow_nixl_telemetry_capture() is True
 
-    assert os.environ["NIXL_TELEMETRY_ENABLE"] == "y"
+    assert "NIXL_TELEMETRY_ENABLE" not in os.environ
     assert os.environ["NIXL_TELEMETRY_EXPORTER"] == "NOP"
     assert "NIXL_TELEMETRY_DIR" not in os.environ
     assert os.environ["NIXL_TELEMETRY_PROMETHEUS_PORT"] == "19090"
@@ -113,7 +113,7 @@ def test_headless_clears_false_enable_before_workers(monkeypatch):
             sys.modules.pop("dynamo.vllm.headless", None)
 
     assert seen == {
-        "enable": "y",
+        "enable": None,
         "exporter": "NOP",
         "directory": None,
         "port": "19090",

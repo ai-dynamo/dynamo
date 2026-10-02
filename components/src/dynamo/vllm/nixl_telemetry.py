@@ -18,17 +18,18 @@ _NOP_EXPORTER = "NOP"
 def allow_nixl_telemetry_capture() -> bool:
     """Replace a false NIXL_TELEMETRY_ENABLE with capture-only collection.
 
-    A set false value vetoes capture_telemetry=True. NIXL reads the
-    environment before any config file, and an unset exporter falls through
-    to NIXL_TELEMETRY_DIR. Enable plus the NOP exporter keeps
-    get_xfer_telemetry working and writes nothing. Returns True when the
+    NIXL 1.4 treats a set false value as a veto of capture_telemetry=True,
+    so that value is removed. The exporter is pinned to NOP so 1.4 does not
+    fall through to NIXL_TELEMETRY_DIR or a config file. Enable is left
+    unset: NIXL 1.3.2, which the vLLM image builds, has no NOP plugin and
+    loads an exporter only when enable is true. Returns True when the
     environment was changed.
     """
     enable = os.environ.get("NIXL_TELEMETRY_ENABLE")
     if enable is None or enable.lower() not in _FALSE:
         return False
 
-    os.environ["NIXL_TELEMETRY_ENABLE"] = "y"
+    os.environ.pop("NIXL_TELEMETRY_ENABLE", None)
     os.environ["NIXL_TELEMETRY_EXPORTER"] = _NOP_EXPORTER
     os.environ.pop("NIXL_TELEMETRY_DIR", None)
     logger.info("Pinned NIXL telemetry to the NOP exporter")
