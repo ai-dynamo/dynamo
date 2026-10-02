@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
+import types
+from types import SimpleNamespace
 
 import pytest
 
@@ -63,3 +66,55 @@ def test_unset_enable_leaves_sink_envs(monkeypatch):
 
     assert "NIXL_TELEMETRY_ENABLE" not in os.environ
     assert os.environ["NIXL_TELEMETRY_EXPORTER"] == "prometheus"
+
+
+def test_headless_clears_false_enable_before_workers(monkeypatch):
+    monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "n")
+    monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+    monkeypatch.setenv("NIXL_TELEMETRY_DIR", "/tmp/x")
+    monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
+
+    seen = {}
+
+    def run_headless(_args):
+        seen["enable"] = os.environ.get("NIXL_TELEMETRY_ENABLE")
+        seen["exporter"] = os.environ.get("NIXL_TELEMETRY_EXPORTER")
+        seen["directory"] = os.environ.get("NIXL_TELEMETRY_DIR")
+        seen["port"] = os.environ.get("NIXL_TELEMETRY_PROMETHEUS_PORT")
+
+    def package(name: str) -> types.ModuleType:
+        module = types.ModuleType(name)
+        module.__path__ = []
+        module.__package__ = name
+        return module
+
+    # headless imports vLLM argument types. Stub that module when this test
+    # runs without vLLM installed, and drop the stub import afterward.
+    loaded_headless = "dynamo.vllm.headless" in sys.modules
+    if not loaded_headless and "dynamo.vllm.args" not in sys.modules:
+        args_mod = types.ModuleType("dynamo.vllm.args")
+        args_mod.Config = object
+        monkeypatch.setitem(sys.modules, "dynamo.vllm.args", args_mod)
+    for name in ("vllm", "vllm.entrypoints", "vllm.entrypoints.cli"):
+        if name not in sys.modules:
+            monkeypatch.setitem(sys.modules, name, package(name))
+    serve = types.ModuleType("vllm.entrypoints.cli.serve")
+    serve.run_headless = run_headless
+    monkeypatch.setitem(sys.modules, "vllm.entrypoints.cli.serve", serve)
+
+    try:
+        from dynamo.vllm.headless import run_dynamo_headless
+
+        run_dynamo_headless(
+            SimpleNamespace(engine_args=SimpleNamespace(load_format="auto"))
+        )
+    finally:
+        if not loaded_headless:
+            sys.modules.pop("dynamo.vllm.headless", None)
+
+    assert seen == {
+        "enable": None,
+        "exporter": None,
+        "directory": None,
+        "port": "19090",
+    }
