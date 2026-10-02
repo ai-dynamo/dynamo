@@ -27,7 +27,13 @@ import pytest
 from PIL import Image
 from redis.exceptions import RedisClusterException, RedisError
 
-from dynamo.common.http import HttpConnectionError, HttpStatusError, HttpTimeoutError
+from dynamo.common.http import (
+    HttpConfigurationError,
+    HttpConnectionError,
+    HttpError,
+    HttpStatusError,
+    HttpTimeoutError,
+)
 from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.image_loader import (
@@ -314,6 +320,87 @@ async def test_http_status_error_propagated(loader: ImageLoader) -> None:
         assert exc_info.value is error
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "status",
+        "timeout",
+        "connection",
+        "configuration",
+        "transport",
+        "validation",
+        "decode",
+        "empty",
+        "unsupported",
+    ],
+)
+async def test_http_failure_logs_redact_reference(
+    loader: ImageLoader, caplog, failure
+) -> None:
+    url = "https://example.com/ref.png?sig=private-token&padding=" + "x" * 2000
+    errors = {
+        "status": HttpStatusError(503, "Unavailable", url),
+        "timeout": HttpTimeoutError(f"Timed out: {url}"),
+        "connection": HttpConnectionError(f"Connection failed: {url}"),
+        "configuration": HttpConfigurationError(f"Proxy rejected: {url}"),
+        "transport": HttpError(f"Transport failed: {url}"),
+        "validation": UrlValidationError(f"Redirect rejected: {url}"),
+        "decode": OSError(f"Decode failed: {url}"),
+    }
+    expected_type = type(errors[failure]) if failure in errors else ValueError
+    expected_status = {
+        "status": 503,
+        "timeout": 408,
+        "connection": 400,
+        "unsupported": 415,
+    }.get(failure)
+    if expected_status is not None:
+        expected_type = HttpStatusError
+    fetch = AsyncMock(return_value=b"" if failure == "empty" else b"not an image")
+    if failure == "decode":
+        loader._open_image = AsyncMock(side_effect=errors[failure])
+    elif failure in errors:
+        fetch.side_effect = errors[failure]
+
+    with patch(_FETCH_BYTES_PATH, fetch), pytest.raises(expected_type) as exc_info:
+        await loader.load_image(url)
+
+    if expected_status is not None:
+        assert exc_info.value.status == expected_status
+    if failure in errors and failure not in ("timeout", "connection"):
+        assert exc_info.value is errors[failure]
+    fetch.assert_awaited_once()
+    assert fetch.await_args.args[0] == url
+    assert caplog.records
+    assert "private-token" not in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
+
+
+@pytest.mark.parametrize("error_type", [HttpStatusError, OSError])
+async def test_http_batch_logs_redact_reference(
+    loader: ImageLoader, caplog, error_type
+) -> None:
+    url = "https://example.com/ref.png?sig=private-token&padding=" + "x" * 2000
+    if error_type is HttpStatusError:
+        error = HttpStatusError(503, f"Unavailable: {url}", url)
+    else:
+        error = OSError(f"Decode failed: {url}")
+    caplog.set_level(logging.DEBUG, logger="dynamo.common.multimodal.image_loader")
+
+    with patch(_FETCH_BYTES_PATH, _mock_fetch_bytes(side_effect=error)):
+        with pytest.raises(Exception) as exc_info:
+            await loader.load_image_batch([{URL_VARIANT_KEY: url}])
+
+    if error_type is HttpStatusError:
+        assert exc_info.value is error
+    else:
+        assert not isinstance(exc_info.value, ValueError)
+        assert "Decode failed" in str(exc_info.value)
+    assert caplog.records
+    assert "private-token" not in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
+
+
 # --- Cache behavior ---
 
 
@@ -495,6 +582,23 @@ async def test_leading_whitespace_does_not_collide_with_other_host(
     assert mock_fetch.call_count == 2
     assert first.getpixel((0, 0)) == (255, 0, 0)
     assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
+async def test_http_cache_logs_redact_without_changing_cache_keys(
+    loader: ImageLoader, caplog
+) -> None:
+    url = "https://example.com/ref.png?sig=private-token&padding=" + "x" * 2000
+    other_url = url.replace("private-token", "other-private-token")
+    caplog.set_level(logging.DEBUG, logger="dynamo.common.multimodal.image_loader")
+    with patch(_FETCH_BYTES_PATH, _mock_fetch_bytes()) as fetch:
+        first = await loader.load_image(url)
+        assert await loader.load_image(url) is first
+        assert await loader.load_image(other_url) is not first
+
+    assert [call.args[0] for call in fetch.await_args_list] == [url, other_url]
+    assert caplog.records
+    assert "private-token" not in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
 
 
 def _make_svg_bytes() -> bytes:
@@ -1021,23 +1125,30 @@ async def test_shared_cache_delete_cluster_error_falls_back_to_origin(
     client.set.assert_awaited_once()
 
 
-async def test_invalid_shared_cache_entry_is_deleted_and_refetched(monkeypatch) -> None:
+async def test_invalid_shared_cache_entry_is_deleted_and_refetched(
+    monkeypatch, caplog
+) -> None:
     _enable_shared_image_cache(monkeypatch)
     client = AsyncMock()
     client.get.return_value = b"not an image"
     origin_fetch = _mock_fetch_bytes()
+    url = "https://example.com/img.png?sig=private-token&padding=" + "x" * 2000
 
     with (
         patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
         patch(_FETCH_BYTES_PATH, origin_fetch),
     ):
         shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
-        image = await shared_loader.load_image("https://example.com/img.png")
+        image = await shared_loader.load_image(url)
 
     assert image.size == (2, 2)
     client.delete.assert_awaited_once()
     origin_fetch.assert_awaited_once()
+    assert origin_fetch.await_args.args[0] == url
     client.set.assert_awaited_once()
+    assert caplog.records
+    assert "private-token" not in caplog.text
+    assert all(len(record.getMessage()) < 512 for record in caplog.records)
 
 
 async def test_truncated_shared_cache_entry_is_deleted_and_refetched(

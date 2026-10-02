@@ -613,6 +613,9 @@ class OmniHandler(BaseOmniHandler):
         elif request_type == RequestType.IMAGE_GENERATION:
             assert isinstance(parsed_request, NvCreateImageRequest)
             dimensions = image_generation_size_from_str(parsed_request.size)
+            inputs = self._engine_inputs_from_image(
+                parsed_request, dimensions=dimensions
+            )
             if parsed_request.input_reference is not None:
                 try:
                     image = await self._image_loader.load_image(
@@ -621,9 +624,20 @@ class OmniHandler(BaseOmniHandler):
                 except (ValueError, PIL.Image.DecompressionBombError) as e:
                     # Keep URLs and inline image data out of the client error.
                     raise ValueError("Failed to load input_reference") from e
-            return self._engine_inputs_from_image(
-                parsed_request, dimensions=dimensions, image=image
-            )
+            if image is not None:
+                inputs.prompt.update(
+                    build_image_to_image_prompt(
+                        model_class_name=get_model_class_name(self.engine_client),
+                        prompt=parsed_request.prompt,
+                        negative_prompt=(
+                            parsed_request.nvext or ImageNvExt()
+                        ).negative_prompt,
+                        input_image=[image],
+                        height=dimensions[1],
+                        width=dimensions[0],
+                    )
+                )
+            return inputs
         elif request_type == RequestType.VIDEO_GENERATION:
             assert isinstance(parsed_request, NvCreateVideoRequest)
             return self._engine_inputs_from_video(parsed_request, image=image)
@@ -794,7 +808,6 @@ class OmniHandler(BaseOmniHandler):
         req: NvCreateImageRequest,
         *,
         dimensions: tuple[int, int],
-        image: PIL.Image.Image | None = None,
     ) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
         width, height = dimensions
@@ -806,18 +819,6 @@ class OmniHandler(BaseOmniHandler):
             width,
             negative_prompt=nvext.negative_prompt,
         )
-        if image is not None:
-            prompt.update(
-                build_image_to_image_prompt(
-                    model_class_name=get_model_class_name(self.engine_client),
-                    prompt=req.prompt,
-                    negative_prompt=nvext.negative_prompt,
-                    input_image=[image],
-                    height=height,
-                    width=width,
-                )
-            )
-
         sp = OmniDiffusionSamplingParams(
             height=height,
             width=width,
