@@ -11,7 +11,7 @@ from typing import Optional
 
 import tritonclient.grpc.model_config_pb2 as mc
 import uvloop
-from google.protobuf import text_format
+from google.protobuf import json_format, text_format
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
 
@@ -70,8 +70,6 @@ def _read_model_config(
     else:
         # model.config() returns dict[str, Any]; parse it back into the ModelConfig
         # protobuf and serialize to bytes, matching the config.pbtxt branch above.
-        from google.protobuf import json_format
-
         model_config_pb = json_format.ParseDict(model_config, mc.ModelConfig())
         serialized_config = model_config_pb.SerializeToString()
         logger.info("Read model config from Triton.")
@@ -79,9 +77,13 @@ def _read_model_config(
         return serialized_config
 
 
-def _collect_classify_dependency_models(repository_path: str) -> set[str]:
+def _collect_classify_dependency_models(
+    server: TritonServer,
+    model_names: list[str],
+    repository_path: str,
+) -> set[str]:
     """Return names of models referenced as a step inside any model's
-    ``ensemble_scheduling`` anywhere in the repository.
+    ``ensemble_scheduling``.
 
     Invoked only on the ``--task classify`` path. A typical classify
     ensemble pairs one ``ensemble`` model with a Python tokenizer
@@ -91,21 +93,63 @@ def _collect_classify_dependency_models(repository_path: str) -> set[str]:
     ``ClassifyWorkerHandler`` for the tokenizer or numeric stage raises,
     which cancels the entire TaskGroup and aborts the valid ensemble.
 
-    Scanning the repository FS instead of only the ready set also
-    catches the case where the public ensemble fails to load: we still
-    know its leaves are its deps and keep them out of ``/v1/classify``
-    rather than exposing them with the wrong tensor contract.
+    Dependency discovery combines two sources:
+
+    * Each ready model's own config, via Triton's runtime API. This
+      works for cloud model repositories (``s3://``, ``gs://``,
+      ``as://``), where filesystem listing is not available.
+    * A filesystem scan of ``config.pbtxt`` files under
+      ``repository_path``. On local repos this supplements the ready-set
+      scan so we still skip dependencies when the public ensemble itself
+      failed to load. For cloud URIs the glob returns nothing and the
+      scan is a no-op.
     """
     deps: set[str] = set()
-    repo = Path(repository_path)
-    for pbtxt in sorted(repo.glob("*/config.pbtxt")):
+
+    # Primary source: loaded model configs (works for both local and
+    # cloud repositories).
+    for name in model_names:
+        try:
+            raw_config = server.model(name).config()
+        except Exception as exc:  # noqa: BLE001 - best-effort discovery
+            logger.warning(
+                "Could not read runtime config for '%s' while scanning "
+                "for ensemble dependencies: %s",
+                name,
+                exc,
+            )
+            continue
+        if not raw_config:
+            continue
+        try:
+            cfg = json_format.ParseDict(raw_config, mc.ModelConfig())
+        except json_format.ParseError as exc:
+            logger.warning(
+                "Could not parse runtime config for '%s' while scanning "
+                "for ensemble dependencies: %s",
+                name,
+                exc,
+            )
+            continue
+        if cfg.HasField("ensemble_scheduling"):
+            for step in cfg.ensemble_scheduling.step:
+                if step.model_name:
+                    deps.add(step.model_name)
+
+    # Supplementary source: filesystem scan picks up ensembles whose own
+    # load failed (so they are not in the ready set) but whose leaves are
+    # ready. No-op for cloud URIs: Path.glob returns nothing.
+    try:
+        pbtxts = sorted(Path(repository_path).glob("*/config.pbtxt"))
+    except (OSError, NotImplementedError):
+        pbtxts = []
+    for pbtxt in pbtxts:
         try:
             with pbtxt.open() as f:
                 cfg = text_format.Parse(f.read(), mc.ModelConfig())
         except (OSError, text_format.ParseError) as exc:
-            # A config we cannot read also cannot declare dependencies.
             logger.warning(
-                "Could not read %s while scanning for ensemble " "dependencies: %s",
+                "Could not read %s while scanning for ensemble dependencies: %s",
                 pbtxt,
                 exc,
             )
@@ -114,6 +158,7 @@ def _collect_classify_dependency_models(repository_path: str) -> set[str]:
             for step in cfg.ensemble_scheduling.step:
                 if step.model_name:
                     deps.add(step.model_name)
+
     return deps
 
 
@@ -145,21 +190,25 @@ async def _register_and_serve(
 
     triton_model_config = _read_model_config(model, model_name, model_repository)
 
-    # Model metadata for the KServe frontend. register_model reads the tensor
-    # protocol layout for tensor-based models from tensor_model_config.
-    tensor_model_config = {
-        "name": "",
-        "inputs": [],
-        "outputs": [],
-        "triton_model_config": triton_model_config,
-    }
-
     if config.task == "classify":
         model_input = ModelInput.Text
         model_type = ModelType.Classify
+        # Classify handler parses config.pbtxt locally; register_model
+        # just needs to skip HF asset fetching for a non-HF model.
+        register_kwargs: dict = {"skip_model_assets": True}
     else:
         model_input = ModelInput.Tensor
         model_type = ModelType.TensorBased
+        # TensorBased consumers (KServe frontend) read the Triton model
+        # config bytes off the MDC.
+        register_kwargs = {
+            "tensor_model_config": {
+                "name": "",
+                "inputs": [],
+                "outputs": [],
+                "triton_model_config": triton_model_config,
+            },
+        }
 
     logger.info(
         f"Attempting to register model '{model_name}' with Dynamo runtime "
@@ -171,7 +220,7 @@ async def _register_and_serve(
         endpoint,
         model_name,  # model_path (used as display name for tensor-based models)
         worker_type=WorkerType.Aggregated,
-        tensor_model_config=tensor_model_config,
+        **register_kwargs,
     )
     logger.info(
         f"✓ Successfully registered model '{model_name}' with endpoint "
@@ -276,7 +325,9 @@ async def init_worker(
     # everything so a dependency model is still addressable directly over
     # KServe gRPC for debugging.
     if config.task == "classify":
-        deps = _collect_classify_dependency_models(model_repository)
+        deps = _collect_classify_dependency_models(
+            server, model_names, model_repository
+        )
         skipped = sorted(set(model_names) & deps)
         exposed = [n for n in model_names if n not in deps]
         if skipped:

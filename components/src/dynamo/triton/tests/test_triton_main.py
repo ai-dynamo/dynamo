@@ -146,7 +146,11 @@ def test_register_and_serve_classify_task_wires_classify_handler(monkeypatch, tm
     assert reg_args[1] == main.ModelType.Classify
     assert reg_args[3] == model_name
     assert reg_kwargs["worker_type"] == main.WorkerType.Aggregated
-    assert "triton_model_config" in reg_kwargs["tensor_model_config"]
+    # Classify takes the asset-skip fast path (no HF resolve) and does
+    # not attach the Triton protocol layout. The handler parses it
+    # directly from config.pbtxt.
+    assert reg_kwargs["skip_model_assets"] is True
+    assert "tensor_model_config" not in reg_kwargs
 
     endpoint.serve_endpoint.assert_awaited_once()
     served = endpoint.serve_endpoint.call_args.args[0]
@@ -274,20 +278,16 @@ def init_worker_env(monkeypatch):
 
 
 def _make_server_with_models(server_cls: MagicMock, model_names: list[str]):
-    """Wire the patched ``TritonServer`` to report ``model_names`` as ready,
-    and return a per-name empty-config model so the disk-fallback path reads
-    the real config.pbtxt we wrote under tmp_path."""
+    """Wire the patched ``TritonServer`` to report ``model_names`` as ready.
+
+    An empty runtime config on every looked-up model makes
+    ``_collect_classify_dependency_models``'s primary (runtime) scan a
+    no-op, so it falls back to the ``config.pbtxt`` files written under
+    ``tmp_path``.
+    """
     server = server_cls.return_value
     server.models.return_value = [(n, 1) for n in model_names]
-
-    def _model(name: str) -> MagicMock:
-        m = MagicMock(name=f"model-{name}")
-        # Empty runtime config forces _read_model_config to the disk-pbtxt path.
-        m.config.return_value = {}
-        m.name = name
-        return m
-
-    server.model.side_effect = _model
+    server.model.return_value.config.return_value = {}
     return server
 
 

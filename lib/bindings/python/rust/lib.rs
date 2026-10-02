@@ -694,21 +694,9 @@ fn register_model<'p>(
 
     let model_type_obj = model_type.inner;
     let tensor_model_config = parse_tensor_model_config(tensor_model_config)?;
-    // `tensor_model_config` carries the Triton-native model config
-    // (config.pbtxt serialized as protobuf) that a tensor-serving worker
-    // attaches to its MDC. It is valid for TensorBased models and for
-    // Classify / Pooling models served through a tensor engine (e.g. the
-    // Triton backend). Those workers own tokenization and label lookup
-    // internally, so the frontend has no HuggingFace tokenizer or
-    // `config.json` to fetch for them. vLLM's pooling workers do not pass
-    // `tensor_model_config` and stay on the full HF-resolve path.
-    let is_classify_tensor = model_type_obj.supports_classify() && tensor_model_config.is_some();
-    let is_pooling_tensor = model_type_obj.supports_pooling() && tensor_model_config.is_some();
-    if tensor_model_config.is_some()
-        && !(is_tensor_based || is_classify_tensor || is_pooling_tensor)
-    {
+    if tensor_model_config.is_some() && !is_tensor_based {
         return Err(PyValueError::new_err(
-            "tensor_model_config is only valid for TensorBased, Classify, or Pooling models",
+            "tensor_model_config is only valid for TensorBased models",
         ));
     }
 
@@ -810,14 +798,7 @@ fn register_model<'p>(
         // These model types handle model loading internally. External adapters can
         // opt into the same minimal card without resolving local or HF assets.
         // Ordinary audio registrations retain the builder's metadata and checksum.
-        if is_tensor_based
-            || is_images
-            || is_videos
-            || is_realtime
-            || is_classify_tensor
-            || is_pooling_tensor
-            || skip_model_assets
-        {
+        if is_tensor_based || is_images || is_videos || is_realtime || skip_model_assets {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             // Preserve source_path for compatibility checks (LoRA vs base model).

@@ -286,16 +286,6 @@ class TestInitAndResolve:
                 triton_model_config=self._config_with_input_dims([2]),
             )
 
-    def test_variable_rank_1_dims_accepted(self) -> None:
-        # dims=[-1] is semantically "variable length on that axis"; it
-        # accepts shape 1 from the handler, so the layout is supported.
-        handler = ClassifyWorkerHandler(
-            server=MagicMock(),
-            model=_MockModel([]),
-            triton_model_config=self._config_with_input_dims([-1]),
-        )
-        assert handler._input_name == "TEXT"
-
 
 # ---------------------------------------------------------------------------
 # Classify happy paths

@@ -2234,12 +2234,6 @@ async def register_model(
     or tokenizer files. Audio models retain their metadata by default; external
     audio adapters must explicitly opt in. Audio aliases are preserved in both paths.
 
-    Classify and Pooling models take the same fast path when a `tensor_model_config`
-    is attached, since a tensor engine (e.g. the Triton backend) owns tokenization and
-    label lookup internally and the frontend has no HuggingFace metadata to fetch.
-    Backends without a `tensor_model_config` (e.g. vLLM's pooling workers) keep the
-    full HF-resolve behavior.
-
     Model serving readiness:
         `worker_type` and `needs` describe the worker's processing stage and
         peer dependencies. `needs` is a DNF list — each inner list is an
