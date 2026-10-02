@@ -108,6 +108,8 @@ pub(crate) fn configured_family(
         (Some(DEEPSEEK_V41_UNIFIED_FAMILY), Some(DEEPSEEK_V41_UNIFIED_FAMILY)) => {
             Some(DEEPSEEK_V41_UNIFIED_FAMILY)
         }
+        (Some("glm47"), Some("glm45")) => Some("glm47"),
+        (Some("deepseek_v4"), Some("deepseek_v4")) => Some("deepseek_v4"),
         _ => None,
     }
 }
@@ -133,7 +135,7 @@ pub(crate) fn selected_family(
         "unified parser path decision"
     );
     configured.filter(|family| match *family {
-        QWEN3_UNIFIED_FAMILY => experimental_parsers_v2_enabled(),
+        QWEN3_UNIFIED_FAMILY | "glm47" | "deepseek_v4" => experimental_parsers_v2_enabled(),
         DEEPSEEK_V41_UNIFIED_FAMILY => true,
         _ => false,
     })
@@ -157,7 +159,7 @@ pub(crate) fn selected_batch_family(
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
     configured_batch_family(tool_call_parser, reasoning_parser).filter(|family| match *family {
-        QWEN3_UNIFIED_FAMILY => experimental_parsers_v2_enabled(),
+        QWEN3_UNIFIED_FAMILY | "glm47" | "deepseek_v4" => experimental_parsers_v2_enabled(),
         DEEPSEEK_V41_UNIFIED_FAMILY => true,
         _ => false,
     })
@@ -234,7 +236,7 @@ fn bare_guided_json_prefill(
 /// neither marker means reasoning never ran for this turn.
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
-        QWEN3_UNIFIED_FAMILY | DEEPSEEK_V41_UNIFIED_FAMILY => {
+        QWEN3_UNIFIED_FAMILY | DEEPSEEK_V41_UNIFIED_FAMILY | "glm47" | "deepseek_v4" => {
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
             // pre-opened reasoning produces a leading `</think>` with no opener before
             // it, but a later `<think>...</think>` pair from the model can still follow
