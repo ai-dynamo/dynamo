@@ -18,6 +18,9 @@ import (
 // podSpec must be non-nil. Runtime-only settings (envFrom, image ENV, command-line
 // exports) cannot be resolved here; deployments using them must also declare a
 // literal total budget in the pod template to validate their effective value.
+// This is only a Dynamo worker lower bound, not a whole-pod shutdown guarantee.
+// Restartable init containers (including an external engine) terminate after
+// ordinary containers and need an additional, deployment-specific allowance.
 func validateShutdownBudget(podSpec *corev1.PodSpec, isWorker bool) error {
 	// Kubernetes counts preStop execution against the pod grace period too.
 	grace := int64(30)
@@ -61,7 +64,7 @@ func validateShutdownBudget(podSpec *corev1.PodSpec, isWorker bool) error {
 			}
 		}
 		if grace < total+5 {
-			return fmt.Errorf("container %s: terminationGracePeriodSeconds=%d must be at least %d (shutdown total plus 5s margin); include additional time for preStop hooks", container.Name, grace, total+5)
+			return fmt.Errorf("container %s: terminationGracePeriodSeconds=%d must be at least %d (shutdown total plus 5s margin); include additional time for preStop hooks and sequential restartable-init-container teardown", container.Name, grace, total+5)
 		}
 	}
 	return nil
