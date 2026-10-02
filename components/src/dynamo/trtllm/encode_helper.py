@@ -16,6 +16,7 @@ from dynamo.common.multimodal.image_loader import (
     ImageLoader,
     image_cache_scope_from_request,
 )
+from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
@@ -453,7 +454,7 @@ class EncodeHelper:
             # Use token_ids from request (Rust preprocessor already applied
             # chat template and tokenized; token_ids then include image placeholder tokens
             # if the model's tokenizer_config chat template emits them).
-            token_ids = request.get("token_ids")
+            token_ids = token_ids_to_list(request.get("token_ids"))
             epd_mm_kwargs = resolve_mm_processor_kwargs(request)
             if epd_mm_kwargs is not None and not isinstance(epd_mm_kwargs, dict):
                 # Raise rather than yield an error payload: a yielded dict reads as a

@@ -152,6 +152,7 @@ ignore:
   - 'lib/sidecar/**/*.rst'
 
 ci: &ci
+  - '.github/ci/**'
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
@@ -187,6 +188,7 @@ core:
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
   # TokenSpeed Docker images and backend-specific build/test jobs.
   - 'components/src/dynamo/tokenspeed/**'
+  - 'examples/backends/tokenspeed/**'
   - 'components/src/dynamo/squeeze_evolve/**'
   - '*.toml'
   - '*.lock'
@@ -357,6 +359,7 @@ sidecar:
   - 'tests/router/helper.py'
   - 'tests/router/router_process.py'
   - 'tests/utils/gpu_args.py'
+  - 'tests/utils/payloads.py'
   - 'tests/utils/prometheus.py'
   - 'tests/utils/router_logs.py'
   - 'tests/utils/router_nvext.py'

@@ -22,6 +22,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -79,7 +80,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	}
 
 	// Validate runtime compatibility against the source-version fields.
-	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) && !spec.IsLPX() {
 		image, imagePath := runtimeVersionImageAndPathV1Alpha1(spec, fldPath)
 		if err := eppRuntimeCompatibilityError(
 			eppRuntimeContractV1Alpha1(spec, image),
@@ -110,8 +111,14 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1al
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
+	// Alpha-only fields are absent from the storage-version component comparison.
+	if newSpec.IsLPX() && !features.MustGateFrom(v.ctx).Enabled(features.LPX) &&
+		!apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("componentType"), "LPX components require lpx.enabled=true"))
+	}
+
 	// Ratchet only complete, unchanged source-version runtime contract violations.
-	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) && !newSpec.IsLPX() {
 		newImage, imagePath := runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
 		oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
 		overrideChanged := newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride

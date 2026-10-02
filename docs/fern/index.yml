@@ -714,6 +714,8 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/multimodal-serving/overview.md
+          - page: Voice Pipelines
+            path: pages/use-cases/multimodal-serving/voice.md
           - page: Parallel Media Decoding
             path: pages/use-cases/multimodal-serving/parallel-media-decoding.md
           - page: Custom Vision Encoders
@@ -785,6 +787,13 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - section: Motif Technologies
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Motif-3 NVFP4
+                path: pages/recipes/model-recipes/motif-3.mdx
+                slug: motif-3
           # Grouped by model provider. Each group uses skip-slug so page URLs
           # stay /recipes/<slug>; within a group, newest models come first.
           - section: Z.ai

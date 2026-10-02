@@ -188,7 +188,7 @@ func TestGroveWorkerHashSuffixMigration(t *testing.T) {
 			}
 
 			t.Log("Verify suffix rendering from the worker generation")
-			if got := shouldRenderGroveWorkerHashSuffix(dgd, existing, tt.hashChanged); got != tt.wantSuffix {
+			if got := shouldRenderGroveWorkerHashSuffix(groveReconcileRequest{DGD: dgd, IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, existing, tt.hashChanged); got != tt.wantSuffix {
 				t.Fatalf("shouldRenderGroveWorkerHashSuffix() = %t, want %t", got, tt.wantSuffix)
 			}
 		})
@@ -242,7 +242,7 @@ func TestPlanUnsupportedWorkerHashTransitionDoesNotCommit(t *testing.T) {
 	assert.Equal(t, currentHash, currentWorkerHashV2(dgd), "planning must not commit the DGD hash")
 }
 
-func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
+func TestGenerateGrovePodCliqueSetWorkerHashSuffix(t *testing.T) {
 	tests := []struct {
 		name             string
 		workerHashSuffix bool
@@ -262,23 +262,39 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			})
+			lpxSource := newLPXHandoffSource(t, "node-local-v2-hybrid")
+			dgd.Spec.Components = append(dgd.Spec.Components, lpxSource.Spec.Components[0], nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "frontend", ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"test": "original"}}},
+			})
+			before := dgd.DeepCopy()
 
-			t.Log("Render the Grove deployment")
-			rendered, err := groveRenderDeployment(dgd, nil, tt.workerHashSuffix)
+			t.Log("Render the managed Grove components")
+			req := groveReconcileRequest{DGD: dgd, IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
+			pcs, err := dynamo.GenerateGrovePodCliqueSet(
+				t.Context(), dgd, req.IsDelegated,
+				&configv1alpha1.OperatorConfiguration{}, &commonController.RuntimeConfig{},
+				nil, nil, nil, nil, tt.workerHashSuffix, nil,
+			)
 			require.NoError(t, err)
-			worker := rendered.GetComponentByName("worker")
+			worker := podCliqueSetCliqueForComponent(pcs, "worker")
 			require.NotNil(t, worker)
+			require.Len(t, pcs.Spec.Template.Cliques, 2)
+			require.Nil(t, podCliqueSetCliqueForComponent(pcs, "lpx"))
+			frontend := podCliqueSetCliqueForComponent(pcs, "frontend")
+			require.NotNil(t, frontend)
+			frontend.Labels["test"] = "rendered"
 
 			t.Log("Verify the rendered suffix and source DGD immutability")
 			if tt.workerHashSuffix {
 				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 				require.NoError(t, err)
-				require.NotNil(t, worker.PodTemplate)
-				assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+				assert.Equal(t, wantHash, worker.Labels[consts.KubeLabelDynamoWorkerHash])
 			} else {
-				assert.Nil(t, worker.PodTemplate)
+				assert.Empty(t, worker.Labels[consts.KubeLabelDynamoWorkerHash])
 			}
 			assert.Nil(t, dgd.GetComponentByName("worker").PodTemplate)
+			assert.Equal(t, before, dgd)
 		})
 	}
 }

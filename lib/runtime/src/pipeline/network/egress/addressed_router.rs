@@ -636,7 +636,9 @@ impl AddressedPushRouter {
         }
     }
 
-    /// Cancel all pending response-stream registrations for an instance.
+    /// Cancel stream registrations for an instance. The TCP response plane cancels
+    /// pending handshakes and lets established response streams drain; the QUIC
+    /// response plane also cancels active streams.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
         match &self.responses {
             ResponseServer::Tcp(responses) => responses.cancel_instance_streams(instance_id).await,
@@ -724,11 +726,9 @@ impl AddressedPushRouter {
         let enable_request_stream = input_stream.is_some();
         let payload_codec = payload_codec_for_worker(instance);
 
-        // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
-        // which simplifies the cancellation of registration on error. Each side is
-        // disarmed by `into_parts()` on awaiting stream provider: past that point the
-        // subject is reaped by the worker's dial-in (instance healthy) or the discovery
-        // watcher (instance dropped), so no cleanup is owed.
+        // Keep registration cleanup armed through dispatch errors. The response
+        // registration also stays armed while waiting for the response prologue;
+        // the request-stream registration is handed off to its forwarder below.
         let (send_registered, recv_registered) = self
             .register_streams(engine_ctx.clone(), enable_request_stream)
             .await?;
@@ -835,12 +835,9 @@ impl AddressedPushRouter {
         let _nvtx_wait = dynamo_nvtx_range!("transport.response.wait_backend");
         tracing::trace!(request_id = context.id(), "awaiting transport handshake");
 
-        // Disarms the recv-side cleanup; see the holding rationale above.
-        let (_recv_conn_info, response_stream_provider) = recv_registered.into_parts();
-
         // RecvError → migratable Disconnected (watcher cancelled the subject
         // or the worker died before establishing the response stream).
-        let response_stream = match response_stream_provider.await {
+        let response_stream = match recv_registered.wait().await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
                 return Err(anyhow::anyhow!(pre_stream_failure_error(e)));
@@ -1093,8 +1090,7 @@ where
         input: ManyIn<T>,
     ) -> Result<ManyOut<U>, Error>;
 
-    /// Discovery-driven cleanup when an instance leaves — the request plane
-    /// cancels its call-home streams; another transport frees per-instance state.
+    /// Release per-instance transport state when discovery removes an instance.
     async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
 
     /// Discovery-driven notification when an instance (re)appears — the request
@@ -1135,7 +1131,7 @@ where
                 endpoint = %id.endpoint,
                 instance_id = id.instance_id,
                 cancelled = n,
-                "Cancelled pending response streams for removed instance (discovery-driven cleanup)"
+                "Cancelled stream registrations for removed instance (discovery-driven cleanup)"
             );
         }
     }
@@ -1195,6 +1191,124 @@ mod tests {
     #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
     struct TestRequest {
         value: u64,
+    }
+
+    #[tokio::test]
+    async fn quic_router_delivers_data_after_successful_wait() {
+        use super::{
+            AddressedPushRouter, AddressedRequest, RequestPlaneClient, quic_response, tcp,
+        };
+        use crate::pipeline::{AsyncEngine, SingleIn};
+        use bytes::Bytes;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        // Capture the request envelope, but exercise the real router and QUIC response plane.
+        struct CaptureRequest(mpsc::Sender<RequestControlMessage>);
+
+        #[async_trait::async_trait]
+        impl RequestPlaneClient for CaptureRequest {
+            async fn send_request(
+                &self,
+                _address: String,
+                payload: Bytes,
+                _headers: super::super::unified_client::Headers,
+            ) -> anyhow::Result<Bytes> {
+                let message = TwoPartCodec::default().decode_message(payload)?;
+                let control = serde_json::from_slice(&message.header)?;
+                self.0.send(control).await?;
+                Ok(Bytes::new())
+            }
+
+            fn transport_name(&self) -> &'static str {
+                "test"
+            }
+
+            fn is_healthy(&self) -> bool {
+                true
+            }
+        }
+
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let address = "127.0.0.1:0".parse().unwrap();
+            let responses =
+                quic_response::QuicResponseServer::new(address, address, shutdown).unwrap();
+            // The router also needs a TCP request-callback server. Isolate its TLS
+            // configuration from tests that change the process-wide environment.
+            let callbacks = temp_env::async_with_vars(
+                [
+                    ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                    ("DYN_TCP_TLS_KEY_PATH", None),
+                    ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ],
+                tcp::server::TcpStreamServer::new(
+                    tcp::server::ServerOptions::builder()
+                        .interface(Some("127.0.0.1".to_string()))
+                        .build()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let (request_tx, mut request_rx) = mpsc::channel(1);
+            let router = AddressedPushRouter::new_quic(
+                Arc::new(CaptureRequest(request_tx)),
+                callbacks,
+                responses,
+            );
+            let request = SingleIn::new(AddressedRequest::new(42_u64, "test".to_string()));
+            let pool = quic_response::QuicResponseClientPool::from_env().unwrap();
+            let (response, (mut sender, payload_codec)) =
+                tokio::join!(router.generate(request), async {
+                    let control = request_rx.recv().await.unwrap();
+                    let worker_context =
+                        Context::with_id_and_metadata((), control.id, control.metadata);
+                    let mut sender = pool
+                        .sender(worker_context.context(), control.connection_info)
+                        .await
+                        .unwrap();
+                    sender.send_prologue(None).await.unwrap();
+                    (sender, control.payload_codec)
+                });
+
+            // Send data only after generate() returns through wait(), so cleanup on
+            // success cannot be hidden by data buffered before the handshake finishes.
+            let mut response: ManyOut<Annotated<u64>> = response.unwrap();
+            // The first item uses QUIC's priority lane; the second uses its bulk lane.
+            for value in [1_u64, 2] {
+                sender
+                    .send(
+                        payload_codec
+                            .encode(&super::NetworkStreamWrapper {
+                                data: Some(Annotated::from_data(value)),
+                                complete_final: value == 2,
+                            })
+                            .unwrap()
+                            .into(),
+                    )
+                    .await
+                    .unwrap();
+                let item = response
+                    .next()
+                    .await
+                    .expect("QUIC stream ended before delivering data");
+                assert!(
+                    item.error.is_none(),
+                    "unexpected QUIC response error: {:?}",
+                    item.error
+                );
+                assert_eq!(item.data, Some(value));
+            }
+            sender.finish().await.unwrap();
+            assert!(
+                response.next().await.is_none(),
+                "QUIC stream must end after all data"
+            );
+        })
+        .await
+        .expect("QUIC router did not deliver the established response stream");
     }
 
     #[test]

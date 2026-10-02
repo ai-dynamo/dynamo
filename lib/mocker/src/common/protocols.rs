@@ -1177,6 +1177,8 @@ impl MockEngineArgs {
         let canonical: aisimulate_core::ForwardPassPerfModelConfig =
             serde_json::from_value(config.clone())
                 .map_err(|error| anyhow::anyhow!("invalid ais_perf_config: {error}"))?;
+        // TODO(aisimulate): add pipeline stages to ReplayRoleConfig/grouped engine
+        // construction and model pipeline scheduling before forwarding pp > 1.
         anyhow::ensure!(
             canonical.pp == 1,
             "Mocker/Replay supports only pp=1; got pp={}",

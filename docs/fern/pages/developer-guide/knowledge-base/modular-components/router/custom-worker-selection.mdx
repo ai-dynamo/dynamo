@@ -395,6 +395,9 @@ Routing cache resources start only if a component requests `CACHE`. `serve_index
 | `parent_session_id()` | Optional parent session for subagents |
 | `session_final()` | Optional terminal marker for lifecycle-aware policies |
 | `input_trigger()` | Optional `UserMessage`, `ToolResult`, or `Other` request trigger |
+| `agent_headers()` | Opaque coding-agent header names mapped to ordered lists of string values |
+
+`agent_headers()` exposes the request's ingress observations. Names are lowercase; values retain their original text, including unknown values and malformed embedded JSON. The map is shared across request and policy-context clones without copying header strings, needs no `WorkerInputs` group, and is not interpreted by the default policy. Missing keys mean no observation was captured. Plugins own any parsing, normalization, and decisions based on this untrusted data. For the captured families, size limits, and rolling-upgrade behavior, see [Agent Harnesses](../../../../use-cases/agents/agent-harnesses.mdx#agent-headers) and [Agent Tracing](../../../../use-cases/agents/agent-tracing.md#dynamo-request_end-record).
 
 The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) use `input_trigger()` to give tool-result turns a cache-local picker path.
 

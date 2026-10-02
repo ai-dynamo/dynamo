@@ -2214,6 +2214,7 @@ async def register_model(
     ignore_weights: bool = False,
     max_gpu_lora_count: Optional[int] = None,
     model_aliases: Optional[List[str]] = None,
+    skip_model_assets: bool = False,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2223,9 +2224,15 @@ async def register_model(
         - `lora_name`: The served model name for the LoRA model
         - `base_model_path`: Path to the base model that the LoRA extends
 
-    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
-    and a minimal model card is registered directly. Use model_path as the display name
-    for these models. Pass tensor protocol metadata through `tensor_model_config`.
+    For TensorBased, Images, Videos, and Realtime models, Hugging Face
+    downloads are skipped and a minimal model card is registered directly. Their
+    model_path may be an external service identifier. Pass tensor protocol metadata
+    through `tensor_model_config` for TensorBased models.
+
+    External adapters that do not need model assets can pass `skip_model_assets=True`
+    to register a minimal card without fetching or loading weights, configuration,
+    or tokenizer files. Audio models retain their metadata by default; external
+    audio adapters must explicitly opt in. Audio aliases are preserved in both paths.
 
     Model serving readiness:
         `worker_type` and `needs` describe the worker's processing stage and
@@ -2530,6 +2537,8 @@ def run_mocker_trace_replay(
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
     agentic_lanes: Optional[int] = None,
+    execution_model: Optional[str] = None,
+    weka_nested_timestamp_basis: Optional[Literal["auto", "absolute", "relative"]] = None,
     capture_telemetry: bool = False,
     telemetry_sample_interval_ms: float = 1_000.0,
     telemetry_callback: Optional[ReplayTelemetryCallback] = None,
@@ -2538,6 +2547,9 @@ def run_mocker_trace_replay(
     """Replay mocker trace files and return the simulation report.
 
     Supports aggregated or disaggregated engine configurations.
+
+    ``weka_nested_timestamp_basis`` applies only to Weka traces. Omission uses
+    AISimulate's automatic selection; explicit absolute or relative overrides it.
 
     Offline replay returns an internal native result consumed by
     ``dynamo.replay``; online replay retains the summary dictionary.
