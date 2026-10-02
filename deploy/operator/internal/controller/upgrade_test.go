@@ -36,7 +36,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -806,25 +808,25 @@ spec:
 						&controller_common.RuntimeConfig{},
 						nil,
 					)
-					renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
+					renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd}, nil, nil, false)
 					require.NoError(t, err)
 					pcs := renderedPCS.desired
-					renderDGD := renderedPCS.renderDeployment
 
-					t.Log("generate the decode service selector from the same prepared Grove component")
-					decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
-					require.NotNil(t, decodeComponent)
-					service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-						ServiceName:     dynamo.GetDCDResourceName(renderDGD, "VllmDecodeWorker", ""),
-						Namespace:       renderDGD.Namespace,
-						ComponentType:   string(decodeComponent.ComponentType),
-						DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decodeComponent),
-						ComponentName:   "VllmDecodeWorker",
-						Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decodeComponent),
-						Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decodeComponent),
-						IsK8sDiscovery:  true,
-					})
+					t.Log("generate the decode service selector from the rendered Grove workload")
+					stableResources := newGroveStableResourcesReconciler(
+						reconciler.Client,
+						events.NewFakeRecorder(10),
+						&configv1alpha1.OperatorConfiguration{
+							Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+						},
+					)
+					_, err = stableResources.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, pcs)
 					require.NoError(t, err)
+					service := &corev1.Service{}
+					require.NoError(t, reconciler.Client.Get(ctx, types.NamespacedName{
+						Name:      dynamo.GetDCDResourceName(dgd, "VllmDecodeWorker", ""),
+						Namespace: dgd.Namespace,
+					}, service))
 					return pcs, service.Spec.Selector
 				},
 				childPodLabels: func(t *testing.T, obj client.Object) map[string]map[string]string {
@@ -932,15 +934,11 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd}, nil, nil, false)
 	require.NoError(t, err)
 	desired := renderedPCS.desired
-	renderDGD := renderedPCS.renderDeployment
 
 	t.Log("assert the native prefill component stays prefill instead of legacy worker")
-	prefillComponent := renderDGD.GetComponentByName("prefill")
-	require.NotNil(t, prefillComponent)
-	require.Equal(t, v1beta1.ComponentTypePrefill, prefillComponent.ComponentType)
 	prefillClique := requireGroveClique(t, desired, "prefill")
 	require.Equal(t, commonconsts.ComponentTypePrefill, prefillClique.Labels[commonconsts.KubeLabelDynamoComponentType])
 }

@@ -129,11 +129,11 @@ jobs:
       - operator
       - operator-integration
       - helm-chart-tests
-      - snapshot-placeholder-vllm
-      - snapshot-placeholder-sglang
-      - snapshot-placeholder-trtllm
       - power-agent
       - sidecar-build
+      - sidecar-vllm-test
+      - sidecar-sglang-test
+      - sidecar-trtllm-test
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -184,9 +184,6 @@ jobs:
       - deploy-snapshot-agent-checkpoint-vllm
       - deploy-snapshot-agent-checkpoint-sglang
       - deploy-snapshot-agent-checkpoint-trtllm
-      - snapshot-placeholder-vllm
-      - snapshot-placeholder-sglang
-      - snapshot-placeholder-trtllm
       - frontend-copy-to-acr
       - deploy-test-checkpoint-vllm
       - deploy-test-checkpoint-sglang
@@ -355,11 +352,106 @@ jobs:
     uses: $/.github/workflows/shared-build-sidecar.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      # Default (60) is tight for a cold cache: multi-arch cargo build of 3
+      # sidecar crates + dynamo-llm/dynamo-runtime, plus the compliance and
+      # binary-extraction steps that follow it. Observed a legitimate cold
+      # build exceed 60m with room to spare in run 34547963529.
+      build_timeout_minutes: 90
       artifact_retention_days: '7'
       diff_event_context: pr
       diff_current_branch: ${{ github.ref_name }}
       diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
       diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+
+  # Reuse the backend test image and install the sidecar artifact before pytest.
+
+  sidecar-vllm-test:
+    name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
+    needs: [changed-files, vllm-build, sidecar-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_count: ${{ fromJSON(needs.changed-files.outputs.run_multigpu_tests == 'true' && '[1,2]' || '[1]') }}
+    # vllm-build must have succeeded or been intentionally skipped (a
+    # lib/sidecar-only PR) -- not failed or cancelled -- or the fallback below
+    # would silently test this PR's sidecar binary against main's vllm image
+    # and report green while this PR's own vllm-runtime build is red.
+    if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' && (needs.vllm-build.result == 'success' || needs.vllm-build.result == 'skipped') }}
+    permissions:
+      actions: read
+      contents: read
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
+      test_type: ${{ format('Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      target_tag_plain: ${{ needs.vllm-build.result == 'success' && needs.vllm-build.outputs.target_tag_plain || 'vllm-runtime' }}
+      source_ref: ${{ needs.vllm-build.result == 'success' && github.sha || 'main' }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: ${{ format('pre_merge and sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: vllm
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
+
+  sidecar-sglang-test:
+    name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
+    needs: [changed-files, sglang-build, sidecar-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_count: ${{ fromJSON(needs.changed-files.outputs.run_multigpu_tests == 'true' && '[1,2]' || '[1]') }}
+    # See sidecar-vllm-test above: sglang-build must have succeeded or been
+    # intentionally skipped, not failed or cancelled.
+    if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' && (needs.sglang-build.result == 'success' || needs.sglang-build.result == 'skipped') }}
+    permissions:
+      actions: read
+      contents: read
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
+      test_type: ${{ format('Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      target_tag_plain: ${{ needs.sglang-build.result == 'success' && needs.sglang-build.outputs.target_tag_plain || 'sglang-runtime' }}
+      source_ref: ${{ needs.sglang-build.result == 'success' && github.sha || 'main' }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: ${{ format('pre_merge and sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: sglang
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
+
+  sidecar-trtllm-test:
+    name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
+    needs: [changed-files, trtllm-build, sidecar-build]
+    # See sidecar-vllm-test above: trtllm-build must have succeeded or been
+    # intentionally skipped, not failed or cancelled.
+    if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' && (needs.trtllm-build.result == 'success' || needs.trtllm-build.result == 'skipped') }}
+    permissions:
+      actions: read
+      contents: read
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
+      test_type: Sidecar E2E Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.trtllm-build.result == 'success' && needs.trtllm-build.outputs.target_tag_plain || 'trtllm-runtime' }}
+      source_ref: ${{ needs.trtllm-build.result == 'success' && github.sha || 'main' }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and sidecar and trtllm and gpu_1
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: trtllm
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -373,8 +465,8 @@ jobs:
     needs: [changed-files]
     # `sample` is here because sample tests piggyback on this image and run as part of vllm-test.
     # `operator` is here because operator changes run the deploy tests, which
-    # deploy the CI-built runtime image. `snapshot` is here because
-    # Snapshot checkpoint deploy tests build a snapshot placeholder from it.
+    # deploy the CI-built runtime image. Snapshot checkpoint deploy tests also
+    # use this image directly for capture and restore.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
@@ -392,7 +484,8 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 60
+      # Include cold multi-arch compilation and the later test-image/compliance stages.
+      build_timeout_minutes: 90
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -445,8 +538,8 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files]
     # `operator` is here because operator changes run the deploy tests, which
-    # deploy the CI-built runtime image. `snapshot` is here because
-    # Snapshot checkpoint deploy tests build a snapshot placeholder from it.
+    # deploy the CI-built runtime image. Snapshot checkpoint deploy tests also
+    # use this image directly for capture and restore.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
@@ -516,8 +609,8 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files]
     # `operator` is here because operator changes run the deploy tests, which
-    # deploy the CI-built runtime image. `snapshot` is here because
-    # Snapshot checkpoint deploy tests build a snapshot placeholder from it.
+    # deploy the CI-built runtime image. Snapshot checkpoint deploy tests also
+    # use this image directly for capture and restore.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.trtllm == 'true' ||
@@ -690,7 +783,8 @@ jobs:
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.planner == 'true' ||
-      needs.changed-files.outputs.operator == 'true'
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.dgdr == 'true'
     uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -772,7 +866,8 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 60
+      # Include cold multi-arch compilation and the later test-image/compliance stages.
+      build_timeout_minutes: 90
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -813,7 +908,10 @@ jobs:
       # Keep the outer step budget above the test's 450s timeout so pytest can
       # finish teardown and upload diagnostics instead of being killed first.
       cpu_e2e_test_timeout_minutes: 15
-      gpu_test_markers: pre_merge and vllm and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-vllm-sidecar layered onto
+      # the image (see sidecar-vllm-test below), which this plain vllm-runtime
+      # image doesn't have.
+      gpu_test_markers: pre_merge and vllm and gpu_1 and not sidecar
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
@@ -839,7 +937,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and gpu_2
+      gpu_test_markers: pre_merge and vllm and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -858,7 +956,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
-      gpu_test_markers: pre_merge and sglang and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-sglang-sidecar layered
+      # onto the image (see sidecar-sglang-test below), which this plain
+      # sglang-runtime image doesn't have.
+      gpu_test_markers: pre_merge and sglang and gpu_1 and not sidecar
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -884,7 +985,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and gpu_2
+      gpu_test_markers: pre_merge and sglang and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -903,7 +1004,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and trtllm and gpu_0
-      gpu_test_markers: pre_merge and trtllm and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-trtllm-sidecar layered
+      # onto the image (see sidecar-trtllm-test below), which this plain
+      # trtllm-runtime image doesn't have.
+      gpu_test_markers: pre_merge and trtllm and gpu_1 and not sidecar
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -1031,7 +1135,7 @@ jobs:
           fi
       - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
-        run: python tests/frontend/router_aic_image_smoke.py
+        run: python tests/frontend/router_ais_image_smoke.py
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
@@ -1221,39 +1325,6 @@ jobs:
       AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
       AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  snapshot-placeholder-vllm:
-    name: vLLM Snapshot Placeholder
-    needs: [changed-files, vllm-copy-to-acr]
-    if: |
-      always() && !cancelled() &&
-      (needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.snapshot_vllm == 'true')
-    runs-on: prod-default-v2
-    outputs:
-      image_tag: ${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and push snapshot placeholder
-        uses: $/.github/actions/build-deploy-component
-        with:
-          component: checkpoint-placeholder
-          image_tag: ${{ github.sha }}-vllm-placeholder
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-          extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
-
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
@@ -1272,39 +1343,6 @@ jobs:
       cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       copy_timeout_minutes: 20
     secrets: inherit
-
-  snapshot-placeholder-sglang:
-    name: SGLang Snapshot Placeholder
-    needs: [changed-files, sglang-copy-to-acr]
-    if: |
-      always() && !cancelled() &&
-      (needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.snapshot_sglang == 'true')
-    runs-on: prod-default-v2
-    outputs:
-      image_tag: ${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and push snapshot placeholder
-        uses: $/.github/actions/build-deploy-component
-        with:
-          component: checkpoint-placeholder
-          image_tag: ${{ github.sha }}-sglang-placeholder
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
-          extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
 
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
@@ -1325,39 +1363,6 @@ jobs:
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
-
-  snapshot-placeholder-trtllm:
-    name: TRTLLM Snapshot Placeholder
-    needs: [changed-files, trtllm-copy-to-acr]
-    if: |
-      always() && !cancelled() &&
-      (needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.snapshot_trtllm == 'true')
-    runs-on: prod-default-v2
-    outputs:
-      image_tag: ${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and push snapshot placeholder
-        uses: $/.github/actions/build-deploy-component
-        with:
-          component: checkpoint-placeholder
-          image_tag: ${{ github.sha }}-trtllm-placeholder
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-          extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
 
   # ============================================================================
   # DEPLOY TEST PIPELINES
@@ -1409,6 +1414,8 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.vllm-copy-to-acr.result == 'success' &&
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
@@ -1428,6 +1435,8 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success' &&
       (needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
@@ -1447,6 +1456,8 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.trtllm-copy-to-acr.result == 'success' &&
       (needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
@@ -1465,6 +1476,8 @@ jobs:
     needs: [changed-files, deploy-operator, planner-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.planner-copy-to-acr.result == 'success' &&
       (needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.dgdr == 'true')
     uses: $/.github/workflows/shared-dgdr-deploy-test.yml
@@ -1751,14 +1764,14 @@ jobs:
 
   deploy-test-checkpoint-vllm:
     name: vLLM Snapshot Deploy Test
-    needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
+    needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, vllm-copy-to-acr, frontend-copy-to-acr]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-vllm.result == 'success' &&
-      needs.snapshot-placeholder-vllm.result == 'success' &&
+      needs.vllm-copy-to-acr.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -1812,7 +1825,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-vllm.outputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_vllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           # Mount the shared model cache only when both endpoint vars are set
@@ -1825,14 +1838,14 @@ jobs:
 
   deploy-test-checkpoint-sglang:
     name: SGLang Snapshot Deploy Test
-    needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
+    needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, sglang-copy-to-acr, frontend-copy-to-acr]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-sglang.result == 'success' &&
-      needs.snapshot-placeholder-sglang.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -1886,7 +1899,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-sglang.outputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_sglang
           test_file: tests/deploy/test_dynamocheckpoint.py
           # Mount the shared model cache only when both endpoint vars are set
@@ -1899,14 +1912,14 @@ jobs:
 
   deploy-test-checkpoint-trtllm:
     name: TRTLLM Snapshot Deploy Test
-    needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, snapshot-placeholder-trtllm, frontend-copy-to-acr]
+    needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, trtllm-copy-to-acr, frontend-copy-to-acr]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-trtllm.result == 'success' &&
-      needs.snapshot-placeholder-trtllm.result == 'success' &&
+      needs.trtllm-copy-to-acr.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -1960,7 +1973,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-trtllm.outputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_trtllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           # Mount the shared model cache only when both endpoint vars are set
@@ -2046,9 +2059,6 @@ jobs:
     needs:
       - changed-files
       - operator
-      - snapshot-placeholder-vllm
-      - snapshot-placeholder-sglang
-      - snapshot-placeholder-trtllm
       - power-agent
       - sidecar-build
       - planner-test

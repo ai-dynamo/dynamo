@@ -846,7 +846,9 @@ class TestGenerateLocally:
             prompt_logprobs = []
         return self._make_mock_generation_result_sequence([prompt_logprobs])
 
-    def _make_mock_generation_result_sequence(self, prompt_logprobs_per_chunk):
+    def _make_mock_generation_result_sequence(
+        self, prompt_logprobs_per_chunk, cached_tokens=mock.sentinel.unset
+    ):
         """Mock GenerationResult with cumulative output across streaming chunks."""
         results = []
         last_index = len(prompt_logprobs_per_chunk) - 1
@@ -861,6 +863,8 @@ class TestGenerateLocally:
             res = MagicMock()
             res.outputs = [output]
             res.finished = index == last_index
+            if cached_tokens is not mock.sentinel.unset:
+                res.cached_tokens = cached_tokens
             results.append(res)
 
         generation_result = MagicMock()
@@ -880,6 +884,73 @@ class TestGenerateLocally:
         context.async_killed_or_stopped.return_value = never_resolve
         context.id.return_value = "test-priority"
         return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mode", "request_type", "multimodal", "cached_tokens", "expected"),
+        [
+            (
+                DisaggregationMode.AGGREGATED,
+                None,
+                False,
+                2,
+                {"prompt_tokens": 3, "reused_tokens": 2},
+            ),
+            (
+                DisaggregationMode.PREFILL,
+                "context_only",
+                False,
+                1,
+                {"prompt_tokens": 3, "reused_tokens": 1},
+            ),
+            (DisaggregationMode.DECODE, "generation_only", False, 3, None),
+            (DisaggregationMode.AGGREGATED, None, True, 2, None),
+            (DisaggregationMode.AGGREGATED, None, False, None, None),
+        ],
+        ids=[
+            "aggregated",
+            "prefill",
+            "generation-only",
+            "multimodal",
+            "missing-counter",
+        ],
+    )
+    async def test_final_chunk_reports_context_attempt_cache_reuse(
+        self, mode, request_type, multimodal, cached_tokens, expected
+    ):
+        handler = self._make_handler()
+        handler.disaggregation_mode = mode
+        if multimodal:
+            # The multimodal processor hands the engine a prompt dict whose
+            # cached count covers expanded image tokens.
+            handler._prepare_input_for_generation = mock.AsyncMock(
+                return_value={"prompt_token_ids": [1, 2, 3], "multi_modal_data": {}}
+            )
+        params = (
+            None
+            if request_type is None
+            else SimpleNamespace(request_type=request_type, disagg_request_id=None)
+        )
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(params, None, {})
+        )
+        handler._encode_and_pack_disaggregated_params = MagicMock(return_value=None)
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence(
+                [[]], cached_tokens=cached_tokens
+            )
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
 
     @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):

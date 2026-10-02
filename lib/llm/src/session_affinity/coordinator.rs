@@ -359,6 +359,7 @@ fn affinity_error(error: AffinityError) -> Error {
     }
 }
 
+/// Session and worker identifiers are private diagnostics and must not be copied into client responses.
 pub(crate) fn invalid_argument(message: impl Into<String>) -> Error {
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)

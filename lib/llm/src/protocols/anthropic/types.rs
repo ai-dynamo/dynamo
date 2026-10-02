@@ -38,6 +38,7 @@ fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequest
         ChatCompletionRequestSystemMessage {
             content: ChatCompletionRequestSystemMessageContent::Text(content),
             name: None,
+            tools: None,
         },
     ));
 }
@@ -100,6 +101,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                             audio: None,
                             tool_calls: None,
                             function_call: None,
+                            partial: None,
                         },
                     ));
                 }
@@ -180,6 +182,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 None
             },
             thinking: None,
+            thinking_token_budget: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -474,6 +477,7 @@ fn convert_assistant_blocks(
             tool_calls: tc,
             #[allow(deprecated)]
             function_call: None,
+            partial: None,
         },
     ));
 }

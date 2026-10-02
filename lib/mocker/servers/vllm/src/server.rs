@@ -113,6 +113,7 @@ impl VllmMockerService {
                 tensor_parallel_size: 1,
                 pipeline_parallel_size: 1,
                 data_parallel_size: engine_args.dp_size,
+                data_parallel_size_local: engine_args.dp_size,
                 data_parallel_rank: DP_RANK,
                 decode_context_parallel_size: 1,
                 world_size: 1,
@@ -141,6 +142,7 @@ impl VllmMockerService {
                     anyhow::anyhow!("max_num_batched_tokens exceeds the Control API range")
                 })?
                 .unwrap_or_default(),
+            effective_attention_block_size: Some(engine_args.block_size as u64),
             rl_capabilities: None,
         };
         // The wire role is separate from the aggregated scheduler used to

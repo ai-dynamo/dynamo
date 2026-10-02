@@ -14,12 +14,15 @@ import logging
 import os
 import subprocess
 import time
+from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 import kr8s
 import pytest
 import requests
 import yaml
+from kubernetes_asyncio.client.exceptions import ApiException
 
 from tests.deploy.conftest import DeploymentTarget
 from tests.deploy.dgd_utils import (
@@ -96,12 +99,18 @@ def validate_agg_logging_output(frontend_pod: Any, baseline_line_count: int) -> 
 @pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.timeout(1200)
+@pytest.mark.parametrize(
+    "capture_failure",
+    [False, pytest.param(True, marks=pytest.mark.gpu_1)],
+    ids=["normal", "discovery-failure"],
+)
 async def test_deployment(
     deployment_target: DeploymentTarget,
     deployment_spec: DeploymentSpec,
     namespace: str,
     skip_service_restart: bool,
     request,
+    capture_failure: bool,
 ) -> None:
     """Test Kubernetes deployment end-to-end.
 
@@ -120,11 +129,17 @@ async def test_deployment(
         skip_service_restart: Whether to skip restarting NATS/etcd services (default: True).
             Use --restart-services flag to restart services before deployment.
         request: Pytest request object for accessing test metadata
+        capture_failure: Exercise failure cleanup and validate discovery artifacts.
     """
     # Extract identifying information from the target
     framework = deployment_target.framework
     profile = deployment_target.profile
     validate_agg_logging = profile == "agg_logging"
+    if capture_failure and (framework, profile) != ("vllm", "agg"):
+        pytest.skip("Failure snapshot coverage uses only the vLLM agg deployment")
+    if capture_failure:
+        # Avoid racing deletion of the normal case's deployment.
+        deployment_spec.name = f"{deployment_spec.name}-discovery"
 
     # NIXL_ERR_BACKEND: vCluster CI nodes lack RDMA/UCX for inter-pod KV
     # transfer.  Prefill workers crash in NixlWrapper.create_backend.
@@ -169,84 +184,179 @@ async def test_deployment(
     )
     logger.info(f"Log directory: {request.node.name}")
 
-    # Deploy and test
-    async with ManagedDeployment(
-        log_dir=request.node.name,
-        deployment_spec=deployment_spec,
-        namespace=namespace,
-        skip_service_restart=skip_service_restart,
-    ) as deployment:
-        # Get frontend pod for port forwarding
-        frontend_pods = deployment.get_pods([deployment.frontend_service_name])
-        frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
+    # Catch outside the deployment context so teardown sees the failure.
+    expected_failure = (
+        pytest.raises(RuntimeError, match="^intentional discovery capture failure$")
+        if capture_failure
+        else nullcontext()
+    )
+    with expected_failure:
+        async with ManagedDeployment(
+            log_dir=request.node.name,
+            deployment_spec=deployment_spec,
+            namespace=namespace,
+            skip_service_restart=skip_service_restart,
+        ) as deployment:
+            # Get frontend pod for port forwarding
+            frontend_pods = deployment.get_pods([deployment.frontend_service_name])
+            frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
 
-        assert (
-            len(frontend_pod_list) > 0
-        ), f"No frontend pods found for deployment {deployment_spec.name}"
+            assert (
+                len(frontend_pod_list) > 0
+            ), f"No frontend pods found for deployment {deployment_spec.name}"
 
-        frontend_pod = frontend_pod_list[0]
-        logger.info(f"Found frontend pod: {frontend_pod.name}")
+            frontend_pod = frontend_pod_list[0]
+            logger.info(f"Found frontend pod: {frontend_pod.name}")
 
-        # Setup port forwarding
-        port = deployment_spec.port
-        port_forward = deployment.port_forward(frontend_pod, port)
-        assert (
-            port_forward is not None
-        ), f"Failed to establish port forward to {frontend_pod.name}:{port}"
+            # Setup port forwarding
+            port = deployment_spec.port
+            port_forward = deployment.port_forward(frontend_pod, port)
+            assert (
+                port_forward is not None
+            ), f"Failed to establish port forward to {frontend_pod.name}:{port}"
 
-        base_url = f"http://localhost:{port_forward.local_port}"
-        logger.info(f"Port forwarding established: {base_url}")
+            base_url = f"http://localhost:{port_forward.local_port}"
+            logger.info(f"Port forwarding established: {base_url}")
 
-        # Wait for model to be available
-        endpoint = deployment_spec.endpoint
-        model_ready = wait_for_model_availability(
-            url=base_url,
-            endpoint=endpoint,
-            model=model,
-            logger=logger,
-            max_attempts=30,
+            # Wait for model to be available
+            endpoint = deployment_spec.endpoint
+            model_ready = wait_for_model_availability(
+                url=base_url,
+                endpoint=endpoint,
+                model=model,
+                logger=logger,
+                max_attempts=30,
+            )
+
+            assert (
+                model_ready
+            ), f"Model '{model}' did not become available within the timeout period"
+
+            # This chat-completion request is side-effect free, so one retry after a
+            # dropped port-forward is safe.
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": TEST_PROMPT}],
+                "max_tokens": DEFAULT_MAX_TOKENS,
+                "temperature": DEFAULT_TEMPERATURE,
+                "stream": False,
+            }
+            frontend_log_baseline = (
+                len(normalize_log_lines(frontend_pod.logs(container="main")))
+                if validate_agg_logging
+                else 0
+            )
+            response = deployment.send_request_with_port_forward_retry(
+                pod=frontend_pod,
+                remote_port=port,
+                endpoint=endpoint,
+                payload=payload,
+                timeout=float(DEFAULT_REQUEST_TIMEOUT),
+                port_forward=port_forward,
+            )
+
+            # Validate response
+            validate_chat_response(
+                response=response,
+                expected_model=model,
+                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
+            )
+
+            if validate_agg_logging:
+                validate_agg_logging_output(frontend_pod, frontend_log_baseline)
+
+            if capture_failure:
+                pod_uids = {
+                    pod.metadata.uid
+                    for pods in deployment.get_pods().values()
+                    for pod in pods
+                }
+                # Readiness alone does not guarantee that worker metadata is visible.
+                async with asyncio.timeout(60):
+                    while True:
+                        metadata = (
+                            await deployment._custom_api.list_namespaced_custom_object(
+                                "nvidia.com",
+                                "v1alpha1",
+                                namespace,
+                                "dynamoworkermetadatas",
+                                _request_timeout=3,
+                            )
+                        )
+                        worker_uids = {
+                            item["metadata"]["uid"]
+                            for item in metadata["items"]
+                            if any(
+                                owner["uid"] in pod_uids
+                                for owner in item["metadata"].get("ownerReferences", [])
+                            )
+                        }
+                        if worker_uids:
+                            break
+                        await asyncio.sleep(1)
+                raise RuntimeError("intentional discovery capture failure")
+
+            logger.info(
+                f"Deployment test PASSED for {deployment_target.test_id} "
+                f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
+            )
+
+    if capture_failure:
+        snapshots = {}
+        for resource in ("dgd", "dwm", "pods", "services", "endpointslices"):
+            path = Path(deployment.log_dir) / "discovery" / f"{resource}.json"
+            record = json.loads(path.read_text())
+            assert "error" not in record, record
+            assert record["namespace"] == namespace
+            assert record["deployment"] == deployment_spec.name
+            assert record["captured_at"]
+            snapshots[resource] = record["response"]["items"]
+            assert snapshots[resource], f"Empty discovery snapshot: {path}"
+
+        dgd = next(
+            item
+            for item in snapshots["dgd"]
+            if item["metadata"]["name"] == deployment_spec.name
+        )
+        assert dgd["metadata"]["resourceVersion"]
+        assert not dgd["metadata"].get("deletionTimestamp")
+        assert pod_uids <= {item["metadata"]["uid"] for item in snapshots["pods"]}
+        assert worker_uids <= {item["metadata"]["uid"] for item in snapshots["dwm"]}
+        for item in snapshots["dwm"]:
+            if item["metadata"]["uid"] in worker_uids:
+                assert item["metadata"]["resourceVersion"]
+                assert item["metadata"]["ownerReferences"]
+        services = {item["metadata"]["name"] for item in snapshots["services"]}
+        assert any(
+            item["metadata"].get("labels", {}).get("kubernetes.io/service-name")
+            in services
+            and any(
+                endpoint.get("targetRef", {}).get("uid") in pod_uids
+                and endpoint.get("conditions", {}).get("ready")
+                for endpoint in item["endpoints"]
+            )
+            for item in snapshots["endpointslices"]
         )
 
-        assert (
-            model_ready
-        ), f"Model '{model}' did not become available within the timeout period"
-
-        # This chat-completion request is side-effect free, so one retry after a
-        # dropped port-forward is safe.
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": TEST_PROMPT}],
-            "max_tokens": DEFAULT_MAX_TOKENS,
-            "temperature": DEFAULT_TEMPERATURE,
-            "stream": False,
-        }
-        frontend_log_baseline = (
-            len(normalize_log_lines(frontend_pod.logs(container="main")))
-            if validate_agg_logging
-            else 0
-        )
-        response = deployment.send_request_with_port_forward_retry(
-            pod=frontend_pod,
-            remote_port=port,
-            endpoint=endpoint,
-            payload=payload,
-            timeout=float(DEFAULT_REQUEST_TIMEOUT),
-            port_forward=port_forward,
-        )
-
-        # Validate response
-        validate_chat_response(
-            response=response,
-            expected_model=model,
-            min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
-        )
-
-        if validate_agg_logging:
-            validate_agg_logging_output(frontend_pod, frontend_log_baseline)
-
+        # Deletion can be asynchronous while Kubernetes processes finalizers.
+        async with asyncio.timeout(60):
+            while True:
+                try:
+                    await deployment._custom_api.get_namespaced_custom_object(
+                        "nvidia.com",
+                        deployment_spec.api_version,
+                        namespace,
+                        "dynamographdeployments",
+                        deployment_spec.name,
+                        _request_timeout=3,
+                    )
+                except ApiException as error:
+                    if error.status != 404:
+                        raise
+                    break
+                await asyncio.sleep(1)
         logger.info(
-            f"Deployment test PASSED for {deployment_target.test_id} "
-            f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
+            "Validated discovery snapshot files in %s/discovery", deployment.log_dir
         )
 
 
