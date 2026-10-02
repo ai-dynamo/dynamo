@@ -136,10 +136,26 @@ var errProfilingOutputNotReady = errors.New("profiling output is not ready")
 // shell script template for the output copier sidecar.
 //
 // The sidecar is a continuous poller that:
-//  1. During profiling: polls profiler_status.yaml every 10s, relays phase+message
-//     to the output ConfigMap so the controller can track sub-phase progress.
+//  1. During profiling: polls profiler_status.yaml and (for a Sweeper-based, DGDR v2
+//     run) sweeper_status.yaml every 10s, relaying whichever are present to the
+//     output ConfigMap. sweeper_status.yaml is written by
+//     dynamo.aisimulate.output.dgd.DGDRAdapter and relayed verbatim (as a block-scalar
+//     value), not parsed, so the sidecar stays independent of its schema; it is absent
+//     for a plain (non-Sweeper) profiling run, so every Sweeper-specific step below is
+//     then always a no-op.
 //  2. After profiler terminates: writes the final profiling output (final_config.yaml
-//     + profiler_status.yaml) to the same ConfigMap, preserving the phase+message keys.
+//     + profiler_status.yaml [+ sweeper_status.yaml]) to the same ConfigMap, preserving
+//     the phase+message keys.
+//
+// relay_progress always sends the FULL currently-known state (phase+message AND the
+// sweeper status blob, whichever files exist) in one combined `kubectl apply`, never a
+// partial one. kubectl apply's 3-way merge deletes any ConfigMap key that was present in
+// the previous apply's manifest but missing from the current one: two independent
+// narrow-keyset appliers (one for phase/message, one for the sweeper blob) would
+// alternately wipe out each other's keys on every poll tick. The same discipline
+// applies to the terminal success/failure blocks below, which is why they also
+// conditionally re-include sweeper_status.yaml rather than letting relay_progress's
+// last apply be superseded by a narrower one.
 const sidecarScriptTemplate = `
 set -e
 set -o pipefail
@@ -152,24 +168,53 @@ if ! command -v kubectl >/dev/null 2>&1; then
 fi
 
 STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
+SWEEPER_STATUS_FILE="{{.OutputPath}}/sweeper_status.yaml"
 LAST_PHASE=""
+LAST_SWEEPER_DEBOUNCE_KEY=""
 START_TIME=$(date +%s)
 LAST_PROGRESS_LOG=$START_TIME
 PROGRESS_INTERVAL=300
 
-# relay_phase: read phase+message from profiler_status.yaml and write to ConfigMap.
-# Only writes when the phase changes (debounce).
-relay_phase() {
-  if [ ! -f "$STATUS_FILE" ]; then
+# relay_progress: read phase+message from profiler_status.yaml and/or the sweeper
+# status blob from sweeper_status.yaml, and relay whichever are present to the
+# ConfigMap in a single combined apply. Only applies when at least one changed
+# (debounce), but always carries the full known state forward on that apply -- see
+# the comment above sidecarScriptTemplate for why a partial apply is unsafe here.
+relay_progress() {
+  PHASE=""
+  MESSAGE=""
+  if [ -f "$STATUS_FILE" ]; then
+    PHASE=$(grep "^phase:" "$STATUS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'" || true)
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" 2>/dev/null | sed 's/^message: *//' | tr -d '"' | tr -d "'" || true)
+  fi
+  SWEEPER_DEBOUNCE_KEY=""
+  if [ -f "$SWEEPER_STATUS_FILE" ]; then
+    SWEEPER_STATUS_VALUE=$(grep "^status:" "$SWEEPER_STATUS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'" || true)
+    SWEEPER_ROUND_NO=$(grep "^round_no:" "$SWEEPER_STATUS_FILE" 2>/dev/null | awk '{print $2}' || true)
+    SWEEPER_DEBOUNCE_KEY="${SWEEPER_STATUS_VALUE}:${SWEEPER_ROUND_NO}"
+  fi
+
+  PHASE_CHANGED=false
+  if [ -n "$PHASE" ] && [ "$PHASE" != "$LAST_PHASE" ]; then
+    PHASE_CHANGED=true
+  fi
+  SWEEPER_CHANGED=false
+  if [ -n "$SWEEPER_DEBOUNCE_KEY" ] && [ "$SWEEPER_DEBOUNCE_KEY" != "$LAST_SWEEPER_DEBOUNCE_KEY" ]; then
+    SWEEPER_CHANGED=true
+  fi
+  if [ "$PHASE_CHANGED" = false ] && [ "$SWEEPER_CHANGED" = false ]; then
     return
   fi
-  PHASE=$(grep "^phase:" "$STATUS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'" || true)
-  MESSAGE=$(grep "^message:" "$STATUS_FILE" 2>/dev/null | sed 's/^message: *//' | tr -d '"' | tr -d "'" || true)
-  if [ -z "$PHASE" ] || [ "$PHASE" = "$LAST_PHASE" ]; then
-    return
+
+  if [ "$PHASE_CHANGED" = true ]; then
+    echo "Phase update: $PHASE - $MESSAGE"
   fi
-  echo "Phase update: $PHASE - $MESSAGE"
-  cat >/tmp/progress.yaml <<PEOF
+  if [ "$SWEEPER_CHANGED" = true ]; then
+    echo "Sweeper status update: $SWEEPER_DEBOUNCE_KEY"
+  fi
+
+  {
+    cat <<PEOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -187,20 +232,27 @@ metadata:
     blockOwnerDeletion: true
     controller: true
 data:
-  phase: "$PHASE"
-  message: "$MESSAGE"
 PEOF
-  kubectl apply -f /tmp/progress.yaml 2>/dev/null && LAST_PHASE="$PHASE" || echo "Warning: failed to update progress ConfigMap"
+    if [ -n "$PHASE" ]; then
+      echo "  phase: \"$PHASE\""
+      echo "  message: \"$MESSAGE\""
+    fi
+    if [ -f "$SWEEPER_STATUS_FILE" ]; then
+      echo "  sweeper_status.yaml: |"
+      sed 's/^/    /' "$SWEEPER_STATUS_FILE"
+    fi
+  } >/tmp/progress.yaml
+  kubectl apply -f /tmp/progress.yaml 2>/dev/null && { LAST_PHASE="$PHASE"; LAST_SWEEPER_DEBOUNCE_KEY="$SWEEPER_DEBOUNCE_KEY"; } || echo "Warning: failed to update progress ConfigMap"
 }
 
-# Main loop: poll profiler_status.yaml and wait for profiler to terminate
+# Main loop: poll profiler_status.yaml/sweeper_status.yaml and wait for profiler to terminate
 echo "Waiting for profiler to complete..."
 while true; do
   CURRENT_TIME=$(date +%s)
   ELAPSED=$((CURRENT_TIME - START_TIME))
 
-  # Relay phase updates to ConfigMap
-  relay_phase
+  # Relay phase/sweeper status updates to ConfigMap
+  relay_progress
 
   # Log progress every 5 minutes
   if [ $((CURRENT_TIME - LAST_PROGRESS_LOG)) -ge $PROGRESS_INTERVAL ]; then
@@ -217,8 +269,8 @@ while true; do
   sleep 10
 done
 
-# Final relay: pick up any last phase change written just before termination
-relay_phase
+# Final relay: pick up any last phase change / sweeper status written just before termination
+relay_progress
 
 # Check profiler status file (2 minute timeout)
 echo "Checking profiler status..."
@@ -282,6 +334,10 @@ FEOF
       echo "  profiler_status.yaml: |" >> /tmp/cm.yaml
       sed 's/^/    /' {{.OutputPath}}/profiler_status.yaml >> /tmp/cm.yaml
     fi
+    if [ -f "$SWEEPER_STATUS_FILE" ]; then
+      echo "  sweeper_status.yaml: |" >> /tmp/cm.yaml
+      sed 's/^/    /' "$SWEEPER_STATUS_FILE" >> /tmp/cm.yaml
+    fi
     kubectl apply -f /tmp/cm.yaml
     echo "Saved failure info to ConfigMap {{.ConfigMapName}}"
     exit 0
@@ -332,6 +388,14 @@ sed 's/^/    /' {{.OutputPath}}/{{.OutputFile}} >> /tmp/cm.yaml
 if [ -f {{.OutputPath}}/profiler_status.yaml ]; then
   echo "  profiler_status.yaml: |" >> /tmp/cm.yaml
   sed 's/^/    /' {{.OutputPath}}/profiler_status.yaml >> /tmp/cm.yaml
+fi
+
+# Carry the sweeper status blob forward into this terminal apply too -- it must
+# stay a superset of whatever relay_progress last applied, or this apply (which
+# doesn't otherwise mention sweeper_status.yaml) would delete that key.
+if [ -f "$SWEEPER_STATUS_FILE" ]; then
+  echo "  sweeper_status.yaml: |" >> /tmp/cm.yaml
+  sed 's/^/    /' "$SWEEPER_STATUS_FILE" >> /tmp/cm.yaml
 fi
 
 # Note: Profiling data (raw_data.npz converted to JSON) is included in the
