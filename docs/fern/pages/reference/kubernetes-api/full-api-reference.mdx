@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 187 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 188 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">90 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">91 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">28 types</Card>
 </CardGroup>
 
@@ -3544,14 +3544,10 @@ replicaID is the stable logical identity.
 **Validation:** MinLength: 1
 </ParamField>
 
-<ParamField path="runtimeIncarnation" type="string">
-runtimeIncarnation identifies the concrete engine process in this topology.
-**Validation:** MinLength: 1
-</ParamField>
-
-<ParamField path="nativeMembers" type="string array">
-nativeMembers are the backend-specific ranks or member identities committed for the replica.
-**Validation:** MinItems: 1  items:MinLength: 1
+<ParamField path="nativeMembers" type="EngineGroupNativeMemberIncarnationStatus array">
+nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime.
+See [EngineGroupNativeMemberIncarnationStatus](#enginegroupnativememberincarnationstatus).
+**Validation:** MinItems: 1
 </ParamField>
 </Accordion>
 
@@ -3573,6 +3569,24 @@ EngineGroupMemberTraffic records per-member traffic evidence, independently of P
 - <Badge intent="note" minimal>Unknown</Badge>
 </Accordion>
 
+<Accordion id="enginegroupnativememberincarnationstatus" title="EngineGroupNativeMemberIncarnationStatus">
+EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+
+
+**Kind:** `type`
+**Appears in:** [EngineGroupMemberStatus](#enginegroupmemberstatus)
+
+<ParamField path="id" type="string">
+id is the engine-native member identity.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="runtimeIncarnation" type="string">
+runtimeIncarnation changes on every restart of this member's process.
+**Validation:** MinLength: 1
+</ParamField>
+</Accordion>
+
 <Accordion id="enginegroupnativememberstatus" title="EngineGroupNativeMemberStatus">
 EngineGroupNativeMemberStatus records one engine-authoritative native member and its traffic evidence.
 
@@ -3583,6 +3597,11 @@ EngineGroupNativeMemberStatus records one engine-authoritative native member and
 <ParamField path="id" type="string">
 id is a stable backend-native member identity.
 **Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="runtimeIncarnation" type="string">
+runtimeIncarnation identifies the process to which membership and traffic evidence apply.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="membership" type="EngineGroupReplicaMembership">
@@ -3686,11 +3705,6 @@ EngineGroupReplicaAllocationStatus binds concrete capacity to independently obse
 
 **Kind:** `type`
 **Appears in:** [EngineGroupReplicaStatus](#enginegroupreplicastatus)
-
-<ParamField path="runtimeIncarnation" type="string">
-runtimeIncarnation identifies one concrete engine process incarnation. A dormant candidate may not yet have a runtime incarnation.
-**Validation:** MinLength: 1  Optional: \&#123;\&#125;
-</ParamField>
 
 <ParamField path="capacityRefs" type="EngineGroupCapacityRef array">
 capacityRefs contains every concrete Pod incarnation in this replica allocation.

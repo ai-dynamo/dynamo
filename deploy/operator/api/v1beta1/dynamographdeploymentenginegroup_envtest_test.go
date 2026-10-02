@@ -192,9 +192,8 @@ func TestDynamoGraphDeploymentEngineGroupAPIServerContract(t *testing.T) {
 			status: DynamoGraphDeploymentEngineGroupStatus{Topology: &EngineGroupTopologyStatus{
 				Generation: 1,
 				Replicas: []EngineGroupMemberStatus{{
-					ReplicaID:          "replica-0",
-					RuntimeIncarnation: "runtime-0",
-					NativeMembers:      []string{""},
+					ReplicaID:     "replica-0",
+					NativeMembers: []EngineGroupNativeMemberIncarnationStatus{{ID: "", RuntimeIncarnation: "runtime-0"}},
 				}},
 			}},
 		},
@@ -282,10 +281,9 @@ func requirePackedEngineGroupStatusRoundTrip(t *testing.T, ctx context.Context, 
 		ReplicaStates: []EngineGroupReplicaStatus{{
 			ReplicaID: "replica-1", SlotID: "slot-1",
 			CurrentAllocation: &EngineGroupReplicaAllocationStatus{
-				RuntimeIncarnation: "runtime-1",
-				CapacityRefs:       []EngineGroupCapacityRef{{Name: "worker-1", UID: types.UID("pod-uid-1")}},
-				Availability:       EngineGroupReplicaAvailabilityAvailable,
-				Health:             EngineGroupAllocationHealthDegraded,
+				CapacityRefs: []EngineGroupCapacityRef{{Name: "worker-1", UID: types.UID("pod-uid-1")}},
+				Availability: EngineGroupReplicaAvailabilityAvailable,
+				Health:       EngineGroupAllocationHealthDegraded,
 			},
 			CandidateAllocation: &EngineGroupReplicaAllocationStatus{
 				CapacityRefs: []EngineGroupCapacityRef{{Name: "replacement-1", UID: types.UID("candidate-uid-1")}},
@@ -309,7 +307,7 @@ func requirePackedEngineGroupStatusRoundTrip(t *testing.T, ctx context.Context, 
 	if packed.Status.Replicas != 2 || packed.Status.AvailableReplicas != 1 || packed.Status.DesiredNativeMemberCount != 8 || packed.Status.ActiveNativeMemberCount != 7 {
 		t.Fatalf("packed status lost independent allocation/member counters: %+v", packed.Status)
 	}
-	if len(packed.Status.ReplicaStates) != 1 || packed.Status.ReplicaStates[0].CandidateAllocation == nil || packed.Status.ReplicaStates[0].CandidateAllocation.RuntimeIncarnation != "" {
+	if len(packed.Status.ReplicaStates) != 1 || packed.Status.ReplicaStates[0].CandidateAllocation == nil {
 		t.Fatalf("dormant replacement did not survive status round-trip: %+v", packed.Status.ReplicaStates)
 	}
 	if len(packed.Status.ReplicaStates[0].NativeMembers) != 4 || packed.Status.ReplicaStates[0].NativeMembers[1].Membership != EngineGroupReplicaMembershipMasked {

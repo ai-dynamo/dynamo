@@ -2386,8 +2386,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `replicaID` _string_ | replicaID is the stable logical identity. |  | MinLength: 1 <br /> |
-| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the concrete engine process in this topology. |  | MinLength: 1 <br /> |
-| `nativeMembers` _string array_ | nativeMembers are the backend-specific ranks or member identities committed for the replica. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
+| `nativeMembers` _[EngineGroupNativeMemberIncarnationStatus](#enginegroupnativememberincarnationstatus) array_ | nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may<br />retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime. |  | MinItems: 1 <br /> |
 
 
 #### EngineGroupMemberTraffic
@@ -2411,6 +2410,23 @@ _Appears in:_
 | `Unknown` |  |
 
 
+#### EngineGroupNativeMemberIncarnationStatus
+
+
+
+EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+
+
+
+_Appears in:_
+- [EngineGroupMemberStatus](#enginegroupmemberstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | id is the engine-native member identity. |  | MinLength: 1 <br /> |
+| `runtimeIncarnation` _string_ | runtimeIncarnation changes on every restart of this member's process. |  | MinLength: 1 <br /> |
+
+
 #### EngineGroupNativeMemberStatus
 
 
@@ -2425,6 +2441,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `id` _string_ | id is a stable backend-native member identity. |  | MinLength: 1 <br /> |
+| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the process to which membership and traffic evidence apply. |  | MinLength: 1 <br />Optional: \{\} <br /> |
 | `membership` _[EngineGroupReplicaMembership](#enginegroupreplicamembership)_ | membership distinguishes committed participation from masking or orchestration intent. |  | Enum: [Active Masked Joining Retiring Unknown] <br /> |
 | `traffic` _[EngineGroupMemberTraffic](#enginegroupmembertraffic)_ | traffic is admission or terminal drain evidence from the runtime traffic authority. |  | Enum: [Admitted Draining Drained Withdrawn Unknown] <br /> |
 
@@ -2485,7 +2502,6 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `runtimeIncarnation` _string_ | runtimeIncarnation identifies one concrete engine process incarnation.<br />A dormant candidate may not yet have a runtime incarnation. |  | MinLength: 1 <br />Optional: \{\} <br /> |
 | `capacityRefs` _[EngineGroupCapacityRef](#enginegroupcapacityref) array_ | capacityRefs contains every concrete Pod incarnation in this replica allocation. |  | MinItems: 1 <br /> |
 | `availability` _[EngineGroupReplicaAvailability](#enginegroupreplicaavailability)_ | availability reports usable backing capacity for the members this allocation still serves.<br />Pod Ready is only an input; a degraded allocation may keep serving surviving members. |  | Enum: [Available Unavailable Unknown] <br /> |
 | `health` _[EngineGroupAllocationHealth](#enginegroupallocationhealth)_ | health records physical and runtime health independently of committed membership. |  | Enum: [Healthy Degraded Failed Unknown] <br /> |

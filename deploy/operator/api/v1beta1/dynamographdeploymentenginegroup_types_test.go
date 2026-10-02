@@ -75,7 +75,6 @@ func TestDynamoGraphDeploymentEngineGroupDeepCopyPreservesIdentityIsolation(t *t
 				ReplicaID: "replica-0",
 				SlotID:    "slot-0",
 				CurrentAllocation: &EngineGroupReplicaAllocationStatus{
-					RuntimeIncarnation: "runtime-0",
 					CapacityRefs: []EngineGroupCapacityRef{{
 						Name: "worker-0",
 						UID:  types.UID("pod-uid-0"),

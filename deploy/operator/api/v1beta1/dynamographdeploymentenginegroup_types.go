@@ -213,14 +213,23 @@ type EngineGroupMemberStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	ReplicaID string `json:"replicaID"`
 
-	// runtimeIncarnation identifies the concrete engine process in this topology.
+	// nativeMembers correlates backend-native IDs with exact process lifetimes. Terminal traffic evidence may
+	// retain several lifetimes of a reused native ID; committed topology must contain only its current lifetime.
+	// +kubebuilder:validation:MinItems=1
+	// +listType=map
+	// +listMapKey=id
+	// +listMapKey=runtimeIncarnation
+	NativeMembers []EngineGroupNativeMemberIncarnationStatus `json:"nativeMembers"`
+}
+
+// EngineGroupNativeMemberIncarnationStatus binds one native ID to an independent process lifetime.
+type EngineGroupNativeMemberIncarnationStatus struct {
+	// id is the engine-native member identity.
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
+	// runtimeIncarnation changes on every restart of this member's process.
 	// +kubebuilder:validation:MinLength=1
 	RuntimeIncarnation string `json:"runtimeIncarnation"`
-
-	// nativeMembers are the backend-specific ranks or member identities committed for the replica.
-	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:items:MinLength=1
-	NativeMembers []string `json:"nativeMembers"`
 }
 
 // EngineGroupReplicaStatus preserves one stable logical identity across physical replacement.
@@ -256,12 +265,6 @@ type EngineGroupReplicaStatus struct {
 
 // EngineGroupReplicaAllocationStatus binds concrete capacity to independently observed health.
 type EngineGroupReplicaAllocationStatus struct {
-	// runtimeIncarnation identifies one concrete engine process incarnation.
-	// A dormant candidate may not yet have a runtime incarnation.
-	// +optional
-	// +kubebuilder:validation:MinLength=1
-	RuntimeIncarnation string `json:"runtimeIncarnation,omitempty"`
-
 	// capacityRefs contains every concrete Pod incarnation in this replica allocation.
 	// +kubebuilder:validation:MinItems=1
 	CapacityRefs []EngineGroupCapacityRef `json:"capacityRefs"`
@@ -279,6 +282,11 @@ type EngineGroupNativeMemberStatus struct {
 	// id is a stable backend-native member identity.
 	// +kubebuilder:validation:MinLength=1
 	ID string `json:"id"`
+
+	// runtimeIncarnation identifies the process to which membership and traffic evidence apply.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	RuntimeIncarnation string `json:"runtimeIncarnation,omitempty"`
 
 	// membership distinguishes committed participation from masking or orchestration intent.
 	Membership EngineGroupReplicaMembership `json:"membership"`
