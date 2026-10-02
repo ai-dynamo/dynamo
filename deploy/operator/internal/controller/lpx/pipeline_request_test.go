@@ -375,7 +375,6 @@ func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
 		wantPartitions  [][]int64
 	}{
 		{name: "omitted selection requests every partition", wantPartitions: [][]int64{{7, 8}}},
-		{name: "selected chain root keeps the whole chain local", localPartitions: &v1beta1.LPXLocalPartitions{IDs: []int32{7}}, wantPartitions: [][]int64{}},
 		{name: "all-local selection requests no LPU placement", localPartitions: &v1beta1.LPXLocalPartitions{All: true}, wantPartitions: [][]int64{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1162,7 +1162,7 @@ func (in *LPXLocalPartitions) DeepCopyInto(out *LPXLocalPartitions) {
 	*out = *in
 	if in.IDs != nil {
 		in, out := &in.IDs, &out.IDs
-		*out = make([]int32, len(*in))
+		*out = make([]int64, len(*in))
 		copy(*out, *in)
 	}
 }

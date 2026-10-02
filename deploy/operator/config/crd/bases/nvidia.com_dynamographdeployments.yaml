@@ -11536,7 +11536,8 @@ spec:
                               ids:
                                 description: ids lists the compiler partition IDs that run on the Cyborg GPU.
                                 items:
-                                  format: int32
+                                  format: int64
+                                  maximum: 4294967295
                                   minimum: 0
                                   type: integer
                                 minItems: 1
@@ -21091,7 +21092,8 @@ spec:
                               ids:
                                 description: ids lists the compiler partition IDs that run on the Cyborg GPU.
                                 items:
-                                  format: int32
+                                  format: int64
+                                  maximum: 4294967295
                                   minimum: 0
                                   type: integer
                                 minItems: 1

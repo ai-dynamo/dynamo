@@ -70,7 +70,6 @@ func RenderNodeLocal(
 	workloadDigest := workload.Digest().String()
 	agentTemplateNames := make([]string, 0, len(plan.Agents))
 	for _, agent := range plan.Agents {
-		// A workload whose partitions all run on the Cyborg GPU has no Agent clique.
 		if agent.Replicas > 0 {
 			agentTemplateNames = append(agentTemplateNames, agent.TemplateName)
 		}

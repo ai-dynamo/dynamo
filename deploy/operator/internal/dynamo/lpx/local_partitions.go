@@ -47,7 +47,6 @@ func selectRemotePartitions(
 		}
 	}
 
-	// Resolve the requested runtime partitions against the build.
 	local := make(map[int]bool)
 	if selection.All {
 		for _, owner := range runtimeOwner {
@@ -69,7 +68,6 @@ func selectRemotePartitions(
 		local[id] = true
 	}
 
-	// Keep every physical partition whose runtime partition remains on LPUs.
 	remote := make([]BuildPartition, 0, len(build.Partitions))
 	for _, partition := range build.Partitions {
 		if !local[runtimeOwner[partition.SourcePartitionID]] {
