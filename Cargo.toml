@@ -1,13 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-[patch.crates-io]
-# Review pins until the companion tokenizer/renderer releases are published. Keep their
-# shared protocol types on the same source in every consuming Cargo root.
-dynamo-protocols = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "0389e0577664b749dd55f083eec3dff20949ea65" }
-dynamo-tokenizers = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "0389e0577664b749dd55f083eec3dff20949ea65" }
-dynamo-renderer = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "0389e0577664b749dd55f083eec3dff20949ea65" }
-
 [workspace]
 members = [
     "lib/llm",
