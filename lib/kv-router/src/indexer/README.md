@@ -1,6 +1,8 @@
 # ⚡ FlashIndexer — KV Router Index Data Structures
 
-This document explains the KV cache index implementations: `RadixTree` (and its concurrent compressed variant `ConcurrentRadixTreeCompressed`), `PositionalIndexer` (NestedMap), and `LineageIndex`.
+This document explains the KV cache index implementations: `RadixTree` (and its concurrent
+compressed variant `ConcurrentRadixTreeCompressed`), `PositionalIndexer` (NestedMap), and
+`PositionalCarrierIndex`.
 
 The concurrent indexers achieve a combined throughput of over **10 million events + requests per second** with **p99 latency under 10 microseconds**.
 
@@ -18,16 +20,20 @@ The concurrent indexers achieve a combined throughput of over **10 million event
 | `radix_tree.rs` | `RadixTree` — single-threaded compressed tree with `Rc<RefCell<RadixBlock>>` nodes |
 | `concurrent_radix_tree_compressed/` | `ConcurrentRadixTreeCompressed` — thread-safe compressed trie; see its `README.md` |
 | `positional.rs` | `PositionalIndexer` — flat `DashMap<(pos, hash), SeqEntry>` with jump optimization |
-| `lineage.rs` | `LineageIndex<W>` — sparse position buckets for PLHs, with deepest-held queries |
+| `positional_carrier.rs` | `PositionalCarrierIndex<W>` — sparse position buckets for PLHs, with deepest-held queries |
 | `thread_pool.rs` | `ThreadPoolIndexer<T: SyncIndexer>` — N OS threads for sticky-routed writes, inline reads; wraps `ConcurrentRadixTreeCompressed` or `PositionalIndexer` |
 | `local.rs` | `LocalKvIndexer` — thin wrapper around `KvIndexer` with a circular event buffer for worker-side decentralized routing |
 | `pruning.rs` | `PruneManager` — TTL-based approximate expiration via 100ms buckets and per-worker pruning queues |
 | `naive.rs` | Brute-force baseline indexers (bench-only, behind `bench` feature flag) |
 | `tests.rs` | Integration tests for all indexer variants |
 
-## LineageIndex
+## PositionalCarrierIndex
 
-`LineageIndex<W>` indexes sparse positional lineage hashes by the position each hash carries. It supports holder-aware insert, removal, atomic replacement, position dumps, and deepest-hash queries. Callers own manifest scoping, event decoding, and create-kind policy.
+`PositionalCarrierIndex<W>` indexes sparse positional lineage hashes by the position each hash
+carries. It supports holder-aware insert, removal, atomic replacement, position dumps, and
+deepest-hash queries. Query hash slices must be ordered by ascending `position()`, as produced by
+`positional_lineage_hashes`; unsorted input may return a shallower answer. Callers own manifest
+scoping, event decoding, and create-kind policy.
 
 ## Ownership delegate
 

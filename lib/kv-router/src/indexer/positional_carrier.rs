@@ -14,14 +14,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashSet};
 
 use dynamo_tokens::PositionalLineageHash;
 
 type Bucket<W> = Arc<DashMap<PositionalLineageHash, FxHashSet<W>, FxBuildHasher>>;
 
 /// Sparse index of PLHs held by generic identifiers.
-pub struct LineageIndex<W> {
+///
+/// Hash slices passed to [`Self::deepest`] and [`Self::deepest_by_holder`] must be ordered by
+/// ascending `position()`, as produced by `positional_lineage_hashes`. Unsorted input may
+/// produce a shallower result.
+pub struct PositionalCarrierIndex<W> {
     buckets: DashMap<u64, Bucket<W>, FxBuildHasher>,
     max_positions: AtomicU64,
     dropped_out_of_range: AtomicU64,
@@ -30,14 +34,14 @@ pub struct LineageIndex<W> {
 
 /// A PLH and its sorted set of holders.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LineageHit<W> {
+pub struct CarrierHit<W> {
     /// The matched positional lineage hash.
     pub hash: PositionalLineageHash,
     /// Holder identifiers in ascending order.
     pub holders: Vec<W>,
 }
 
-impl<W: Copy + Eq + Hash + Ord> LineageIndex<W> {
+impl<W: Copy + Eq + Hash + Ord> PositionalCarrierIndex<W> {
     /// Creates an index with capacity for `max_positions` positions.
     pub fn new(max_positions: u64) -> Self {
         Self {
@@ -90,13 +94,13 @@ impl<W: Copy + Eq + Hash + Ord> LineageIndex<W> {
     }
 
     /// Returns the deepest supplied hash currently held by any holder.
-    pub fn deepest(&self, hashes: &[PositionalLineageHash]) -> Option<LineageHit<W>> {
+    ///
+    /// `hashes` must be ordered by ascending `position()`, as produced by
+    /// `positional_lineage_hashes`. Unsorted input may return a shallower match.
+    pub fn deepest(&self, hashes: &[PositionalLineageHash]) -> Option<CarrierHit<W>> {
         let _swap = self.swap.read();
-        let mut best: Option<LineageHit<W>> = None;
-
-        for hash in hashes {
-            let position = hash.position();
-            let Some(bucket) = self.bucket(position) else {
+        for hash in hashes.iter().rev() {
+            let Some(bucket) = self.bucket(hash.position()) else {
                 continue;
             };
             let Some(holders) = bucket.get(hash) else {
@@ -105,60 +109,50 @@ impl<W: Copy + Eq + Hash + Ord> LineageIndex<W> {
             if holders.is_empty() {
                 continue;
             }
-            if best
-                .as_ref()
-                .is_none_or(|hit| position > hit.hash.position())
-            {
-                let mut holders: Vec<W> = holders.iter().copied().collect();
-                holders.sort_unstable();
-                best = Some(LineageHit {
-                    hash: *hash,
-                    holders,
-                });
-            }
+            let mut holders: Vec<W> = holders.iter().copied().collect();
+            holders.sort_unstable();
+            return Some(CarrierHit {
+                hash: *hash,
+                holders,
+            });
         }
 
-        best
+        None
     }
 
     /// Returns each matching holder's deepest supplied hash, sorted by holder.
+    ///
+    /// `hashes` must be ordered by ascending `position()`, as produced by
+    /// `positional_lineage_hashes`. Unsorted input may return a shallower match.
+    /// Visits every hash because shallower hits may have additional holders.
     pub fn deepest_by_holder(
         &self,
         hashes: &[PositionalLineageHash],
     ) -> Vec<(W, PositionalLineageHash)> {
         let _swap = self.swap.read();
-        let mut best = FxHashMap::<W, (u64, PositionalLineageHash)>::default();
+        let mut seen = FxHashSet::<W>::default();
+        let mut result = Vec::new();
 
-        for hash in hashes {
-            let position = hash.position();
-            let Some(bucket) = self.bucket(position) else {
+        for hash in hashes.iter().rev() {
+            let Some(bucket) = self.bucket(hash.position()) else {
                 continue;
             };
             let Some(holders) = bucket.get(hash) else {
                 continue;
             };
             for holder in holders.iter().copied() {
-                best.entry(holder)
-                    .and_modify(|(best_position, best_hash)| {
-                        if position > *best_position {
-                            *best_position = position;
-                            *best_hash = *hash;
-                        }
-                    })
-                    .or_insert((position, *hash));
+                if seen.insert(holder) {
+                    result.push((holder, *hash));
+                }
             }
         }
 
-        let mut result: Vec<_> = best
-            .into_iter()
-            .map(|(holder, (_, hash))| (holder, hash))
-            .collect();
         result.sort_unstable_by_key(|(holder, _)| *holder);
         result
     }
 
     /// Returns all entries at `position`, sorted by hash and holder.
-    pub fn entries_at(&self, position: u64) -> Vec<LineageHit<W>> {
+    pub fn entries_at(&self, position: u64) -> Vec<CarrierHit<W>> {
         let _swap = self.swap.read();
         let Some(bucket) = self.bucket(position) else {
             return Vec::new();
@@ -169,7 +163,7 @@ impl<W: Copy + Eq + Hash + Ord> LineageIndex<W> {
             .map(|entry| {
                 let mut holders: Vec<W> = entry.value().iter().copied().collect();
                 holders.sort_unstable();
-                LineageHit {
+                CarrierHit {
                     hash: *entry.key(),
                     holders,
                 }
@@ -240,7 +234,7 @@ impl<W: Copy + Eq + Hash + Ord> LineageIndex<W> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LineageHit, LineageIndex};
+    use super::{CarrierHit, PositionalCarrierIndex};
     use crate::protocols::WorkerWithDpRank;
     use dynamo_tokens::PositionalLineageHash;
 
@@ -259,7 +253,7 @@ mod tests {
 
     #[test]
     fn entries_at_buckets_positions_and_sorts_shared_prefix_holders() -> anyhow::Result<()> {
-        let index = LineageIndex::new(4);
+        let index = PositionalCarrierIndex::new(4);
         let first = sequence(0, 4)?;
         let second = plhs(vec![
             0, 1, 2, 3, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
@@ -272,18 +266,18 @@ mod tests {
 
         assert_eq!(
             index.entries_at(0),
-            vec![LineageHit {
+            vec![CarrierHit {
                 hash: first[0],
                 holders: vec![2, 9],
             }]
         );
 
         let mut expected = vec![
-            LineageHit {
+            CarrierHit {
                 hash: first[1],
                 holders: vec![9],
             },
-            LineageHit {
+            CarrierHit {
                 hash: second[1],
                 holders: vec![2],
             },
@@ -295,24 +289,42 @@ mod tests {
     }
 
     #[test]
-    fn deepest_selects_the_deepest_hash_regardless_of_input_order() -> anyhow::Result<()> {
-        let index = LineageIndex::new(4);
+    fn deepest_returns_the_last_held_hash() -> anyhow::Result<()> {
         let hashes = sequence(10, 4)?;
-        index.insert(1, &hashes);
-
-        assert_eq!(index.deepest(&hashes).map(|hit| hit.hash), Some(hashes[3]));
-        let mut reversed = hashes.clone();
-        reversed.reverse();
+        let index = PositionalCarrierIndex::new(4);
+        index.insert(1, &hashes[0..2]);
         assert_eq!(
-            index.deepest(&reversed).map(|hit| hit.hash),
-            Some(hashes[3])
+            index.deepest(&hashes),
+            Some(CarrierHit {
+                hash: hashes[1],
+                holders: vec![1],
+            })
+        );
+
+        index.insert(2, &hashes);
+        assert_eq!(
+            index.deepest(&hashes),
+            Some(CarrierHit {
+                hash: hashes[3],
+                holders: vec![2],
+            })
+        );
+
+        let sparse = PositionalCarrierIndex::new(4);
+        sparse.insert(3, &[hashes[0], hashes[2]]);
+        assert_eq!(
+            sparse.deepest(&hashes),
+            Some(CarrierHit {
+                hash: hashes[2],
+                holders: vec![3],
+            })
         );
         Ok(())
     }
 
     #[test]
     fn deepest_miss_returns_none_and_holders_are_sorted() -> anyhow::Result<()> {
-        let index = LineageIndex::new(4);
+        let index = PositionalCarrierIndex::new(4);
         let hashes = sequence(20, 3)?;
         let other = sequence(80, 3)?;
         index.insert(9, &hashes);
@@ -320,7 +332,7 @@ mod tests {
 
         assert_eq!(
             index.deepest(&[hashes[1]]),
-            Some(LineageHit {
+            Some(CarrierHit {
                 hash: hashes[1],
                 holders: vec![2, 9],
             })
@@ -330,28 +342,8 @@ mod tests {
     }
 
     #[test]
-    fn deepest_ties_choose_the_first_hash_in_input_order() -> anyhow::Result<()> {
-        let index = LineageIndex::new(4);
-        let first = sequence(0, 3)?;
-        let second = plhs(vec![0, 1, 2, 3, 40, 41, 42, 43, 44, 45, 46, 47])?;
-        assert_ne!(first[1], second[1]);
-        index.insert(1, &[first[1]]);
-        index.insert(2, &[second[1]]);
-
-        assert_eq!(
-            index.deepest(&[first[1], second[1]]).map(|hit| hit.hash),
-            Some(first[1])
-        );
-        assert_eq!(
-            index.deepest(&[second[1], first[1]]).map(|hit| hit.hash),
-            Some(second[1])
-        );
-        Ok(())
-    }
-
-    #[test]
     fn remove_prunes_empty_hash_entries_and_preserves_remaining_holders() -> anyhow::Result<()> {
-        let index = LineageIndex::new(3);
+        let index = PositionalCarrierIndex::new(3);
         let hashes = sequence(0, 3)?;
         index.insert(1, &hashes);
         index.insert(2, &hashes);
@@ -366,7 +358,7 @@ mod tests {
 
     #[test]
     fn remove_holder_sweeps_all_positions() -> anyhow::Result<()> {
-        let index = LineageIndex::new(3);
+        let index = PositionalCarrierIndex::new(3);
         let hashes = sequence(0, 3)?;
         index.insert(1, &hashes);
         index.insert(2, &hashes);
@@ -384,7 +376,7 @@ mod tests {
 
     #[test]
     fn capacity_drops_out_of_range_hashes_and_grows_only() -> anyhow::Result<()> {
-        let index = LineageIndex::new(2);
+        let index = PositionalCarrierIndex::new(2);
         let hashes = sequence(0, 4)?;
         index.insert(1, &hashes);
 
@@ -404,7 +396,7 @@ mod tests {
 
     #[test]
     fn replace_holder_replaces_only_that_holders_hashes() -> anyhow::Result<()> {
-        let index = LineageIndex::new(4);
+        let index = PositionalCarrierIndex::new(4);
         let old_hashes = sequence(0, 4)?;
         let new_hashes = sequence(100, 4)?;
         index.insert(1, &old_hashes);
@@ -425,7 +417,7 @@ mod tests {
 
     #[test]
     fn deepest_by_holder_handles_sparse_holdings() -> anyhow::Result<()> {
-        let index = LineageIndex::new(4);
+        let index = PositionalCarrierIndex::new(4);
         let hashes = sequence(0, 4)?;
         let other = sequence(100, 4)?;
         index.insert(1, &[hashes[1]]);
@@ -441,7 +433,7 @@ mod tests {
 
     #[test]
     fn supports_worker_with_dp_rank_holders() -> anyhow::Result<()> {
-        let index = LineageIndex::new(2);
+        let index = PositionalCarrierIndex::new(2);
         let hashes = sequence(0, 2)?;
         let first = WorkerWithDpRank::new(7, 0);
         let second = WorkerWithDpRank::new(3, 1);
