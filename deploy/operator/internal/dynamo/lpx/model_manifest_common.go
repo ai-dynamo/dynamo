@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"capnproto.org/go/capnp/v3"
-	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 )
 
 const hxTopologyFamily = "16x8x2x3"
@@ -55,7 +54,10 @@ func classifyManifestPartitions(filename string, partitions []BuildPartition, pa
 	return family, packagedNodes, partitionZeroNodes, nil
 }
 
-func buildXTPartition(subject, topology string, raw manifestcapnpv2.LpuPartitionArtifact) (BuildPartition, error) {
+func buildXTPartition(subject, topology string, raw interface {
+	NumChips() uint32
+	DevicesPerNode() uint32
+}) (BuildPartition, error) {
 	// Derive XT geometry from numeric manifest fields, never the topology name.
 	numChips, err := positiveManifestUInt32ToInt(subject+" numChips", raw.NumChips())
 	if err != nil {
@@ -71,7 +73,22 @@ func buildXTPartition(subject, topology string, raw manifestcapnpv2.LpuPartition
 	return BuildPartition{Topology: Topology{Raw: topology, ChipCount: numChips}, DevicesPerNode: devicesPerNode}, nil
 }
 
-func buildHXPartition(subject, topology string, raw manifestcapnpv2.LpuPartitionArtifact) (BuildPartition, bool, error) {
+type lpuTopologyMetadata interface {
+	TopologyFamily() (string, error)
+	PartitionShape() (capnp.UInt32List, error)
+}
+
+// Both generated families expose the same physical LPU geometry.
+type lpuPartitionArtifact[M lpuTopologyMetadata] interface {
+	NumChips() uint32
+	DevicesPerNode() uint32
+	HasTopologyMetadata() bool
+	TopologyMetadata() (M, error)
+	Topology() (string, error)
+	Path() (string, error)
+}
+
+func buildHXPartition[M lpuTopologyMetadata, P lpuPartitionArtifact[M]](subject, topology string, raw P) (BuildPartition, bool, error) {
 	devicesPerNode, err := positiveManifestUInt32ToInt(subject+" devicesPerNode", raw.DevicesPerNode())
 	if err != nil {
 		return BuildPartition{}, false, err
@@ -235,4 +252,91 @@ func positiveManifestUInt32ToInt(field string, value uint32) (int, error) {
 		return 0, fmt.Errorf("%s must be >= 1, got 0", field)
 	}
 	return int(value), nil
+}
+
+func validateManifestBatchSize(filename string, batchSize int, ioFPGACount, ioFanoutFactor int32) error {
+	// Reject an incomplete split-I/O batch before any runtime path consumes it.
+	if batchSize%int(ioFPGACount) != 0 {
+		return fmt.Errorf(
+			"%s deployment.program.batchSize %d must be divisible by deployment.runtimeIo.ioFpgaCount %d",
+			filename,
+			batchSize,
+			ioFPGACount,
+		)
+	}
+
+	// Reject incomplete client-owned transaction regions after endpoint splitting.
+	perEndpointBatchSize := batchSize / int(ioFPGACount)
+	if perEndpointBatchSize%int(ioFanoutFactor) != 0 {
+		return fmt.Errorf(
+			"%s deployment.program.batchSize per endpoint %d must be divisible by deployment.runtimeIo.fanoutFactor %d",
+			filename,
+			perEndpointBatchSize,
+			ioFanoutFactor,
+		)
+	}
+	return nil
+}
+
+func buildLPUArtifact[M lpuTopologyMetadata, P lpuPartitionArtifact[M]](filename string, partitionID uint32, raw P, family BuildFamily) (BuildPartition, bool, error) {
+	topology, err := raw.Topology()
+	if err != nil {
+		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d topology: %w", filename, partitionID, err)
+	}
+	path, err := raw.Path()
+	if err != nil {
+		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d path: %w", filename, partitionID, err)
+	}
+
+	// Topology names are opaque but must fit one runtime configuration line.
+	subject := fmt.Sprintf("%s LPU partition %d", filename, partitionID)
+	if strings.TrimSpace(topology) == "" {
+		return BuildPartition{}, false, fmt.Errorf("%s topology must not be empty", subject)
+	}
+	if strings.ContainsAny(topology, "\x00\r\n") {
+		return BuildPartition{}, false, fmt.Errorf("%s topology must not contain NUL bytes or line breaks: %q", subject, topology)
+	}
+
+	// Each format selects the hardware family from its explicit architecture.
+	var partition BuildPartition
+	var compatible bool
+	switch family {
+	case BuildFamilyHX:
+		partition, compatible, err = buildHXPartition(subject, topology, raw)
+	case BuildFamilyXT:
+		partition, err = buildXTPartition(subject, topology, raw)
+	default:
+		return BuildPartition{}, false, fmt.Errorf("%s unsupported hardware family %q", subject, family)
+	}
+	if err != nil {
+		return BuildPartition{}, false, err
+	}
+
+	// Validate shared artifact fields once, after the selected geometry is accepted.
+	partition.PartPath, err = cleanManifestRelativeBuildPath(subject+" path", path)
+	if err != nil {
+		return BuildPartition{}, false, err
+	}
+	partition.SourcePartitionID = int(partitionID)
+	return partition, compatible, nil
+}
+
+func validateSelectedLPUPartitions(filename, field string, selectedIDs []int, partitions []BuildPartition) error {
+	selectedLPU := make(map[int]struct{}, len(partitions))
+	for _, id := range selectedIDs {
+		if _, duplicate := selectedLPU[id]; duplicate {
+			return fmt.Errorf("%s %s has duplicate LPU partition id %d", filename, field, id)
+		}
+		partitionIndex := sort.Search(len(partitions), func(i int) bool {
+			return partitions[i].SourcePartitionID >= id
+		})
+		if partitionIndex == len(partitions) || partitions[partitionIndex].SourcePartitionID != id {
+			return fmt.Errorf("%s %s references unpackaged LPU partition id %d", filename, field, id)
+		}
+		selectedLPU[id] = struct{}{}
+	}
+	if len(selectedLPU) != len(partitions) {
+		return fmt.Errorf("%s %s selects %d LPU partitions, but artifacts package %d", filename, field, len(selectedLPU), len(partitions))
+	}
+	return nil
 }

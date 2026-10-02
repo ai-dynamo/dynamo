@@ -108,10 +108,10 @@ func TestAcquireBuildSnapshotRejectsLegacyCompilerMetadata(t *testing.T) {
 	registry, err := NewModelRegistry("", nil)
 	require.NoError(t, err)
 
-	t.Log("Require revision-2 binary compiler metadata without fallback")
+	t.Log("Require a supported binary compiler contract without JSON fallback")
 	_, err = registry.AcquireBuildSnapshot(t.Context(), buildDir)
 	require.ErrorIs(t, err, ErrBuildSnapshotInconsistent)
-	require.ErrorContains(t, err, "is missing manifest.v2.capnp.bin")
+	require.ErrorContains(t, err, "missing build contract: require manifest.v2.capnp.bin or deployment.v1.capnp.bin")
 }
 
 func TestNormalizeBuildFilePathsCanonicalizesAndRejectsAmbiguity(t *testing.T) {
