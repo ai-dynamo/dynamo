@@ -5,6 +5,10 @@ title: Global Router Configuration
 subtitle: Field reference for the CLI flags and JSON config file consumed by the Global Router service.
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 The Global Router (`python -m dynamo.global_router`) is the cross-pool request routing component of a [GlobalPlanner single-endpoint multi-pool deployment](../../developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md). It sits in the control DGD alongside a Frontend and GlobalPlanner, receives inference requests from the Frontend, and routes each one to the appropriate private prefill or decode pool. It is deployed only in raw DGD topologies — there is no DGDR surface for it.
 
 Its configuration has two parts:

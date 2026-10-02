@@ -54,6 +54,17 @@ import { ReferenceStyles } from "@/components/ReferenceStyles";
 <ReferenceStyles />
 ```
 
+### EnumStyles
+
+Once per Reference page that uses enum badges, immediately after the
+frontmatter.
+
+```mdx
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+```
+
 ### LandingStyles
 
 Once on `welcome.mdx` and `community/README.mdx`, immediately after the
