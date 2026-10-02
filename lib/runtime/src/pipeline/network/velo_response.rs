@@ -12,11 +12,14 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, LazyLock, Weak},
+    sync::{
+        Arc, LazyLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{OnceCell, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use velo::{
@@ -39,7 +42,7 @@ use crate::{
 pub const TRANSPORT_NAME: &str = "velo_response";
 const VERSION: u32 = 2;
 const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
-static PROCESS_SERVICE: tokio::sync::Mutex<Weak<VeloResponseService>> =
+static PROCESS_SERVICE: tokio::sync::Mutex<Weak<SharedService>> =
     tokio::sync::Mutex::const_new(Weak::new());
 static PROCESS_METRICS: LazyLock<(crate::MetricsRegistry, Arc<velo::VeloMetrics>)> =
     LazyLock::new(|| {
@@ -62,10 +65,10 @@ pub(crate) enum ResponseTransport {
 
 /// Per-stream credit window for response streams.
 ///
-/// 32, not velo's larger default. When the frontend is the bottleneck, every
-/// stream runs at its window, and a larger window fills the shared path from a
-/// worker to the frontend, so a new stream's first token waits behind all of
-/// it. On the mocker rig with a saturated 24-core frontend, a window of 256
+/// Keep 32 explicit here, matching Velo's current default. In the earlier
+/// mocker campaign, a larger window filled the shared path from a
+/// worker to the frontend, so a new stream's first token waited behind it.
+/// On the mocker rig with a saturated 24-core frontend, a window of 256
 /// put TTFT p50 at 135 to 355 ms and 32 put it at 88 to 102 ms. Throughput was
 /// within noise, and ITL p99 was no higher.
 const RESPONSE_CREDIT_WINDOW: u32 = 32;
@@ -137,6 +140,107 @@ struct Registrations {
     tombstones: HashMap<EndpointInstanceId, Instant>,
 }
 
+/// One owner per Dynamo Runtime, shared by all of that runtime's clones.
+pub(crate) struct RuntimeService {
+    runtime: crate::runtime::RuntimeType,
+    owner: tokio::sync::Mutex<Option<Arc<SharedService>>>,
+    closed: AtomicBool,
+}
+
+impl std::fmt::Debug for RuntimeService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeService")
+            .field("closed", &self.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeService {
+    pub(crate) fn new(runtime: crate::runtime::RuntimeType) -> Self {
+        Self {
+            runtime,
+            owner: tokio::sync::Mutex::new(None),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn service(&self) -> Result<Arc<VeloResponseService>> {
+        let mut owner = self.owner.lock().await;
+        ensure!(!self.is_closed(), "Velo response runtime is shut down");
+        if let Some(owner) = owner.as_ref() {
+            return Ok(owner.service.clone());
+        }
+        // Acquisition and final-owner shutdown use the same lock. A new
+        // runtime cannot acquire a service while that service is closing.
+        let mut shared = PROCESS_SERVICE.lock().await;
+        let lease = match shared.upgrade() {
+            Some(lease) => lease,
+            None => {
+                let runtime = self.runtime.clone();
+                // The spawned result owns cleanup even if its caller stops
+                // waiting before construction finishes.
+                let lease = Arc::new(
+                    runtime
+                        .handle()
+                        .spawn(async move {
+                            Ok::<_, anyhow::Error>(SharedService {
+                                service: VeloResponseService::from_env().await?,
+                                runtime,
+                            })
+                        })
+                        .await??,
+                );
+                *shared = Arc::downgrade(&lease);
+                lease
+            }
+        };
+        let service = lease.service.clone();
+        *owner = Some(lease);
+        Ok(service)
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        let mut owner = self.owner.lock().await;
+        self.closed.store(true, Ordering::Release);
+        let Some(lease) = owner.take() else {
+            return;
+        };
+        let mut shared = PROCESS_SERVICE.lock().await;
+        if let Some(lease) = Arc::into_inner(lease) {
+            *shared = Weak::new();
+            lease.service.shutdown().await;
+        }
+    }
+}
+
+/// Stream handles retain the service, but do not count as runtime owners.
+struct SharedService {
+    service: Arc<VeloResponseService>,
+    // Retain an owned Tokio runtime without retaining the Dynamo Runtime and
+    // its owner slot. External runtimes remain the caller's responsibility.
+    runtime: crate::runtime::RuntimeType,
+}
+
+impl Drop for SharedService {
+    fn drop(&mut self) {
+        if self.service.closed.initialized() {
+            return;
+        }
+        // Explicit Runtime shutdown awaits this work. Drop can only make a
+        // best effort, using the runtime that created the service.
+        let service = self.service.clone();
+        let runtime = self.runtime.clone();
+        runtime.handle().spawn(async move {
+            service.shutdown().await;
+            drop(runtime);
+        });
+    }
+}
+
 pub struct VeloResponseService {
     velo: Arc<Velo>,
     transport: ResponseTransport,
@@ -144,16 +248,13 @@ pub struct VeloResponseService {
     /// Frontends this worker has already registered and handshaken. Both are
     /// per peer, not per request. Done per request, they put a messenger round
     /// trip through the frontend in front of every request's first token.
-    prepared_peers: dashmap::DashSet<velo::InstanceId>,
+    prepared_peers: dashmap::DashMap<velo::InstanceId, Arc<OnceCell<()>>>,
+    closing: AtomicBool,
+    closed: OnceCell<()>,
 }
 
 impl VeloResponseService {
-    /// A weak process cache lets the final runtime owner release the service.
-    pub async fn shared() -> Result<Arc<Self>> {
-        let mut shared = PROCESS_SERVICE.lock().await;
-        if let Some(service) = shared.upgrade() {
-            return Ok(service);
-        }
+    async fn from_env() -> Result<Arc<Self>> {
         let transport = ResponseTransport::configured()?;
         let host = crate::utils::ip_resolver::host_override_from_env(
             crate::config::environment_names::tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
@@ -163,15 +264,13 @@ impl VeloResponseService {
             Some(host) => crate::utils::ip_resolver::resolve_host_or_interface(&host, &resolver)?,
             None => crate::utils::ip_resolver::resolve_local_host(&resolver)?,
         };
-        let service = Self::new(transport, SocketAddr::new(host.advertise_ip(), 0)).await?;
-        *shared = Arc::downgrade(&service);
-        Ok(service)
+        Self::new(transport, SocketAddr::new(host.advertise_ip(), 0)).await
     }
 
     async fn new(transport: ResponseTransport, address: SocketAddr) -> Result<Arc<Self>> {
         let mut builder = Velo::builder()
             .metrics(PROCESS_METRICS.1.clone())
-            .stream_bind_addr(address.ip())
+            .mux_only()
             .messenger_mux(response_mux_config())?;
         match transport {
             ResponseTransport::Tcp => {
@@ -192,14 +291,37 @@ impl VeloResponseService {
             velo: builder.build().await?,
             transport,
             registrations: Mutex::new(Registrations::default()),
-            prepared_peers: dashmap::DashSet::new(),
+            prepared_peers: dashmap::DashMap::new(),
+            closing: AtomicBool::new(false),
+            closed: OnceCell::new(),
         }))
+    }
+
+    async fn shutdown(&self) {
+        self.closed
+            .get_or_init(|| async {
+                self.closing.store(true, Ordering::Release);
+                let requests = std::mem::take(&mut self.registrations.lock().requests);
+                for registration in requests.into_values() {
+                    registration.done.cancel();
+                    registration.controller.cancel();
+                }
+                // Bound the drain to five seconds, then await transport close.
+                self.velo
+                    .shutdown(velo::ShutdownPolicy::Timeout(Duration::from_secs(5)))
+                    .await;
+            })
+            .await;
     }
 
     pub fn register_response(
         self: &Arc<Self>,
         context: Arc<dyn AsyncEngineContext>,
     ) -> Result<RegisteredStream<StreamReceiver>> {
+        ensure!(
+            !self.closing.load(Ordering::Acquire),
+            "Velo response service is shut down"
+        );
         let anchor = self.velo.create_anchor::<ResponseFrame>();
         let ticket = self
             .velo
@@ -218,7 +340,12 @@ impl VeloResponseService {
         };
         let id = Uuid::new_v4();
         let done = CancellationToken::new();
-        self.registrations.lock().requests.insert(
+        let mut registrations = self.registrations.lock();
+        ensure!(
+            !self.closing.load(Ordering::Acquire),
+            "Velo response service is shut down"
+        );
+        registrations.requests.insert(
             id,
             Registration {
                 controller: controller.clone(),
@@ -226,6 +353,8 @@ impl VeloResponseService {
                 instance: None,
             },
         );
+        drop(registrations);
+        tracing::debug!(context_id = %context.id(), registration_id = %id, "Registered Velo response stream");
         let lease = ResponseLease {
             service: self.clone(),
             id,
@@ -240,15 +369,22 @@ impl VeloResponseService {
                 tokio::select! {
                     biased;
                     _ = done.cancelled() => return,
-                    _ = context.killed() => { controller.cancel(); return; }
+                    _ = context.killed() => {
+                        tracing::debug!(context_id = %context.id(), "Cancelling Velo response stream");
+                        controller.cancel(); return;
+                    }
                     _ = tx.closed() => return,
-                    _ = context.stopped(), if !stopped => { controller.request_stop(); stopped = true; }
+                    _ = context.stopped(), if !stopped => {
+                        tracing::debug!(context_id = %context.id(), "Stopping Velo response generation");
+                        controller.request_stop(); stopped = true;
+                    }
                     first = anchor.next() => break first,
                 }
             };
             match first {
                 Some(Ok(StreamFrame::Item(ResponseFrame::Prologue(prologue)))) => {
                     if let Some(error) = prologue.error {
+                        tracing::debug!(context_id = %context.id(), %error, "Velo response prologue returned an error");
                         let _ = tx.send(Err(StreamPrologueError {
                             message: error,
                             typed_error: prologue.typed_error,
@@ -257,6 +393,7 @@ impl VeloResponseService {
                     }
                 }
                 other => {
+                    tracing::warn!(context_id = %context.id(), reason = %first_kind(&other), "Velo response ended before its prologue");
                     let _ = tx.send(Err(StreamPrologueError::from_message(format!(
                         "Velo response ended before a valid prologue: {}",
                         first_kind(&other)
@@ -267,6 +404,7 @@ impl VeloResponseService {
             let receiver = VeloResponseReceiver {
                 anchor,
                 _lease: lease,
+                context_id: context.id().to_string(),
                 ended: false,
             };
             if tx
@@ -281,8 +419,14 @@ impl VeloResponseService {
                 tokio::select! {
                     biased;
                     _ = done.cancelled() => return,
-                    _ = context.killed() => { controller.cancel(); return; }
-                    _ = context.stopped(), if !stopped => { controller.request_stop(); stopped = true; }
+                    _ = context.killed() => {
+                        tracing::debug!(context_id = %context.id(), "Cancelling Velo response stream");
+                        controller.cancel(); return;
+                    }
+                    _ = context.stopped(), if !stopped => {
+                        tracing::debug!(context_id = %context.id(), "Stopping Velo response generation");
+                        controller.request_stop(); stopped = true;
+                    }
                 }
             }
         });
@@ -343,12 +487,42 @@ impl VeloResponseService {
         self.registrations.lock().tombstones.remove(instance);
     }
 
+    async fn prepare_peer(&self, peer: PeerInfo) -> Result<()> {
+        let peer_id = peer.instance_id();
+        let ready = self
+            .prepared_peers
+            .entry(peer_id)
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone();
+        // Release the map guard before awaiting. A failed or cancelled attempt
+        // leaves the cell empty, so the next caller can retry.
+        ready
+            .get_or_try_init(|| async {
+                self.velo.register_peer(peer)?;
+                if peer_id != self.velo.instance_id() {
+                    // The hello also installs the reverse UCX address.
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        self.velo.wait_for_handler(peer_id, "_stream_stop"),
+                    )
+                    .await??;
+                }
+                Ok::<(), anyhow::Error>(())
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn sender(
         self: &Arc<Self>,
         context: Arc<dyn AsyncEngineContext>,
         info: ConnectionInfo,
         cancellation: Option<prometheus::IntCounter>,
     ) -> Result<VeloResponseSender> {
+        ensure!(
+            !self.closing.load(Ordering::Acquire),
+            "Velo response service is shut down"
+        );
         ensure!(
             info.transport == TRANSPORT_NAME,
             "invalid Velo response transport"
@@ -368,22 +542,9 @@ impl VeloResponseService {
             address.anchor.unpack().0 == address.peer.worker_id(),
             "Velo anchor and peer identity differ"
         );
-        let peer_id = address.peer.instance_id();
-        if !self.prepared_peers.contains(&peer_id) {
-            self.velo.register_peer(address.peer)?;
-            if peer_id != self.velo.instance_id() {
-                // Velo checks cached lifecycle support for this peer instance
-                // first. Its initial hello also installs the reverse UCX
-                // address; stream slot opens do not perform that peer
-                // handshake, so it runs once per peer, here.
-                tokio::time::timeout(
-                    Duration::from_secs(10),
-                    self.velo.wait_for_handler(peer_id, "_stream_stop"),
-                )
-                .await??;
-            }
-            self.prepared_peers.insert(peer_id);
-        }
+        self.prepare_peer(address.peer).await.inspect_err(|error| {
+            tracing::warn!(context_id = %context.id(), %error, "Failed to prepare Velo response peer");
+        })?;
         let sender = if address.anchor.unpack().0 == self.velo.instance_id().worker_id() {
             self.velo
                 .attach_anchor::<ResponseFrame>(address.anchor)
@@ -393,6 +554,7 @@ impl VeloResponseService {
                 .open_anchor_stream::<ResponseFrame>(address.anchor, address.ticket)
                 .await?
         };
+        tracing::debug!(context_id = %context.id(), "Opened Velo response sender");
         let stop = sender.stop_token();
         let cancel = sender.cancellation_token();
         let finished = CancellationToken::new();
@@ -404,10 +566,14 @@ impl VeloResponseService {
                     biased;
                     _ = cancel.cancelled() => {
                         if let Some(counter) = &cancellation { counter.inc(); }
+                        tracing::debug!(context_id = %context.id(), "Velo response peer cancelled the request");
                         context.kill(); return;
                     }
                     _ = monitor_done.cancelled() => return,
-                    _ = stop.cancelled(), if !stopped => { context.stop_generating(); stopped = true; }
+                    _ = stop.cancelled(), if !stopped => {
+                        tracing::debug!(context_id = %context.id(), "Velo response peer requested a stop");
+                        context.stop_generating(); stopped = true;
+                    }
                 }
             }
         });
@@ -417,18 +583,6 @@ impl VeloResponseService {
             finished,
             prologue_sent: false,
         })
-    }
-}
-
-impl Drop for VeloResponseService {
-    fn drop(&mut self) {
-        let velo = self.velo.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                velo.graceful_shutdown(velo::ShutdownPolicy::Timeout(Duration::from_secs(5)))
-                    .await;
-            });
-        }
     }
 }
 
@@ -455,6 +609,7 @@ fn first_kind(
 pub(super) struct VeloResponseReceiver {
     anchor: StreamAnchor<ResponseFrame>,
     _lease: ResponseLease,
+    context_id: String,
     ended: bool,
 }
 impl Stream for VeloResponseReceiver {
@@ -472,6 +627,7 @@ impl Stream for VeloResponseReceiver {
             }
             terminal => {
                 this.ended = true;
+                tracing::warn!(context_id = %this.context_id, reason = %first_kind(&terminal), "Velo response ended without finalization");
                 Poll::Ready(Some(Err(DynamoError::builder()
                     .error_type(ErrorType::Disconnected)
                     .message(format!(
@@ -541,6 +697,165 @@ mod tests {
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context as EngineContext;
 
+    #[tokio::test]
+    async fn runtime_shutdown_closes_only_the_last_owner_after_endpoint_drain() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
+            ],
+            async {
+                // Separate owned Tokio runtimes: the service must remain alive
+                // even after the runtime that created it has been dropped.
+                let first = crate::Runtime::single_threaded().unwrap();
+                let first_clone = first.clone();
+                let second = crate::Runtime::single_threaded().unwrap();
+                let service = first.velo_response_service().service().await.unwrap();
+                assert!(Arc::ptr_eq(
+                    &service,
+                    &first_clone.velo_response_service().service().await.unwrap()
+                ));
+                assert!(Arc::ptr_eq(
+                    &service,
+                    &second.velo_response_service().service().await.unwrap()
+                ));
+                let entry = service
+                    .velo
+                    .peer_info()
+                    .worker_address()
+                    .get_entry("tcp")
+                    .unwrap()
+                    .unwrap();
+                let address = velo::transports::utils::interfaces::parse_endpoints(&entry).unwrap()
+                    [0]
+                .socket_addr()
+                .unwrap();
+
+                first.shutdown();
+                tokio::time::timeout(Duration::from_secs(10), first.primary_token().cancelled())
+                    .await
+                    .unwrap();
+                assert!(first_clone.velo_response_service().service().await.is_err());
+                drop(first_clone);
+                drop(first);
+                assert!(!service.closed.initialized());
+                tokio::net::TcpStream::connect(address).await.unwrap();
+
+                // Retain both the service and a registration across shutdown.
+                let registration = service
+                    .register_response(EngineContext::new(()).context())
+                    .unwrap();
+                let endpoint = second.graceful_shutdown_tracker().register_task();
+                let main = second.primary_token();
+                second.shutdown();
+                second.child_token().cancelled().await;
+                assert!(!main.is_cancelled());
+                assert!(!service.closed.initialized());
+                tokio::net::TcpStream::connect(address).await.unwrap();
+                drop(endpoint);
+                tokio::time::timeout(Duration::from_secs(10), main.cancelled())
+                    .await
+                    .unwrap();
+                assert!(service.closed.initialized());
+                assert!(tokio::net::TcpStream::connect(address).await.is_err());
+                assert!(service.registrations.lock().requests.is_empty());
+                assert!(
+                    service
+                        .register_response(EngineContext::new(()).context())
+                        .is_err()
+                );
+                assert!(second.velo_response_service().service().await.is_err());
+                drop(registration);
+
+                // A later runtime receives a new service, even while callers
+                // still hold handles to the service that was shut down.
+                let replacement = crate::Runtime::from_current().unwrap();
+                let fresh = replacement.velo_response_service().service().await.unwrap();
+                assert!(!Arc::ptr_eq(&service, &fresh));
+                replacement.shutdown();
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    replacement.primary_token().cancelled(),
+                )
+                .await
+                .unwrap();
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_peer_preparation_shares_a_handshake_and_retries_failure() {
+        use std::sync::atomic::AtomicUsize;
+        use tracing_subscriber::prelude::*;
+
+        // Count actual hello requests at the peer, rather than just checking
+        // the cache size after concurrent calls have completed.
+        struct HelloCount(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for HelloCount {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() != "crate::messenger::system" {
+                    return;
+                }
+                struct Message(bool);
+                impl tracing::field::Visit for Message {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message"
+                            && format!("{value:?}") == "Received _hello handshake from peer"
+                        {
+                            self.0 = true;
+                        }
+                    }
+                }
+                let mut message = Message(false);
+                event.record(&mut message);
+                if message.0 {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        let hellos = Arc::new(AtomicUsize::new(0));
+        let _logging = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(HelloCount(hellos.clone())),
+        );
+        let (consumer, producer) = pair(ResponseTransport::Tcp).await;
+        let peer = consumer.velo.peer_info();
+        let invalid = PeerInfo::new(peer.instance_id(), velo::WorkerAddress::empty());
+        assert!(producer.prepare_peer(invalid).await.is_err());
+        assert!(
+            !producer
+                .prepared_peers
+                .get(&peer.instance_id())
+                .unwrap()
+                .initialized()
+        );
+        let results =
+            futures::future::join_all((0..8).map(|_| producer.prepare_peer(peer.clone()))).await;
+        for result in results {
+            result.unwrap();
+        }
+        assert!(
+            producer
+                .prepared_peers
+                .get(&peer.instance_id())
+                .unwrap()
+                .initialized()
+        );
+        assert_eq!(hellos.load(Ordering::Relaxed), 1);
+        producer.prepare_peer(peer).await.unwrap();
+        assert_eq!(hellos.load(Ordering::Relaxed), 1);
+        producer.shutdown().await;
+        consumer.shutdown().await;
+    }
+
     #[test]
     fn response_streams_use_a_credit_window_of_32() {
         assert_eq!(response_mux_config().initial_credit, 32);
@@ -599,9 +914,13 @@ mod tests {
         sender.send_prologue(None).await.unwrap();
         let (_, provider) = registered.into_parts();
         let mut receiver = provider.await.unwrap().unwrap();
-        let payload = Bytes::from(vec![7; 128 * 1024]);
-        sender.send(payload.clone()).await.unwrap();
-        assert_eq!(receiver.rx.next().await.unwrap().unwrap(), payload);
+        // Cover both an ordinary item and an item above Velo's rendezvous
+        // threshold. Mux-only services must send the latter in chunks.
+        for size in [128 * 1024, 1024 * 1024] {
+            let payload = Bytes::from(vec![7; size]);
+            sender.send(payload.clone()).await.unwrap();
+            assert_eq!(receiver.rx.next().await.unwrap().unwrap(), payload);
+        }
         drop(receiver);
         tokio::time::timeout(Duration::from_secs(5), engine.killed())
             .await
