@@ -13,6 +13,7 @@ use dynamo_llm::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
+        openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_runtime::metrics::prometheus_names::frontend_service::METRICS_PREFIX_ENV;
@@ -214,6 +215,67 @@ impl
             };
             let ann = metrics
                 .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                .expect("metrics serialize");
+            annotated.event = ann.event;
+            annotated.comment = ann.comment;
+            yield annotated;
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// The completions-shaped twin of [`MockGatedMetricsEngine`]: same leading
+/// frame, same gate, so `/v1/completions` pins the same observation order.
+struct MockGatedCompletionsEngine {
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for MockGatedCompletionsEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let generator = request.response_generator(ctx.id().to_string());
+        let gate = Arc::clone(&self.gate);
+
+        let stream = stream! {
+            let leading = LLMMetricAnnotation {
+                input_tokens: 5,
+                output_tokens: 1,
+                chunk_tokens: 1,
+                ..Default::default()
+            };
+            yield leading
+                .to_annotation::<NvCreateCompletionResponse>()
+                .expect("metrics serialize");
+
+            gate.notified().await;
+
+            let output = generator.create_choice(
+                0,
+                Some("gated".to_string()),
+                Some(dynamo_protocols::types::CompletionFinishReason::Stop),
+                None,
+            );
+            let mut annotated = Annotated::from_data(output);
+            let metrics = LLMMetricAnnotation {
+                input_tokens: 5,
+                output_tokens: 2,
+                chunk_tokens: 1,
+                ..Default::default()
+            };
+            let ann = metrics
+                .to_annotation::<NvCreateCompletionResponse>()
                 .expect("metrics serialize");
             annotated.event = ann.event;
             annotated.comment = ann.comment;
@@ -685,8 +747,8 @@ async fn test_unknown_model_uses_sentinel_label() {
 /// the case times out.
 ///
 /// `path` selects the handler under test; `request` is the non-streaming
-/// request body for that endpoint. Both handlers route to the same chat
-/// engine, so one gated engine serves both cases.
+/// request body for that endpoint. Chat and Responses route to the same
+/// chat engine; completions has its own twin with the same gate.
 async fn assert_non_streaming_observes_metrics_before_preflight(
     path: &str,
     request: serde_json::Value,
@@ -696,6 +758,7 @@ async fn assert_non_streaming_observes_metrics_before_preflight(
         let service = HttpService::builder()
             .port(port)
             .enable_chat_endpoints(true)
+            .enable_cmpl_endpoints(true)
             .enable_responses_endpoints(true)
             .build()
             .unwrap();
@@ -715,6 +778,15 @@ async fn assert_non_streaming_observes_metrics_before_preflight(
         });
         manager
             .add_chat_completions_model("gatedmodel", card.mdcsum(), engine)
+            .unwrap();
+        manager
+            .add_completions_model(
+                "gatedmodel",
+                card.mdcsum(),
+                Arc::new(MockGatedCompletionsEngine {
+                    gate: Arc::clone(&gate),
+                }),
+            )
             .unwrap();
 
         wait_for_metrics_ready(port).await;
@@ -758,10 +830,13 @@ async fn assert_non_streaming_observes_metrics_before_preflight(
             "{path}: request failed: {response:?}"
         );
         let body: serde_json::Value = response.json().await.unwrap();
-        // Exact content per endpoint shape: chat puts it on the message, the
-        // Responses API on an `output_text` item.
+        // Exact content per endpoint shape: chat puts it on the message,
+        // completions on the choice text, the Responses API on an
+        // `output_text` item.
         let content = if path == "/v1/chat/completions" {
             body["choices"][0]["message"]["content"].as_str()
+        } else if path == "/v1/completions" {
+            body["choices"][0]["text"].as_str()
         } else {
             body["output"].as_array().and_then(|items| {
                 items.iter().find_map(|item| {
@@ -819,6 +894,21 @@ async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
             "stream": false,
             "max_tokens": 8,
             "messages": [{"role": "user", "content": "hi"}]
+        }),
+    )
+    .await;
+}
+
+/// Non-streaming `/v1/completions`: same order through its own engine type.
+#[tokio::test]
+async fn test_completions_non_streaming_observes_metrics_before_backend_error_preflight() {
+    assert_non_streaming_observes_metrics_before_preflight(
+        "/v1/completions",
+        serde_json::json!({
+            "model": "gatedmodel",
+            "stream": false,
+            "max_tokens": 8,
+            "prompt": "hi"
         }),
     )
     .await;
