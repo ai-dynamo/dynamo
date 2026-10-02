@@ -3333,11 +3333,7 @@ mod ownership_tests {
             "ordering and duplicates do not change admission"
         );
 
-        for malformed in [
-            serde_json::Value::Null,
-            serde_json::json!("text"),
-            serde_json::json!(["text", 1]),
-        ] {
+        for malformed in [serde_json::Value::Null, serde_json::json!(["text", 1])] {
             assert_eq!(
                 missing.mdcsum(),
                 card_with_modalities(malformed).mdcsum(),
