@@ -18,8 +18,6 @@
 package controller
 
 import (
-	"time"
-
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -265,14 +263,6 @@ func engineGroupFailureToAPI(value *enginegroup.Failure) *nvidiacomv1beta1.Engin
 		Reason:         value.Reason,
 		Message:        value.Message,
 	}
-}
-
-func engineGroupTimeFromAPI(value metav1.Time) time.Time {
-	return value.Time
-}
-
-func engineGroupTimeToAPI(value time.Time) metav1.Time {
-	return metav1.NewTime(value)
 }
 
 func engineGroupCapacityStatusFromAPI(
@@ -685,8 +675,8 @@ func engineGroupTransitionFromAPI(
 		Verification:    engineGroupVerificationFromAPI(value.Verification),
 		Outcome:         enginegroup.TransitionOutcome(value.Outcome),
 		Failure:         engineGroupFailureFromAPI(value.Failure),
-		StartedAt:       engineGroupTimeFromAPI(value.StartedAt),
-		UpdatedAt:       engineGroupTimeFromAPI(value.UpdatedAt),
+		StartedAt:       value.StartedAt.Time,
+		UpdatedAt:       value.UpdatedAt.Time,
 	}
 }
 
@@ -707,8 +697,8 @@ func engineGroupTransitionToAPI(
 		Verification:    engineGroupVerificationToAPI(value.Verification),
 		Outcome:         nvidiacomv1beta1.EngineGroupTransitionOutcome(value.Outcome),
 		Failure:         engineGroupFailureToAPI(value.Failure),
-		StartedAt:       engineGroupTimeToAPI(value.StartedAt),
-		UpdatedAt:       engineGroupTimeToAPI(value.UpdatedAt),
+		StartedAt:       metav1.NewTime(value.StartedAt),
+		UpdatedAt:       metav1.NewTime(value.UpdatedAt),
 	}
 }
 
@@ -792,7 +782,7 @@ func engineGroupVerificationFromAPI(
 		proof = &enginegroup.ServingProof{
 			TopologyGeneration: value.Proof.TopologyGeneration,
 			RuntimeDigest:      value.Proof.RuntimeDigest,
-			ObservedAt:         engineGroupTimeFromAPI(value.Proof.ObservedAt),
+			ObservedAt:         value.Proof.ObservedAt.Time,
 		}
 	}
 	return enginegroup.VerificationStatus{
@@ -813,7 +803,7 @@ func engineGroupVerificationToAPI(
 		proof = &nvidiacomv1beta1.EngineGroupServingProofStatus{
 			TopologyGeneration: value.Proof.TopologyGeneration,
 			RuntimeDigest:      value.Proof.RuntimeDigest,
-			ObservedAt:         engineGroupTimeToAPI(value.Proof.ObservedAt),
+			ObservedAt:         metav1.NewTime(value.Proof.ObservedAt),
 		}
 	}
 	return &nvidiacomv1beta1.EngineGroupVerificationStatus{

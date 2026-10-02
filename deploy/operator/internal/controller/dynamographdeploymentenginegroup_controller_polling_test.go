@@ -170,6 +170,66 @@ func TestEngineGroupControllerPollsSettledWorldsWithoutPodUpdates(t *testing.T) 
 	}
 }
 
+func TestEngineGroupRuntimeResolutionFailureInvalidatesHealth(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "allocation observation failure", err: errors.New("capacity unavailable")},
+		{name: "runtime no longer selected", err: ErrEngineGroupRuntimeUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("seed historical health evidence from the previous generation")
+			ctx := t.Context()
+			group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "group", Namespace: "test", Generation: 2},
+				Spec:       nvidiacomv1beta1.DynamoGraphDeploymentEngineGroupSpec{Replicas: 1},
+				Status:     nvidiacomv1beta1.DynamoGraphDeploymentEngineGroupStatus{ObservedGeneration: 1},
+			}
+			for _, conditionType := range []string{engineGroupConditionAvailable, engineGroupConditionTopologyKnown,
+				engineGroupConditionDegraded, engineGroupConditionTargetReached} {
+				condition := metav1.Condition{Type: conditionType, Status: metav1.ConditionTrue, Reason: "PreviouslyObserved", ObservedGeneration: 1}
+				if conditionType == engineGroupConditionDegraded {
+					condition.Status = metav1.ConditionFalse
+				}
+				meta.SetStatusCondition(&group.Status.Conditions, condition)
+			}
+			scheme := runtime.NewScheme()
+			require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(group).WithObjects(group).Build()
+			reconciler := &DynamoGraphDeploymentEngineGroupReconciler{
+				Client: kubeClient, RuntimeProvider: failingEngineGroupRuntimeProvider{err: test.err},
+			}
+
+			t.Log("fail runtime resolution before any coordinator observation can establish current health")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(group)})
+			if !errors.Is(test.err, ErrEngineGroupRuntimeUnavailable) {
+				require.ErrorIs(t, err, test.err)
+			}
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(group), group))
+
+			t.Log("retain historical generation while making every current health claim unknown")
+			assert.Equal(t, int64(1), group.Status.ObservedGeneration)
+			for _, conditionType := range []string{engineGroupConditionAvailable, engineGroupConditionTopologyKnown,
+				engineGroupConditionDegraded, engineGroupConditionTargetReached} {
+				condition := meta.FindStatusCondition(group.Status.Conditions, conditionType)
+				require.NotNil(t, condition)
+				assert.Equal(t, metav1.ConditionUnknown, condition.Status, conditionType)
+				assert.Equal(t, group.Generation, condition.ObservedGeneration)
+			}
+		})
+	}
+}
+
+type failingEngineGroupRuntimeProvider struct {
+	err error
+}
+
+func (p failingEngineGroupRuntimeProvider) Resolve(context.Context, *nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup) (EngineGroupRuntime, error) {
+	return EngineGroupRuntime{}, p.err
+}
+
 func TestEngineGroupControllerPeriodicObservationFailsClosed(t *testing.T) {
 	authorities := []enginegroup.ObservationAuthority{
 		enginegroup.ObservationAuthorityCapacity,

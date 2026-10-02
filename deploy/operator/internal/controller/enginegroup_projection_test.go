@@ -38,6 +38,7 @@ func TestEngineGroupPackedMemberProjectionPreservesDesiredEP8ThroughEP7Recovery(
 		Spec:       api.DynamoGraphDeploymentEngineGroupSpec{Replicas: 2},
 	}
 	reconciler := &DynamoGraphDeploymentEngineGroupReconciler{}
+	reconcileEngineGroupDesiredAssignment(group, profile, status, nil)
 	reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
 	require.Equal(t, int32(2), group.Status.Replicas)
 	require.Equal(t, int32(2), group.Status.AvailableReplicas)
@@ -98,6 +99,70 @@ func TestEngineGroupPackedMemberProjectionPreservesDesiredEP8ThroughEP7Recovery(
 	assert.Equal(t, int32(2), group.Status.AvailableReplicas)
 	assert.Equal(t, metav1.ConditionTrue, meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionTargetReached).Status)
 	assert.Equal(t, metav1.ConditionFalse, meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionDegraded).Status)
+}
+
+func TestEngineGroupCancelsRolledBackDesiredAssignment(t *testing.T) {
+	tests := []struct {
+		name            string
+		change          enginegroup.ResolvedChange
+		originalTarget  int32
+		requestedTarget int32
+		pendingMembers  []string
+	}{
+		{
+			name: "cancel growth", originalTarget: 1, requestedTarget: 2,
+			change: enginegroup.ResolvedChange{Kind: enginegroup.PlanKindGrow, Grow: &enginegroup.GrowChange{
+				Replicas: []enginegroup.ReplicaTarget{engineGroupTestReplicaTarget("replica-1", "slot-1", "dp-1")},
+			}},
+			pendingMembers: []string{"dp-0", "dp-1"},
+		},
+		{
+			name: "cancel retirement", originalTarget: 2, requestedTarget: 1,
+			change: enginegroup.ResolvedChange{Kind: enginegroup.PlanKindRetire, Retire: &enginegroup.RetireChange{
+				Replicas: []enginegroup.ReplicaID{"replica-1"},
+			}},
+			pendingMembers: []string{"dp-0"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("resolve and persist the initial canonical assignment")
+			status := healthyEngineGroupProjectionStatus(int(test.originalTarget))
+			profile := api.EngineGroupProfileStatus{NativeMembersPerReplica: 1, MinSafeServingNativeMembers: 1}
+			group := &api.DynamoGraphDeploymentEngineGroup{
+				ObjectMeta: metav1.ObjectMeta{Generation: 1},
+				Spec:       api.DynamoGraphDeploymentEngineGroupSpec{Replicas: test.originalTarget},
+			}
+			reconcileEngineGroupDesiredAssignment(group, profile, status, nil)
+			original := append([]string(nil), group.Status.DesiredNativeMembers...)
+
+			t.Log("resolve a new target from the exact durable resize plan")
+			group.Generation++
+			group.Spec.Replicas = test.requestedTarget
+			status.Transition = &enginegroup.TransitionStatus{
+				Spec: enginegroup.TransitionSpec{
+					ID: "resize", BaseTopologyGeneration: 1,
+					Plan: enginegroup.ResolvedPlan{ID: "resize-plan", Change: test.change},
+				},
+				Outcome: enginegroup.TransitionOutcomeProgressing,
+			}
+			reconcileEngineGroupDesiredAssignment(group, profile, status, &status.Transition.Spec.Plan)
+			require.Equal(t, test.pendingMembers, group.Status.DesiredNativeMembers)
+
+			t.Log("roll the operation back and cancel its target after a controller restart")
+			status.Transition.Outcome = enginegroup.TransitionOutcomeRolledBack
+			group = group.DeepCopy()
+			group.Generation++
+			group.Spec.Replicas = test.originalTarget
+			reconcileEngineGroupDesiredAssignment(group, profile, status, nil)
+			(&DynamoGraphDeploymentEngineGroupReconciler{}).projectEngineGroupStatus(group, profile, status, nil, nil)
+
+			t.Log("reach the restored target without retaining obsolete desired members")
+			assert.Equal(t, original, group.Status.DesiredNativeMembers)
+			assert.Equal(t, group.Generation, group.Status.DesiredAssignmentGeneration)
+			assert.Equal(t, metav1.ConditionTrue, meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionTargetReached).Status)
+		})
+	}
 }
 
 func TestEngineGroupPackedTargetRequiresExactMemberIdentities(t *testing.T) {

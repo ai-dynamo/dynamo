@@ -176,6 +176,9 @@ func (r *DynamoGraphDeploymentEngineGroupReconciler) Reconcile(
 	result, reconcileErr := coordinator.Reconcile(ctx, engineGroupID(group), desiredPlan, status)
 	var observationErr *enginegroup.ObservationError
 	errors.As(reconcileErr, &observationErr)
+	if planningErr == nil && validation == nil && observationErr == nil {
+		reconcileEngineGroupDesiredAssignment(group, runtime.Profile, result.Status, desiredPlan)
+	}
 	r.projectEngineGroupStatus(group, runtime.Profile, result.Status, observationErr, planningErr)
 	if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
 		return ctrl.Result{}, updateErr
@@ -199,6 +202,10 @@ func (r *DynamoGraphDeploymentEngineGroupReconciler) initializeEngineGroupStatus
 	before := group.Status.DeepCopy()
 	observations, err := observeEngineGroupRuntime(ctx, runtime, engineGroupID(group), "")
 	if err != nil {
+		invalidateEngineGroupHealth(group, "ObservationFailed", "Initial external state could not be established")
+		if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
+			return ctrl.Result{}, updateErr
+		}
 		return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, fmt.Errorf("observe initial Engine Group state: %w", err)
 	}
 
@@ -211,6 +218,7 @@ func (r *DynamoGraphDeploymentEngineGroupReconciler) initializeEngineGroupStatus
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("initialize Engine Group journal: %w", err)
 	}
+	reconcileEngineGroupDesiredAssignment(group, runtime.Profile, status, nil)
 	r.projectEngineGroupStatus(group, runtime.Profile, status, nil, nil)
 	if err := r.updateEngineGroupStatus(ctx, group, before); err != nil {
 		return ctrl.Result{}, err
@@ -299,6 +307,7 @@ func (r *DynamoGraphDeploymentEngineGroupReconciler) reconcileDeletion(
 		transitionID,
 	)
 	if observationErr != nil {
+		invalidateEngineGroupHealth(group, "ObservationFailed", "Current external state could not be established during deletion")
 		setEngineGroupCondition(group, engineGroupConditionProgressing, metav1.ConditionFalse, "DeletionBlocked",
 			"Deletion is blocked because current capacity, traffic, or membership cannot be established")
 		if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
@@ -408,9 +417,9 @@ func (r *DynamoGraphDeploymentEngineGroupReconciler) reconcileUnavailableRuntime
 	err error,
 ) (ctrl.Result, error) {
 	before := group.Status.DeepCopy()
-	group.Status.ObservedGeneration = group.Generation
 	projectEngineGroupScaleIdentity(group)
 	setEngineGroupCondition(group, engineGroupConditionRuntimeReady, metav1.ConditionFalse, "RuntimeUnavailable", err.Error())
+	invalidateEngineGroupHealth(group, "RuntimeUnavailable", "Current external state cannot be established without a usable runtime")
 	if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
 		return ctrl.Result{}, updateErr
 	}
@@ -441,7 +450,9 @@ func (r *DynamoGraphDeploymentEngineGroupReconciler) projectEngineGroupStatus(
 	observationErr *enginegroup.ObservationError,
 	planningErr error,
 ) {
-	group.Status.ObservedGeneration = group.Generation
+	if observationErr == nil {
+		group.Status.ObservedGeneration = group.Generation
+	}
 	projectEngineGroupScaleIdentity(group)
 	group.Status.Profile = profile.DeepCopy()
 	group.Status.Reconciliation = engineGroupStatusToAPI(status)
@@ -472,7 +483,6 @@ func (r *DynamoGraphDeploymentEngineGroupReconciler) projectEngineGroupStatus(
 		Draining:           engineGroupMembershipsToAPI(status.Traffic.Observed.Draining),
 		Drained:            engineGroupMembershipsToAPI(status.Traffic.Observed.Drained),
 	}
-	group.Status.DesiredNativeMembers = resolveEngineGroupDesiredNativeMembers(group.Status.DesiredNativeMembers, status)
 	group.Status.DesiredNativeMemberCount = int32(len(group.Status.DesiredNativeMembers))
 	group.Status.ReplicaStates = projectEngineGroupReplicaStates(status, group.Status.ReplicaStates)
 	group.Status.AvailableReplicas = countAvailableEngineGroupReplicas(group.Status.ReplicaStates, profile.NativeMembersPerReplica)
@@ -524,14 +534,7 @@ func projectEngineGroupConditions(
 		chooseEngineGroupString(progressing, "An Engine Group transition is progressing", "No Engine Group transition is progressing"))
 	if observationErr != nil {
 		message := fmt.Sprintf("Current %s state could not be established", observationErr.Authority)
-		setEngineGroupCondition(group, engineGroupConditionTopologyKnown, metav1.ConditionUnknown,
-			"ObservationFailed", message)
-		setEngineGroupCondition(group, engineGroupConditionTargetReached, metav1.ConditionUnknown,
-			"ObservationFailed", message)
-		setEngineGroupCondition(group, engineGroupConditionAvailable, metav1.ConditionUnknown,
-			"ObservationFailed", message)
-		setEngineGroupCondition(group, engineGroupConditionDegraded, metav1.ConditionUnknown,
-			"ObservationFailed", message)
+		invalidateEngineGroupHealth(group, "ObservationFailed", message)
 		return
 	}
 
@@ -549,7 +552,8 @@ func projectEngineGroupConditions(
 		chooseEngineGroupString(available, "ServingAvailable", "ServingUnavailable"),
 		chooseEngineGroupString(available, "The committed topology is available and admitted", "The committed topology is not fully available and admitted"))
 
-	targetReached := topologyKnown && group.Status.Replicas == group.Spec.Replicas &&
+	targetReached := topologyKnown && group.Status.DesiredAssignmentGeneration == group.Generation &&
+		group.Status.Replicas == group.Spec.Replicas &&
 		int64(group.Status.DesiredNativeMemberCount) == int64(group.Spec.Replicas)*int64(group.Status.Profile.NativeMembersPerReplica) &&
 		slices.Equal(engineGroupTopologyNativeMembers(status.Membership.Observed.CommittedTopology), group.Status.DesiredNativeMembers)
 	setEngineGroupCondition(group, engineGroupConditionTargetReached, conditionStatus(targetReached),
@@ -568,6 +572,16 @@ func projectEngineGroupConditions(
 	setEngineGroupCondition(group, engineGroupConditionDegraded, conditionStatus(degraded),
 		chooseEngineGroupString(degraded, "UnexpectedMembershipLossOrDegradation", "MembershipStable"),
 		chooseEngineGroupString(degraded, "An allocation is degraded or membership has unexpected losses", "Engine membership is not degraded"))
+}
+
+// invalidateEngineGroupHealth retains historical evidence without advertising current authority.
+func invalidateEngineGroupHealth(group *nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup, reason, message string) {
+	for _, conditionType := range []string{
+		engineGroupConditionTopologyKnown, engineGroupConditionTargetReached,
+		engineGroupConditionAvailable, engineGroupConditionDegraded,
+	} {
+		setEngineGroupCondition(group, conditionType, metav1.ConditionUnknown, reason, message)
+	}
 }
 
 func exactPlannedRetirementObserved(status enginegroup.GroupStatus) bool {

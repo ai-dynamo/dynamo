@@ -13,22 +13,43 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 )
 
-// resolveEngineGroupDesiredNativeMembers preserves assignments across survivor observations.
-// Normal scaling/remapping changes assignment; recovery never replaces it with surviving membership.
-func resolveEngineGroupDesiredNativeMembers(previous []string, status enginegroup.GroupStatus) []string {
-	desired := slices.Clone(previous)
+// reconcileEngineGroupDesiredAssignment owns the durable assignment, not its health projection.
+// Recovery retains it; a cancelled, settled resize may return to the complete canonical base.
+func reconcileEngineGroupDesiredAssignment(group *api.DynamoGraphDeploymentEngineGroup, profile api.EngineGroupProfileStatus, status enginegroup.GroupStatus, desiredPlan *enginegroup.ResolvedPlan) {
+	desired := slices.Clone(group.Status.DesiredNativeMembers)
 	if len(desired) == 0 {
 		initial, found := status.Topologies.Current()
 		if found {
 			desired = engineGroupTopologyNativeMembers(initial)
 		}
 	}
-	if status.Transition == nil || status.Transition.Outcome == enginegroup.TransitionOutcomeRolledBack {
-		sort.Strings(desired)
-		return slices.Compact(desired)
+
+	// A superseded or rejected plan cannot rewrite the new target's assignment.
+	transition := status.Transition
+	if desiredPlan != nil && transition != nil && desiredPlan.ID == transition.Spec.Plan.ID {
+		desired = engineGroupPlanNativeMembers(desired, status)
+	} else if desiredPlan == nil && (transition == nil ||
+		transition.Outcome == enginegroup.TransitionOutcomeRolledBack ||
+		transition.Outcome == enginegroup.TransitionOutcomeCompleted) {
+		current, found := status.Topologies.Current()
+		expected := int64(group.Spec.Replicas) * int64(profile.NativeMembersPerReplica)
+		if found && int64(len(desired)) != expected && current.ReplicaCount() == group.Spec.Replicas &&
+			int64(current.NativeMemberCount()) == expected {
+			desired = engineGroupTopologyNativeMembers(current)
+		}
 	}
 
+	// Persist the exact assignment once; public counts and health remain projections of it.
+	sort.Strings(desired)
+	group.Status.DesiredNativeMembers = slices.Compact(desired)
+	if int64(len(group.Status.DesiredNativeMembers)) == int64(group.Spec.Replicas)*int64(profile.NativeMembersPerReplica) {
+		group.Status.DesiredAssignmentGeneration = group.Generation
+	}
+}
+
+func engineGroupPlanNativeMembers(desired []string, status enginegroup.GroupStatus) []string {
 	// Derive the exact assignment from the immutable plan, never from an uncorrelated observation.
+	desired = slices.Clone(desired)
 	change := status.Transition.Spec.Plan.Change
 	switch change.Kind {
 	case enginegroup.PlanKindGrow:

@@ -245,6 +245,11 @@ func TestProjectEngineGroupStatusDistinguishesPlannedAndUnplannedMembershipLoss(
 			}
 
 			t.Log("project health from exact committed identities and transition intent")
+			var desiredPlan *enginegroup.ResolvedPlan
+			if test.status.Transition != nil {
+				desiredPlan = &test.status.Transition.Spec.Plan
+			}
+			reconcileEngineGroupDesiredAssignment(group, profile, test.status, desiredPlan)
 			(&DynamoGraphDeploymentEngineGroupReconciler{}).
 				projectEngineGroupStatus(group, profile, test.status, nil, nil)
 
