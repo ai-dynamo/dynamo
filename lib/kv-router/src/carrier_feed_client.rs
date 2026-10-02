@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures_util::{StreamExt, stream::BoxStream};
 use serde::Deserialize;
+use tokio_util::bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 
 use crate::carrier_feed::{
