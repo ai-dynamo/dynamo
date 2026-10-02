@@ -19,6 +19,7 @@ package enginegroup
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -41,7 +42,7 @@ func TestResolvedPlanVariantsProduceExactIdentitySets(t *testing.T) {
 		History: []ReplicaHistoryEntry{{
 			TopologyGeneration: 1,
 			Incarnation:        cloneReplicaIncarnation(excludedIncarnation),
-			NativeMembers:      cloneNativeMembers(excluded.NativeMembers),
+			NativeMembers:      slices.Clone(excluded.NativeMembers),
 		}},
 	})
 
@@ -108,7 +109,7 @@ func TestResolvedPlanVariantsProduceExactIdentitySets(t *testing.T) {
 							ReplicaID:     excludedIncarnation.ReplicaID,
 							SlotID:        excludedIncarnation.SlotID,
 							Bootstrap:     BootstrapModeRestoreFixedSlot,
-							NativeMembers: cloneNativeMembers(excluded.NativeMembers),
+							NativeMembers: slices.Clone(excluded.NativeMembers),
 						},
 					}}},
 				},

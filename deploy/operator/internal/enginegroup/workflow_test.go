@@ -257,7 +257,7 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 		History: []ReplicaHistoryEntry{{
 			TopologyGeneration: 1,
 			Incarnation:        cloneReplicaIncarnation(excludedIncarnation),
-			NativeMembers:      cloneNativeMembers(excluded.NativeMembers),
+			NativeMembers:      slices.Clone(excluded.NativeMembers),
 		}},
 	})
 	replacement := cloneReplicaIncarnation(excludedIncarnation)
@@ -277,7 +277,7 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 					ReplicaID:     excluded.ReplicaID,
 					SlotID:        excludedIncarnation.SlotID,
 					Bootstrap:     BootstrapModeRestoreFixedSlot,
-					NativeMembers: cloneNativeMembers(excluded.NativeMembers),
+					NativeMembers: slices.Clone(excluded.NativeMembers),
 				},
 			}}},
 		},

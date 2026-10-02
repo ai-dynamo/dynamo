@@ -816,7 +816,7 @@ func validateVerificationStatus(status GroupStatus) error {
 			return errors.New("passed verification lacks proof or carries failure")
 		}
 		topology, found := status.Topologies.Snapshot(verification.Proof.TopologyGeneration)
-		if !found || verification.Proof.RuntimeDigest != topologyRuntimeDigest(topology) {
+		if !found || verification.Proof.RuntimeDigest != TopologyRuntimeDigest(topology) {
 			return errors.New("serving proof does not match retained topology history")
 		}
 	case VerificationPhaseFailed:

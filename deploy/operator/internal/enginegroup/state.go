@@ -27,21 +27,13 @@ import (
 	"strings"
 )
 
-func cloneCapacityRefs(values []CapacityRef) []CapacityRef {
-	return slices.Clone(values)
-}
-
-func cloneNativeMembers(values []NativeMemberID) []NativeMemberID {
-	return slices.Clone(values)
-}
-
 func cloneReplicaIncarnation(value ReplicaIncarnation) ReplicaIncarnation {
-	value.CapacityRefs = cloneCapacityRefs(value.CapacityRefs)
+	value.CapacityRefs = slices.Clone(value.CapacityRefs)
 	return value
 }
 
 func cloneReplicaMembership(value ReplicaMembership) ReplicaMembership {
-	value.NativeMembers = cloneNativeMembers(value.NativeMembers)
+	value.NativeMembers = slices.Clone(value.NativeMembers)
 	return value
 }
 
@@ -69,7 +61,7 @@ func cloneResolvedPlan(value ResolvedPlan) ResolvedPlan {
 	if change.Grow != nil {
 		replicas := make([]ReplicaTarget, 0, len(change.Grow.Replicas))
 		for _, replica := range change.Grow.Replicas {
-			replica.NativeMembers = cloneNativeMembers(replica.NativeMembers)
+			replica.NativeMembers = slices.Clone(replica.NativeMembers)
 			replicas = append(replicas, replica)
 		}
 		value.Change.Grow = &GrowChange{Replicas: replicas}
@@ -85,7 +77,7 @@ func cloneResolvedPlan(value ResolvedPlan) ResolvedPlan {
 	if change.Restore != nil {
 		replicas := make([]RestorationTarget, 0, len(change.Restore.Replicas))
 		for _, replica := range change.Restore.Replicas {
-			replica.ReplicaTarget.NativeMembers = cloneNativeMembers(replica.ReplicaTarget.NativeMembers)
+			replica.ReplicaTarget.NativeMembers = slices.Clone(replica.ReplicaTarget.NativeMembers)
 			replicas = append(replicas, replica)
 		}
 		value.Change.Restore = &RestoreChange{Replicas: replicas}
@@ -93,7 +85,7 @@ func cloneResolvedPlan(value ResolvedPlan) ResolvedPlan {
 	if change.Remap != nil {
 		membership := make([]ReplicaNativeMembership, 0, len(change.Remap.Membership))
 		for _, replica := range change.Remap.Membership {
-			replica.NativeMembers = cloneNativeMembers(replica.NativeMembers)
+			replica.NativeMembers = slices.Clone(replica.NativeMembers)
 			membership = append(membership, replica)
 		}
 		value.Change.Remap = &RemapChange{Membership: membership}
@@ -249,7 +241,7 @@ func cloneReplicaRecord(value ReplicaRecord) ReplicaRecord {
 	value.History = make([]ReplicaHistoryEntry, 0, len(history))
 	for _, entry := range history {
 		entry.Incarnation = cloneReplicaIncarnation(entry.Incarnation)
-		entry.NativeMembers = cloneNativeMembers(entry.NativeMembers)
+		entry.NativeMembers = slices.Clone(entry.NativeMembers)
 		value.History = append(value.History, entry)
 	}
 	return value
@@ -294,14 +286,14 @@ func cloneCapacityTarget(value *CapacityTarget) *CapacityTarget {
 		}
 		if replica.Bootstrap != nil {
 			bootstrap := *replica.Bootstrap
-			bootstrap.NativeMembers = cloneNativeMembers(replica.Bootstrap.NativeMembers)
+			bootstrap.NativeMembers = slices.Clone(replica.Bootstrap.NativeMembers)
 			replica.Bootstrap = &bootstrap
 		}
 		cloned.Replicas = append(cloned.Replicas, replica)
 	}
 	cloned.ReleaseFences = make([]ReleaseFence, 0, len(value.ReleaseFences))
 	for _, fence := range value.ReleaseFences {
-		fence.CapacityRefs = cloneCapacityRefs(fence.CapacityRefs)
+		fence.CapacityRefs = slices.Clone(fence.CapacityRefs)
 		cloned.ReleaseFences = append(cloned.ReleaseFences, fence)
 	}
 	return &cloned
@@ -412,7 +404,7 @@ func (h TopologyHistory) Current() (MembershipTopology, bool) {
 }
 
 func normalizeCapacityRefs(values []CapacityRef) []CapacityRef {
-	normalized := cloneCapacityRefs(values)
+	normalized := slices.Clone(values)
 	slices.SortFunc(normalized, func(left, right CapacityRef) int {
 		if left.Name != right.Name {
 			return strings.Compare(left.Name, right.Name)
@@ -423,7 +415,7 @@ func normalizeCapacityRefs(values []CapacityRef) []CapacityRef {
 }
 
 func normalizeNativeMembers(values []NativeMemberID) []NativeMemberID {
-	normalized := cloneNativeMembers(values)
+	normalized := slices.Clone(values)
 	slices.SortFunc(normalized, func(left, right NativeMemberID) int {
 		return strings.Compare(string(left), string(right))
 	})
@@ -465,6 +457,11 @@ func sameIncarnation(left, right ReplicaIncarnation) bool {
 		sameCapacityRefs(left.CapacityRefs, right.CapacityRefs)
 }
 
+// SameIncarnation reports whether two incarnations name the same logical, runtime, and physical capacity.
+func SameIncarnation(left, right ReplicaIncarnation) bool {
+	return sameIncarnation(left, right)
+}
+
 func membershipMatchesIncarnation(membership ReplicaMembership, incarnation ReplicaIncarnation) bool {
 	return membership.ReplicaID == incarnation.ReplicaID &&
 		membership.RuntimeIncarnation == incarnation.RuntimeIncarnation
@@ -490,8 +487,19 @@ func sameMemberships(left, right []ReplicaMembership) bool {
 	return true
 }
 
+// SameMembershipSet reports whether two membership lists contain the same logical, runtime, and native identities.
+// Ordering is not significant.
+func SameMembershipSet(left, right []ReplicaMembership) bool {
+	return sameMemberships(left, right)
+}
+
 func sameTopology(left, right MembershipTopology) bool {
 	return left.Generation == right.Generation && sameMemberships(left.Replicas, right.Replicas)
+}
+
+// SameTopology reports whether two topologies have the same generation and exact membership identity set.
+func SameTopology(left, right MembershipTopology) bool {
+	return sameTopology(left, right)
 }
 
 func membershipByID(topology MembershipTopology, replicaID ReplicaID) (ReplicaMembership, bool) {
@@ -539,7 +547,8 @@ func appendTopology(history TopologyHistory, topology MembershipTopology) (Topol
 	return history, nil
 }
 
-func topologyRuntimeDigest(topology MembershipTopology) string {
+// TopologyRuntimeDigest returns the canonical identity a serving proof must echo for one topology.
+func TopologyRuntimeDigest(topology MembershipTopology) string {
 	memberships := normalizeMemberships(topology.Replicas)
 	var input strings.Builder
 	_, _ = fmt.Fprintf(&input, "generation=%d;", topology.Generation)

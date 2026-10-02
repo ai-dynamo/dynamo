@@ -328,7 +328,7 @@ func (v *testServingVerifier) Verify(
 	}
 	return VerificationResult{Proof: &ServingProof{
 		TopologyGeneration: topology.Generation,
-		RuntimeDigest:      topologyRuntimeDigest(topology),
+		RuntimeDigest:      TopologyRuntimeDigest(topology),
 		ObservedAt:         time.Unix(100, 0),
 	}}, nil
 }
