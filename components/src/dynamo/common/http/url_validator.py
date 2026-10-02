@@ -230,7 +230,9 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
             size = len(url.encode("utf-8", "surrogatepass"))
         if size > limit:
             raise UrlValidationError(
-                f"data: URL is {size} bytes, exceeds the {limit}-byte limit"
+                f"data: URL is {size} bytes, exceeds the {limit}-byte limit. "
+                f"To raise the limit, set {DYN_MM_MAX_DATA_URL_MB} (in megabytes) "
+                "on both the frontend and the workers."
             )
         return url
 

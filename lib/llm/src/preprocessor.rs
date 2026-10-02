@@ -3480,7 +3480,9 @@ impl OpenAIPreprocessor {
                             let limit = max_data_url_bytes();
                             if size > limit {
                                 return Err(invalid_argument_error(format!(
-                                    "{type_str} data: URL is {size} bytes, exceeds the {limit}-byte limit"
+                                    "{type_str} data: URL is {size} bytes, exceeds the {limit}-byte limit. \
+                                     To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) on \
+                                     both the frontend and the workers."
                                 )));
                             }
                         }
@@ -12444,6 +12446,14 @@ mod tests {
             assert!(
                 dynamo_error.message().contains(
                     "audio_url data: URL is 1048577 bytes, exceeds the 1048576-byte limit"
+                ),
+                "{}",
+                dynamo_error.message()
+            );
+            assert!(
+                dynamo_error.message().contains(
+                    "To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) on both \
+                     the frontend and the workers."
                 ),
                 "{}",
                 dynamo_error.message()

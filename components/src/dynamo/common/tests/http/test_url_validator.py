@@ -185,8 +185,14 @@ async def test_validate_url_rejects_oversized_data_url(monkeypatch) -> None:
     # The cap is read per call, so a value set after import applies.
     monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
     await validate_url(_data_url(_MIB), STRICT_HTTPS)
-    with pytest.raises(UrlValidationError, match="exceeds the 1048576-byte limit"):
+    with pytest.raises(
+        UrlValidationError, match="exceeds the 1048576-byte limit"
+    ) as exc_info:
         await validate_url(_data_url(_MIB + 1), STRICT_HTTPS)
+    assert (
+        "To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) "
+        "on both the frontend and the workers." in str(exc_info.value)
+    )
 
 
 async def test_validate_url_measures_data_url_in_utf8_bytes(monkeypatch) -> None:
