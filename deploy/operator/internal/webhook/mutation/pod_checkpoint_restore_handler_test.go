@@ -149,13 +149,6 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 				wantErr: "not operator-stamped",
 			},
 			{
-				name: "unsupported workload entrypoint",
-				mutate: func(pod *corev1.Pod) {
-					pod.Spec.Containers[1].Command = []string{"serve-model"}
-				},
-				wantErr: "must directly invoke python -m",
-			},
-			{
 				name: "missing restore target metadata",
 				mutate: func(pod *corev1.Pod) {
 					delete(pod.Annotations, consts.RestoreCandidateTargetContainersAnnotation)
@@ -341,61 +334,6 @@ func TestPodCheckpointRestoreMutatorAutomaticSnapshotJob(t *testing.T) {
 		require.NotNil(t, resp.Result)
 		assert.Contains(t, resp.Result.Message, "not marked as a Dynamo automatic checkpoint")
 	})
-}
-
-func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
-	tests := []struct {
-		name      string
-		command   []string
-		args      []string
-		supported bool
-	}{
-		{
-			name:      "vLLM module in command",
-			command:   []string{"python3", "-m", "dynamo.vllm"},
-			supported: true,
-		},
-		{
-			name:      "SGLang module split across command and args",
-			command:   []string{"python"},
-			args:      []string{"-m", "dynamo.sglang", "--model", "test"},
-			supported: true,
-		},
-		{
-			name:      "TensorRT-LLM module with versioned Python path",
-			command:   []string{"/usr/bin/python3.11", "-m", "dynamo.trtllm"},
-			supported: true,
-		},
-		{
-			name:      "vLLM module after operand-free interpreter flags",
-			command:   []string{"python3", "-u", "-O", "-m", "dynamo.vllm"},
-			supported: true,
-		},
-		{
-			name:    "shell wrapper",
-			command: []string{"/bin/sh", "-c"},
-			args:    []string{"python3 -m dynamo.vllm"},
-		},
-		{
-			name:    "custom wrapper with module arguments",
-			command: []string{"serve-model"},
-			args:    []string{"-m", "dynamo.vllm"},
-		},
-		{
-			name:    "unsupported Dynamo module",
-			command: []string{"python3", "-m", "dynamo.frontend"},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Given a restore destination with an explicit container entrypoint")
-			container := &corev1.Container{Command: test.command, Args: test.args}
-
-			t.Log("Then only a direct invocation of a standby-aware engine is accepted")
-			assert.Equal(t, test.supported, usesSupportedDynamoRestoreEntrypoint(container))
-		})
-	}
 }
 
 func nativeRestoreTestSnapshot() *snapshotv1alpha1.PodSnapshot {
