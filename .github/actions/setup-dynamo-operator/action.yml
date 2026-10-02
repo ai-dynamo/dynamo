@@ -592,38 +592,17 @@ runs:
       run: |
         echo "::group::Wait for operator Deployment rollouts (vCluster)"
         VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
-        # readyReplicas ignores the terminal Pods an eviction leaves behind, and
-        # the vCluster API only exposes this run's objects, so no scoping needed.
-        READY_TIMEOUT=1800
-        end=$((SECONDS + READY_TIMEOUT))
-        for DEPLOYMENT in dynamo-platform-dynamo-operator-controller-manager grove-operator; do
-          # Helm reports `deployed` once manifests are applied, not once they exist.
-          until kubectl --kubeconfig="${VKUBECONFIG}" -n default \
-            get "deployment/${DEPLOYMENT}" >/dev/null 2>&1; do
-            if [ "${SECONDS}" -ge "${end}" ]; then
-              echo "::error::Deployment ${DEPLOYMENT} was not created within ${READY_TIMEOUT}s"
-              exit 1
-            fi
-            sleep 5
-          done
-          # `--timeout=0s` means wait forever, so never pass a spent budget.
-          REMAINING=$((end - SECONDS))
-          if [ "${REMAINING}" -le 0 ]; then
-            echo "::error::Operator Deployments did not become available within ${READY_TIMEOUT}s"
-            exit 1
-          fi
-          # `rollout status` also exits at the Deployment's own 600s progress
-          # deadline, which the controller clears once the Pod becomes available.
-          until kubectl --kubeconfig="${VKUBECONFIG}" -n default \
-            rollout status "deployment/${DEPLOYMENT}" --timeout="${REMAINING}s"; do
-            sleep 15
-            REMAINING=$((end - SECONDS))
-            if [ "${REMAINING}" -le 0 ]; then
-              echo "::error::Deployment ${DEPLOYMENT} did not become available within ${READY_TIMEOUT}s"
-              exit 1
-            fi
-          done
-        done
+        # `Available` ignores the terminal Pods an eviction leaves behind, and is
+        # held back while `observedGeneration` lags. Unlike `rollout status` it
+        # does not give up at the Deployment's 600s progress deadline. One
+        # deadline covers both, and the release is `deployed` by now so they exist.
+        if ! kubectl --kubeconfig="${VKUBECONFIG}" -n default wait --timeout=1800s \
+          --for=condition=Available \
+          deployment/dynamo-platform-dynamo-operator-controller-manager \
+          deployment/grove-operator; then
+          echo "::error::Operator Deployments did not become available within 1800s"
+          exit 1
+        fi
         echo "::endgroup::"
 
     - name: Verify operator image and admission webhooks
