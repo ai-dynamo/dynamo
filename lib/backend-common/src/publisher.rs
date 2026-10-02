@@ -75,6 +75,7 @@ fn setup_kv_publishers(
                 endpoint,
                 topic,
                 image_token_id,
+                bootstrap,
                 ..
             } => (
                 Some(KvEventSourceConfig::Zmq {
@@ -82,6 +83,7 @@ fn setup_kv_publishers(
                     topic,
                     image_token_id,
                     video_token_id: None,
+                    bootstrap,
                 }),
                 None,
             ),

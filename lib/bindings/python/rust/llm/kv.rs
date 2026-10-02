@@ -1298,6 +1298,7 @@ impl KvEventPublisher {
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,
             video_token_id,
+            bootstrap: None,
         });
 
         if kv_block_size == 0 {

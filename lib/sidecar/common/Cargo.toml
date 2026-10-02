@@ -19,10 +19,6 @@ ignored = ["prost-types-v14"]
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-runtime = { workspace = true }
-dynamo-llm = { path = "../../llm", default-features = false }
-dynamo-kv-router = { workspace = true }
-tmq = { workspace = true }
-zmq = "0.10"
 
 anyhow = { workspace = true }
 
@@ -39,7 +35,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-rmp-serde = { workspace = true }
 async-trait = { workspace = true }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tokio = { workspace = true, features = ["test-util"] }

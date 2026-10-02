@@ -24,12 +24,10 @@ mod test_event_processing {
     fn test_publish_batch_ignores_empty_and_preserves_order() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
-            kv_block_size: 1,
             source: None,
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
             tx,
-            next_event_id: Arc::new(AtomicU64::new(0)),
         };
 
         publisher.publish_batch(Vec::new()).unwrap();
@@ -64,12 +62,10 @@ mod test_event_processing {
     fn test_publish_batch_closed_channel_returns_original_events_in_order() {
         let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
-            kv_block_size: 1,
             source: None,
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
             tx,
-            next_event_id: Arc::new(AtomicU64::new(0)),
         };
         drop(rx);
 
@@ -99,12 +95,10 @@ mod test_event_processing {
     fn test_publish_wraps_events_in_batches() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
-            kv_block_size: 1,
             source: None,
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
             tx,
-            next_event_id: Arc::new(AtomicU64::new(0)),
         };
 
         publisher
@@ -1274,7 +1268,7 @@ mod tests_startup_helpers {
         }
 
         // Prepare channel that listener should fill
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
 
         // Keep the unique IPC directory alive until the sockets shut down.
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
@@ -1299,6 +1293,7 @@ mod tests_startup_helpers {
                 token,
                 4,
                 next_event_id,
+                None,
                 None,
                 None,
             )
@@ -1349,7 +1344,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(&pub_socket, frames.clone())
@@ -1416,7 +1411,7 @@ mod tests_startup_helpers {
             },
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
         let token = dynamo_runtime::CancellationToken::new();
@@ -1430,6 +1425,7 @@ mod tests_startup_helpers {
                 token,
                 4,
                 Arc::new(AtomicU64::new(0)),
+                None,
                 None,
                 None,
             )
@@ -1460,7 +1456,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(&pub_socket, frames.clone())
@@ -1515,7 +1511,7 @@ mod tests_startup_helpers {
             },
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
         let token = dynamo_runtime::CancellationToken::new();
@@ -1529,6 +1525,7 @@ mod tests_startup_helpers {
                 token,
                 4,
                 Arc::new(AtomicU64::new(0)),
+                None,
                 None,
                 None,
             )
@@ -1552,7 +1549,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(&pub_socket, sentinel_frames.clone())
@@ -1603,7 +1600,7 @@ mod tests_startup_helpers {
 
     #[tokio::test]
     async fn test_start_zmq_listener_connects_before_publisher_bind() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         // Keep the unique IPC directory alive until the sockets shut down.
         let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let topic = String::new();
@@ -1613,7 +1610,18 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None, None)
+            start_zmq_listener(
+                endpoint,
+                topic,
+                1,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+                None,
+                None,
+            )
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -1647,7 +1655,7 @@ mod tests_startup_helpers {
             loop {
                 tokio::select! {
                     event_batch = rx.recv() => {
-                        return event_batch.expect("listener channel closed");
+                        return event_batch.expect("listener channel closed").into_events();
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(

@@ -513,6 +513,8 @@ pub enum KvEventSource {
         dp_rank: u32,
         /// Model image-placeholder token used to normalize multimodal events.
         image_token_id: Option<u32>,
+        /// Replay configuration and completion result for initial startup.
+        bootstrap: Option<dynamo_llm::kv_router::publisher::ZmqBootstrapConfig>,
     },
     Push {
         on_ready: OnPublisherReady,

@@ -3,7 +3,7 @@
 
 //! Dynamo backend for SGLang's native `sglang.runtime.v1` gRPC server.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,10 +14,7 @@ use dynamo_backend_common::{
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
     PreprocessedRequest, WorkerConfig, usage,
 };
-use dynamo_llm::kv_router::publisher::KvEventPublisher;
-use dynamo_sidecar_common::kv_replay::{
-    BootstrapOutcome, ReplaySource as DiscoveredKvEventSource, bootstrap_sources,
-};
+use dynamo_llm::kv_router::publisher::{BootstrapOutcome, ZmqBootstrapConfig};
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
 use serde_json::Value;
@@ -50,8 +47,31 @@ struct StartedState {
     pool: Pool,
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
-    kv_publishers: Arc<Mutex<BTreeMap<u32, Arc<KvEventPublisher>>>>,
-    worker_id: u64,
+    bootstrap_results: Mutex<Vec<tokio::sync::oneshot::Receiver<BootstrapOutcome>>>,
+}
+
+/// All configured rank listeners must finish local application before serving.
+async fn wait_for_kv_bootstrap(
+    results: Vec<tokio::sync::oneshot::Receiver<BootstrapOutcome>>,
+) -> Result<(), DynamoError> {
+    futures::future::try_join_all(results.into_iter().map(|result| async move {
+        match result.await {
+            Ok(BootstrapOutcome::Success) => Ok(()),
+            outcome => Err(client::engine_shutdown(format!(
+                "KV bootstrap failed: {outcome:?}"
+            ))),
+        }
+    }))
+    .await?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiscoveredKvEventSource {
+    endpoint: String,
+    replay_endpoint: String,
+    topic: String,
+    dp_rank: u32,
 }
 
 impl SglangSidecarEngine {
@@ -241,7 +261,7 @@ impl SglangSidecarEngine {
 
 #[async_trait]
 impl LLMEngine for SglangSidecarEngine {
-    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError> {
+    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         if self.state.initialized() {
             return Err(client::engine_shutdown("sglang sidecar already started"));
         }
@@ -300,8 +320,7 @@ impl LLMEngine for SglangSidecarEngine {
                 pool,
                 native_http,
                 kv_event_sources,
-                kv_publishers: Arc::default(),
-                worker_id,
+                bootstrap_results: Mutex::default(),
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -319,25 +338,9 @@ impl LLMEngine for SglangSidecarEngine {
             .state
             .get()
             .ok_or_else(|| client::engine_shutdown("sidecar not started"))?;
-        let publishers = state.kv_publishers.lock().unwrap().clone();
-        // No publishers are attached when KV routing is disabled.
-        if publishers.is_empty() {
-            return Ok(());
-        }
-        match bootstrap_sources(
-            state.kv_event_sources.clone(),
-            publishers,
-            state.worker_id,
-            self.cancel.clone(),
-            self.transport.startup_deadline,
-        )
-        .await
-        {
-            BootstrapOutcome::Success => Ok(()),
-            outcome => Err(client::engine_shutdown(format!(
-                "KV bootstrap failed: {outcome:?}"
-            ))),
-        }
+        let results = std::mem::take(&mut *state.bootstrap_results.lock().unwrap());
+        // With KV routing disabled no listeners or completion results exist.
+        wait_for_kv_bootstrap(results).await
     }
 
     async fn generate(
@@ -587,17 +590,18 @@ impl LLMEngine for SglangSidecarEngine {
             .kv_event_sources
             .iter()
             .map(|source| {
-                let publishers = state.kv_publishers.clone();
-                let rank = source.dp_rank;
-                KvEventSource::Push {
-                    dp_rank: rank,
-                    on_ready: Box::new(move |publisher| {
-                        if publishers.lock().unwrap().insert(rank, publisher).is_some() {
-                            return Err(client::protocol_error(
-                                "duplicate KV publisher attachment",
-                            ));
-                        }
-                        Ok(())
+                let (completion, result) = tokio::sync::oneshot::channel();
+                state.bootstrap_results.lock().unwrap().push(result);
+                KvEventSource::Zmq {
+                    endpoint: source.endpoint.clone(),
+                    topic: source.topic.clone(),
+                    dp_rank: source.dp_rank,
+                    image_token_id: None,
+                    bootstrap: Some(ZmqBootstrapConfig {
+                        endpoint: source.replay_endpoint.clone(),
+                        dp_rank: source.dp_rank,
+                        timeout: self.transport.startup_deadline,
+                        completion,
                     }),
                 }
             })
@@ -1135,6 +1139,38 @@ mod tests {
         discovery_bootstrap_port, discovery_mode, hicache_native_offloading_capacity,
         kv_event_connect_host, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
+
+    #[tokio::test]
+    async fn kv_startup_waits_for_every_rank_and_propagates_failure() {
+        use super::{BootstrapOutcome, wait_for_kv_bootstrap};
+        for outcome in [
+            Some(BootstrapOutcome::Success),
+            Some(BootstrapOutcome::MissingHistory {
+                dp_rank: 1,
+                expected: 0,
+                got: 500,
+            }),
+            Some(BootstrapOutcome::Uncertain {
+                reason: "timeout".into(),
+            }),
+            None,
+        ] {
+            let success = outcome == Some(BootstrapOutcome::Success);
+            let (a, first) = tokio::sync::oneshot::channel();
+            let (b, second) = tokio::sync::oneshot::channel();
+            let mut startup = Box::pin(wait_for_kv_bootstrap(vec![first, second]));
+            a.send(BootstrapOutcome::Success).unwrap();
+            assert!(futures::poll!(&mut startup).is_pending());
+            if let Some(outcome) = outcome {
+                b.send(outcome).unwrap();
+            } else {
+                drop(b);
+            }
+            assert_eq!(startup.await.is_ok(), success);
+        }
+        // No listeners are attached when KV routing is disabled.
+        assert!(wait_for_kv_bootstrap(vec![]).await.is_ok());
+    }
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
         Discovery {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -35,7 +35,9 @@ mod state_agent_host;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
+mod zmq_bootstrap;
 mod zmq_listener;
+pub use zmq_bootstrap::{BootstrapOutcome, ZmqBootstrapConfig};
 
 pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
 
@@ -77,6 +79,8 @@ pub enum KvEventSourceConfig {
         /// Model video-placeholder token id. `None` leaves video runs on the
         /// engine's native hashing path.
         video_token_id: Option<u32>,
+        /// Optional one-time replay before ordinary live consumption.
+        bootstrap: Option<ZmqBootstrapConfig>,
     },
 }
 
@@ -135,6 +139,7 @@ impl KvEventSource {
                 topic,
                 image_token_id,
                 video_token_id,
+                bootstrap,
             } => {
                 let listener_handle =
                     component
@@ -151,6 +156,7 @@ impl KvEventSource {
                             next_event_id,
                             image_token_id,
                             video_token_id,
+                            bootstrap,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =
@@ -217,8 +223,6 @@ impl PublisherInput {
 /// supported. Future independent restart support must either emit an ordered rank-scoped
 /// `Cleared` event before the new stream or create a new Dynamo publisher ID.
 pub struct KvEventPublisher {
-    /// The size of the KV block.
-    kv_block_size: u32,
     /// The source of KV events.
     /// Can be `None` if all events are provided through
     /// [`KvEventPublisher::publish`] or [`KvEventPublisher::publish_batch`].
@@ -229,8 +233,6 @@ pub struct KvEventPublisher {
     worker_id: WorkerId,
     /// The channel to send events to.
     tx: mpsc::UnboundedSender<PublisherInput>,
-    /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
-    next_event_id: Arc<AtomicU64>,
 }
 
 impl KvEventPublisher {
@@ -366,7 +368,7 @@ impl KvEventPublisher {
                 config,
                 cancellation_token.clone(),
                 tx.clone(),
-                next_event_id.clone(),
+                next_event_id,
             )?);
         }
 
@@ -499,12 +501,10 @@ impl KvEventPublisher {
         });
 
         Ok(Self {
-            kv_block_size,
             source,
             cancellation_token,
             worker_id,
             tx,
-            next_event_id,
         })
     }
 
@@ -601,37 +601,6 @@ impl KvEventPublisher {
                         .event,
                 )
             })
-    }
-
-    /// Admit already-normalized live events to the ordinary asynchronous path.
-    pub fn publish_placement_batch(
-        &self,
-        events: Vec<PlacementEvent>,
-    ) -> Result<(), mpsc::error::SendError<Vec<PlacementEvent>>> {
-        self.tx
-            .send(PublisherInput::Events(events))
-            .map_err(|error| mpsc::error::SendError(error.0.into_events()))
-    }
-
-    /// Apply a recovery batch to the local index before returning. This scoped
-    /// path preserves ordinary publishers' asynchronous admission contract.
-    pub async fn publish_recovery_batch(&self, events: Vec<PlacementEvent>) -> anyhow::Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(PublisherInput::Recovery(events, tx))
-            .map_err(|_| anyhow::anyhow!("KV publisher stopped"))?;
-        tokio::select! {
-            _ = self.cancellation_token.cancelled() => anyhow::bail!("KV publisher cancelled"),
-            result = rx => result.map_err(|_| anyhow::anyhow!("KV recovery batch dropped"))?,
-        }
-    }
-
-    pub fn next_event_id(&self) -> u64 {
-        self.next_event_id.fetch_add(1, Ordering::SeqCst)
-    }
-
-    pub fn kv_block_size(&self) -> u32 {
-        self.kv_block_size
     }
 
     pub fn shutdown(&mut self) {

@@ -86,6 +86,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
             topic: topic.clone(),
             image_token_id: None,
             video_token_id: None,
+            bootstrap: None,
         }),
         false,
         *dp_rank,

@@ -1165,6 +1165,7 @@ impl LLMEngine for VllmSidecarEngine {
                 topic: source.topic,
                 dp_rank,
                 image_token_id,
+                bootstrap: None,
             });
         }
         if ranks.len() != expected_dp_size as usize {
