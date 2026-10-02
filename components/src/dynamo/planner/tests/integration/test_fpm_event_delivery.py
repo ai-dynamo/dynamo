@@ -65,6 +65,7 @@ class _DecodePlanner(NativePlannerBase):
     require_decode = True
 
 
+@pytest.mark.timeout(45)
 def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path):
     # Keep binding runtimes out of pytest's process without pytest-forked, whose parent setup
     # stack is not advanced when a forked item is the last test in its module.
@@ -202,13 +203,23 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
                     run_load_scaling=True,
                 )
             )
-            if tick_input.fpm_observations.decode:
+            # An idle heartbeat can arrive first (or replace the load sample if
+            # this task is descheduled). Wait for the load we actually published.
+            fpm = (tick_input.fpm_observations.decode or {}).get((worker_id, 0))
+            if (
+                fpm is not None
+                and fpm.scheduled_requests.sum_decode_kv_tokens == 200
+                and fpm.queued_requests.sum_decode_kv_tokens == 100
+            ):
                 break
 
         assert tick_input is not None
         observations = tick_input.fpm_observations
         assert observations.decode is not None
         assert (worker_id, 0) in observations.decode
+        fpm = observations.decode[(worker_id, 0)]
+        assert fpm.scheduled_requests.sum_decode_kv_tokens == 200
+        assert fpm.queued_requests.sum_decode_kv_tokens == 100
 
         scaling = PlannerScalingState(
             config,
