@@ -281,6 +281,7 @@ data:
       max_draft_len: 3
       allow_advanced_sampling: true
       speculative_model_dir: nvidia/Kimi-K2.5-Thinking-Eagle3
+      eagle3_one_model: true
   decode.yaml: |
     allreduce_strategy: MNNVL
     cache_transceiver_config:
@@ -325,3 +326,4 @@ data:
       max_draft_len: 3
       allow_advanced_sampling: true
       speculative_model_dir: nvidia/Kimi-K2.5-Thinking-Eagle3
+      eagle3_one_model: true
