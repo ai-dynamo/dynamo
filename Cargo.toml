@@ -94,7 +94,7 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.6.0" }
 
 # velo
 # Combined 0.19 candidate; use the registry release after both Velo cleanup PRs ship.
-velo = { version = "0.19.0", git = "https://github.com/ai-dynamo/velo.git", rev = "730d8eb4c2b4c7923cd9c86cef34e217e7d76bae", default-features = false }
+velo = { version = "0.19.0", git = "https://github.com/ai-dynamo/velo.git", rev = "70d627ddfa62e8c99b2616c116258fa4ab8d207f", default-features = false }
 
 # External dependencies
 anyhow = { version = "1" }
