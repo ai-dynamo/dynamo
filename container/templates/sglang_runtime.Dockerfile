@@ -273,6 +273,12 @@ RUN set -eux; \
         /usr/local/lib/pkgconfig/libsw*.pc \
         /usr/local/src/ffmpeg \
         /root/.cache/pip; \
+    find /usr /opt /workspace /sgl-workspace -xdev \
+        \( -type f -o -type l \) \
+        \( -name 'libx264*.so*' -o -name 'libx265*.so*' \
+        -o -name 'libopenh264*.so*' -o -name 'libfdk-aac*.so*' \
+        -o -name 'libfaac*.so*' -o -name 'libvo-aacenc*.so*' \
+        -o -name 'libaacplus*.so*' \) -delete; \
     ldconfig
 {% endif %}
 
