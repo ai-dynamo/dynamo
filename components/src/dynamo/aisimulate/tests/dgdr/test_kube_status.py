@@ -4,7 +4,7 @@
 import pytest
 import yaml
 
-from dynamo.aisimulate.output.dgd.kube_status import (
+from dynamo.aisimulate.output.dgdr.kube_status import (
     STATUS_FILE_NAME,
     CandidateOutcome,
     CandidateStatusEntry,
