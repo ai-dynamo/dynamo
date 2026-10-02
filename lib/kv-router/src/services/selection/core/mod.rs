@@ -18,7 +18,6 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-#[cfg(test)]
 use crate::carrier_routing::CarrierFeedConnector;
 use crate::carrier_routing::CarrierRouter;
 use crate::identity::RoutingPartitionId;
@@ -290,6 +289,7 @@ pub struct SelectionCore {
     selection_cache: SelectionCache,
     tracking_hash: Arc<TrackingHashContext>,
     session_affinity: Option<SessionAffinityConfig>,
+    carrier_feed_connector: Option<Arc<dyn CarrierFeedConnector>>,
     #[cfg(test)]
     carrier_connector_override: parking_lot::Mutex<Option<Arc<dyn CarrierFeedConnector>>>,
     /// Worker ids whose upsert fails with `Internal` before any catalog
@@ -356,6 +356,7 @@ impl SelectionCore {
             tracking_hash,
             indexer_policy,
             None,
+            None,
         ))
     }
 
@@ -376,6 +377,7 @@ impl SelectionCore {
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
         indexer_policy: IndexerPolicy,
+        carrier_feed_connector: Option<Arc<dyn CarrierFeedConnector>>,
         session_affinity: Option<SessionAffinityConfig>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
@@ -405,6 +407,7 @@ impl SelectionCore {
             selection_cache: SelectionCache::new(&cache_config),
             tracking_hash,
             session_affinity,
+            carrier_feed_connector,
             #[cfg(test)]
             carrier_connector_override: parking_lot::Mutex::new(None),
             #[cfg(test)]
@@ -428,10 +431,13 @@ impl SelectionCore {
         if !enabled {
             return Arc::new(CarrierRouter::new(None));
         }
+        if let Some(connector) = &self.carrier_feed_connector {
+            return Arc::new(CarrierRouter::new(Some(Arc::clone(connector))));
+        }
         #[cfg(feature = "standalone-indexer")]
         {
             Arc::new(CarrierRouter::new(Some(Arc::new(
-                crate::carrier_feed_client::ZmqCarrierFeedConnector,
+                crate::carrier_feed_client::ZmqCarrierFeedConnector::default(),
             ))))
         }
         #[cfg(not(feature = "standalone-indexer"))]

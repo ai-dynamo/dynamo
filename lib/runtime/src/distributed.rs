@@ -733,7 +733,7 @@ impl DistributedRuntime {
 
     /// TODO: This is a temporary KV router measure for component/component.rs EventSubscriber impl for
     /// Component, to allow it to subscribe to NATS. KV Router is the only user.
-    pub(crate) async fn kv_router_nats_subscribe(
+    pub async fn kv_router_nats_subscribe(
         &self,
         subject: String,
     ) -> Result<async_nats::Subscriber> {

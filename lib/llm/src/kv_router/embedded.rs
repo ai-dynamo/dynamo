@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use dynamo_kv_router::WorkerType;
+use dynamo_kv_router::carrier_feed_client::{HttpCarrierFeedConnector, ZmqCarrierFeedConnector};
 use dynamo_kv_router::carrier_routing::{CARRIER_RUNTIME_DATA_KEY, CarrierWorkerConfig};
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
@@ -250,6 +251,20 @@ impl EmbeddedSelection {
                 slot.lock().ok().and_then(|mut s| s.take())
             }));
 
+        let drt = args.endpoint.component().drt().clone();
+        let carrier_feed_connector: Arc<
+            dyn dynamo_kv_router::carrier_routing::CarrierFeedConnector,
+        > = match drt.default_event_transport_kind() {
+            dynamo_runtime::discovery::EventTransportKind::Zmq => {
+                Arc::new(ZmqCarrierFeedConnector::default())
+            }
+            dynamo_runtime::discovery::EventTransportKind::Nats => {
+                Arc::new(HttpCarrierFeedConnector::new(
+                    crate::kv_router::carrier_feed_nats::NatsFeedTransport::new(drt),
+                ))
+            }
+        };
+
         // The registry is only consulted when no factory is set; `policy_factory`
         // always is, so the builder never reads it.
         let service = SelectionServiceBuilder::new(
@@ -258,6 +273,7 @@ impl EmbeddedSelection {
             RouterPluginRegistry::default(),
         )
         .worker_selection_policy_factory(args.policy_factory)
+        .carrier_feed_connector(carrier_feed_connector)
         .host_manages_request_lifecycle()
         .indexer_threads(1)
         .host(SelectionHost {
