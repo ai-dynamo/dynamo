@@ -15,7 +15,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime@sha256:13ed3609d95c04e868230a30d68371ab73969c6f56c2399ca3a7302e7e0a774b
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-18f6f66a7bc6a1fbad77362007ac88582a94bc6a-vllm-runtime@sha256:08a32bbe954b133ecbbdc977d3d2d5997e4a6af4720a7f765ebc1312e257565f
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -52,7 +52,7 @@ spec:
         terminationGracePeriodSeconds: 60
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime@sha256:13ed3609d95c04e868230a30d68371ab73969c6f56c2399ca3a7302e7e0a774b
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-18f6f66a7bc6a1fbad77362007ac88582a94bc6a-vllm-runtime@sha256:08a32bbe954b133ecbbdc977d3d2d5997e4a6af4720a7f765ebc1312e257565f
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -155,7 +155,7 @@ spec:
         terminationGracePeriodSeconds: 60
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-842bca6a42b8e532766366e46a764e5e3a74c1d1-vllm-runtime@sha256:13ed3609d95c04e868230a30d68371ab73969c6f56c2399ca3a7302e7e0a774b
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-18f6f66a7bc6a1fbad77362007ac88582a94bc6a-vllm-runtime@sha256:08a32bbe954b133ecbbdc977d3d2d5997e4a6af4720a7f765ebc1312e257565f
           imagePullPolicy: IfNotPresent
           command:
           - python3
