@@ -30,6 +30,63 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
+func TestBugDGDEngineGroupConfigurationRoundTripsByComponentName(t *testing.T) {
+	const elasticWorkerName = "elastic-worker"
+
+	t.Log("Create two worlds per component with a separate initial allocation size and policy")
+	initial := &v1beta1.ComponentEngineGroupSpec{
+		InitialSize: 2,
+		Policy:      &v1beta1.ComponentEngineGroupPolicy{MinSize: ptr.To[int32](1), MaxSize: ptr.To[int32](8)},
+	}
+	in := &v1beta1.DynamoGraphDeployment{
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: elasticWorkerName, Replicas: ptr.To[int32](2), EngineGroup: initial},
+			{ComponentName: "frontend", Replicas: ptr.To[int32](1)},
+		}},
+	}
+	original := in.DeepCopy()
+
+	t.Log("Down-convert the hub-only engineGroup block into the existing sparse spec payload")
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(in); err != nil {
+		t.Fatal(err)
+	}
+	spoke.Spec.Services[elasticWorkerName].Replicas = ptr.To[int32](3)
+	spoke.Spec.Services["new-worker"] = &DynamoComponentDeploymentSharedSpec{Replicas: ptr.To[int32](1)}
+
+	t.Log("Restore only matching components while keeping live world counts authoritative")
+	out := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(out); err != nil {
+		t.Fatal(err)
+	}
+	for _, component := range out.Spec.Components {
+		if component.ComponentName == elasticWorkerName {
+			if diff := cmp.Diff(initial, component.EngineGroup); diff != "" {
+				t.Fatalf("engineGroup round trip (-want +got): %s", diff)
+			}
+			if *component.Replicas != 3 {
+				t.Fatalf("world count = %d, want live alpha value 3", *component.Replicas)
+			}
+		} else if component.EngineGroup != nil {
+			t.Fatalf("component %s inherited another component's engineGroup", component.ComponentName)
+		}
+	}
+	if diff := cmp.Diff(original, in); diff != "" {
+		t.Fatalf("conversion mutated its source: %s", diff)
+	}
+
+	t.Log("A removed component must not be resurrected from preserved Engine Group configuration")
+	delete(spoke.Spec.Services, elasticWorkerName)
+	if err := spoke.ConvertTo(out); err != nil {
+		t.Fatal(err)
+	}
+	for _, component := range out.Spec.Components {
+		if component.ComponentName == elasticWorkerName || component.EngineGroup != nil {
+			t.Fatal("removed component's Engine Group configuration was restored")
+		}
+	}
+}
+
 func TestConvertToServiceCheckpointConfigSetsNilIdentity(t *testing.T) {
 	var got ServiceCheckpointConfig
 	ConvertToServiceCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
