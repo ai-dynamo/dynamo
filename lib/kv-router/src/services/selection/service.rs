@@ -26,6 +26,7 @@ use super::types::{
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerType;
+use crate::carrier_routing::CarrierFeedConnector;
 use crate::plugins::RouterPluginRegistry;
 
 pub struct SelectionServiceBuilder {
@@ -41,6 +42,7 @@ pub struct SelectionServiceBuilder {
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     session_affinity_ttl: Option<Duration>,
     host_manages_request_lifecycle: bool,
+    carrier_feed_connector: Option<Arc<dyn CarrierFeedConnector>>,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -82,6 +84,7 @@ impl SelectionServiceBuilder {
             worker_selection_policy_factory: None,
             session_affinity_ttl: None,
             host_manages_request_lifecycle: false,
+            carrier_feed_connector: None,
         }
     }
 
@@ -105,6 +108,12 @@ impl SelectionServiceBuilder {
     /// What the embedding host supplies to every partition this service creates.
     pub fn host(mut self, host: SelectionHost) -> Self {
         self.host = host;
+        self
+    }
+
+    /// Use the supplied transport to connect carrier feeds from indexer hubs.
+    pub fn carrier_feed_connector(mut self, connector: Arc<dyn CarrierFeedConnector>) -> Self {
+        self.carrier_feed_connector = Some(connector);
         self
     }
 
@@ -197,6 +206,7 @@ impl SelectionServiceBuilder {
             self.selection_cache,
             tracking_hash,
             indexer_policy,
+            self.carrier_feed_connector,
             self.session_affinity_ttl.map(SessionAffinityConfig::new),
         ));
 

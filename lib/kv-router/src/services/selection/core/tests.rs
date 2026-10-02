@@ -82,6 +82,7 @@ fn core_with(
         SelectionCacheConfig::default(),
         tracking_hash,
         indexer_policy,
+        None,
         affinity,
     )
 }
