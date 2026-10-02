@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path"
+	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -341,12 +343,20 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		containers[container.Name] = container
 	}
 
-	// Validate every destination first so conflicting workload
+	// Validate every destination first so unsupported or conflicting workload
 	// entrypoints cannot leave a partially modified Pod even in caller tests.
 	for _, mapping := range mappings {
 		container := containers[mapping.Destination]
 		if container == nil {
 			return fmt.Errorf("restore destination container %q not found", mapping.Destination)
+		}
+		if !usesSupportedDynamoRestoreEntrypoint(container) {
+			return fmt.Errorf(
+				"restore destination container %q must directly invoke python -m <module>; command=%q args=%q",
+				mapping.Destination,
+				container.Command,
+				container.Args,
+			)
 		}
 		for _, env := range container.Env {
 			if env.Name == podcontract.RestoreStandbyModeEnv && (env.Value != "1" || env.ValueFrom != nil) {
@@ -375,6 +385,46 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		checkpoint.EnsureRestoreStartupProbe(container)
 	}
 	return nil
+}
+
+// usesSupportedDynamoRestoreEntrypoint recognizes direct Python module
+// invocations (python -m <module>); the module name is not restricted. Shell and
+// custom wrappers are rejected because admission cannot prove they honor it.
+func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
+	if len(container.Command) == 0 {
+		return false
+	}
+	python := path.Base(container.Command[0])
+	if python != "python" && python != "python3" && !strings.HasPrefix(python, "python3.") {
+		return false
+	}
+
+	arguments := make([]string, 0, len(container.Command)+len(container.Args))
+	arguments = append(arguments, container.Command...)
+	arguments = append(arguments, container.Args...)
+
+	// Skip only operand-free interpreter options so -m remains unambiguous.
+	moduleFlagIndex := 1
+	for moduleFlagIndex < len(arguments) && isOperandFreePythonInterpreterFlag(arguments[moduleFlagIndex]) {
+		moduleFlagIndex++
+	}
+	if moduleFlagIndex+1 >= len(arguments) || arguments[moduleFlagIndex] != "-m" {
+		return false
+	}
+
+	return true
+}
+
+// isOperandFreePythonInterpreterFlag recognizes options that cannot consume
+// the following -m argument. Operand-taking and execution-selector options
+// remain fail-closed.
+func isOperandFreePythonInterpreterFlag(argument string) bool {
+	switch argument {
+	case "-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-vv", "-x":
+		return true
+	default:
+		return false
+	}
 }
 
 func removeRestoreCandidateAnnotations(annotations map[string]string) {
