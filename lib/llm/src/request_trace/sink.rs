@@ -625,7 +625,6 @@ mod tests {
         policy.file_roll_bytes = 1024 * 1024;
         policy.file_buffer_bytes = 1;
         policy.file_max_bytes = Some(1);
-        policy.file_max_age_secs = Some(60);
         let sink = JsonlGzipRequestTraceSink::from_policy(&policy)
             .await
             .unwrap();

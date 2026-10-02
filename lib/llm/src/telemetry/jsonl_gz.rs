@@ -436,13 +436,28 @@ fn lock_prefix(base_path: &Path, exclusive: bool) -> anyhow::Result<File> {
     } else {
         file.try_lock_shared()
     };
-    result.with_context(|| format!(
+    check_prefix_lock_result(result, exclusive).with_context(|| format!(
         "locking gzip jsonl prefix {}; retention requires a separate output prefix for each writer",
         base_path.display()
     ))?;
     // Keep this file on disk: removing it would let new writers lock a different
     // inode while an existing writer still owns this one.
     Ok(file)
+}
+
+fn check_prefix_lock_result(
+    result: Result<(), std::fs::TryLockError>,
+    exclusive: bool,
+) -> Result<(), std::fs::TryLockError> {
+    match result {
+        Err(std::fs::TryLockError::Error(error))
+            if !exclusive && error.kind() == std::io::ErrorKind::Unsupported =>
+        {
+            tracing::warn!(%error, "gzip jsonl shared prefix lock unsupported; continuing without a lock");
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 fn prune_retained_segments(
@@ -862,6 +877,46 @@ mod tests {
         exclusive_owner.try_lock().unwrap();
         assert!(lock_prefix(&path, false).is_err());
         assert!(std::fs::read(&lock_path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_unsupported_shared_lock_errors_are_tolerated() {
+        use std::fs::TryLockError;
+        use std::io::{Error, ErrorKind};
+
+        for exclusive in [false, true] {
+            assert!(check_prefix_lock_result(Ok(()), exclusive).is_ok());
+            assert_eq!(
+                check_prefix_lock_result(
+                    Err(TryLockError::Error(ErrorKind::Unsupported.into())),
+                    exclusive
+                )
+                .is_ok(),
+                !exclusive,
+            );
+            assert!(matches!(
+                check_prefix_lock_result(Err(TryLockError::WouldBlock), exclusive),
+                Err(TryLockError::WouldBlock),
+            ));
+            for kind in [ErrorKind::PermissionDenied, ErrorKind::Other] {
+                let result = check_prefix_lock_result(
+                    Err(TryLockError::Error(Error::from(kind))),
+                    exclusive,
+                );
+                assert!(matches!(result, Err(TryLockError::Error(error)) if error.kind() == kind));
+            }
+        }
+        #[cfg(unix)]
+        {
+            // ENOLCK is resource exhaustion, not evidence that locking is unsupported.
+            let result = check_prefix_lock_result(
+                Err(TryLockError::Error(Error::from_raw_os_error(libc::ENOLCK))),
+                false,
+            );
+            assert!(
+                matches!(result, Err(TryLockError::Error(error)) if error.raw_os_error() == Some(libc::ENOLCK))
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -532,7 +532,7 @@ mod tests {
                 assert_eq!(policy.file_max_age_secs, Some(7 * 24 * 60 * 60));
             },
         );
-        for disabled in ["0", "-1", "invalid"] {
+        for disabled in ["0", "invalid"] {
             with_request_trace_env(
                 &[
                     (

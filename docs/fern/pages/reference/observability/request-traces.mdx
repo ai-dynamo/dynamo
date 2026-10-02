@@ -118,7 +118,9 @@ Give each frontend process a separate output prefix when retention is enabled. A
 another gzip writer from using that prefix while retention owns it. The lock file remains after exit
 and does not count toward the byte limit; do not remove it while a writer is running. Use a filesystem
 that supports file locking, and do not share the prefix with older Dynamo processes that do not take
-this lock.
+this lock. Without retention, an unsupported shared-lock operation logs a warning and recording
+continues without the lock. Lock contention, permission errors, and other I/O errors still fail
+initialization; exclusive locking for retention never falls back.
 
 Retention preserves record timestamps. Replay normalizes the selected requests to their earliest
 arrival time. A truncated window does not restore earlier KV cache state and can omit agent-session
