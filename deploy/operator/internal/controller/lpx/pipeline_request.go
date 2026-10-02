@@ -76,6 +76,10 @@ func resolvePipelineRequests(
 		replicaPlan := plan.ForReplica(replica)
 
 		for index, projection := range projections {
+			// Partitions that all run on the Cyborg GPU need no LPU placement.
+			if projection.AgentReplicas() == 0 {
+				continue
+			}
 			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, projection.Model(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{

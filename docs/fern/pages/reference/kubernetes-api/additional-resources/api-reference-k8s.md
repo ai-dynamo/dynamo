@@ -2505,6 +2505,26 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
 | `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
+| `localPartitions` _[LPXLocalPartitions](#lpxlocalpartitions)_ | localPartitions selects partitions of a hybrid build that the Cyborg<br />conductor runs on its own GPU. The operator schedules LPU Agents only for<br />the remaining partitions, and schedules none when every partition is<br />local. Omission runs every partition on LPUs. |  | Optional: \{\} <br /> |
+
+
+#### LPXLocalPartitions
+
+
+
+LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.
+Partition IDs are the compiler partition IDs of the build's runtime
+partitions. A selected prop-sync chain is identified by its first partition.
+
+
+
+_Appears in:_
+- [LPXConfig](#lpxconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `all` _boolean_ | all runs every partition on the Cyborg GPU. |  | Optional: \{\} <br /> |
+| `ids` _integer array_ | ids lists the compiler partition IDs that run on the Cyborg GPU. |  | MinItems: 1 <br />items:Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### MockerSpec

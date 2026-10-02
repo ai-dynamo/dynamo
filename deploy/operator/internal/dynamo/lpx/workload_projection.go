@@ -32,6 +32,9 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	case BuildFamilyXT:
 		projections, err = appendV2ModelProjections(dst, intent)
 	case BuildFamilyHX:
+		if intent.LocalPartitions != nil {
+			return nil, fmt.Errorf("%w: localPartitions is not supported for HX builds", ErrUnsupportedRuntime)
+		}
 		projections, err = appendV3ModelProjections(dst, intent)
 	default:
 		return nil, fmt.Errorf("unsupported LPX target family %q", intent.BuildSnapshot.build.Family)
@@ -41,7 +44,11 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	}
 	// Bound the component's physical build before runtime expansion and request publication.
 	projection := projections[len(dst)]
-	if len(projection.partitions) < 1 || len(projection.partitions) > maxLPXPartitions {
+	minPartitions := 1
+	if len(projection.localPartitionIDs) > 0 {
+		minPartitions = 0
+	}
+	if len(projection.partitions) < minPartitions || len(projection.partitions) > maxLPXPartitions {
 		return nil, fmt.Errorf("LPX projection has %d partitions, limit is 1..%d", len(projection.partitions), maxLPXPartitions)
 	}
 	return projections, nil

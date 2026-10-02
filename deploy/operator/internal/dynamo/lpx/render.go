@@ -70,7 +70,10 @@ func RenderNodeLocal(
 	workloadDigest := workload.Digest().String()
 	agentTemplateNames := make([]string, 0, len(plan.Agents))
 	for _, agent := range plan.Agents {
-		agentTemplateNames = append(agentTemplateNames, agent.TemplateName)
+		// A workload whose partitions all run on the Cyborg GPU has no Agent clique.
+		if agent.Replicas > 0 {
+			agentTemplateNames = append(agentTemplateNames, agent.TemplateName)
+		}
 	}
 	conductorTemplateName := plan.ConductorTemplate
 	allocation := strings.Join(agentTemplateNames, ":")
@@ -178,6 +181,9 @@ func RenderNodeLocal(
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
 		agent := plan.Agents[index]
+		if agent.Replicas == 0 {
+			continue
+		}
 		replicas := int32(agent.Replicas)
 		rendered.Cliques = append(rendered.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        agent.TemplateName,
