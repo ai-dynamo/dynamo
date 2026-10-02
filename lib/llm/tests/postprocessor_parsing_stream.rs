@@ -3160,6 +3160,33 @@ async fn response_format_qwen3_prompt_injected_reasoning_then_json_preserves_cha
     assert_eq!(content, json);
 }
 
+#[tokio::test]
+async fn response_format_qwen3_json_reasoning_then_close_preserves_channels_at_every_split() {
+    let raw = r#"{"plan":"check"}</think>{"answer":42}"#;
+    for split in 0..=raw.len() {
+        let preprocessor = build_preprocessor(Some("qwen3"), None);
+        let request = streaming_json_schema_request(true);
+        let input_stream = stream::iter(
+            vec![
+                mock_content_chunk(&raw[..split]),
+                mock_content_chunk(&raw[split..]),
+                mock_final_chunk(),
+            ]
+            .into_iter()
+            .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            reasoning, content, ..
+        } = drain_stream(output_stream).await;
+
+        assert_eq!(reasoning, r#"{"plan":"check"}"#, "split {split}");
+        assert_eq!(content, r#"{"answer":42}"#, "split {split}");
+    }
+}
+
 /// If SGLang emits response_format JSON immediately after a prompt-injected
 /// Qwen `<think>`, Dynamo must recover the structured answer as assistant
 /// content instead of classifying the JSON as reasoning.
@@ -3185,6 +3212,97 @@ async fn response_format_qwen3_prompt_injected_bare_json_stays_content() {
         "response_format JSON must not be reasoning_content, got: {reasoning:?}"
     );
     assert_eq!(content, json);
+}
+
+#[tokio::test]
+async fn response_format_qwen3_prompt_injected_truncated_json_stays_visible() {
+    let json_prefix = "{\"country\":";
+    let preprocessor = build_preprocessor(Some("qwen3"), None);
+    let request = streaming_json_schema_request(true);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(json_prefix), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(
+        reasoning.is_empty(),
+        "truncated structured JSON must stay visible"
+    );
+    assert_eq!(content, json_prefix);
+}
+
+#[tokio::test]
+async fn response_format_qwen3_prompt_injected_json_streams_before_terminal() {
+    let first_json_chunk = "{\"country\":";
+    let preprocessor = build_preprocessor(Some("qwen3"), None);
+    let request = streaming_json_schema_request(false);
+    let input_stream = stream::iter(
+        vec![
+            mock_content_chunk(first_json_chunk),
+            mock_content_chunk("\"France\"}"),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let first_output = output_stream.take(1).collect::<Vec<_>>().await;
+    let first_content: String = first_output
+        .iter()
+        .filter_map(|response| response.data.as_ref())
+        .flat_map(|response| response.inner.choices.iter())
+        .filter_map(|choice| choice.delta.content.as_ref())
+        .map(get_text)
+        .collect();
+
+    assert_eq!(first_content, first_json_chunk);
+}
+
+#[tokio::test]
+async fn postprocessor_parsing_stream_keeps_quoted_think_markers_as_content() {
+    let literal = r#"The literal "</think>" closes reasoning."#;
+    for family in ["qwen3", "deepseek_v4", "deepseek_v41", "glm47", "kimi_k2"] {
+        for split in 0..=literal.len() {
+            let preprocessor = build_preprocessor(Some(family), None);
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": family,
+                    "messages": [{"role": "user", "content": "Explain the marker."}],
+                    "stream": true
+                }))
+                .unwrap();
+            let input_stream = stream::iter(
+                vec![
+                    mock_content_chunk(&literal[..split]),
+                    mock_content_chunk(&literal[split..]),
+                    mock_final_chunk(),
+                ]
+                .into_iter()
+                .map(Annotated::from_data),
+            );
+            let output_stream = preprocessor
+                .postprocessor_parsing_stream(input_stream, &request, false, false)
+                .expect("postprocessor_parsing_stream should build");
+            let DrainOutput {
+                reasoning, content, ..
+            } = drain_stream(output_stream).await;
+
+            assert!(
+                reasoning.is_empty(),
+                "{family} split {split}: {reasoning:?}"
+            );
+            assert_eq!(content, literal, "{family} split {split}");
+        }
+    }
 }
 
 /// With thinking disabled, response_format JSON is ordinary assistant content.
@@ -3236,41 +3354,117 @@ async fn response_format_gemma4_bare_json_stays_content() {
 }
 
 #[tokio::test]
-async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
-    let preprocessor = build_preprocessor(Some("gemma4"), None);
-
-    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-        "model": "dummy-gemma4-model",
-        "messages": [
-            {
-                "role": "user",
-                "content": "answer plainly"
+async fn all_unified_families_honor_normalized_request_controls_for_all_selector_shapes() {
+    for (family, raw) in [
+        ("deepseek_v4", "<think>private</think>answer"),
+        ("deepseek_v41", "<think>private</think>answer"),
+        ("qwen3", "<think>private</think>answer"),
+        ("glm47", "<think>private</think>answer"),
+        ("kimi_k2", "<think>private</think>answer"),
+        ("gemma4", "<|channel>thought\nprivate<channel|>answer"),
+        (
+            "kimi_k3",
+            "<|open|>think<|sep|>private<|close|>think<|sep|><|open|>response<|sep|>answer<|close|>response<|sep|>",
+        ),
+        (
+            "muse_glimmer",
+            "<|start|>assistant to=self<|message|>private<|eom|><|start|>assistant to=user<|message|>answer<|eot|>",
+        ),
+    ] {
+        for (reasoning, tool) in [
+            (Some(family), None),
+            (None, Some(family)),
+            (Some(family), Some(family)),
+        ] {
+            let preprocessor = build_preprocessor(reasoning, tool);
+            for thinking in [None, Some(false), Some(true)] {
+                let mut request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model":"dummy", "messages":[{"role":"user","content":"answer"}], "stream":true})).unwrap();
+                request.thinking = thinking.map(|value| serde_json::json!(value));
+                request.normalize_reasoning_template_args().unwrap();
+                for split in 0..=raw.len() {
+                    let input = stream::iter(
+                        vec![
+                            mock_content_chunk(&raw[..split]),
+                            mock_content_chunk(&raw[split..]),
+                            mock_final_chunk(),
+                        ]
+                        .into_iter()
+                        .map(Annotated::from_data),
+                    );
+                    let output = preprocessor
+                        .postprocessor_parsing_stream(input, &request, false, false)
+                        .unwrap();
+                    let out = drain_stream(output).await;
+                    let disabled = if family == "gemma4" {
+                        thinking != Some(true)
+                    } else {
+                        thinking == Some(false)
+                    };
+                    assert_eq!(
+                        out.reasoning,
+                        if disabled { "" } else { "private" },
+                        "{family} {reasoning:?} {tool:?} {thinking:?} split{split}"
+                    );
+                    assert_eq!(
+                        out.content,
+                        if disabled && family == "gemma4" {
+                            raw
+                        } else if disabled {
+                            "privateanswer"
+                        } else {
+                            "answer"
+                        },
+                        "{family} {reasoning:?} {tool:?} {thinking:?} split{split}"
+                    );
+                }
             }
-        ],
-        "stream": true
-    }))
-    .unwrap();
+        }
+    }
+}
 
-    let text = "<|channel>thought\nshould stay plain<channel|>final answer";
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(text), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
+#[tokio::test]
+async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
+    for (reasoning_selector, tool_selector) in [
+        (Some("gemma4"), None),
+        (None, Some("gemma4")),
+        (Some("gemma4"), Some("gemma4")),
+        (None, Some("gemma-4")),
+    ] {
+        let preprocessor = build_preprocessor(reasoning_selector, tool_selector);
 
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
-        .expect("postprocessor_parsing_stream should build");
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "dummy-gemma4-model",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "answer plainly"
+                }
+            ],
+            "stream": true
+        }))
+        .unwrap();
 
-    let DrainOutput {
-        reasoning, content, ..
-    } = drain_stream(output_stream).await;
+        let text = "<|channel>thought\nshould stay plain<channel|>final answer";
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(text), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
 
-    assert!(
-        reasoning.is_empty(),
-        "Gemma 4 reasoning parser must be gated off without enable_thinking=true, got: {reasoning:?}"
-    );
-    assert_eq!(content, text);
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, false, false)
+            .expect("postprocessor_parsing_stream should build");
+
+        let DrainOutput {
+            reasoning, content, ..
+        } = drain_stream(output_stream).await;
+
+        assert!(
+            reasoning.is_empty(),
+            "Gemma 4 reasoning parser must be gated off without enable_thinking=true, got: {reasoning:?}"
+        );
+        assert_eq!(content, text);
+    }
 }
 
 /// MiniMax append-think is a force-reasoning parser that is not yet proven to
@@ -3543,9 +3737,8 @@ async fn tool_choice_minimax_m2_required_thinking_disabled_keeps_tool_xml() {
     assert!(finish_reasons.contains(&FinishReason::ToolCalls));
 }
 
-/// `Auto` is required because forced and named tool choices use the v1 jail.
 #[tokio::test]
-async fn tool_calls_qwen3_coder_auto_routes_through_v2_by_default() {
+async fn tool_calls_qwen3_coder_auto_preserves_tool_output_and_finish_reason() {
     let xml = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
     let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
     let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
@@ -3564,7 +3757,7 @@ async fn tool_calls_qwen3_coder_auto_routes_through_v2_by_default() {
         ..
     } = drain_stream(output_stream).await;
 
-    let path = "qwen3_coder auto -> dynamo-parsers-v2 by default";
+    let path = "qwen3_coder auto tool output";
     assert_clean_tool_call(path, &content, &tool_calls, "San Francisco");
     // Both paths must honor the OpenAI contract: a tool-call stream terminates with
     // finish_reason=ToolCalls — v1 via the jail's fix_finish_reason, v2 via apply_stream.
@@ -4677,48 +4870,38 @@ async fn muse_force_nonempty_keeps_reasoning_before_a_tool_call_on_the_wire() {
     }));
 }
 
-/// `tool_choice=Required` is excluded by the guard (auto/none only), so the turn
-/// falls through to the guided-decode + jail path. No reasoning parser is
-/// configured there, so `reasoning_content` can never be produced — proof the
-/// unified parser (which would yield "Look it up.") did NOT engage.
+/// Without a structural tag, Required installs a JSON tool schema. Native XML is
+/// outside that generated constraint; exercise valid guided output through Unified.
 #[tokio::test]
-async fn postprocessor_parsing_stream_muse_required_does_not_route_to_unified() {
+async fn postprocessor_parsing_stream_muse_required_guided_json_routes_to_unified() {
     let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
     let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let guided = [
+        MUSE_MARKUP_SHAPE[0],
+        "[{\"name\":\"get_weather\",\"parameters\":{\"location\":\"Paris\"}}]",
+        MUSE_MARKUP_SHAPE[2],
+    ];
+    let raw = guided.concat();
+    for split in 0..=raw.len() {
+        let out = solo_output(&preprocessor, &request, &[&raw[..split], &raw[split..]]).await;
+        assert_native_muse_output(&out);
+    }
+}
 
-    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
-
-    assert!(
-        out.reasoning.is_empty(),
-        "Required must NOT route to unified; reasoning_content must stay empty, got {:?}",
-        out.reasoning
-    );
-    // Empty reasoning alone also passes if the unified parser ran and dropped it, so
-    // assert the POSITIVE signal of the jail path: it does not strip muse markers.
-    assert!(
-        out.content.contains("<|start|>"),
-        "the jail path leaves muse markup in content; got {:?}",
-        out.content
-    );
-    assert!(
-        out.tool_calls
-            .iter()
-            .all(|(name, _)| name.as_deref() != Some("get_weather")),
-        "the unified parser must not produce a native-markup call here: {:?}",
-        out.tool_calls
+fn assert_native_muse_output(out: &ChoiceOutput) {
+    assert_eq!(out.reasoning, "Look it up.");
+    assert_eq!(out.content, "It's 18C.");
+    assert_eq!(out.tool_calls.len(), 1);
+    assert_eq!(out.tool_calls[0].0.as_deref(), Some("get_weather"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&out.tool_calls[0].1).unwrap(),
+        serde_json::json!({"location":"Paris"})
     );
 }
 
-/// A structural-tag request must stay on the guided-decode + jail path, exactly as a
-/// forced `tool_choice` does: it emits guided JSON, not the native ATEM markup the
-/// unified parser reads. The guard carries `!uses_tool_call_structural_tag` for that,
-/// and nothing pinned it — a refactor could drop the clause and every other muse test
-/// would still pass, because they all run with the flag false.
-///
-/// `solo_output` hardcodes `false, false`, so this drives
-/// `postprocessor_parsing_stream` directly to set the flag.
+/// Structural tags select native output; the Unified parser must own all three channels.
 #[tokio::test]
-async fn postprocessor_parsing_stream_muse_structural_tag_does_not_route_to_unified() {
+async fn postprocessor_parsing_stream_muse_structural_tag_routes_to_unified() {
     let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
     let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
 
@@ -4752,26 +4935,7 @@ async fn postprocessor_parsing_stream_muse_structural_tag_does_not_route_to_unif
         })
         .unwrap_or_default();
 
-    // No reasoning parser is configured, so any `reasoning_content` at all could only
-    // have come from the unified parser engaging.
-    assert!(
-        out.reasoning.is_empty(),
-        "structural-tag must NOT route to unified; reasoning stayed {:?}",
-        out.reasoning
-    );
-    // The positive jail signal: that path does not strip muse markers.
-    assert!(
-        out.content.contains("<|start|>"),
-        "the jail path leaves muse markup in content; got {:?}",
-        out.content
-    );
-    assert!(
-        out.tool_calls
-            .iter()
-            .all(|(name, _)| name.as_deref() != Some("get_weather")),
-        "the unified parser must not produce a native-markup call here: {:?}",
-        out.tool_calls
-    );
+    assert_native_muse_output(&out);
 }
 
 /// `unified_family` keys on EITHER parser name, so a card that sets only

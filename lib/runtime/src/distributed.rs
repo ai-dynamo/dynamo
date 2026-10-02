@@ -62,6 +62,16 @@ mod unit_tests {
 
     #[tokio::test]
     async fn completed_runtime_initialization_rejects_shutdown_before_http_bind() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::completed_runtime_initialization_rejects_shutdown_before_http_bind"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         use super::{DistributedConfig, DistributedRuntime, Runtime};
         use crate::system_status_server::SystemProbePolicy;
 
@@ -238,14 +248,7 @@ impl DistributedRuntime {
             None => ResponsePlaneMode::configured()?,
         };
 
-        let config = match policy {
-            system_status_server::SystemProbePolicy::Worker => {
-                crate::config::RuntimeConfig::from_settings().unwrap_or_default()
-            }
-            system_status_server::SystemProbePolicy::RuntimeOnly => {
-                crate::config::RuntimeConfig::from_settings()?
-            }
-        };
+        let config = crate::config::RuntimeConfig::from_settings()?;
         let nats_client = match nats_config {
             Some(nc) => Some(nc.connect().await?),
             None => None,
@@ -851,17 +854,17 @@ mod parser_env_tests {
     async fn distributed_runtime_rejects_invalid_parser_version() {
         const CHILD: &str = "DYNAMO_DISTRIBUTED_RUNTIME_PARSER_ENV_TEST";
         if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "distributed::parser_env_tests::distributed_runtime_rejects_invalid_parser_version",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(CHILD, "1")
-                .env(crate::config::environment_names::llm::DYN_PARSER_VERSION, "v3")
-                .status()
-                .unwrap();
+            let status = crate::test_utils::isolated_command(
+                "distributed::parser_env_tests::distributed_runtime_rejects_invalid_parser_version",
+            )
+            .arg("--test-threads=1")
+            .env(CHILD, "1")
+            .env(
+                crate::config::environment_names::llm::DYN_PARSER_VERSION,
+                "v3",
+            )
+            .status()
+            .unwrap();
             assert!(status.success());
             return;
         }
@@ -1250,6 +1253,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_disabled() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_drt_uptime_after_delay_system_disabled"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server disabled
         temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
@@ -1277,9 +1290,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_drt_uptime_after_delay_system_enabled"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server enabled
-        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("8081"))], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("0"))], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 

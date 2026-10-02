@@ -20,6 +20,9 @@ use dynamo_protocols::types::{
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use futures::StreamExt;
 
+#[path = "../../runtime/src/test_utils.rs"]
+mod test_utils;
+
 fn get_text(content: &ChatCompletionMessageContent) -> &str {
     match content {
         ChatCompletionMessageContent::Text(text) => text.as_str(),
@@ -303,35 +306,21 @@ async fn run_qwen_unified_batch_suppression_assertions() {
 }
 
 #[tokio::test]
-#[ignore = "only run as a child process spawned by the parent test"]
-async fn qwen_unified_batch_suppression_child() {
+async fn test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup"
+        ),
+        &[],
+    ) {
+        return;
+    }
     assert_ne!(
         std::env::var(env_llm::DYN_PARSER_VERSION).as_deref(),
         Ok("v1")
     );
     run_qwen_unified_batch_suppression_assertions().await;
-}
-
-#[test]
-fn test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup() {
-    // Re-execute the child in an isolated process because the parser decision is
-    // intentionally cached for the process lifetime.
-    let exe = std::env::current_exe().expect("test binary path for self re-exec");
-    let status = std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "qwen_unified_batch_suppression_child",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env_remove(env_llm::DYN_PARSER_VERSION)
-        .status()
-        .expect("failed to spawn child test process");
-    assert!(
-        status.success(),
-        "child aggregator suppression test failed (see its own output above): {status:?}"
-    );
 }
 
 async fn run_qwen_unified_batch_v1_assertions() {
@@ -373,33 +362,21 @@ async fn run_qwen_unified_batch_v1_assertions() {
 }
 
 #[tokio::test]
-#[ignore = "only run as a child process spawned by the parent test"]
-async fn qwen_unified_batch_v1_child() {
+async fn test_qwen_unified_batch_reverts_to_v1_when_requested() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::test_qwen_unified_batch_reverts_to_v1_when_requested"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "v1")],
+    ) {
+        return;
+    }
     assert_eq!(
         std::env::var(env_llm::DYN_PARSER_VERSION).as_deref(),
         Ok("v1")
     );
     run_qwen_unified_batch_v1_assertions().await;
-}
-
-#[test]
-fn test_qwen_unified_batch_reverts_to_v1_when_requested() {
-    let exe = std::env::current_exe().expect("test binary path for self re-exec");
-    let status = std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "qwen_unified_batch_v1_child",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(env_llm::DYN_PARSER_VERSION, "v1")
-        .status()
-        .expect("failed to spawn child test process");
-    assert!(
-        status.success(),
-        "child aggregator flag-off test failed (see its own output above): {status:?}"
-    );
 }
 
 fn assert_guided_batch_call(result: &NvCreateChatCompletionResponse) {
@@ -1070,6 +1047,71 @@ async fn test_responses_tool_parsing_is_owned_by_the_aggregator() {
                 panic!("expected output text");
             };
             assert_eq!(content.text, raw);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_all_unified_batch_request_policies_for_each_selector_shape() {
+    for (family, raw) in [
+        ("deepseek_v4", "<think>private</think>answer"),
+        ("deepseek_v41", "<think>private</think>answer"),
+        ("qwen3", "<think>private</think>answer"),
+        ("glm47", "<think>private</think>answer"),
+        ("kimi_k2", "<think>private</think>answer"),
+        ("gemma4", "<|channel>thought\nprivate<channel|>answer"),
+        (
+            "kimi_k3",
+            "<|open|>think<|sep|>private<|close|>think<|sep|><|open|>response<|sep|>answer<|close|>response<|sep|>",
+        ),
+        (
+            "muse_glimmer",
+            "<|start|>assistant to=self<|message|>private<|eom|><|start|>assistant to=user<|message|>answer<|eot|>",
+        ),
+    ] {
+        for (tool, reasoning) in [
+            (Some(family), None),
+            (None, Some(family)),
+            (Some(family), Some(family)),
+        ] {
+            for thinking in [None, Some(false), Some(true)] {
+                let disabled = if family == "gemma4" {
+                    thinking != Some(true)
+                } else {
+                    thinking == Some(false)
+                };
+                let mut options =
+                    ParsingOptions::new(tool.map(str::to_owned), reasoning.map(str::to_owned));
+                options.reasoning_disabled = disabled;
+                for split in 0..=raw.len() {
+                    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+                        futures::stream::iter([
+                            make_stream_delta(Some(&raw[..split]), None),
+                            make_stream_delta(Some(&raw[split..]), None),
+                        ]),
+                        options.clone(),
+                    )
+                    .await
+                    .unwrap();
+                    let message = &result.inner.choices[0].message;
+                    assert_eq!(
+                        message.reasoning_content.as_deref().unwrap_or(""),
+                        if disabled { "" } else { "private" },
+                        "{family} {tool:?} {reasoning:?} {thinking:?} split{split}"
+                    );
+                    assert_eq!(
+                        message.content.as_ref().map(get_text).unwrap_or(""),
+                        if disabled && family == "gemma4" {
+                            raw
+                        } else if disabled {
+                            "privateanswer"
+                        } else {
+                            "answer"
+                        },
+                        "{family} {tool:?} {reasoning:?} {thinking:?} split{split}"
+                    );
+                }
+            }
         }
     }
 }

@@ -412,10 +412,7 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
-        crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
-            card.runtime_config.tool_call_parser.as_deref(),
-            card.runtime_config.reasoning_parser.as_deref(),
-        )?;
+        validate_card_parser_version(card)?;
 
         validate_policy_worker_role(card, &self.plugins)?;
 
@@ -438,7 +435,6 @@ impl ModelWatcher {
                  exact video routing disabled for this group"
             );
         }
-
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
         // are process-local, so preserve them when the MDC supplies the base config.
@@ -1348,6 +1344,16 @@ fn validate_card_shape(card: &ModelDeploymentCard) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_card_parser_version(card: &ModelDeploymentCard) -> anyhow::Result<()> {
+    if should_validate_parser_version(card) {
+        crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
+            card.runtime_config.tool_call_parser.as_deref(),
+            card.runtime_config.reasoning_parser.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
 fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
     card.model_type.supports_chat()
         && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
@@ -1745,8 +1751,7 @@ mod tests {
         if std::env::var("DYNAMO_ALIAS_TEST").as_deref() != Ok(test_name) {
             let output = tokio::time::timeout(
                 Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
+                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
                     .env("DYNAMO_ALIAS_TEST", test_name)
                     .env("DYN_TCP_RPC_HOST", "127.0.0.1")
                     .env("DYN_TCP_RPC_PORT", "0")
@@ -2104,8 +2109,7 @@ mod tests {
             // more than libtest's default 2 MiB stack, like the prefill routing tests.
             let output = tokio::time::timeout(
                 Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
+                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
                     .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
                     .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
                     .env("DYN_TCP_RPC_HOST", "127.0.0.1")
@@ -3031,6 +3035,34 @@ request_classifier:
 
         card.worker_type = Some(WorkerType::Decode);
         assert!(validate_policy_worker_role(&card, &custom).is_ok());
+    }
+
+    #[test]
+    fn parser_validation_skips_non_chat_and_prefill_workers() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::parser_validation_skips_non_chat_and_prefill_workers"
+            ),
+            &[("DYN_PARSER_VERSION", "2")],
+        ) {
+            return;
+        }
+
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        card.model_type = ModelType::Embedding;
+        assert!(validate_card_parser_version(&card).is_ok());
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(validate_card_parser_version(&card).is_ok());
+        for role in [None, Some(WorkerType::Decode), Some(WorkerType::Encode)] {
+            card.worker_type = role;
+            assert!(validate_card_parser_version(&card).is_err());
+        }
+        card.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        card.runtime_config.reasoning_parser = Some("qwen3".to_string());
+        assert!(validate_card_parser_version(&card).is_ok());
     }
 
     #[test]

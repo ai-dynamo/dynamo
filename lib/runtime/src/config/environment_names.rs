@@ -446,16 +446,13 @@ pub mod llm {
 
     /// Select the parser generation. Unset selects the newest compatible generation.
     ///
-    /// Which v2 shape a request gets is decided by the configured parsers, not by a
-    /// second flag:
-    /// * tool-call parser only (Qwen3-Coder, DeepSeek-V4) -> the v2 TOOL parser owns
-    ///   incremental tool-call emission and drops values truncated at EOF.
-    /// * tool-call AND reasoning parser naming the same family (`qwen3_coder` +
-    ///   `qwen3`) -> the v2 UNIFIED parser owns reasoning, visible text and tool calls
-    ///   in one ordered stream, so reasoning that followed a tool call stays after it
-    ///   instead of being hoisted to the front and fused with the first thought.
+    /// A registered family configured in either parser slot uses the v2 UNIFIED
+    /// parser for reasoning, visible text, and tool calls in one ordered stream.
+    /// When both slots are set, their names must resolve to the same family.
+    /// Families without a registered unified parser retain compatible tool-only
+    /// or legacy routes.
     ///
-    /// Accepted values are `auto`, `v1`, `v2`, and future parser generations. Explicit
+    /// Accepted values are `auto`, `1`/`v1`, and `2`/`v2`. Explicit
     /// generations fail during preprocessor construction when the configured family has
     /// no compatible parser.
     pub const DYN_PARSER_VERSION: &str = "DYN_PARSER_VERSION";
