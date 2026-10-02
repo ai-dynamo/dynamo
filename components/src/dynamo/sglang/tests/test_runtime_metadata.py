@@ -357,7 +357,6 @@ def test_input_modalities_only_declare_text_only_models(flag, expected):
 
 
 def test_input_modalities_without_engine_metadata():
-    # Keep registration imports lazy for pytest-marker-report's SGLang stubs.
     from dynamo.sglang.register import _get_input_modalities
 
     assert _get_input_modalities(None) is None
