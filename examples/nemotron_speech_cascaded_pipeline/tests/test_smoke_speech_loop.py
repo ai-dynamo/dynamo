@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -26,29 +27,45 @@ class _WebSocket:
     def __init__(self, events):
         self.events = iter(events)
         self.sent = []
+        self.closed = False
 
     async def send_json(self, event):
         self.sent.append(event)
 
     async def receive(self):
+        event = next(self.events)
+        if isinstance(event, BaseException):
+            raise event
         return SimpleNamespace(
             type=aiohttp.WSMsgType.TEXT,
-            data=json.dumps(next(self.events)),
+            data=json.dumps(event),
         )
+
+    async def close(self):
+        self.closed = True
+
+    def __await__(self):
+        return self.__aenter__().__await__()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.close()
+
+
+class _WebSocketSession:
+    def __init__(self, *websockets):
+        self.websockets = iter(websockets)
+
+    def ws_connect(self, url, **kwargs):
+        return next(self.websockets)
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *args):
         return None
-
-
-class _WebSocketSession:
-    def __init__(self, websocket):
-        self.websocket = websocket
-
-    def ws_connect(self, url, **kwargs):
-        return self.websocket
 
 
 async def test_realtime_llm_streams_complete_transcript_and_collects_text():
@@ -81,6 +98,19 @@ async def test_realtime_llm_streams_complete_transcript_and_collects_text():
         },
         {"type": "response.create"},
     ]
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+async def test_realtime_llm_rejects_unsuccessful_response_after_partial_output(status):
+    websocket = _WebSocket(
+        [
+            {"type": "response.output_text.delta", "delta": "partial"},
+            {"type": "response.done", "response": {"status": status}},
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match=status):
+        await _complete_realtime(websocket, SimpleNamespace(timeout=1.0), "hello")
 
 
 @pytest.mark.parametrize(
@@ -171,10 +201,22 @@ async def test_transcription_forwards_deltas_to_realtime_llm_before_commit():
 
 
 @pytest.mark.parametrize(
-    "event_type", ["error", "conversation.item.input_audio_transcription.failed"]
+    "event_type,after_delta",
+    [("error", False), ("conversation.item.input_audio_transcription.failed", True)],
 )
-async def test_transcription_failure_does_not_commit_llm_input(event_type):
-    asr_websocket = _WebSocket([{"type": event_type, "error": "ASR unavailable"}])
+async def test_transcription_failure_stops_upload_without_committing(
+    event_type, after_delta
+):
+    events = [{"type": event_type, "error": "ASR unavailable"}]
+    if after_delta:
+        events.insert(
+            0,
+            {
+                "type": "conversation.item.input_audio_transcription.delta",
+                "delta": "partial",
+            },
+        )
+    asr_websocket = _WebSocket(events)
     llm_websocket = _WebSocket([])
     args = SimpleNamespace(
         base_url="http://dynamo",
@@ -188,11 +230,16 @@ async def test_transcription_failure_does_not_commit_llm_input(event_type):
         await _transcribe(
             _WebSocketSession(asr_websocket),
             args,
-            b"\x00\x00",
+            b"\x00\x00" * 4,
             _RealtimeTextInput(llm_websocket),
         )
 
-    assert llm_websocket.sent == []
+    assert llm_websocket.sent == (
+        [{"type": "input_text.append", "text": "partial"}] if after_delta else []
+    )
+    sent_types = [event["type"] for event in asr_websocket.sent]
+    assert "input_audio_buffer.commit" not in sent_types
+    assert sent_types.count("input_audio_buffer.append") < 4
 
 
 class _Content:
@@ -258,6 +305,81 @@ async def test_chat_llm_streams_same_transcript_and_collects_text():
             "stream": True,
         },
     )
+
+
+@pytest.mark.parametrize(
+    "outcome", ["completed", "asr_error", "llm_error", "cancelled", "empty_final"]
+)
+async def test_realtime_run_orders_handoff_and_closes_connections(monkeypatch, outcome):
+    llm_websocket = _WebSocket(
+        [
+            {"type": "session.created"},
+            {"type": "session.updated"},
+            {"type": "response.output_text.delta", "delta": "answer"},
+            {
+                "type": "response.done",
+                "response": {
+                    "status": "failed" if outcome == "llm_error" else "completed"
+                },
+            },
+        ]
+    )
+    asr_events = [
+        {"type": "conversation.item.input_audio_transcription.delta", "delta": delta}
+        for delta in ("hello", " world")
+    ]
+    asr_events.append(
+        asyncio.CancelledError()
+        if outcome == "cancelled"
+        else (
+            {"type": "error", "error": "ASR unavailable"}
+            if outcome == "asr_error"
+            else {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "" if outcome == "empty_final" else "hello world",
+            }
+        )
+    )
+    asr_websocket = _WebSocket(asr_events)
+    session = _WebSocketSession(llm_websocket, asr_websocket)
+
+    async def synthesize(session, args):
+        return b"\x01\x00" * 4, 0.01
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda **kwargs: session)
+    monkeypatch.setattr(smoke_speech_loop, "_synthesize", synthesize)
+    args = SimpleNamespace(
+        base_url="http://dynamo",
+        asr_model="test/asr",
+        llm_model="test/llm",
+        language="en",
+        timeout=1.0,
+        chunk_bytes=2,
+        llm_transport="realtime",
+        llm_instructions="Be concise.",
+        max_output_tokens=32,
+        min_rms=0.0,
+    )
+    if outcome == "completed":
+        await smoke_speech_loop.run(args)
+    else:
+        error = asyncio.CancelledError if outcome == "cancelled" else RuntimeError
+        with pytest.raises(error):
+            await smoke_speech_loop.run(args)
+
+    assert llm_websocket.closed and asr_websocket.closed
+    assert [event["type"] for event in llm_websocket.sent] == [
+        "session.update",
+        "input_text.append",
+        "input_text.append",
+        *(
+            ["input_text.commit", "response.create"]
+            if outcome in {"completed", "llm_error"}
+            else ["input_text.clear"]
+            if outcome == "empty_final"
+            else []
+        ),
+    ]
 
 
 async def test_report_measures_from_asr_final_including_handoff(monkeypatch, capsys):

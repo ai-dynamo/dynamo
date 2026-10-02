@@ -299,26 +299,60 @@ curl --fail --silent --show-error http://localhost:8000/v1/chat/completions \
 ### Measure ASR-to-LLM handoff
 
 The smoke client can pass ASR output to the LLM and report time to first text
-and total LLM latency. With the default DGD, measure streamed chat completions:
+and total LLM latency:
+
+| `--llm-transport` | Behavior |
+| --- | --- |
+| `chat` | Baseline: send the final transcript to streamed chat completions. Works with the default DGD. |
+| `realtime-atomic` | Baseline: establish the LLM WebSocket before ASR, then send the final transcript without speculative prefill. |
+| `realtime` | Incremental: establish the LLM WebSocket before ASR and forward provisional text to overlap prefill with transcription. |
+
+With the default DGD, run the chat baseline:
 
 ```bash
 python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
   --llm-transport chat
 ```
 
-To test LLM prefill while speech is still being transcribed, use Dynamo
-frontend and vLLM images containing
-[incremental realtime text support](https://github.com/ai-dynamo/dynamo/pull/14326),
-add `--realtime` to the `VllmWorker` arguments in `deploy/agg.yaml`, and keep
-vLLM prefix caching enabled. Build frontend, worker, and speech-adapter images
-from a combined revision containing [#12567](https://github.com/ai-dynamo/dynamo/pull/12567)
-and #14326: the adapter also needs #12567's native
-`register_model(skip_model_assets=True)` binding. Use published images only
-after both capabilities are released, then redeploy the DGD. Run:
-
 > [!NOTE]
 > The incremental text events are an experimental Dynamo extension and may
 > change before stabilization.
+
+For the realtime modes, build from this branch, which already combines the
+speech adapters from [#12567](https://github.com/ai-dynamo/dynamo/pull/12567) and
+incremental realtime text support from
+[#14326](https://github.com/ai-dynamo/dynamo/pull/14326). Build both runtime images,
+including their native bindings, from the same checkout. Follow the
+[frontend image instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md#building-the-frontend-image)
+to produce `dynamo:frontend` and the
+[vLLM runtime instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md#1-runtime-target-runs-as-non-root-dynamo-user)
+to produce `dynamo:latest-vllm-runtime`. Using the registry variables above and a
+fresh semantic-version tag matching the source runtime (for example,
+`<runtime-version>-dev.<short-commit>`), push those images and rebuild the speech
+adapter from the matching frontend:
+
+```bash
+export DYNAMO_RUNTIME_VERSION="<source-build-version>"
+export DYNAMO_FRONTEND_IMAGE="${CUSTOM_IMAGE_REGISTRY}/${CUSTOM_IMAGE_REPOSITORY}/dynamo-frontend:${DYNAMO_RUNTIME_VERSION}"
+export DYNAMO_VLLM_IMAGE="${CUSTOM_IMAGE_REGISTRY}/${CUSTOM_IMAGE_REPOSITORY}/vllm-runtime:${DYNAMO_RUNTIME_VERSION}"
+export CUSTOM_SPEECH_ADAPTER_IMAGE="${CUSTOM_IMAGE_REGISTRY}/${CUSTOM_IMAGE_REPOSITORY}/dynamo-nemotron-speech-adapter:${DYNAMO_RUNTIME_VERSION}"
+docker tag dynamo:frontend "${DYNAMO_FRONTEND_IMAGE}"
+docker tag dynamo:latest-vllm-runtime "${DYNAMO_VLLM_IMAGE}"
+docker push "${DYNAMO_FRONTEND_IMAGE}"
+docker push "${DYNAMO_VLLM_IMAGE}"
+./examples/nemotron_speech_cascaded_pipeline/container/build.sh
+docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
+```
+
+The adapter build uses `DYNAMO_FRONTEND_IMAGE` as its base. Use published images
+only after both capabilities are released. In `deploy/agg.yaml`, add
+`--realtime` and `--enable-prefix-caching` to the `main` container's `args` in
+the component named `worker`, leaving its other arguments unchanged. For private
+runtime images, also add `custom-adapter-image-pull-secret` to
+`podTemplate.spec.imagePullSecrets` for the `Frontend` and `worker` components.
+Repeat the deployment command in step 4 with these image variables. The worker
+now serves realtime text instead of chat completions; remove `--realtime` and
+redeploy to return to the chat baseline. After the rollout, run:
 
 ```bash
 python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
@@ -336,9 +370,9 @@ warming at turn end. Unchanged text uses `input_text.commit`. This is a
 single-turn endpoint smoke test, not a full voice application; it does not
 synthesize the LLM response or add an integration to Pipecat or the Blueprint.
 
-For an established Realtime connection without overlapping prefill, run
-`--llm-transport realtime-atomic`. Compare it with `realtime` using the same
-image, model, speech, instructions, and output-token limit.
+Use `--llm-transport realtime-atomic` as the established-connection baseline.
+Compare it with `realtime` using the same image, model, speech, instructions,
+and output-token limit.
 `llm_ttft_from_asr_final_ms` measures the post-transcription handoff, while
 `asr_start_to_llm_first_token_ms` covers the full ASR-to-first-token path.
 These measurements include final-text correction and handoff, but do not prove
@@ -403,8 +437,9 @@ The example's unit tests cover connection configuration, endpoint resolution,
 and the external ASR-to-LLM handoff without installing the Riva client.
 Model-registration regressions are covered
 by `lib/bindings/python/tests/test_runtime_data_discovery.py` in the regular
-Dynamo binding suite. These tests do not cover the Riva adapters' streaming or
-cancellation behavior; use the deployed smoke test for functional validation.
+Dynamo binding suite. The Riva-dependent adapter, worker, and connection modules
+have no automated test coverage. Run the deployed smoke test manually for
+functional validation.
 
 ```bash
 python3 -m pip install aiohttp pytest pytest-asyncio

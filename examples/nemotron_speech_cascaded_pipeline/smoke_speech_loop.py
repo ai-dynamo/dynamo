@@ -163,6 +163,9 @@ async def _transcribe(
                     }
                 )
                 await asyncio.sleep(len(chunk) / (SAMPLE_RATE * 2))
+                # Surface ASR errors without uploading the rest of the utterance.
+                if receive_task.done():
+                    return await receive_task
             await websocket.send_json({"type": "input_audio_buffer.commit"})
             return await receive_task
         finally:
