@@ -16,9 +16,6 @@ The contract was copied from SGLang commit
 The upstream file's SHA-256 is
 `a2e14952ddb2b34b6e22cbbc4e76d76d70c44f2dbf087cb9918aed3399d9ef42`.
 The local file adds SPDX and temporary-copy comments and applies Dynamo's
-`clang-format` style. It additionally carries `Shutdown`, `WatchEngineState`,
-and their messages from SGLang commit
-[`8260324d8f441ed8dc29e25902cb521ac8a781af`](https://github.com/sgl-project/sglang/pull/41582).
-`ShutdownRequest` remains empty and uses the configured SGLang shutdown policy. The
+`clang-format` style; these changes do not alter the protobuf descriptor. The
 SGLang sidecar generates both client and server types and temporarily exposes
 them to the Mocker server.

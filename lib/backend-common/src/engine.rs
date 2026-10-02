@@ -337,10 +337,10 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(MetricsBindings::default())
     }
 
-    /// Optional serving gate for recovery. False keeps the endpoint unready
-    /// and absent from discovery; engines without recovery keep the default.
-    fn readiness(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
-        None
+    /// Complete one-time initialization after KV publishers are attached and
+    /// before registering serving endpoints. Failure must not permit serving.
+    async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+        Ok(())
     }
 
     /// Canary payload registered with the runtime's `HealthCheckManager`.

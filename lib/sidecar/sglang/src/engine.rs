@@ -3,9 +3,9 @@
 
 //! Dynamo backend for SGLang's native `sglang.runtime.v1` gRPC server.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,6 +13,10 @@ use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
     PreprocessedRequest, WorkerConfig, usage,
+};
+use dynamo_llm::kv_router::publisher::KvEventPublisher;
+use dynamo_sidecar_common::kv_replay::{
+    BootstrapOutcome, ReplaySource as DiscoveredKvEventSource, bootstrap_sources,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
@@ -46,15 +50,8 @@ struct StartedState {
     pool: Pool,
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
-    recovery: Option<Arc<crate::recovery::Recovery>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct DiscoveredKvEventSource {
-    endpoint: String,
-    topic: String,
-    dp_rank: u32,
-    replay_endpoint: String,
+    kv_publishers: Arc<Mutex<BTreeMap<u32, Arc<KvEventPublisher>>>>,
+    worker_id: u64,
 }
 
 impl SglangSidecarEngine {
@@ -298,29 +295,13 @@ impl LLMEngine for SglangSidecarEngine {
         let kv_event_sources = discover_kv_event_sources(&discovery, &config, &self.endpoint)?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
-        let recovery = (!kv_event_sources.is_empty()).then(|| {
-            crate::recovery::Recovery::new(
-                pool.control_client(),
-                kv_event_sources
-                    .iter()
-                    .map(|source| dynamo_sidecar_common::kv_replay::ReplaySource {
-                        endpoint: source.endpoint.clone(),
-                        replay_endpoint: source.replay_endpoint.clone(),
-                        topic: source.topic.clone(),
-                        dp_rank: source.dp_rank,
-                    })
-                    .collect(),
-                worker_id,
-                discovery.server_info.clone(),
-                self.cancel.clone(),
-            )
-        });
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
-                recovery,
+                kv_publishers: Arc::default(),
+                worker_id,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -333,13 +314,30 @@ impl LLMEngine for SglangSidecarEngine {
         Ok(config)
     }
 
-    fn readiness(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
-        self.state.get().and_then(|s| {
-            s.recovery
-                .as_ref()
-                .filter(|r| r.is_active())
-                .map(|r| r.readiness())
-        })
+    async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+        let state = self
+            .state
+            .get()
+            .ok_or_else(|| client::engine_shutdown("sidecar not started"))?;
+        let publishers = state.kv_publishers.lock().unwrap().clone();
+        // No publishers are attached when KV routing is disabled.
+        if publishers.is_empty() {
+            return Ok(());
+        }
+        match bootstrap_sources(
+            state.kv_event_sources.clone(),
+            publishers,
+            state.worker_id,
+            self.cancel.clone(),
+            self.transport.startup_deadline,
+        )
+        .await
+        {
+            BootstrapOutcome::Success => Ok(()),
+            outcome => Err(client::engine_shutdown(format!(
+                "KV bootstrap failed: {outcome:?}"
+            ))),
+        }
     }
 
     async fn generate(
@@ -351,15 +349,6 @@ impl LLMEngine for SglangSidecarEngine {
             .state
             .get()
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
-        if state
-            .recovery
-            .as_ref()
-            .is_some_and(|r| r.is_active() && !*r.readiness().borrow())
-        {
-            return Err(client::engine_shutdown(
-                "SGLang KV index recovery is in progress",
-            ));
-        }
         if let Some(native_request) = native_http::request(
             &request,
             ctx.id(),
@@ -598,16 +587,16 @@ impl LLMEngine for SglangSidecarEngine {
             .kv_event_sources
             .iter()
             .map(|source| {
-                let recovery = state
-                    .recovery
-                    .as_ref()
-                    .expect("KV sources have a recovery controller")
-                    .clone();
+                let publishers = state.kv_publishers.clone();
                 let rank = source.dp_rank;
                 KvEventSource::Push {
                     dp_rank: rank,
                     on_ready: Box::new(move |publisher| {
-                        recovery.attach(rank, publisher);
+                        if publishers.lock().unwrap().insert(rank, publisher).is_some() {
+                            return Err(client::protocol_error(
+                                "duplicate KV publisher attachment",
+                            ));
+                        }
                         Ok(())
                     }),
                 }

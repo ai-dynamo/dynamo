@@ -7,12 +7,12 @@ use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum ReplayFrame {
+enum ReplayFrame {
     Batch(u64, Vec<u8>),
     End,
 }
 
-pub fn decode_replay(frames: Vec<Vec<u8>>) -> Result<ReplayFrame> {
+fn decode_replay(frames: Vec<Vec<u8>>) -> Result<ReplayFrame> {
     // DEALER removes identity; SGLang omits the topic included by vLLM.
     let (sequence, payload) = match frames.as_slice() {
         [delimiter, sequence, payload] if delimiter.is_empty() => (sequence, payload),
@@ -35,7 +35,7 @@ pub fn decode_replay(frames: Vec<Vec<u8>>) -> Result<ReplayFrame> {
 /// One cursor per engine incarnation and rank. Never infer history loss from
 /// a timeout: an ordered replay suffix can confirm an observed hole.
 #[derive(Debug)]
-pub struct ReplayCursor {
+struct ReplayCursor {
     next: u64,
     pending: BTreeMap<u64, Vec<u8>>,
     bytes: usize,
@@ -43,7 +43,7 @@ pub struct ReplayCursor {
 }
 
 impl ReplayCursor {
-    pub fn new(max_bytes: usize) -> Self {
+    fn new(max_bytes: usize) -> Self {
         Self {
             next: 0,
             pending: BTreeMap::new(),
@@ -51,10 +51,10 @@ impl ReplayCursor {
             limit: max_bytes,
         }
     }
-    pub fn next(&self) -> u64 {
+    fn next(&self) -> u64 {
         self.next
     }
-    pub fn insert(&mut self, sequence: u64, payload: Vec<u8>) -> Result<()> {
+    fn insert(&mut self, sequence: u64, payload: Vec<u8>) -> Result<()> {
         if sequence < self.next || self.pending.contains_key(&sequence) {
             return Ok(());
         }
@@ -65,7 +65,7 @@ impl ReplayCursor {
         self.pending.insert(sequence, payload);
         Ok(())
     }
-    pub fn pop_contiguous(&mut self) -> Result<Option<(u64, Vec<u8>)>> {
+    fn pop_contiguous(&mut self) -> Result<Option<(u64, Vec<u8>)>> {
         let Some(payload) = self.pending.remove(&self.next) else {
             return Ok(None);
         };
@@ -77,7 +77,7 @@ impl ReplayCursor {
         self.bytes -= payload.len();
         Ok(Some((sequence, payload)))
     }
-    pub fn gap(&self) -> Option<(u64, u64)> {
+    fn gap(&self) -> Option<(u64, u64)> {
         self.pending
             .first_key_value()
             .and_then(|(&got, _)| (got > self.next).then_some((self.next, got)))
@@ -126,7 +126,7 @@ mod tests {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplaySource {
     pub endpoint: String,
     pub replay_endpoint: String,
@@ -135,10 +135,91 @@ pub struct ReplaySource {
 }
 
 #[derive(Clone, Debug)]
-pub enum RecoveryStatus {
+enum RecoveryStatus {
     Recovering,
     Ready,
     MissingHistory { expected: u64, got: u64 },
+}
+
+/// Result of one bounded attempt against an initially empty local index.
+/// Retry and engine shutdown policy are deliberately left to the caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BootstrapOutcome {
+    Success,
+    MissingHistory {
+        dp_rank: u32,
+        expected: u64,
+        got: u64,
+    },
+    Uncertain {
+        reason: String,
+    },
+}
+
+/// Bootstrap all sources, leaving only live listeners running on success.
+/// The caller must provide an empty index and cancel successful listeners before
+/// any later attempt. Failed attempts may have partially applied events; they
+/// never permit serving. The deadline covers replay and index application.
+pub async fn bootstrap_sources<T: RecoveryTarget + 'static>(
+    sources: Vec<ReplaySource>,
+    publishers: BTreeMap<u32, std::sync::Arc<T>>,
+    worker_id: u64,
+    cancel: tokio_util::sync::CancellationToken,
+    timeout: std::time::Duration,
+) -> BootstrapOutcome {
+    let session = cancel.child_token();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut statuses = Vec::new();
+    for source in sources {
+        let rank = source.dp_rank;
+        let Some(publisher) = publishers.get(&rank).cloned() else {
+            session.cancel();
+            tasks.abort_all();
+            return BootstrapOutcome::Uncertain {
+                reason: format!("missing publisher for rank {rank}"),
+            };
+        };
+        let (tx, rx) = tokio::sync::watch::channel(RecoveryStatus::Recovering);
+        statuses.push((rank, rx));
+        let cancel = session.clone();
+        tasks.spawn(async move {
+            let result = tokio::select! {
+                _ = cancel.cancelled() => Ok(()),
+                result = run_source(source, publisher, worker_id, cancel.clone(), tx) => result,
+            };
+            if let Err(error) = &result {
+                tracing::warn!(rank, %error, "KV listener stopped");
+            }
+            result
+        });
+    }
+    let result = tokio::time::timeout(timeout, async {
+        loop {
+            for (rank, status) in &statuses {
+                if let RecoveryStatus::MissingHistory { expected, got } = *status.borrow() {
+                    return BootstrapOutcome::MissingHistory { dp_rank: *rank, expected, got };
+                }
+            }
+            if statuses.iter().all(|(_, status)| matches!(*status.borrow(), RecoveryStatus::Ready)) {
+                return BootstrapOutcome::Success;
+            }
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return BootstrapOutcome::Uncertain { reason: "startup cancelled".into() },
+                result = tasks.join_next() => return BootstrapOutcome::Uncertain { reason: format!("KV listener ended during bootstrap: {result:?}") },
+                _ = futures::future::select_all(statuses.iter_mut().map(|(_, rx)| Box::pin(rx.changed()))) => {},
+            }
+        }
+    }).await.unwrap_or_else(|_| BootstrapOutcome::Uncertain { reason: "KV bootstrap deadline exceeded".into() });
+    if result == BootstrapOutcome::Success {
+        // No controller remains to monitor engines, reconnect, or change routes.
+        tasks.detach_all();
+    } else {
+        session.cancel();
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
+    result
 }
 
 /// Local application target. Keeping transport separate allows socket-level
@@ -150,6 +231,12 @@ pub trait RecoveryTarget: Send + Sync {
         &self,
         events: Vec<dynamo_kv_router::protocols::PlacementEvent>,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn publish_live(
+        &self,
+        events: Vec<dynamo_kv_router::protocols::PlacementEvent>,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        self.apply(events)
+    }
 }
 
 impl RecoveryTarget for dynamo_llm::kv_router::publisher::KvEventPublisher {
@@ -162,12 +249,18 @@ impl RecoveryTarget for dynamo_llm::kv_router::publisher::KvEventPublisher {
     async fn apply(&self, events: Vec<dynamo_kv_router::protocols::PlacementEvent>) -> Result<()> {
         self.publish_recovery_batch(events).await
     }
+    async fn publish_live(
+        &self,
+        events: Vec<dynamo_kv_router::protocols::PlacementEvent>,
+    ) -> Result<()> {
+        self.publish_placement_batch(events)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
 }
 
-/// Socket lifetimes are one recovery session: automatic reconnect is disabled
-/// so replacement-engine sequences cannot enter an existing cursor. The owner
-/// verifies the engine instance again before publishing readiness.
-pub async fn run_source<T: RecoveryTarget + 'static>(
+/// Receive replay and live events during startup, then consume live events.
+/// No engine lifecycle or runtime sequence-gap policy is implemented here.
+async fn run_source<T: RecoveryTarget + 'static>(
     source: ReplaySource,
     publisher: std::sync::Arc<T>,
     worker_id: u64,
@@ -175,7 +268,7 @@ pub async fn run_source<T: RecoveryTarget + 'static>(
     status: tokio::sync::watch::Sender<RecoveryStatus>,
 ) -> Result<()> {
     use dynamo_kv_router::{protocols::*, zmq_wire::*};
-    use futures::{SinkExt, StreamExt};
+    use futures::{FutureExt, SinkExt, StreamExt};
     use std::time::Duration;
     use tmq::{Context, Multipart};
 
@@ -194,9 +287,6 @@ pub async fn run_source<T: RecoveryTarget + 'static>(
     let mut live = tmq::subscribe(&context)
         .set_linger(0)
         .set_ipv6(true)
-        .set_reconnect_ivl(-1)
-        .set_rcvhwm(8)
-        .set_maxmsgsize(LIMIT as i64)
         .monitor("inproc://live-monitor", monitor_events)
         .connect(&source.endpoint)?
         .subscribe(source.topic.as_bytes())?;
@@ -204,7 +294,6 @@ pub async fn run_source<T: RecoveryTarget + 'static>(
     let mut replay = tmq::dealer(&context)
         .set_linger(0)
         .set_ipv6(true)
-        .set_reconnect_ivl(-1)
         .set_rcvhwm(8)
         .set_maxmsgsize(LIMIT as i64)
         .monitor("inproc://replay-monitor", monitor_events)
@@ -242,11 +331,12 @@ pub async fn run_source<T: RecoveryTarget + 'static>(
             _ = cancel.cancelled() => return Ok(()),
             result = tokio::time::timeout(TIMEOUT, replay.send(request)) => { result??; }
         }
+        // Validate the local application path even for an empty replay.
+        publisher.apply(Vec::new()).await?;
         // An inactivity timeout is uncertainty, never evidence of expired history.
         let mut deadline = tokio::time::Instant::now() + TIMEOUT;
         loop {
             let (sequence, payload) = tokio::select! {
-                biased;
                 _ = cancel.cancelled() => return Ok(()),
                 _ = live_monitor.next() => bail!("KV live connection lost"),
                 _ = replay_monitor.next() => bail!("KV replay connection lost"),
@@ -281,6 +371,22 @@ pub async fn run_source<T: RecoveryTarget + 'static>(
             )
             .await?;
         }
+        // Replay End can arrive while live messages are already queued. Merge
+        // those before deciding whether the startup handoff still has a gap.
+        while let Some(message) = live.next().now_or_never() {
+            let (sequence, payload) =
+                decode_live(message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??)?;
+            apply_batch(
+                &mut cursor,
+                sequence,
+                payload,
+                &mut normalizer,
+                publisher.as_ref(),
+                WorkerWithDpRank::new(worker_id, source.dp_rank),
+                &status,
+            )
+            .await?;
+        }
         if cursor.gap().is_none() {
             break;
         }
@@ -289,6 +395,7 @@ pub async fn run_source<T: RecoveryTarget + 'static>(
     }
     drop(replay);
     drop(replay_monitor);
+    drop(live_monitor);
     let bootstrap_next = cursor.next();
     drop(cursor);
     status.send_replace(RecoveryStatus::Ready);
@@ -296,22 +403,29 @@ pub async fn run_source<T: RecoveryTarget + 'static>(
         let message = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(()),
-            _ = live_monitor.next() => bail!("KV live connection lost"),
             message = live.next() => message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??,
         };
-        let (sequence, payload) = decode_live(message)?;
-        // Discard queued overlap with bootstrap; otherwise trust live PUB/SUB
-        // delivery, just like the ordinary KV listener. No runtime gap repair.
+        let (sequence, payload) = match decode_live(message) {
+            Ok(batch) => batch,
+            Err(error) => {
+                tracing::warn!(%error, "Invalid live KV envelope");
+                continue;
+            }
+        };
+        // Discard queued overlap with bootstrap; otherwise use ordinary live
+        // admission without completion acknowledgements or runtime gap repair.
         if sequence < bootstrap_next {
             continue;
         }
-        apply_payload(
+        match normalize_payload(
             &payload,
             &mut normalizer,
             publisher.as_ref(),
             WorkerWithDpRank::new(worker_id, source.dp_rank),
-        )
-        .await?;
+        ) {
+            Ok(events) => publisher.publish_live(events).await?,
+            Err(error) => tracing::warn!(%error, "Invalid live KV batch"),
+        }
     }
 }
 
@@ -340,17 +454,19 @@ async fn apply_batch<T: RecoveryTarget>(
         status.send_replace(RecoveryStatus::Recovering);
     }
     while let Some((_, payload)) = cursor.pop_contiguous()? {
-        apply_payload(&payload, normalizer, publisher, worker).await?;
+        publisher
+            .apply(normalize_payload(&payload, normalizer, publisher, worker)?)
+            .await?;
     }
     Ok(())
 }
 
-async fn apply_payload<T: RecoveryTarget>(
+fn normalize_payload<T: RecoveryTarget>(
     payload: &[u8],
     normalizer: &mut dynamo_kv_router::zmq_wire::ZmqEventNormalizer,
     publisher: &T,
     worker: dynamo_kv_router::protocols::WorkerWithDpRank,
-) -> Result<()> {
+) -> Result<Vec<dynamo_kv_router::protocols::PlacementEvent>> {
     let batch = dynamo_kv_router::zmq_wire::decode_event_batch(payload)?;
     anyhow::ensure!(
         !batch
@@ -367,8 +483,7 @@ async fn apply_payload<T: RecoveryTarget>(
             events.push(event);
         }
     }
-    publisher.apply(events).await?;
-    Ok(())
+    Ok(events)
 }
 
 #[cfg(test)]
@@ -390,6 +505,7 @@ mod socket_tests {
         events: Mutex<Vec<KvCacheEvent>>,
         next: AtomicU64,
         fail: bool,
+        block_first: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     }
     impl RecoveryTarget for Target {
         fn block_size(&self) -> u32 {
@@ -400,6 +516,14 @@ mod socket_tests {
         }
         async fn apply(&self, events: Vec<PlacementEvent>) -> Result<()> {
             anyhow::ensure!(!self.fail, "injected application failure");
+            if events
+                .first()
+                .is_some_and(|event| event.event.event_id == 0)
+                && let Some((entered, release)) = &self.block_first
+            {
+                entered.notify_one();
+                release.notified().await;
+            }
             self.events
                 .lock()
                 .unwrap()
@@ -474,6 +598,114 @@ mod socket_tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_waits_for_every_rank_then_leaves_live_listeners_running() {
+        let mut first = Fixture::new();
+        let mut second = Fixture::new();
+        second.source.dp_rank = 1;
+        let a = Arc::new(Target::default());
+        let b = Arc::new(Target::default());
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(bootstrap_sources(
+            vec![first.source.clone(), second.source.clone()],
+            BTreeMap::from([(0, a.clone()), (1, b.clone())]),
+            1,
+            cancel.clone(),
+            Duration::from_secs(10),
+        ));
+        let id = first.request(0).await;
+        first.send(&id, 0, payload(0)).await;
+        first.send(&id, -1, vec![]).await;
+        let id = second.request(0).await;
+        assert!(!task.is_finished());
+        second.send(&id, 0, payload(1)).await;
+        second.send(&id, -1, vec![]).await;
+        assert_eq!(task.await.unwrap(), BootstrapOutcome::Success);
+        assert_eq!(a.events.lock().unwrap().len(), 1);
+        assert_eq!(b.events.lock().unwrap().len(), 1);
+        second
+            .live
+            .send(Multipart::from(vec![
+                vec![],
+                2_u64.to_be_bytes().to_vec(),
+                payload(1),
+            ]))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while b.events.lock().unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_distinguishes_missing_history_from_deadline() {
+        for missing in [true, false] {
+            let mut fixture = Fixture::new();
+            let cancel = CancellationToken::new();
+            let task = tokio::spawn(bootstrap_sources(
+                vec![fixture.source.clone()],
+                BTreeMap::from([(0, Arc::new(Target::default()))]),
+                1,
+                cancel,
+                Duration::from_secs(1),
+            ));
+            let id = fixture.request(0).await;
+            if missing {
+                fixture.send(&id, 500, payload(0)).await;
+            }
+            let outcome = task.await.unwrap();
+            if missing {
+                assert_eq!(
+                    outcome,
+                    BootstrapOutcome::MissingHistory {
+                        dp_rank: 0,
+                        expected: 0,
+                        got: 500
+                    }
+                );
+            } else {
+                assert!(matches!(outcome, BootstrapOutcome::Uncertain { .. }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_deadline_includes_local_application() {
+        struct BlockedTarget(std::sync::atomic::AtomicBool);
+        impl RecoveryTarget for BlockedTarget {
+            fn block_size(&self) -> u32 {
+                16
+            }
+            fn next_event_id(&self) -> u64 {
+                0
+            }
+            async fn apply(&self, _: Vec<PlacementEvent>) -> Result<()> {
+                self.0.store(true, Ordering::Relaxed);
+                std::future::pending().await
+            }
+        }
+        let fixture = Fixture::new();
+        let target = Arc::new(BlockedTarget(std::sync::atomic::AtomicBool::new(false)));
+        let outcome = bootstrap_sources(
+            vec![fixture.source],
+            BTreeMap::from([(0, target.clone())]),
+            1,
+            CancellationToken::new(),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(
+            target.0.load(Ordering::Relaxed),
+            "must reach local application before timing out"
+        );
+        assert!(matches!(outcome, BootstrapOutcome::Uncertain { .. }));
     }
 
     #[tokio::test]
@@ -558,6 +790,96 @@ mod socket_tests {
     }
 
     #[tokio::test]
+    async fn bootstrap_resolves_live_overlap_gap_before_success() {
+        let mut fixture = Fixture::new();
+        let target = Arc::new(Target::default());
+        let cancel = CancellationToken::new();
+        let (tx, mut rx) = watch::channel(RecoveryStatus::Recovering);
+        let task = tokio::spawn(run_source(
+            fixture.source.clone(),
+            target.clone(),
+            1,
+            cancel.clone(),
+            tx,
+        ));
+        let id = fixture.request(0).await;
+        fixture
+            .live
+            .send(Multipart::from(vec![
+                vec![],
+                3_u64.to_be_bytes().to_vec(),
+                payload(0),
+            ]))
+            .await
+            .unwrap();
+        // Wait until the live batch has been buffered ahead of sequence zero.
+        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        fixture.send(&id, 0, payload(0)).await;
+        fixture.send(&id, -1, vec![]).await;
+        let id = fixture.request(1).await;
+        assert!(matches!(*rx.borrow(), RecoveryStatus::Recovering));
+        fixture.send(&id, 1, payload(0)).await;
+        fixture.send(&id, 2, payload(0)).await;
+        fixture.send(&id, 3, payload(0)).await;
+        fixture.send(&id, -1, vec![]).await;
+        until(&mut rx, |s| matches!(s, RecoveryStatus::Ready)).await;
+        assert_eq!(target.events.lock().unwrap().len(), 4);
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_live_gap_at_replay_end_is_resolved_before_success() {
+        let mut fixture = Fixture::new();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let target = Arc::new(Target {
+            block_first: Some((entered.clone(), release.clone())),
+            ..Default::default()
+        });
+        let cancel = CancellationToken::new();
+        let (tx, mut rx) = watch::channel(RecoveryStatus::Recovering);
+        let task = tokio::spawn(run_source(
+            fixture.source.clone(),
+            target.clone(),
+            1,
+            cancel.clone(),
+            tx,
+        ));
+        let id = fixture.request(0).await;
+        fixture.send(&id, 0, payload(0)).await;
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        fixture
+            .live
+            .send(Multipart::from(vec![
+                vec![],
+                3_u64.to_be_bytes().to_vec(),
+                payload(0),
+            ]))
+            .await
+            .unwrap();
+        fixture.send(&id, -1, vec![]).await;
+        // Let both socket transports deliver while application is held at the
+        // explicit barrier. The end marker and live batch must be queued.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release.notify_one();
+        let id = fixture.request(1).await;
+        assert!(matches!(*rx.borrow(), RecoveryStatus::Recovering));
+        fixture.send(&id, 1, payload(0)).await;
+        fixture.send(&id, 2, payload(0)).await;
+        fixture.send(&id, -1, vec![]).await;
+        until(&mut rx, |s| matches!(s, RecoveryStatus::Ready)).await;
+        assert_eq!(target.events.lock().unwrap().len(), 4);
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn expired_prefix_is_reported_before_end_or_large_suffix() {
         let mut fixture = Fixture::new();
         let cancel = CancellationToken::new();
@@ -615,9 +937,9 @@ mod socket_tests {
     }
 
     #[tokio::test]
-    async fn disconnected_publisher_ends_session_without_reconnecting() {
+    async fn disconnect_during_bootstrap_is_uncertainty() {
         let mut fixture = Fixture::new();
-        let (tx, mut rx) = watch::channel(RecoveryStatus::Recovering);
+        let (tx, rx) = watch::channel(RecoveryStatus::Recovering);
         let task = tokio::spawn(run_source(
             fixture.source.clone(),
             Arc::new(Target::default()),
@@ -625,9 +947,7 @@ mod socket_tests {
             CancellationToken::new(),
             tx,
         ));
-        let id = fixture.request(0).await;
-        fixture.send(&id, -1, vec![]).await;
-        until(&mut rx, |s| matches!(s, RecoveryStatus::Ready)).await;
+        let _id = fixture.request(0).await;
         drop(fixture.live);
         assert!(
             tokio::time::timeout(Duration::from_secs(5), task)

@@ -105,14 +105,6 @@ macro_rules! delegate_service {
     ($($method:ident($request:ty) -> $response:ty;)*) => {
         #[tonic::async_trait]
         impl SglangService for ControlledService {
-            type WatchEngineStateStream = <SglangMockerService as SglangService>::WatchEngineStateStream;
-            async fn watch_engine_state(&self, request: Request<pb::WatchEngineStateRequest>) -> Result<Response<Self::WatchEngineStateStream>, Status> {
-                self.inner.watch_engine_state(request).await
-            }
-            async fn shutdown(&self, request: Request<pb::ShutdownRequest>) -> Result<Response<pb::ShutdownResponse>, Status> {
-                self.inner.shutdown(request).await
-            }
-
             type TextGenerateStream = <SglangMockerService as SglangService>::TextGenerateStream;
             type GenerateStream = BoxStream<'static, Result<pb::GenerateResponse, Status>>;
             type ChatCompleteStream = <SglangMockerService as SglangService>::ChatCompleteStream;

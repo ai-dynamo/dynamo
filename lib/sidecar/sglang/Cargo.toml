@@ -23,7 +23,6 @@ path = "src/main.rs"
 dynamo-backend-common = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }
-dynamo-kv-router = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
 anyhow = { workspace = true }

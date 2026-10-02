@@ -35,9 +35,6 @@ service SglangService
   rpc Score(OpenAIRequest) returns (OpenAIResponse);
   rpc Rerank(OpenAIRequest) returns (OpenAIResponse);
 
-  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
-  rpc WatchEngineState(WatchEngineStateRequest) returns (stream EngineStateSnapshot);
-
   // Admin/Ops RPCs
   rpc StartProfile(StartProfileRequest) returns (StartProfileResponse);
   rpc StopProfile(StopProfileRequest) returns (StopProfileResponse);
@@ -357,18 +354,4 @@ message UpdateWeightsResponse
 {
   bool success = 1;
   string message = 2;
-}
-
-// Shutdown initiates SGLang's configured SIGTERM procedure, not a drain override.
-message ShutdownRequest {}
-message ShutdownResponse {}
-message WatchEngineStateRequest {}
-message EngineStateSnapshot
-{
-  uint64 instance_id = 1;
-  uint64 revision = 2;
-  bool healthy = 3;
-  bool is_pause = 4;
-  GetModelInfoResponse model_info = 5;
-  GetServerInfoResponse server_info = 6;
 }

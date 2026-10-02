@@ -603,6 +603,16 @@ impl KvEventPublisher {
             })
     }
 
+    /// Admit already-normalized live events to the ordinary asynchronous path.
+    pub fn publish_placement_batch(
+        &self,
+        events: Vec<PlacementEvent>,
+    ) -> Result<(), mpsc::error::SendError<Vec<PlacementEvent>>> {
+        self.tx
+            .send(PublisherInput::Events(events))
+            .map_err(|error| mpsc::error::SendError(error.0.into_events()))
+    }
+
     /// Apply a recovery batch to the local index before returning. This scoped
     /// path preserves ordinary publishers' asynchronous admission contract.
     pub async fn publish_recovery_batch(&self, events: Vec<PlacementEvent>) -> anyhow::Result<()> {
