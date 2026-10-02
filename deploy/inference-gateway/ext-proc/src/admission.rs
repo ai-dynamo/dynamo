@@ -9,6 +9,7 @@
 //! shared with the selection service.
 
 use dynamo_kv_router::scheduling::KvSchedulerError;
+use dynamo_llm::http::service::metrics::request_deadline_exceeded;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
 use crate::picker::PickError;
@@ -52,6 +53,11 @@ impl RouterRejectionExt for RouterRejection {
 /// Classify an error from a routing call. Walks the whole chain, so added
 /// context cannot hide the rejection.
 pub fn classify_router_error(error: &anyhow::Error) -> RouterRejection {
+    // Same check as the Frontend. Other `DeadlineExceeded` errors are transport
+    // timeouts and are not backpressure.
+    if request_deadline_exceeded(error.as_ref()) {
+        return RouterRejection::Overloaded;
+    }
     for cause in error.chain() {
         if let Some(dynamo_error) = cause.downcast_ref::<DynamoError>()
             && let Some(rejection) = classify_error_class(dynamo_error.class())
@@ -75,10 +81,6 @@ fn classify_error_class(class: ErrorType) -> Option<RouterRejection> {
         ErrorType::CapacityExhausted => Some(RouterRejection::Overloaded),
         ErrorType::Unavailable => Some(RouterRejection::Unavailable),
         ErrorType::InvalidRequest => Some(RouterRejection::BadRequest),
-        // TODO(epp-deadline-429): queue deadlines (reason
-        // `router.queue_deadline_exceeded`, 429 in the selection service) and
-        // transport timeouts (504 elsewhere here) share `DeadlineExceeded`.
-        // Split on the reason before mapping it; both fall back to 503 until then.
         _ => None,
     }
 }
@@ -86,6 +88,7 @@ fn classify_error_class(class: ErrorType) -> Option<RouterRejection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::error::ErrorReason;
 
     fn anyhow_from(error: KvSchedulerError) -> anyhow::Error {
         error.into()
@@ -134,6 +137,28 @@ mod tests {
         let wrapped = anyhow_from(KvSchedulerError::AllEligibleWorkersOverloaded)
             .context("decode selection failed");
         assert_eq!(classify_router_error(&wrapped), RouterRejection::Overloaded);
+    }
+
+    #[test]
+    fn queue_deadline_classifies_as_overloaded() {
+        let queue_deadline: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::DeadlineExceeded)
+            .reason(ErrorReason::new("router.queue_deadline_exceeded").unwrap())
+            .message("internal router detail that must not reach the client")
+            .build()
+            .into();
+        assert_eq!(
+            classify_router_error(&queue_deadline.context("decode selection failed")),
+            RouterRejection::Overloaded
+        );
+    }
+
+    #[test]
+    fn transport_timeout_is_not_backpressure() {
+        assert_eq!(
+            classify_router_error(&dynamo_error(ErrorType::DeadlineExceeded)),
+            RouterRejection::Unavailable
+        );
     }
 
     #[test]
