@@ -1079,6 +1079,8 @@ class _ReasoningTokenCounter:
         for attribute in (
             "think_end_token",
             "tool_start_token",
+            "_tool_start_token",
+            "_tool_end_token",
             "TEXT_START_TOKEN",
             "ACTION_START_TOKEN",
             "RESPONSE_OPEN",
@@ -1161,7 +1163,9 @@ class _ReasoningTokenCounter:
             "TEXT_START_TOKEN",
             "ACTION_START_TOKEN",
             "RESPONSE_OPEN",
-        ) or (end_attribute == "tool_start_token" and normal_text):
+        ) or (
+            end_attribute in ("tool_start_token", "_tool_start_token") and normal_text
+        ):
             # A tool marker may be literal reasoning (e.g. a detector requiring
             # it at line start). Exclude it only when the parser passes it on.
             count -= marker_width

@@ -4984,7 +4984,7 @@ HARMONY_MARKERS = [
 @pytest.fixture(scope="module")
 def reasoning_tokenizer():
     tokenizer = copy.deepcopy(get_tokenizer(MODEL))
-    # Register Cohere channel markers and Kimi's XTML special-token pieces.
+    # Register channel markers as atomic tokens, as in their model vocabularies.
     tokenizer.add_special_tokens(
         {
             "additional_special_tokens": HARMONY_MARKERS
@@ -4996,6 +4996,10 @@ def reasoning_tokenizer():
                 "<|open|>",
                 "<|close|>",
                 "<|sep|>",
+                "<|inner_prefix|>",
+                "<|inner_suffix|>",
+                "<|tools_prefix|>",
+                "<|tools_suffix|>",
             ]
         }
     )
@@ -5114,6 +5118,19 @@ class TestReasoningTokenUsage:
             self._count(tokenizer, "qwen3", '<tool_call>{"name":"f"}</tool_call>') == 0
         )
 
+    def test_apertus_inner_tool_span_is_excluded(self, reasoning_tokenizer):
+        tokenizer = reasoning_tokenizer
+        before = self._ids(tokenizer, "<|inner_prefix|>" + self.REASONING)
+        tool = self._ids(tokenizer, "<|tools_prefix|>[") + self._ids(
+            tokenizer, '{"name":"f"}]<|tools_suffix|>'
+        )
+        after = self._ids(tokenizer, "Check again.<|inner_suffix|>")
+        ids = before + tool + after + self._ids(tokenizer, "It is 4.")
+        for step in range(1, len(ids) + 1):
+            post = self._post(tokenizer, "apertus2509")
+            self._feed(post, ids, step=step)
+            assert post.reasoning_token_count == len(before) + len(after), step
+
     def test_tool_marker_ignored_by_detector_remains_reasoning(self, tokenizer):
         reasoning = f"<think>{self.REASONING}<tool_call>literal</think>"
         assert self._count(tokenizer, "deepseek-r1", reasoning + "It is 4.") == len(
@@ -5146,8 +5163,6 @@ class TestReasoningTokenUsage:
         ids=["reasoning-content-reasoning", "consecutive-reasoning-blocks"],
     )
     def test_count_is_identical_for_every_chunk_size(self, reasoning_tokenizer, blocks):
-        # Regression: when one chunk crossed several reasoning/content
-        # boundaries, the count depended on the chunk size.
         text = "".join(blocks)
         expected = sum(
             len(self._ids(reasoning_tokenizer, block))
