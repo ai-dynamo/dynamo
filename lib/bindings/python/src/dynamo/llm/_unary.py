@@ -73,6 +73,16 @@ class LLMUnaryClient:
     def __init__(self, client: _RoundRobinClient) -> None:
         self._client = client
 
+    @classmethod
+    async def connect(
+        cls, runtime: DistributedRuntime, endpoint_name: str
+    ) -> LLMUnaryClient:
+        """Connect to an endpoint after a routable instance is available."""
+
+        client = await runtime.endpoint(endpoint_name).client()
+        await client.wait_for_instances()
+        return cls(client)
+
     async def complete(
         self,
         request: Mapping[str, Any],

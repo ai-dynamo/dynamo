@@ -174,6 +174,55 @@ def _request() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_llm_unary_client_connect_waits_for_routable_instance() -> None:
+    ready = asyncio.Event()
+    waiting = asyncio.Event()
+
+    async def wait_for_instances() -> list[int]:
+        waiting.set()
+        await ready.wait()
+        return [1]
+
+    client = Mock()
+    client.wait_for_instances = AsyncMock(side_effect=wait_for_instances)
+    endpoint = Mock()
+    endpoint.client = AsyncMock(return_value=client)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    task = asyncio.create_task(LLMUnaryClient.connect(runtime, "vision.generator.generate"))
+    await waiting.wait()
+    assert not task.done()
+    ready.set()
+    connected = await task
+
+    runtime.endpoint.assert_called_once_with("vision.generator.generate")
+    endpoint.client.assert_awaited_once_with()
+    client.wait_for_instances.assert_awaited_once_with()
+    assert isinstance(connected, LLMUnaryClient)
+    assert connected._client is client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_at", ["client", "readiness"])
+async def test_llm_unary_client_connect_propagates_errors(failure_at: str) -> None:
+    client = Mock()
+    client.wait_for_instances = AsyncMock()
+    endpoint = Mock()
+    endpoint.client = AsyncMock(return_value=client)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    if failure_at == "client":
+        endpoint.client.side_effect = RuntimeError("client failed")
+    else:
+        client.wait_for_instances.side_effect = RuntimeError("readiness failed")
+
+    with pytest.raises(RuntimeError, match=f"{failure_at} failed"):
+        await LLMUnaryClient.connect(runtime, "vision.generator.generate")
+
+
+@pytest.mark.asyncio
 async def test_llm_unary_client_collects_tokens_and_terminal_metadata() -> None:
     stream = _Stream(
         [
