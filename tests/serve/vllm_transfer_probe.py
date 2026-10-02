@@ -14,9 +14,7 @@ _record_transfer = NixlKVConnectorStats.record_transfer
 def record_transfer(self, result):
     _record_transfer(self, result)
     payload = json.dumps({"bytes": result.totalBytes, "descriptors": result.descCount})
-    with open(
-        os.environ["SIDECAR_NATIVE_TRANSFER_PROBE"], "a", encoding="utf-8"
-    ) as probe:
+    with open(os.environ["DYN_TEST_TRANSFER_PROBE"], "a", encoding="utf-8") as probe:
         probe.write(payload + "\n")
 
 

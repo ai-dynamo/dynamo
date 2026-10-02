@@ -3140,7 +3140,6 @@ dependencies = [
  "futures",
  "libc",
  "prost-types 0.14.3",
- "reqwest 0.12.28",
  "serde_json",
  "tempfile",
  "tokio",
