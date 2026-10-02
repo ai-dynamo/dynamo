@@ -838,11 +838,21 @@ def test_response_cancel_aborts_generation(after_first_delta):
 
 @pytest.mark.parametrize("signal", ["stop_generating", "kill"])
 @pytest.mark.parametrize("pending", ["factory", "first_frame", "next_frame"])
-def test_context_cancellation_closes_pending_text_generation(signal, pending):
+@pytest.mark.parametrize("cancel_response", [False, True])
+def test_context_cancellation_closes_pending_text_generation(
+    signal, pending, cancel_response
+):
     async def scenario():
         started = asyncio.Event()
         closed = asyncio.Event()
         context = _Context()
+
+        async def cleanup():
+            if cancel_response:
+                # Disconnect while response.cancel is already aborting the engine.
+                getattr(context, signal)()
+            await asyncio.sleep(0)
+            closed.set()
 
         async def chat_completion(messages, max_output_tokens):
             del messages, max_output_tokens
@@ -851,8 +861,7 @@ def test_context_cancellation_closes_pending_text_generation(signal, pending):
                     started.set()
                     await asyncio.Event().wait()
                 finally:
-                    await asyncio.sleep(0)
-                    closed.set()
+                    await cleanup()
 
             async def frames():
                 try:
@@ -861,8 +870,7 @@ def test_context_cancellation_closes_pending_text_generation(signal, pending):
                     started.set()
                     await asyncio.Event().wait()
                 finally:
-                    await asyncio.sleep(0)
-                    closed.set()
+                    await cleanup()
 
             return frames()
 
@@ -875,12 +883,18 @@ def test_context_cancellation_closes_pending_text_generation(signal, pending):
             yield _text_item("Wait")
             yield {"type": "response.create"}
             await started.wait()
-            getattr(context, signal)()
+            if cancel_response:
+                yield {"type": "response.cancel"}
+            else:
+                getattr(context, signal)()
 
         result = [event async for event in handler.generate(request_stream(), context)]
         assert closed.is_set()
         assert any(event["type"] == "response.created" for event in result)
-        assert not any(event["type"] == "response.done" for event in result)
+        responses = [event for event in result if event["type"] == "response.done"]
+        assert len(responses) == int(cancel_response)
+        if cancel_response:
+            assert responses[0]["response"]["status"] == "cancelled"
 
     asyncio.run(asyncio.wait_for(scenario(), timeout=1))
 
@@ -1402,3 +1416,58 @@ def test_native_transcription_emits_before_commit_and_feeds_tokens_back():
     assert events[-1]["transcript"] == "word word "
     assert events[-1]["usage"]["input_tokens"] == 3
     assert events[-1]["usage"]["output_tokens"] == 4
+
+
+@pytest.mark.parametrize("operation", ["create_chat_completion", "render_chat_request"])
+def test_text_serving_preserves_error_message(monkeypatch, caplog, operation):
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+    from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
+
+    from dynamo.vllm.realtime.serving import build_realtime_text_factories
+
+    monkeypatch.setattr(OpenAIServingChat, "__init__", lambda self, **kwargs: None)
+    monkeypatch.setattr(
+        "vllm.renderers.online_renderer.OnlineRenderer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.realtime.serving._build_models", lambda **kwargs: None
+    )
+    message = "The model has no chat template configured"
+
+    async def fail_request(self, request):
+        return ErrorResponse(
+            error=ErrorInfo(message=message, type="BadRequestError", code=400)
+        )
+
+    monkeypatch.setattr(OpenAIServingChat, operation, fail_request)
+
+    async def generate(prompt, **kwargs):
+        async for item in prompt:
+            yield item
+
+    engine = SimpleNamespace(
+        model_config=None,
+        renderer=None,
+        generate=generate,
+        vllm_config=SimpleNamespace(
+            cache_config=SimpleNamespace(enable_prefix_caching=True, block_size=16)
+        ),
+    )
+    create_chat_completion, prefill_text = build_realtime_text_factories(
+        engine_client=engine,
+        model_name=TEXT_MODEL,
+        model_path=TEXT_MODEL,
+        chat_template_path=None,
+    )
+
+    async def updates():
+        yield "Hello"
+
+    if operation == "create_chat_completion":
+        with pytest.raises(ValueError, match=message):
+            asyncio.run(create_chat_completion([{"role": "user", "content": "Hi"}], 32))
+    else:
+        asyncio.run(prefill_text([], updates()))
+        assert caplog.messages == [
+            f"realtime text prefill disabled for this turn: {message}"
+        ]

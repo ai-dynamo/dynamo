@@ -74,6 +74,7 @@ def build_realtime_text_factories(
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+    from vllm.entrypoints.serve.engine.protocol import ErrorResponse
     from vllm.inputs import tokens_input
     from vllm.renderers.online_renderer import OnlineRenderer
     from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -129,9 +130,8 @@ def build_realtime_text_factories(
             stream_options={"include_usage": True},
         )
         response = await serving.create_chat_completion(request)
-        if not hasattr(response, "__aiter__"):
-            message = getattr(response, "message", "Chat request failed")
-            raise ValueError(message)
+        if isinstance(response, ErrorResponse):
+            raise ValueError(response.error.message)
         return response
 
     async def render_tokens(messages: list[dict[str, str]]) -> list[int]:
@@ -142,9 +142,8 @@ def build_realtime_text_factories(
             continue_final_message=True,
         )
         rendered = await serving.render_chat_request(request)
-        if not isinstance(rendered, tuple):
-            message = getattr(rendered, "message", "Chat prompt rendering failed")
-            raise ValueError(message)
+        if isinstance(rendered, ErrorResponse):
+            raise ValueError(rendered.error.message)
         _, engine_inputs = rendered
         if len(engine_inputs) != 1:
             raise ValueError("Realtime text prefill requires one rendered prompt")

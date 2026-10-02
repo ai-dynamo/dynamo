@@ -313,6 +313,7 @@ class _TextPrefill:
     ) -> None:
         self.text = ""
         self._text_bytes = 0
+        self._cancel_requested = False
         self._updated = asyncio.Event()
         self.task: asyncio.Task[None] = asyncio.create_task(
             factory(messages, self.updates())
@@ -336,7 +337,8 @@ class _TextPrefill:
     def commit(self) -> None:
         # Final generation reuses completed prefix blocks. Finishing another
         # warming generation here would put speculative work on its critical path.
-        if not self.task.cancelling():
+        if not self._cancel_requested:
+            self._cancel_requested = True
             self.task.cancel()
 
     async def cancel(self) -> None:
@@ -433,13 +435,11 @@ class RealtimeTextHandler:
         usage = None
         finish_reason = None
         stream = None
-        task = asyncio.current_task()
-        assert task is not None
         generation_active = True
 
         def cancel_generation(_: asyncio.Future[bool]) -> None:
-            if generation_active and not task.cancelling():
-                task.cancel()
+            if generation_active:
+                turn.cancel()
 
         # Interrupt pending factory/frame awaits on disconnect, not on input EOF.
         stopped = context.async_killed_or_stopped()
