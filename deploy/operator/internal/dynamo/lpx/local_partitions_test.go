@@ -1,0 +1,234 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package lpx
+
+import (
+	"testing"
+
+	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+)
+
+func TestProjectModelV2LocalPartitions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		pipeline          Pipeline
+		selection         *dynamov1beta1.LPXLocalPartitions
+		wantErr           string
+		wantAgents        int
+		wantCompilerIDs   []int64
+		wantConnectors    int
+		wantRuntimeIDs    string
+		wantLocalIDs      []int
+		wantSameAsAllLPUs bool
+	}{
+		{
+			name: "omitted selection keeps every partition on LPUs", pipeline: PipelineLPX,
+			wantAgents: 17, wantCompilerIDs: []int64{7, 8, 11}, wantConnectors: 1,
+			wantRuntimeIDs: "7\n11", wantSameAsAllLPUs: true,
+		},
+		{
+			name: "independent partition runs locally", pipeline: PipelineLPX,
+			selection:  &dynamov1beta1.LPXLocalPartitions{IDs: []int32{11}},
+			wantAgents: 9, wantCompilerIDs: []int64{7, 8}, wantConnectors: 1,
+			wantRuntimeIDs: "7", wantLocalIDs: []int{11},
+		},
+		{
+			name: "selected chain runs locally as one runtime partition", pipeline: PipelineLPX,
+			selection:  &dynamov1beta1.LPXLocalPartitions{IDs: []int32{7}},
+			wantAgents: 8, wantCompilerIDs: []int64{11}, wantConnectors: 0,
+			wantRuntimeIDs: "11", wantLocalIDs: []int{7},
+		},
+		{
+			name: "every partition runs locally", pipeline: PipelineLPX,
+			selection:  &dynamov1beta1.LPXLocalPartitions{All: true},
+			wantAgents: 0, wantCompilerIDs: []int64{}, wantConnectors: 0,
+			wantRuntimeIDs: "", wantLocalIDs: []int{7, 11},
+		},
+		{
+			name: "chain member is not a runtime partition", pipeline: PipelineLPX,
+			selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int32{8}},
+			wantErr:   "localPartitions references partition 8 of the prop-sync chain that starts at partition 7; select 7",
+		},
+		{
+			name: "unknown partition", pipeline: PipelineLPX,
+			selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int32{99}},
+			wantErr:   "localPartitions references partition 99, which the build does not contain",
+		},
+		{
+			name: "LPU-only pipeline has no Cyborg GPU", pipeline: PipelineSingle,
+			selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int32{11}},
+			wantErr:   "unsupported LPX runtime: localPartitions requires a hybrid build with a Cyborg conductor",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Create a hybrid build with chain 7-8 and an independent partition 11")
+			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			build := normalized.build
+			build.CompilationMode = BuildCompilationModeHybrid
+			firstTopology, err := build.Partitions[0].Topology.withChipCount(8)
+			require.NoError(t, err)
+			secondTopology, err := build.Partitions[1].Topology.withChipCount(64)
+			require.NoError(t, err)
+			build.Partitions[0].Topology = firstTopology
+			build.Partitions[1].Topology = secondTopology
+			third := build.Partitions[1]
+			third.SourcePartitionID = 11
+			third.PartPath = "part-11"
+			build.Partitions = append(build.Partitions, third)
+			build.SelectedPropSyncChains = [][]int{{7, 8}}
+
+			t.Log("Project the build with the selected local partitions")
+			projections, err := appendModelProjections(nil, ModelProjectionInput{
+				Pipeline: test.pipeline, Models: []string{"default"}, BuildSnapshot: normalized,
+				LocalPartitions: test.selection,
+			})
+			if test.wantErr != "" {
+				require.EqualError(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			projection := projections[0]
+
+			t.Log("Request LPU placement only for the remote physical partitions")
+			spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
+			compilerIDs := make([]int64, 0, len(spec.Partitions))
+			for ordinal, partition := range spec.Partitions {
+				require.Equal(t, int64(ordinal), partition.Ordinal)
+				compilerIDs = append(compilerIDs, partition.CompilerPartitionID)
+			}
+			require.Equal(t, test.wantCompilerIDs, compilerIDs)
+			require.Len(t, spec.PropSyncConnectors, test.wantConnectors)
+			require.Equal(t, test.wantAgents, projection.AgentReplicas())
+
+			t.Log("Publish only remote runtime partitions to Agents and Cyborg")
+			require.Equal(t, test.wantRuntimeIDs, resolvedPartitionData([]*ModelProjection{projection})["partition_ids"])
+			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
+
+			t.Log("Keep the digest of an unselected workload stable")
+			baseline := projectTestBuild(t, normalized, PipelineLPX)
+			require.Equal(t, test.wantSameAsAllLPUs, projection.Digest() == baseline.Digest())
+		})
+	}
+}
+
+func TestApplyLocalPartitionIDs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		localIDs []int
+		env      []corev1.EnvVar
+		wantEnv  []corev1.EnvVar
+	}{
+		{
+			name:    "no local partitions leaves authored values",
+			env:     []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}},
+			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}},
+		},
+		{
+			name:     "resolved selection replaces authored values",
+			localIDs: []int{0, 2, 12},
+			env:      []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
+			wantEnv:  []corev1.EnvVar{{Name: "OTHER", Value: "kept"}, {Name: localPartitionIDsEnv, Value: "0,2,12"}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Publish the resolved local partitions into the Cyborg container")
+			container := &corev1.Container{Env: test.env}
+			applyLocalPartitionIDs(container, &ModelProjection{localPartitionIDs: test.localIDs})
+			require.Equal(t, test.wantEnv, container.Env)
+		})
+	}
+}
+
+func TestRenderHybridLocalPartitions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		selection        *dynamov1beta1.LPXLocalPartitions
+		wantAgents       int32
+		wantStartsAfter  []string
+		wantGroupMembers []string
+		wantLocalEnv     string
+	}{
+		{
+			name:       "omitted selection renders every LPU Agent",
+			wantAgents: 17, wantStartsAfter: []string{"agt"}, wantGroupMembers: []string{"agt", "cond"},
+		},
+		{
+			name: "partial selection renders Agents for remote partitions", selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int32{11}},
+			wantAgents: 9, wantStartsAfter: []string{"agt"}, wantGroupMembers: []string{"agt", "cond"}, wantLocalEnv: "11",
+		},
+		{
+			name: "all-local selection renders only Cyborg", selection: &dynamov1beta1.LPXLocalPartitions{All: true},
+			wantStartsAfter: []string{}, wantGroupMembers: []string{"cond"}, wantLocalEnv: "7,11",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Project a hybrid build with chain 7-8 and an independent partition 11")
+			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			build := normalized.build
+			build.CompilationMode = BuildCompilationModeHybrid
+			firstTopology, err := build.Partitions[0].Topology.withChipCount(8)
+			require.NoError(t, err)
+			chainTopology, err := build.Partitions[1].Topology.withChipCount(64)
+			require.NoError(t, err)
+			build.Partitions[0].Topology = firstTopology
+			build.Partitions[1].Topology = chainTopology
+			third := build.Partitions[1]
+			third.SourcePartitionID = 11
+			third.PartPath = "part-11"
+			build.Partitions = append(build.Partitions, third)
+			build.SelectedPropSyncChains = [][]int{{7, 8}}
+			projections, err := appendModelProjections(nil, ModelProjectionInput{
+				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
+			})
+			require.NoError(t, err)
+
+			t.Log("Render the hybrid workload")
+			rendered, err := renderSelectedForTest(renderTestPCS(true), projections, RenderInput{
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+			})
+			require.NoError(t, err)
+
+			t.Log("Render Agents only for remote partitions and start Cyborg after them")
+			var agentReplicas int32
+			for _, clique := range rendered.Spec.Template.Cliques {
+				if clique.Name == testAgentTemplateName {
+					agentReplicas = clique.Spec.Replicas
+				}
+			}
+			require.Equal(t, test.wantAgents, agentReplicas)
+			cyborg := namedClique(t, rendered, "cond")
+			require.Equal(t, test.wantStartsAfter, cyborg.Spec.StartsAfter)
+			require.ElementsMatch(t, test.wantGroupMembers, rendered.Spec.Template.PodCliqueScalingGroupConfigs[0].CliqueNames)
+
+			t.Log("Publish the resolved local partitions to Cyborg")
+			localEnv := ""
+			for _, variable := range cyborg.Spec.PodSpec.Containers[0].Env {
+				if variable.Name == localPartitionIDsEnv {
+					localEnv = variable.Value
+				}
+			}
+			require.Equal(t, test.wantLocalEnv, localEnv)
+		})
+	}
+}
