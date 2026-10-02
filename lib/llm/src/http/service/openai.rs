@@ -4110,6 +4110,8 @@ async fn handler_responses(
     response
 }
 
+/// Serve Responses requests through Chat Completions, retaining request metadata
+/// and tool identities for unary and streaming response reconstruction.
 #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 async fn responses(
     state: Arc<service_v2::State>,
@@ -4176,10 +4178,15 @@ async fn responses(
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
+        tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
+            request.inner.tools.as_deref().unwrap_or_default(),
+            Some(&request.inner.input),
+        )),
         model: request.inner.model.clone(),
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
         max_output_tokens: request.inner.max_output_tokens,
+        metadata: request.inner.metadata.clone(),
         parallel_tool_calls: request.inner.parallel_tool_calls,
         store: request.inner.store,
         tools: request.inner.tools.clone(),
@@ -5925,7 +5932,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::common::extensions::{AgentCompaction, NvExt};
+    use crate::protocols::common::extensions::NvExt;
     use crate::protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
@@ -6155,6 +6162,104 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_completion_stream_options_null_flags() {
+        for (options, expected) in [
+            (serde_json::json!(null), None),
+            (serde_json::json!({}), Some((false, false))),
+            (
+                serde_json::json!({"continuous_usage_stats": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+            (
+                serde_json::json!({"include_usage": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": true, "continuous_usage_stats": null}),
+                Some((true, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": null, "continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+        ] {
+            let mut payload = serde_json::json!({
+                "model": "test-model", "stream": true, "stream_options": options,
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            let chat: NvCreateChatCompletionRequest =
+                parse_json_request("chat completions", &serde_json::to_vec(&payload).unwrap())
+                    .unwrap();
+            payload.as_object_mut().unwrap().remove("messages");
+            payload["prompt"] = serde_json::json!("hello");
+            let completion: NvCreateCompletionRequest =
+                parse_json_request("completions", &serde_json::to_vec(&payload).unwrap()).unwrap();
+            crate::engines::ValidateRequest::validate(&chat).unwrap();
+            crate::engines::ValidateRequest::validate(&completion).unwrap();
+            for parsed in [chat.inner.stream_options, completion.inner.stream_options] {
+                assert_eq!(
+                    parsed.map(|opts| (opts.include_usage, opts.continuous_usage_stats)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_rejects_invalid_types() {
+        for options in [
+            serde_json::json!(false),
+            serde_json::json!({"include_usage": "true", "continuous_usage_stats": null}),
+            serde_json::json!({"include_usage": null, "continuous_usage_stats": 0}),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "model": "test-model", "messages": [{"role": "user", "content": "hello"}],
+                "prompt": "hello", "stream_options": options,
+            }))
+            .unwrap();
+            assert_eq!(
+                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                parse_json_request::<NvCreateCompletionRequest>("completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let body =
+            br#"{"model":"test-model","messages":42,"stream_options":{"include_usage":null}}"#;
+        assert_eq!(
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_preserves_duplicate_field_errors() {
+        let chat_body = br#"{
+            "model":"first-model",
+            "model":"second-model",
+            "messages":[{"role":"user","content":"hello"}],
+            "stream_options":{"include_usage":null}
+        }"#;
+        let chat_error =
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", chat_body)
+                .unwrap_err();
+        assert_eq!(chat_error.0, StatusCode::BAD_REQUEST);
+        assert!(chat_error.1.message.contains("duplicate field `model`"));
+    }
+
+    #[test]
     fn test_parse_chat_completion_request_escapes_control_chars_in_strings() {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"log \x1b[33mPK\x03\x04\"}]}";
 
@@ -6338,6 +6443,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            thinking_token_budget: None,
         }
     }
 
@@ -6407,10 +6513,11 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
-                compaction: Some(AgentCompaction {
-                    trigger: Some("automatic".to_string()),
-                    ..Default::default()
-                }),
+                agent_headers: std::collections::BTreeMap::from([(
+                    "x-claude-code-compaction".into(),
+                    vec!["automatic".into()],
+                )])
+                .into(),
                 input_trigger: None,
             },
         );
@@ -6428,11 +6535,8 @@ mod tests {
         );
         assert_eq!(agent_context.session_final, Some(true));
         assert_eq!(
-            agent_context
-                .compaction
-                .as_ref()
-                .and_then(|compaction| compaction.trigger.as_deref()),
-            Some("automatic")
+            agent_context.agent_headers["x-claude-code-compaction"],
+            ["automatic"]
         );
     }
 
@@ -6453,11 +6557,8 @@ mod tests {
             .expect("agent context attached");
         assert_eq!(agent_context.session_id, "codex-thread");
         assert_eq!(
-            agent_context
-                .compaction
-                .as_ref()
-                .and_then(|compaction| compaction.implementation.as_deref()),
-            Some("local")
+            agent_context.agent_headers["x-codex-turn-metadata"],
+            [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
     }
 
@@ -8150,6 +8251,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -8184,6 +8286,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -8432,6 +8535,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
 
@@ -8464,6 +8568,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -8495,6 +8600,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -8526,6 +8632,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -8559,6 +8666,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -8590,6 +8698,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);

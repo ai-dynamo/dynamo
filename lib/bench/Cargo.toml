@@ -49,6 +49,7 @@ mooncake = [
   "dep:dynamo-mocker",
   "dep:indicatif",
   "dep:libc",
+  "dep:sha2",
   "dep:tokio-util",
 ]
 multiturn = [
@@ -58,7 +59,7 @@ multiturn = [
   "dep:indicatif",
   "dep:rand",
 ]
-offline-replay = ["dep:blake3", "dep:dynamo-mocker"]
+offline-replay = ["dep:blake3", "dep:dynamo-mocker", "dep:libc"]
 router-bench = ["dynamo-kv-router/bench"]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
@@ -74,11 +75,6 @@ router-test-support = [
 ]
 satf = ["dep:dynamo-data-gen"]
 request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
-weka-to-agentic-mooncake = [
-  "dep:dynamo-data-gen",
-  "dep:dynamo-mocker",
-  "dep:tempfile",
-]
 test-support = [
   "router-test-support",
   "dynamo-mocker/test-support",
@@ -111,20 +107,10 @@ name = "request_trace_to_mooncake"
 path = "request_trace_to_mooncake.rs"
 required-features = ["request-trace-to-mooncake"]
 
-[[bin]]
-name = "weka_to_agentic_mooncake"
-path = "weka_to_agentic_mooncake.rs"
-required-features = ["weka-to-agentic-mooncake"]
-
 [[test]]
 name = "request_trace_to_mooncake"
 path = "tests/request_trace_to_mooncake.rs"
 required-features = ["request-trace-to-mooncake"]
-
-[[test]]
-name = "weka_to_agentic_mooncake"
-path = "tests/weka_to_agentic_mooncake.rs"
-required-features = ["weka-to-agentic-mooncake"]
 
 [[bench]]
 name = "offline_replay_bench"
