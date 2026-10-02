@@ -4858,6 +4858,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 "stages": [],
                 "points_real_kv": 0,
                 "points_fake_fallback": 0,
+                "points_gate_skipped": 0,
                 "giant_kv_threshold": self._kvwarm_giant_threshold(),
                 "giant_kv_repeats": self._kvwarm_giant_repeats(),
             }
@@ -5473,7 +5474,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 raise RuntimeError(
                     "KVWARM: attention-DP runs measure real-KV points only, and the "
                     f"warm-up plan cannot cover explicit decode point(s) {coords} "
-                    "(rung depth trimmed by the per-rank pool / slot budget); lower "
+                    "(rung depth trimmed by the per-rank pool / slot budget, or a "
+                    "native point's footprint exceeds the per-rank pool); lower "
                     "the requested batch or context, or run without attention-DP"
                 )
             logger.warning(
@@ -5869,7 +5871,8 @@ class InstrumentedScheduler(AsyncScheduler):
             # fallback) and release the survivors.
             logger.warning(
                 "KVWARM: %d chain(s) of stage batch=%s vanished during the "
-                "build; failing the stage, its points fall back to fake injection",
+                "build; failing the stage, its points fall back to fake injection "
+                "(skipped under attention-DP)",
                 len(vanished),
                 self._kvwarm_stage_batch,
             )
@@ -6002,7 +6005,7 @@ class InstrumentedScheduler(AsyncScheduler):
         meta["stages"].append({"batch": batch, "failed": True, **detail})
         logger.warning(
             "KVWARM: stage batch=%s failed (%s); its points fall back to fake "
-            "injection",
+            "injection (skipped under attention-DP)",
             batch,
             detail,
         )
@@ -6581,17 +6584,21 @@ class InstrumentedScheduler(AsyncScheduler):
             return None
         if self._kvwarm_flag_on():
             meta = self._kvwarm_meta_init()
+            stamp: str | None
             if kvwarm_real:
                 meta["points_real_kv"] += 1
+                stamp = "kvwarm_real_kv"
+            elif meta.get("warm_eligible") is False:
+                # The gate rejected the configuration: synthetic KV is the
+                # design, not a fallback, and the row regime reads
+                # skip:<reason> (``_kvwarm_seed_regime``).
+                meta["points_gate_skipped"] += 1
+                stamp = None
             else:
                 meta["points_fake_fallback"] += 1
-            point = replace(
-                point,
-                sample_reasons=[
-                    *point.sample_reasons,
-                    "kvwarm_real_kv" if kvwarm_real else "kvwarm_fake_fallback",
-                ],
-            )
+                stamp = "kvwarm_fake_fallback"
+            if stamp is not None:
+                point = replace(point, sample_reasons=[*point.sample_reasons, stamp])
         self._bench_current_point = point
         self._bench_current_fpms = []
         self._bench_extra_steps_left = 1
@@ -6893,10 +6900,12 @@ class InstrumentedScheduler(AsyncScheduler):
             # all-or-nothing publish gate. The admission step has the same total, so
             # the correction requires a recorded steady sample (``kvwarm_steady_sample``,
             # set by both save paths): a point that hit its deadline with the admission
-            # FPM alone stays a validation skip.
+            # FPM alone stays a validation skip. Fake means any warm-up point without
+            # real KV: gate-skipped points take the same path but carry no stamp.
             measured = scheduled.get("sum_decode_kv_tokens")
             if (
-                "kvwarm_fake_fallback" in (point.sample_reasons or ())
+                self._kvwarm_flag_on()
+                and "kvwarm_real_kv" not in (point.sample_reasons or ())
                 and point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
                 and measured == point.total_kv_read_tokens - point.batch_size
                 and bool(fpm.get("kvwarm_steady_sample"))

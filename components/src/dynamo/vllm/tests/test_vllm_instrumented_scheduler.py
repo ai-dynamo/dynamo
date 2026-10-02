@@ -5825,6 +5825,91 @@ def test_kvwarm_native_decode_dispatch_uses_real_continuation_and_provenance():
     assert stub._kvwarm_meta["points_real_kv"] == 1
 
 
+def _kvwarm_uncovered_dispatch_stub(warm_eligible, skip_reason=None):
+    """Native-layout decode dispatch of a point no warm-up stage covers."""
+    stub, _ = _kvwarm_native_resume_stub(False)
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=7, batch_size=2, total_kv_read_tokens=9
+    )
+    # The gate's verdict as ``_kvwarm_warm_eligible`` leaves it before dispatch.
+    stub._kvwarm_meta_init().update(
+        warm_eligible=warm_eligible, skip_reason=skip_reason
+    )
+    stub._kvwarm_eligible_cache = warm_eligible
+    stub._kvwarm_covers = lambda point, lengths: False
+    stub._bench_inject_fake_decode = MagicMock(
+        return_value=SimpleNamespace(total_num_scheduled_tokens=point.batch_size)
+    )
+    stub._bench_grid = deque([point])
+    stub._bench_current_point = None
+    stub._bench_drain_pending = False
+    stub._bench_frees_pending = lambda: False
+    stub._bench_stop_at_timeout_boundary = lambda phase: False
+    stub.max_model_len = 8192
+    return stub
+
+
+@pytest.mark.core
+def test_kvwarm_gate_skipped_decode_point_records_skip_regime(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_uncovered_dispatch_stub(False, "dense_model_content_insensitive")
+
+    assert stub._bench_step_decode() is not None
+
+    point = stub._bench_current_point
+    stub._bench_inject_fake_decode.assert_called_once_with([4, 3])
+    assert "kvwarm_fake_fallback" not in point.sample_reasons
+    assert "kvwarm_real_kv" not in point.sample_reasons
+    assert stub._kvwarm_seed_regime(point) == "skip:dense_model_content_insensitive"
+    assert stub._kvwarm_meta["points_gate_skipped"] == 1
+    assert stub._kvwarm_meta["points_fake_fallback"] == 0
+
+
+@pytest.mark.core
+def test_kvwarm_eligible_capacity_fallback_still_records_fake_fallback(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_uncovered_dispatch_stub(True)
+    # Capacity fallback: the planner zeroed the depth of a point the gate accepted.
+    stub._kvwarm_plan = {stub._kvwarm_plan_key(stub._bench_grid[0]): 0}
+
+    assert stub._bench_step_decode() is not None
+
+    point = stub._bench_current_point
+    stub._bench_inject_fake_decode.assert_called_once_with([4, 3])
+    assert "kvwarm_fake_fallback" in point.sample_reasons
+    assert stub._kvwarm_seed_regime(point) == "fake_fallback"
+    assert stub._kvwarm_meta["points_fake_fallback"] == 1
+    assert stub._kvwarm_meta["points_gate_skipped"] == 0
+
+
+@pytest.mark.core
+def test_kvwarm_group_skip_labels_decode_points_like_the_ineligible_rank(
+    monkeypatch,
+):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    # Attention-DP: rank 0's own gate failed and rank 1's passed; the
+    # negotiated envelope carries the group verdict to both.
+    ranks = [
+        _kvwarm_uncovered_dispatch_stub(False, "dataset_empty"),
+        _kvwarm_uncovered_dispatch_stub(True),
+    ]
+    points = []
+    for stub in ranks:
+        stub._bench_dp_size = 2
+        stub._bench_negotiated_capacity = SimpleNamespace(kvwarm_eligible=False)
+        stub._kvwarm_prepare("decode")
+
+        assert stub._bench_step_decode() is not None
+
+        points.append(stub._bench_current_point)
+        assert stub._kvwarm_meta["points_gate_skipped"] == 1
+        assert stub._kvwarm_meta["points_fake_fallback"] == 0
+    # Ranks compare whole points: the READY/RESULT digests and the rank merge.
+    assert points[0] == points[1]
+    assert ranks[0]._kvwarm_seed_regime(points[0]) == "skip:dataset_empty"
+    assert ranks[1]._kvwarm_seed_regime(points[1]) == "skip:peer_ineligible"
+
+
 @pytest.mark.core
 @pytest.mark.parametrize("context,repeats", [(124, 3), (125, 2), (126, 1)])
 def test_kvwarm_native_dp_dispatch_caps_repeats_by_negotiated_model_length(
@@ -6987,7 +7072,9 @@ def test_giant_fake_off_by_batch_correction_requires_a_steady_sample():
     sample (``kvwarm_steady_sample``, set by both save paths) may be accepted at the
     measured coordinate. A giant fake point that reached its deadline with the
     admission FPM alone is a validation skip, not a decode measurement."""
-    stub = SimpleNamespace(_kvwarm_giant_threshold=lambda: 1000)
+    stub = SimpleNamespace(
+        _kvwarm_giant_threshold=lambda: 1000, _kvwarm_flag_on=lambda: True
+    )
     point = BenchmarkPoint(
         point_type="decode",
         benchmark_id=1,
@@ -7066,6 +7153,37 @@ def test_two_fpm_save_path_skips_an_admission_only_giant_sample(monkeypatch):
     assert [s.reason for s in stub._bench_skipped_points] == [
         "measured_decode_context_mismatch"
     ]
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "warmup,reasons,accepted",
+    [
+        ("on", ["kvwarm_fake_fallback"], True),
+        ("on", [], True),
+        ("on", ["kvwarm_real_kv"], False),
+        ("off", [], False),
+    ],
+    ids=["fake_fallback", "gate_skipped", "real_kv", "legacy"],
+)
+def test_giant_off_by_batch_correction_accepts_every_synthetic_warmup_point(
+    monkeypatch, warmup, reasons, accepted
+):
+    """Gate-skipped points run the same synthetic injection and giant repeats as
+    fake fallbacks but carry no stamp; the correction still accepts them, and
+    still rejects real-KV and legacy points."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", warmup)
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_THRESHOLD", "1000")
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    point = replace(_giant_fake_point(), sample_reasons=reasons)
+    steady = {
+        "scheduled_requests": {"num_decode_requests": 2, "sum_decode_kv_tokens": 1998},
+        "kvwarm_steady_sample": True,
+    }
+
+    assert stub._bench_fpm_validation_failure(point, steady) == (
+        None if accepted else "measured_decode_context_mismatch"
+    )
 
 
 def test_kvwarm_shadow_registration_rejects_too_shallow_chain():
