@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 from _deps import HAS_CUDA, HAS_GMS
@@ -44,12 +45,20 @@ vmm.host_register(ctypes.addressof(data), 256)
 vmm.memcpy_h2d_async(mapping.base, ctypes.addressof(data), 256, stream)
 vmm.stream_synchronize(stream)
 session.retain_allocations()
+if sys.argv[2] == 'pending':
+    import torch
+    pending = ctypes.create_string_buffer(b'\\xff' * 256)
+    vmm.host_register(ctypes.addressof(pending), 256)
+    with torch.cuda.stream(torch.cuda.ExternalStream(int(stream))):
+        torch.cuda._sleep(2_000_000_000)
+        vmm.memcpy_h2d_async(mapping.base, ctypes.addressof(pending), 256, stream)
 os.kill(os.getpid(), signal.SIGKILL)
 """
 
 
 @pytest.mark.timeout(30)
-def test_physical_kv_bytes_survive_client_sigkill(tmp_path):
+@pytest.mark.parametrize("phase", ["completed", "pending"])
+def test_physical_kv_bytes_survive_client_sigkill(tmp_path, phase):
     vmm = CudaVMM()
     vmm.ensure_initialized()
     vmm.runtime_set_device(0)
@@ -60,7 +69,7 @@ def test_physical_kv_bytes_survive_client_sigkill(tmp_path):
         thread.start()
         try:
             crashed = subprocess.run(
-                [sys.executable, "-c", _WRITE_AND_CRASH, path],
+                [sys.executable, "-c", _WRITE_AND_CRASH, path, phase],
                 capture_output=True,
                 text=True,
                 timeout=20,
@@ -89,6 +98,15 @@ def test_physical_kv_bytes_survive_client_sigkill(tmp_path):
                 stream = vmm.stream_create_nonblocking()
                 vmm.host_register(ctypes.addressof(output), 256)
                 try:
+                    if phase == "pending":
+                        # A replacement must be able to overwrite its mapping
+                        # without a predecessor's queued DMA writing afterward.
+                        output.raw = bytes(range(256))
+                        vmm.memcpy_h2d_async(
+                            mapping.base, ctypes.addressof(output), 256, stream
+                        )
+                        vmm.stream_synchronize(stream)
+                        time.sleep(3)
                     vmm.memcpy_d2h_async(
                         ctypes.addressof(output), mapping.base, 256, stream
                     )

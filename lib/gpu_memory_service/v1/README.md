@@ -30,9 +30,13 @@ server. The restored process then imports those allocations at its preserved
 virtual addresses.
 
 KV TensorImpls, mapping records, allocation IDs, sizes, and VA reservations also
-survive. KV physical backing and contents do not. Wake creates fresh backing
+survive. By default, KV physical backing and contents do not. Wake creates fresh backing
 under the saved IDs and maps it at the preserved VAs before vLLM prepares the
 cache for use.
+
+The opt-in [Snapshot prefix-cache recovery](../README.md#experimental-snapshot-prefix-cache-recovery)
+path retains serving KV backing and restores the native prefix index. Bootstrap
+KV remains ephemeral so the initial sleeping Snapshot can still be captured.
 
 ## Ownership
 
@@ -195,9 +199,9 @@ local weight memory is asleep. Resume order is KV then weights.
 
 Every connection verifies the physical GPU identity. The container-local device
 ordinal selects both the rank-local socket and the `device-<ordinal>` artifact
-directory; a predecessor server identity is not persisted. V1 does not
-reconstruct models, retain KV contents, scan raw mappings, validate
-model-specific layouts, or implement SGLang integration.
+directory. A sleeping bootstrap can attach to a fresh GMS server; an attached
+persistent KV client additionally rejects a change of server incarnation.
+V1 does not reconstruct models or implement SGLang integration.
 
 ## Running V1
 
