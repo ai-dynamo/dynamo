@@ -154,6 +154,14 @@ func (a *LegacyGrowthAdapter) Observe(
 
 	record := state.Transition
 	changed := false
+
+	// A terminal record cannot be repurposed as evidence for an uncorrelated later collective.
+	if engineState.Scaling && (record.Phase == enginegroup.MembershipTransitionPhaseCommitted ||
+		record.Phase == enginegroup.MembershipTransitionPhaseRejected) {
+		return enginegroup.MembershipObservation{}, fmt.Errorf(
+			"SGLang reports scaling after terminal transition %q", record.TransitionID,
+		)
+	}
 	if record.Phase == enginegroup.MembershipTransitionPhaseRejected &&
 		engineState.EffectiveEPSize == record.TargetEPSize {
 		return enginegroup.MembershipObservation{}, fmt.Errorf(
@@ -178,8 +186,10 @@ func (a *LegacyGrowthAdapter) Observe(
 			changed = true
 		}
 	} else if engineState.Scaling {
-		if record.Phase != enginegroup.MembershipTransitionPhasePending {
+		if record.Phase != enginegroup.MembershipTransitionPhasePending || record.Failure != nil {
 			record.Phase = enginegroup.MembershipTransitionPhasePending
+			record.Failure = nil
+			record.ResultTopology = nil
 			changed = true
 		}
 	} else if record.Phase == enginegroup.MembershipTransitionPhasePending {
@@ -264,6 +274,12 @@ func (a *LegacyGrowthAdapter) Apply(
 	}
 
 	response, err := a.Client.Scale(ctx, targetSize)
+
+	// A backend exception or unsuccessful response is not proof that the dispatched collective cannot commit later.
+	if err == nil && response.Status != "ok" {
+		err = fmt.Errorf("SGLang scale outcome is ambiguous: status=%q pending_ep_size=%d: %s",
+			response.Status, response.PendingEPSize, response.Message)
+	}
 	if err != nil {
 		state.Transition.Phase = enginegroup.MembershipTransitionPhaseUnknown
 		state.Transition.Failure = &enginegroup.Failure{
@@ -275,9 +291,6 @@ func (a *LegacyGrowthAdapter) Apply(
 			return fmt.Errorf("SGLang scale request failed (%v) and persist Unknown failed: %w", err, saveErr)
 		}
 		return err
-	}
-	if response.Status != "ok" {
-		return a.persistRejection(ctx, state, snapshot, target, "ScaleRejected", response.Message)
 	}
 	return nil
 }
@@ -352,6 +365,7 @@ func (a *LegacyGrowthAdapter) persistRejection(
 		ControlRevision: target.ControlRevision,
 		TargetDigest:    target.TargetDigest,
 		BaseTopology:    target.BaseTopology,
+		TargetEPSize:    target.BaseTopology.ReplicaCount() + int32(len(target.Joining)),
 		Phase:           enginegroup.MembershipTransitionPhaseRejected,
 		Failure:         terminalFailure(reason, message),
 	}

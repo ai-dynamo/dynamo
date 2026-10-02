@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 )
 
@@ -41,7 +42,8 @@ func TestProjectConsumerContract(t *testing.T) {
 			ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "large-manager"}},
 		},
 		Spec: corev1.PodSpec{
-			NodeName: "node-a",
+			NodeName:      "node-a",
+			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
 				Name:    "main",
 				Image:   "large-image",
@@ -49,7 +51,10 @@ func TestProjectConsumerContract(t *testing.T) {
 				Args:    []string{"-m", "dynamo"},
 				Env:     []corev1.EnvVar{{Name: "LARGE", Value: "discard-me"}},
 				Resources: corev1.ResourceRequirements{
-					Limits: corev1.ResourceList{corev1.ResourceMemory: resourceQuantity("1Gi")},
+					Limits: corev1.ResourceList{
+						corev1.ResourceMemory:        resourceQuantity("1Gi"),
+						consts.KubeResourceGPUNvidia: resourceQuantity("4"),
+					},
 				},
 				ReadinessProbe: &corev1.Probe{InitialDelaySeconds: 10},
 			}},
@@ -154,7 +159,10 @@ func TestProjectConsumerContract(t *testing.T) {
 	})
 	t.Run("model retains Ready identity command and arguments", func(t *testing.T) {
 		require.Len(t, got.Spec.Containers, 1)
-		assert.Equal(t, corev1.Container{Name: "main", Command: []string{"python"}, Args: []string{"-m", "dynamo"}}, got.Spec.Containers[0])
+		assert.Equal(t, corev1.Container{
+			Name: "main", Command: []string{"python"}, Args: []string{"-m", "dynamo"},
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{consts.KubeResourceGPUNvidia: resourceQuantity("4")}},
+		}, got.Spec.Containers[0])
 		assert.Equal(t, []corev1.PodCondition{
 			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 			{
@@ -168,12 +176,12 @@ func TestProjectConsumerContract(t *testing.T) {
 		assert.Equal(t, corev1.PodRunning, got.Status.Phase)
 		require.Len(t, got.Status.ContainerStatuses, 2)
 		assert.Equal(t, "ImagePullBackOff", got.Status.ContainerStatuses[0].State.Waiting.Reason)
-		assert.Zero(t, got.Status.ContainerStatuses[0].RestartCount)
+		assert.Equal(t, int32(7), got.Status.ContainerStatuses[0].RestartCount)
 		assert.Equal(t, int32(17), got.Status.ContainerStatuses[1].State.Terminated.ExitCode)
 		assert.Equal(t, "worker failed", got.Status.ContainerStatuses[1].State.Terminated.Message)
 		require.Len(t, got.Status.InitContainerStatuses, 2)
 		assert.Equal(t, "ErrImagePull", got.Status.InitContainerStatuses[0].State.Waiting.Reason)
-		assert.Zero(t, got.Status.InitContainerStatuses[0].RestartCount)
+		assert.Equal(t, int32(3), got.Status.InitContainerStatuses[0].RestartCount)
 		assert.Equal(t, "GMS failed", got.Status.InitContainerStatuses[1].State.Terminated.Message)
 		assert.Equal(t, int32(5), got.Status.InitContainerStatuses[1].RestartCount)
 	})
@@ -189,11 +197,18 @@ func TestProjectConsumerContract(t *testing.T) {
 		assert.Empty(t, got.Spec.InitContainers[0].Env)
 		assert.Empty(t, got.Spec.Containers[0].Image)
 		assert.Empty(t, got.Spec.Containers[0].Env)
-		assert.Empty(t, got.Spec.Containers[0].Resources)
-		assert.Empty(t, got.Status.PodIP)
+		assert.NotContains(t, got.Spec.Containers[0].Resources.Limits, corev1.ResourceMemory)
+		assert.Empty(t, got.Spec.Containers[0].Resources.Requests)
 		assert.Empty(t, got.Status.ContainerStatuses[0].Image)
 		assert.Zero(t, got.Status.ContainerStatuses[1].State.Terminated.Signal)
 		assert.Empty(t, got.Status.ContainerStatuses[1].State.Terminated.ContainerID)
+	})
+
+	t.Run("Engine Group runtime retains addressing geometry and restart policy", func(t *testing.T) {
+		t.Log("Preserve the small bootstrap and identity fields consumed by cached Engine Group observations")
+		assert.Equal(t, "10.0.0.1", got.Status.PodIP)
+		assert.Equal(t, corev1.RestartPolicyNever, got.Spec.RestartPolicy)
+		assert.Equal(t, resourceQuantity("4"), got.Spec.Containers[0].Resources.Limits[consts.KubeResourceGPUNvidia])
 	})
 
 	first := got.DeepCopy()

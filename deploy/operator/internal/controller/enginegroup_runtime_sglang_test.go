@@ -14,6 +14,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/grovecapacity"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
@@ -32,7 +33,7 @@ func TestProductionRuntimeProviderResolvesSGLangEP1Profile(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
-	primary := testSGLangPrimaryPod()
+	primary := podcache.Project(testSGLangPrimaryPod())
 	clique := testSGLangMemberClique(primary)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(primary, clique).Build()
 	provider := newEngineGroupRuntimeProvider(kubeClient)

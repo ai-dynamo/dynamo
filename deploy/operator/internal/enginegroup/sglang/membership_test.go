@@ -225,6 +225,152 @@ func TestLegacyGrowthAdapterFailsClosedAfterAmbiguousDispatch(t *testing.T) {
 	require.NoError(t, adapter.Apply(ctx, "group-uid", target))
 }
 
+func TestLegacyGrowthAdapterResolvesAmbiguousResponses(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		timeout  bool
+	}{
+		{name: "unsuccessful response with pending target", response: `{"status":"error","message":"still joining","pending_ep_size":2}`},
+		{name: "unsuccessful response without pending evidence", response: `{"status":"error","message":"backend exception"}`},
+		{name: "transport timeout", timeout: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Establish an EP1 baseline and a concrete EP2 membership target")
+			ctx := t.Context()
+			engineSize := int32(1)
+			scaling := false
+			scaleCalls := 0
+			control, err := NewClient("http://sglang.test:9090", &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path == statePath {
+					return jsonResponse(fmt.Sprintf(`{"effective_ep_size":%d,"is_scaling_elastic_ep":%t}`, engineSize, scaling)), nil
+				}
+				scaleCalls++
+				if test.timeout {
+					return nil, context.DeadlineExceeded
+				}
+				return jsonResponse(test.response), nil
+			})})
+			require.NoError(t, err)
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			capacity := &testCapacityObserver{allocations: []enginegroup.CapacityAllocation{testAllocation(0), testAllocation(1)}}
+			adapter := &LegacyGrowthAdapter{
+				Client: control, Capacity: capacity, ProfileFingerprint: "profile-v1",
+				Journal: kubejournal.NewStore(kubeClient, "test", "group", "group-uid", "membership"),
+			}
+			initial, err := adapter.Observe(ctx, "group-uid", "")
+			require.NoError(t, err)
+			target := enginegroup.MembershipTarget{
+				ControlRevision: 1, TransitionID: "grow-1-2", TargetDigest: "target-digest",
+				BaseTopology: initial.CommittedTopology, Plan: testGrowPlan(),
+				Joining: []enginegroup.JoiningReplica{{ReplicaID: "replica-1", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-1", RuntimeIncarnation: "pod-1"}}}},
+			}
+
+			t.Log("Retain the exact dispatched target as Unknown rather than falsely rejecting it")
+			require.Error(t, adapter.Apply(ctx, "group-uid", target))
+			persisted := membershipJournal{}
+			_, err = adapter.Journal.Load(ctx, &persisted)
+			require.NoError(t, err)
+			require.NotNil(t, persisted.Transition)
+			require.Equal(t, int32(2), persisted.Transition.TargetEPSize)
+			observed, err := adapter.Observe(ctx, "group-uid", target.TransitionID)
+			require.NoError(t, err)
+			require.NotNil(t, observed.Transition)
+			require.Equal(t, enginegroup.MembershipTransitionPhaseUnknown, observed.Transition.Phase)
+			require.NotNil(t, observed.Transition.Failure)
+
+			t.Log("After adapter restart, an unchanged size cannot prove rejection or permit redispatch")
+			restarted := *adapter
+			require.NoError(t, restarted.Apply(ctx, "group-uid", target))
+			require.Equal(t, 1, scaleCalls)
+
+			t.Log("Recover Pending authority and clear the previous ambiguous failure evidence")
+			scaling = true
+			observed, err = restarted.Observe(ctx, "group-uid", target.TransitionID)
+			require.NoError(t, err)
+			require.Equal(t, enginegroup.MembershipTransitionPhasePending, observed.Transition.Phase)
+			require.Nil(t, observed.Transition.Failure)
+			require.Nil(t, observed.Transition.ResultTopology)
+
+			t.Log("Observe the eventual EP2 commit with unchanged transition correlation")
+			engineSize, scaling = 2, false
+			observed, err = restarted.Observe(ctx, "group-uid", target.TransitionID)
+			require.NoError(t, err)
+			require.Equal(t, enginegroup.MembershipTransitionPhaseCommitted, observed.Transition.Phase)
+			require.Equal(t, target.TransitionID, observed.Transition.TransitionID)
+			require.Equal(t, target.ControlRevision, observed.Transition.ControlRevision)
+			require.Equal(t, target.TargetDigest, observed.Transition.TargetDigest)
+			require.Nil(t, observed.Transition.Failure)
+			require.NotNil(t, observed.Transition.ResultTopology)
+			require.True(t, enginegroup.SameTopology(observed.CommittedTopology, *observed.Transition.ResultTopology))
+			require.Equal(t, int64(2), observed.CommittedTopology.Generation)
+
+			t.Log("Keep the terminal result observable after another adapter restart")
+			restarted = *adapter
+			replayed, err := restarted.Observe(ctx, "group-uid", target.TransitionID)
+			require.NoError(t, err)
+			require.Equal(t, observed, replayed)
+			require.NoError(t, restarted.Apply(ctx, "group-uid", target))
+			require.Equal(t, 1, scaleCalls)
+		})
+	}
+}
+
+func TestLegacyGrowthAdapterPreservesPreDispatchRejection(t *testing.T) {
+	t.Log("Observe an EP1 world and construct a request against an unrelated base generation")
+	scaling := false
+	scaleCalls := 0
+	control, err := NewClient("http://sglang.test:9090", &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == statePath {
+			return jsonResponse(fmt.Sprintf(`{"effective_ep_size":1,"is_scaling_elastic_ep":%t}`, scaling)), nil
+		}
+		scaleCalls++
+		return jsonResponse(`{"status":"ok"}`), nil
+	})})
+	require.NoError(t, err)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	adapter := &LegacyGrowthAdapter{
+		Client: control, Capacity: &testCapacityObserver{allocations: []enginegroup.CapacityAllocation{testAllocation(0)}},
+		ProfileFingerprint: "profile-v1",
+		Journal:            kubejournal.NewStore(kubeClient, "test", "group", "group-uid", "membership"),
+	}
+	initial, err := adapter.Observe(t.Context(), "group-uid", "")
+	require.NoError(t, err)
+	target := enginegroup.MembershipTarget{
+		ControlRevision: 1, TransitionID: "rejected-growth", TargetDigest: "target-digest",
+		BaseTopology: initial.CommittedTopology, Plan: testGrowPlan(),
+		Joining: []enginegroup.JoiningReplica{{ReplicaID: "replica-1", Members: []enginegroup.NativeMemberIncarnation{{ID: "dp-1", RuntimeIncarnation: "pod-1"}}}},
+	}
+	target.BaseTopology.Generation++
+
+	t.Log("Reject before dispatch, preserving the requested target and immutable correlation")
+	require.NoError(t, adapter.Apply(t.Context(), "group-uid", target))
+	require.Zero(t, scaleCalls)
+	rejected, err := adapter.Observe(t.Context(), "group-uid", target.TransitionID)
+	require.NoError(t, err)
+	require.Equal(t, enginegroup.MembershipTransitionPhaseRejected, rejected.Transition.Phase)
+	persisted := membershipJournal{}
+	_, err = adapter.Journal.Load(t.Context(), &persisted)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), persisted.Transition.TargetEPSize)
+
+	t.Log("An uncorrelated collective cannot turn this immutable rejection into Pending")
+	scaling = true
+	_, err = adapter.Observe(t.Context(), "group-uid", target.TransitionID)
+	require.ErrorContains(t, err, "scaling after terminal transition")
+	scaling = false
+	observed, err := adapter.Observe(t.Context(), "group-uid", target.TransitionID)
+	require.NoError(t, err)
+	require.Equal(t, rejected, observed)
+	require.NoError(t, adapter.Apply(t.Context(), "group-uid", target))
+	require.Zero(t, scaleCalls)
+}
+
 type testCapacityObserver struct {
 	allocations []enginegroup.CapacityAllocation
 }

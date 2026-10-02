@@ -13,6 +13,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
@@ -224,7 +225,7 @@ func TestObservationRejectsInvalidNativeCapacityBindings(t *testing.T) {
 				case "restarted-container":
 					pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", RestartCount: 1}}
 				}
-				require.NoError(t, fixture.client.Create(t.Context(), pod))
+				require.NoError(t, fixture.client.Create(t.Context(), podcache.Project(pod)))
 			}
 
 			t.Log("fail closed instead of reporting a partial or reassigned allocation set")
