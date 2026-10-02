@@ -289,6 +289,7 @@ pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     active_builds: usize,
     max_concurrent_builds: usize,
     next_build_generation: u64,
+    empty_group_grace: Duration,
 }
 
 impl<H: ControllerHost> ModelDiscoveryController<H> {
@@ -309,6 +310,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             active_builds: 0,
             max_concurrent_builds: max_concurrent_builds.max(1),
             next_build_generation: 1,
+            empty_group_grace: std::env::var("DYN_HTTP_MODEL_FAILOVER_WAIT_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_millis)
+                .unwrap_or_default(),
         }
     }
 
@@ -506,6 +512,32 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 retained.admission_tx.send_replace(Vec::new());
             }
             cancel_build(&old_status);
+            let retain = match &old_status {
+                GroupStatus::Ready { mdc_checksum, .. } if !self.empty_group_grace.is_zero() => {
+                    Some((
+                        mdc_checksum.clone(),
+                        Instant::now() + self.empty_group_grace,
+                    ))
+                }
+                GroupStatus::BlockedReady {
+                    mdc_checksum,
+                    deadline,
+                    ..
+                } if *deadline > Instant::now() => Some((mdc_checksum.clone(), *deadline)),
+                _ => None,
+            };
+            if let Some((mdc_checksum, deadline)) = retain {
+                // Keep the committed pipeline and its admission channel alive
+                // for in-flight migration. A compatible replacement can join
+                // this channel; a different fingerprint is rejected below.
+                group.status = GroupStatus::BlockedReady {
+                    mdc_checksum,
+                    committed_members: BTreeSet::new(),
+                    deadline,
+                };
+                self.groups.insert(key.clone(), group);
+                return;
+            }
             if status_has_commit(&old_status) {
                 self.host.remove_group(key);
             }
@@ -996,6 +1028,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
     fn release_due_retries(&mut self) {
         let now = Instant::now();
         let mut retained_retries = Vec::new();
+        let mut expired_empty = Vec::new();
         for (key, group) in &mut self.groups {
             let (mdc_checksum, deadline, committed_members) = match &group.status {
                 GroupStatus::Retrying {
@@ -1013,6 +1046,10 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     committed_members,
                     deadline,
                 } if *deadline <= now => {
+                    if group.cohorts.is_empty() {
+                        expired_empty.push(key.clone());
+                        continue;
+                    }
                     group.status = GroupStatus::Ready {
                         mdc_checksum: mdc_checksum.clone(),
                         committed_members: committed_members.clone(),
@@ -1031,6 +1068,10 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         }
         for key in retained_retries {
             self.reconcile_group(&key, false);
+        }
+        for key in expired_empty {
+            self.groups.remove(&key);
+            self.host.remove_group(&key);
         }
     }
 
@@ -1933,6 +1974,76 @@ mod tests {
 
         assert!(host.members(&group_key()).is_empty());
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn compatible_replacement_reuses_inflight_admission_channel() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        controller.empty_group_grace = Duration::from_secs(1);
+        let primary = instance(1, "same");
+        let shadow = instance(2, "same");
+        controller.apply_added(primary.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let old_admissions = host.admissions.lock().unwrap()[0].clone();
+
+        controller.apply_removed(&primary.key);
+        assert!(old_admissions.borrow().is_empty());
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+
+        controller.apply_added(shadow.clone());
+        assert_eq!(*old_admissions.borrow(), vec![2]);
+        assert_eq!(host.members(&group_key()), BTreeSet::from([shadow.key]));
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert!(
+            starts.try_recv().is_err(),
+            "compatible group should not rebuild"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_group_grace_expires_and_incompatible_replacement_isolated() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        controller.empty_group_grace = Duration::from_secs(1);
+        let primary = instance(1, "first");
+        let incompatible = instance(2, "second");
+        controller.apply_added(primary.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let old_admissions = host.admissions.lock().unwrap()[0].clone();
+
+        controller.apply_removed(&primary.key);
+        controller.apply_added(incompatible.clone());
+        assert!(old_admissions.borrow().is_empty());
+        assert!(old_admissions.has_changed().is_err());
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([incompatible.key])
+        );
+
+        controller.apply_removed(&instance(2, "second").key);
+        if let GroupStatus::BlockedReady { deadline, .. } =
+            &mut controller.groups.get_mut(&group_key()).unwrap().status
+        {
+            *deadline = Instant::now();
+        } else {
+            panic!("empty committed group should retain a bounded grace period");
+        }
+        controller.release_due_retries();
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 2);
+        assert!(!controller.groups.contains_key(&group_key()));
     }
 
     #[tokio::test]
