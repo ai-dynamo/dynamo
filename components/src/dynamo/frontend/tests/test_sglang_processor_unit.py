@@ -27,6 +27,7 @@ from _tool_guidance_parity import (
     parity_tool,
     tool_choice_value,
 )
+from jinja2.exceptions import TemplateError, UndefinedError
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -864,11 +865,15 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp is not None
         assert rp is not None
 
-    def test_minimax_m3_dynamo_aliases_are_normalized_for_sglang(self, monkeypatch):
+    @pytest.mark.parametrize("tokenizer", [None, object()])
+    def test_minimax_m3_dynamo_aliases_are_normalized_for_sglang(
+        self, monkeypatch, tokenizer
+    ):
         """Dynamo parser aliases should not leak into SGLang parser lookup."""
 
         # Test double: capture the parser name Dynamo passes to SGLang without
-        # depending on SGLang's real parser implementation.
+        # depending on SGLang's real parser implementation. Their signatures
+        # also cover SGLang versions without checkpoint-tokenizer support.
         class FakeFunctionCallParser:
             def __init__(self, *, tools, tool_call_parser):
                 self.tools = tools
@@ -906,6 +911,7 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
             },
             tool_call_parser_name="minimax-m3-nom",
             reasoning_parser_name="minimax_m3",
+            tokenizer=tokenizer,
         )
 
         assert tcp.tool_call_parser == "minimax-m3"
@@ -1151,6 +1157,73 @@ def test_structured_response_requires_effective_reasoning():
     assert not _guided_output_requires_reasoning(
         {"response_format": {"type": "text"}}, True, "deepseek-v4"
     )
+
+
+@pytest.mark.parametrize(
+    ("request_fields", "force_reasoning", "expected"),
+    [
+        ({}, True, True),
+        ({"response_format": {"type": "text"}}, True, True),
+        # A structural_tag response_format keeps the gpt-oss exception.
+        ({"response_format": {"type": "structural_tag"}}, True, False),
+    ],
+)
+def test_auto_tool_structural_tag_requires_effective_reasoning(
+    request_fields, force_reasoning, expected
+):
+    request = {"tool_choice": "auto", **request_fields}
+    guided_decoding = {"structural_tag": {}}
+    assert (
+        _guided_output_requires_reasoning(
+            request, force_reasoning, "gpt-oss", guided_decoding
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("thinking", [True, False])
+def test_kimi_k3_auto_tool_sets_reasoning_gate_pool(thinking, monkeypatch):
+    """Kimi K3's auto tool grammar forbids <|close|>think<|sep|>, so it must
+    only apply after thinking ends."""
+
+    class StubTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1, 2, 3]
+
+    monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", StubTokenizer())
+    monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "kimi_k3")
+    monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "kimi_k3")
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+
+    request = {
+        "model": "moonshotai/Kimi-K3",
+        "messages": [{"role": "user", "content": "Weather in San Francisco?"}],
+        "chat_template_kwargs": {"thinking": thinking},
+        "tool_choice": "auto",
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+    }
+    result = _preprocess_worker(request, MODEL, eos_token_ids=None)
+
+    guided_decoding = result.dynamo_preproc["sampling_options"]["guided_decoding"]
+    assert "structural_tag" in guided_decoding
+    assert result.dynamo_preproc["require_reasoning"] is thinking
 
 
 @pytest.mark.core
@@ -1483,7 +1556,10 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             is None
         )
 
-    def test_auto_tool_guidance_normalizes_minimax_m3_alias(self, monkeypatch):
+    @pytest.mark.parametrize("tokenizer", [None, object()])
+    def test_auto_tool_guidance_normalizes_minimax_m3_alias(
+        self, monkeypatch, tokenizer
+    ):
         tools = convert_tools(
             [
                 {
@@ -1516,6 +1592,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             {"tool_choice": "auto"},
             tool_call_parser_name="minimax_m3_nom",
             sglang_tools=tools,
+            tokenizer=tokenizer,
         )
 
         assert seen["tool_call_parser"] == "minimax-m3"
@@ -2010,6 +2087,82 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
 # ---------------------------------------------------------------------------
 # preprocess_chat_request
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.core
+class TestChatTemplateErrors:
+    @pytest.mark.parametrize(
+        ("stage", "error_type"),
+        [
+            ("render", error_type)
+            for error_type in (TemplateError, UndefinedError, TypeError, RuntimeError)
+        ]
+        + [
+            (stage, error_type)
+            for stage in ("messages", "tokens", "parsers")
+            for error_type in (TemplateError, TypeError)
+        ],
+    )
+    def test_render_error_boundary(self, tokenizer, monkeypatch, stage, error_type):
+        error = error_type("render failure")
+
+        def fail(*args, **kwargs):
+            raise error
+
+        if stage == "render":
+            monkeypatch.setattr(tokenizer, "apply_chat_template", fail)
+        else:
+            target = {
+                "messages": "_normalize_messages_for_template",
+                "tokens": "_normalize_prompt_token_ids",
+                "parsers": "create_parsers",
+            }[stage]
+            monkeypatch.setattr(sglang_prepost_module, target, fail)
+        classified = stage == "render" and error_type is not RuntimeError
+        with pytest.raises(PreprocessError if classified else error_type) as caught:
+            preprocess_chat_request(
+                {"model": MODEL, "messages": [{"role": "user", "content": "Hi"}]},
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+        assert str(caught.value) == "render failure"
+        assert (caught.value.__cause__ if classified else caught.value) is error
+
+    @pytest.mark.parametrize("effort", [None, "custom-budget", 32, "ultra"])
+    def test_template_owns_reasoning_values(self, tokenizer, monkeypatch, effort):
+        monkeypatch.setattr(
+            tokenizer,
+            "chat_template",
+            "{% if reasoning_effort is defined and reasoning_effort not in ['custom-budget', 32] %}{{ raise_exception('Unsupported reasoning_effort') }}{% endif %}Ready",
+        )
+        request = {"model": MODEL, "messages": [{"role": "user", "content": "Hi"}]}
+        if effort is not None:
+            request["chat_template_kwargs"] = {"reasoning_effort": effort}
+        engine = FakeRoutedEngine(
+            items=[
+                {
+                    "token_ids": tokenizer.encode("ok", add_special_tokens=False),
+                    "finish_reason": "stop",
+                }
+            ]
+        )
+        processor = SglangProcessor(tokenizer, engine, None, None, None)
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        if effort == "ultra":
+            with pytest.raises(
+                InvalidArgument, match="Unsupported reasoning_effort"
+            ) as caught:
+                asyncio.run(collect())
+            assert isinstance(caught.value.__cause__, PreprocessError)
+            assert isinstance(caught.value.__cause__.__cause__, TemplateError)
+            assert not engine.requests
+        else:
+            assert asyncio.run(collect())
+            assert len(engine.requests) == 1
 
 
 class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preprocessing (multi-turn assistant tool_calls, role handling)
@@ -4162,16 +4315,70 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         return asyncio.run(collect())
 
-    def test_routed_engine_is_error_yields_internal_error(self, tokenizer):
-        """is_error() True yields a single internal_error chunk with the comment text."""
+    @pytest.mark.parametrize("after_output", [False, True])
+    def test_routed_engine_is_error_yields_error_envelope(self, after_output):
+        """An annotated engine error terminates with a binding-compatible error frame."""
+        prefix = [{"token_ids": [ord("A")]}] if after_output else []
         items = self._run_stream(
-            tokenizer,
-            [FakeRoutedItem(None, is_error=True, comments=["backend disconnected"])],
+            self.ByteTokenizer(),
+            [
+                *prefix,
+                FakeRoutedItem(None, is_error=True, comments=["backend disconnected"]),
+                {"token_ids": [], "finish_reason": "stop"},
+            ],
         )
-        assert len(items) == 1
-        err = items[0]["error"]
-        assert err["type"] == "internal_error"
-        assert "backend disconnected" in err["message"]
+        assert len(items) == len(prefix) + 1
+        if after_output:
+            assert items[0]["choices"][0]["delta"]["content"] == "A"
+            assert items[0]["choices"][0]["finish_reason"] is None
+        assert items[-1] == {
+            "_dynamo_annotated": True,
+            "event": "error",
+            "comment": ["backend disconnected"],
+        }
+
+    @pytest.mark.parametrize("after_output", [False, True])
+    def test_routed_validation_exception_preserves_type_and_message(self, after_output):
+        """A typed iterator failure survives before or after an emitted delta."""
+        message = "Failed to compile json grammar: unsupported schema type"
+
+        class FailingEngine:
+            async def generate(self, preprocessed, **kwargs):
+                """Model the routed iterator raising a native validation exception."""
+
+                async def stream():
+                    if after_output:
+                        yield FakeRoutedItem({"token_ids": [ord("A")]})
+                    raise InvalidArgument(message)
+
+                return stream()
+
+        async def check():
+            tokenizer = self.ByteTokenizer()
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                routed_engine=FailingEngine(),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_ids=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            stream = processor._generate_and_stream(
+                "req-invalid", {"model": "test-model"}, {}, [], post
+            )
+            if after_output:
+                first = await anext(stream)
+                assert first["data"]["choices"][0]["delta"]["content"] == "A"
+                assert first["data"]["choices"][0]["finish_reason"] is None
+            with pytest.raises(InvalidArgument) as error:
+                await anext(stream)
+            assert str(error.value) == message
+            with pytest.raises(StopAsyncIteration):
+                await anext(stream)
+
+        asyncio.run(check())
 
     def test_routed_engine_none_data_is_skipped(self, tokenizer):
         """data() is None (e.g. comment-only event) is skipped, not yielded as error."""
@@ -4193,7 +4400,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             [{"status": "error", "message": "kv cache exhausted"}],
         )
         assert len(items) == 1
-        assert "error" in items[0]
+        assert items[0] == {
+            "_dynamo_annotated": True,
+            "event": "error",
+            "comment": ["kv cache exhausted"],
+        }
 
     def test_completed_batches_replace_decode_context(self):
         """Completed batches replace context instead of accumulating history."""

@@ -205,8 +205,57 @@ impl PolicyProfile {
     }
 }
 
+/// Process-wide cache and tracking settings, separate from policy parameters.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(transparent)]
+pub(super) struct RouterSettings(HashMap<String, serde_json::Value>);
+
+impl RouterSettings {
+    pub(super) fn apply(&self, config: &mut super::config::KvRouterConfig) -> Result<(), String> {
+        // Deserialize into each field's existing type, including nullable fields.
+        // Do not round-trip KvRouterConfig: it has process-local, non-wire fields.
+        macro_rules! apply_fields {
+            ($($field:ident),* $(,)?) => {
+                for (name, value) in &self.0 {
+                    match name.as_str() {
+                        $(stringify!($field) => {
+                            config.$field = serde_json::from_value(value.clone())
+                                .map_err(|error| format!("router.{name}: {error}"))?;
+                        })*
+                        _ => return Err(format!("unknown router setting: {name}")),
+                    }
+                }
+            };
+        }
+        apply_fields!(
+            host_cache_hit_weight,
+            disk_cache_hit_weight,
+            use_kv_events,
+            router_replica_sync,
+            router_track_active_blocks,
+            router_track_output_blocks,
+            router_assume_kv_reuse,
+            router_track_prefill_tokens,
+            router_tracking_hash,
+            router_tracking_key_file,
+            router_tracking_key_id,
+            router_prefill_load_model,
+            router_ttl_secs,
+            router_approximate_cache_policy,
+            router_event_threads,
+            use_remote_indexer,
+            serve_indexer,
+            enable_session_prefix_index,
+            shared_cache_type,
+            router_predicted_ttl_secs,
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouterPolicyConfig {
+    router: Option<RouterSettings>,
     root: Option<PolicyProfile>,
     models: HashMap<String, PolicyProfile>,
     worker_selection: Option<WorkerSelectionConfig>,
@@ -254,6 +303,10 @@ impl RouterPolicyConfig {
             .unwrap_or_else(|| PolicyProfile::synthetic(fallback_threshold, fallback_policy))
     }
 
+    pub(super) fn router(&self) -> Option<&RouterSettings> {
+        self.router.as_ref()
+    }
+
     /// Returns the process-wide worker-selection policy configuration, if present.
     pub fn worker_selection(&self) -> Option<&WorkerSelectionConfig> {
         self.worker_selection.as_ref()
@@ -273,6 +326,7 @@ impl RouterPolicyConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRouterPolicyConfig {
+    router: Option<RouterSettings>,
     default_policy_family: Option<String>,
     policy_classes: Option<Vec<RawPolicyClassConfig>>,
     uncached_isl_buckets: Option<Vec<RawUncachedIslBucket>>,
@@ -284,6 +338,11 @@ struct RawRouterPolicyConfig {
 
 impl RawRouterPolicyConfig {
     fn resolve(self) -> Result<RouterPolicyConfig, RouterPolicyConfigError> {
+        if let Some(router) = &self.router {
+            router
+                .apply(&mut super::config::KvRouterConfig::default())
+                .map_err(RouterPolicyConfigError::Validation)?;
+        }
         let root = match (
             self.default_policy_family,
             self.policy_classes,
@@ -327,17 +386,19 @@ impl RawRouterPolicyConfig {
             .request_classifier
             .map(|config| config.resolve())
             .transpose()?;
-        if root.is_none()
+        if self.router.is_none()
+            && root.is_none()
             && models.is_empty()
             && worker_selection.is_none()
             && request_classifier.is_none()
         {
             return Err(RouterPolicyConfigError::Validation(
-                "router policy config must define a root profile, at least one model profile, worker_selection, or request_classifier".to_string(),
+                "router policy config must define router settings, a root profile, at least one model profile, worker_selection, or request_classifier".to_string(),
             ));
         }
 
         Ok(RouterPolicyConfig {
+            router: self.router,
             root,
             models,
             worker_selection,

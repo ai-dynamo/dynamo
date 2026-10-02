@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCacheInput, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
+    WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
     WorkerSelectionPolicyFactory,
 };
@@ -97,7 +97,7 @@ fn least_loaded(load: &[WorkerLoadInput], rows: impl Iterator<Item = usize>) -> 
 
 fn select_row(
     parameters: &Parameters,
-    cache: &[WorkerCacheInput],
+    cache: WorkerCacheInputs<'_>,
     load: &[WorkerLoadInput],
     request_blocks: u64,
 ) -> Option<usize> {

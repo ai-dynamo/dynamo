@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compile old plugin implementations against the canonical registry and contracts.
+//! Compile legacy plugin import paths against the canonical registry and contracts.
+//! Scorer implementations use the current batch signature; old scalar signatures must migrate.
 //! TODO(v1.7): Remove the legacy import coverage when the compatibility exports are removed.
 
 use std::sync::Arc;
@@ -9,9 +10,9 @@ use std::sync::Arc;
 use dynamo_kv_router::plugins::{RouterPluginRegistry, request_classifier, worker_selection};
 use dynamo_kv_router::scheduling::{ClassifyFuture, ClassifyRequest, RequestClassifier};
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerType,
+    KvRouterConfig, RoutingPartitionRef, WorkerCandidate, WorkerCandidates, WorkerFilter,
+    WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerType,
 };
 
 struct LegacyPolicy;
@@ -24,7 +25,7 @@ impl WorkerFilter for LegacyPolicy {
     fn keep(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
+        candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let _: Option<&dynamo_kv_router::SessionContext> = context.session_context();
         let _: Option<u32> = context.expected_output_tokens();
@@ -41,12 +42,16 @@ impl WorkerScorer for LegacyPolicy {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let _: u64 = context.request_blocks();
-        let _: u32 = context.block_size();
-        let load = candidate.load().expect("requested load inputs");
-        Ok(load.active_requests() as f64 + load.decode_cost_blocks())
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let _: u64 = context.request_blocks();
+            let _: u32 = context.block_size();
+            let load = candidate.load().expect("requested load inputs");
+            *cost = load.active_requests() as f64 + load.decode_cost_blocks();
+        }
+        Ok(())
     }
 }
 
@@ -110,7 +115,7 @@ fn legacy_plugins_resolve_through_the_common_registry() {
         .unwrap();
     let registry: RouterPluginRegistry = registry;
     let policy = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(policy.path(), "worker_selection:\n  aggregated: legacy\n  instances:\n    - name: legacy\n      type: legacy\n").unwrap();
+    std::fs::write(policy.path(), "worker_selection:\n  aggregated: legacy\n  prefill: legacy\n  decode: legacy\n  encode: legacy\n  instances:\n    - name: legacy\n      type: legacy\n").unwrap();
     let config = KvRouterConfig {
         router_policy_config: Some(policy.path().display().to_string()),
         ..Default::default()
