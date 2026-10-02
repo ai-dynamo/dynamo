@@ -30,6 +30,17 @@ patches:
     - op: add
       path: /spec/services/Frontend/extraPodSpec/mainContainer/env/-
       value: {name: HF_HOME, value: /opt/models}
+    # Match the aggregated smoke test's current TCP request plane while
+    # retaining Kubernetes discovery and ZMQ KV events.
+    - op: replace
+      path: /spec/services/Frontend/extraPodSpec/mainContainer/args/5
+      value: tcp
+    - op: replace
+      path: /spec/services/prefill/extraPodSpec/mainContainer/args/10
+      value: tcp
+    - op: replace
+      path: /spec/services/decode/extraPodSpec/mainContainer/args/10
+      value: tcp
     - op: replace
       path: /spec/services/prefill/extraPodSpec/resourceClaims/0/resourceClaimTemplateName
       value: kimi-k25-disagg-compute-domain-channel
