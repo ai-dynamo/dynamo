@@ -29,9 +29,11 @@ permissions:
 concurrency:
   group: deepseek-v4-pro-nightly
   cancel-in-progress: false
+  queue: max
 
 jobs:
   perf:
+    name: DeepSeek V4 Pro aggregated perf
     uses: ./.github/workflows/shared-recipe-perf.yml
     with:
       recipe: deepseek-v4-pro-agg

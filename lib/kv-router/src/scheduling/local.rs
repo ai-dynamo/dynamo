@@ -788,43 +788,42 @@ where
             .add_output_block(&request_id.to_string(), decay_fraction)
     }
 
+    /// Apply output updates before returning, without waiting for admission.
+    ///
+    /// Zero counts and stale or missing bookings return `Ok(())`. A zero count
+    /// does not mutate state or emit load observations. Queue shutdown is checked
+    /// first, including for zero counts.
     #[doc(hidden)]
-    pub async fn add_output_block_if_booking(
+    pub async fn add_output_blocks_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
         self.queue.ensure_running()?;
-        self.add_output_block_if_booking_sync(booking, decay_fraction)
+        self.add_output_blocks_if_booking_sync(booking, num_blocks, decay_fraction)
             .map(|_| ())
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
-    /// `add_output_block_if_booking` applied inline, like `add_output_block`,
-    /// for callers that cannot await.
+    /// Apply output updates directly without checking queue shutdown.
+    ///
+    /// Zero counts and stale or missing bookings return `NoChange`. A zero count
+    /// does not mutate state or emit load observations.
     #[doc(hidden)]
-    pub fn add_output_block_if_booking_sync(
+    pub fn add_output_blocks_if_booking_sync(
         &self,
         booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        self.slots.add_output_block_if_booking(
+        self.slots.add_output_blocks_if_booking(
             &booking.request_id,
             booking.worker,
             booking.attempt_id,
+            num_blocks,
             decay_fraction,
         )
-    }
-
-    /// Apply an output update before returning, without waiting for admission.
-    #[doc(hidden)]
-    pub async fn enqueue_output_block_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        self.add_output_block_if_booking(booking, decay_fraction)
-            .await
     }
 
     pub fn get_potential_loads(
@@ -941,10 +940,10 @@ mod tests {
             let before = slots.active_blocks()[&worker];
             // A single poll on this current-thread runtime cannot run the actor.
             assert!(matches!(
-                poll_once(scheduler.enqueue_output_block_if_booking(&booking, None)),
+                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
-            assert!(slots.active_blocks()[&worker] > before);
+            assert_eq!(slots.active_blocks()[&worker], before + 3);
             assert!(matches!(
                 poll_once(scheduler.mark_prefill_completed_if_booking(&booking)),
                 std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
@@ -959,7 +958,7 @@ mod tests {
                 std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
             ));
             assert!(matches!(
-                poll_once(scheduler.add_output_block_if_booking(&booking, None)),
+                poll_once(scheduler.add_output_blocks_if_booking(&booking, 3, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             slots.assert_completely_drained(Instant::now());
