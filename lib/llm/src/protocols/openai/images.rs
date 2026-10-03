@@ -4,25 +4,71 @@
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 
+use super::MediaDelivery;
+
 mod aggregator;
 mod nvext;
 
 pub use nvext::NvExt;
 
-/// Image generation request with NVIDIA extensions.
+/// Request for image generation (/v1/images/generations and /v1/images/edits).
 ///
-/// Serde is hand-rolled: `inner` occupies the top level of the wire body,
-/// and a derived flattened map next to a flattened struct would capture the
-/// struct's keys too. The manual impls keep one external contract, typed
-/// fields at the top level plus unknown top-level fields retained in
-/// [`Self::passthrough`].
-#[derive(Debug, Clone)]
+/// The OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`.
+/// `model` and `size` are free text, because the OpenAI type accepts any
+/// string there.
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvCreateImageRequest {
-    pub inner: dynamo_protocols::types::CreateImageRequest,
+    pub prompt: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Number of images to generate
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<u8>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<ImageQuality>,
+
+    /// Delivery mode of the generated images
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<MediaDelivery>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<ImageOutputFormat>,
+
+    /// Compression level (0-100%) of jpeg and webp output
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_compression: Option<u8>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+
+    /// Number of partial images to stream before the final image
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_images: Option<u8>,
+
+    /// Image size in WxH format, or "auto"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderation: Option<ImageModeration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<ImageBackground>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<ImageStyle>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 
     /// Optional image reference that guides generation (for I2I/TI2I).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_reference: Option<String>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
 
     /// Worker-boundary contract, not a public field: the frontend moves
@@ -30,13 +76,61 @@ pub struct NvCreateImageRequest {
     /// dispatch (see [`Self::nest_passthrough`]) so workers read one
     /// explicit nested entry. A client-sent `extra_args` lands in
     /// `passthrough` like any other unknown field.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Map<String, serde_json::Value>>,
 
     /// Unknown top-level fields are retained here and forwarded to the
     /// backend without strict validation. This matches the OpenAI client's
     /// extra_body option, which merges into the top level of the body.
     /// Stable knobs can be promoted to typed fields over time.
+    #[serde(default, flatten)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Quality of the generated images
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageQuality {
+    Standard,
+    Hd,
+    High,
+    Medium,
+    Low,
+    Auto,
+}
+
+/// File format of the generated images
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageOutputFormat {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+/// Content-moderation level of the generation
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageModeration {
+    Auto,
+    Low,
+}
+
+/// Requested background of the generated images
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageBackground {
+    Auto,
+    Transparent,
+    Opaque,
+}
+
+/// Style of the generated images
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageStyle {
+    Vivid,
+    Natural,
 }
 
 impl NvCreateImageRequest {
@@ -47,103 +141,63 @@ impl NvCreateImageRequest {
     }
 }
 
-impl<'de> Deserialize<'de> for NvCreateImageRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut body = serde_json::Map::deserialize(deserializer)?;
-        let input_reference = match body.remove("input_reference") {
-            Some(value) => serde_json::from_value(value).map_err(serde::de::Error::custom)?,
-            None => None,
-        };
-        let nvext = match body.remove("nvext") {
-            Some(value) => serde_json::from_value(value).map_err(serde::de::Error::custom)?,
-            None => None,
-        };
-        let inner: dynamo_protocols::types::CreateImageRequest =
-            serde_json::from_value(serde_json::Value::Object(body.clone()))
-                .map_err(serde::de::Error::custom)?;
-        // Keys the typed request consumed stay out of the passthrough.
-        if let serde_json::Value::Object(consumed) =
-            serde_json::to_value(&inner).map_err(serde::de::Error::custom)?
-        {
-            for key in consumed.keys() {
-                body.remove(key);
-            }
-        }
-        Ok(Self {
-            inner,
-            input_reference,
-            nvext,
-            extra_args: None,
-            passthrough: body,
-        })
-    }
-}
-
-impl Serialize for NvCreateImageRequest {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut body = match serde_json::to_value(&self.inner).map_err(serde::ser::Error::custom)? {
-            serde_json::Value::Object(map) => map,
-            _ => {
-                return Err(serde::ser::Error::custom(
-                    "image request must serialize to an object",
-                ));
-            }
-        };
-        // Typed fields win over passthrough entries of the same name.
-        for (key, value) in &self.passthrough {
-            body.entry(key.clone()).or_insert_with(|| value.clone());
-        }
-        if let Some(input_reference) = &self.input_reference {
-            body.insert(
-                "input_reference".to_string(),
-                serde_json::Value::String(input_reference.clone()),
-            );
-        }
-        if let Some(nvext) = &self.nvext {
-            body.insert(
-                "nvext".to_string(),
-                serde_json::to_value(nvext).map_err(serde::ser::Error::custom)?,
-            );
-        }
-        if let Some(extra_args) = &self.extra_args {
-            body.insert(
-                "extra_args".to_string(),
-                serde_json::Value::Object(extra_args.clone()),
-            );
-        }
-        body.serialize(serializer)
-    }
-}
-
-/// A response structure for image generation responses, embedding OpenAI's
-/// `ImagesResponse`.
+/// Response for image generation.
 ///
-/// # Fields
-/// - `inner`: The base OpenAI image response, embedded using `serde(flatten)`.
+/// Keeps the wire format of the OpenAI `ImagesResponse`, which writes every
+/// absent optional field as null.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvImagesResponse {
-    #[serde(flatten)]
-    pub inner: dynamo_protocols::types::ImagesResponse,
+    /// Unix timestamp of creation
+    pub created: u32,
+
+    pub data: Vec<ImageData>,
+
+    pub background: Option<ImageResponseBackground>,
+
+    pub output_format: Option<ImageOutputFormat>,
+
+    /// Image size in WxH format
+    pub size: Option<String>,
+
+    pub quality: Option<ImageQuality>,
+
+    /// Token usage of the generation, when the model reports it
+    pub usage: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// One generated image. The worker sets one of `url` and `b64_json`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ImageData {
+    /// URL of the generated image (if response_format is "url")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    /// Base64-encoded image (if response_format is "b64_json")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b64_json: Option<String>,
+
+    /// The prompt the model used, when it rewrote the original prompt
+    pub revised_prompt: Option<String>,
+}
+
+/// Actual background of the generated images
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageResponseBackground {
+    Transparent,
+    Opaque,
 }
 
 impl NvImagesResponse {
     pub fn empty() -> Self {
         Self {
-            inner: dynamo_protocols::types::ImagesResponse {
-                created: 0,
-                data: vec![],
-                background: None,
-                output_format: None,
-                quality: None,
-                size: None,
-                usage: None,
-            },
+            created: 0,
+            data: vec![],
+            background: None,
+            output_format: None,
+            size: None,
+            quality: None,
+            usage: None,
         }
     }
 }
@@ -176,7 +230,99 @@ impl AnnotationsProvider for NvCreateImageRequest {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_protocols::types::{CreateImageRequest, ImagesResponse};
+    use serde::de::DeserializeOwned;
+
     use super::*;
+
+    /// Parses `json` as the OpenAI type `O` and as the Dynamo type `D`.
+    /// Both must reject it, or both must serialize it to the same JSON.
+    fn assert_same_wire_format<O, D>(json: &str)
+    where
+        O: DeserializeOwned + Serialize,
+        D: DeserializeOwned + Serialize,
+    {
+        let openai = serde_json::from_str::<O>(json).map(|v| serde_json::to_value(v).unwrap());
+        let dynamo = serde_json::from_str::<D>(json).map(|v| serde_json::to_value(v).unwrap());
+        match (openai, dynamo) {
+            (Ok(openai), Ok(dynamo)) => assert_eq!(dynamo, openai, "wire format of {json}"),
+            (Err(_), Err(_)) => {}
+            (openai, dynamo) => panic!("{json}: OpenAI type {openai:?}, Dynamo type {dynamo:?}"),
+        }
+    }
+
+    // --- Wire compatibility with the OpenAI types ---
+
+    #[test]
+    fn image_request_wire_format_matches_the_openai_type() {
+        for json in [
+            r#"{"prompt":"a cat","model":"gpt-image-1","n":2,"quality":"high","response_format":"b64_json","output_format":"webp","output_compression":80,"stream":false,"partial_images":2,"size":"1536x1024","moderation":"low","background":"transparent","style":"natural","user":"user-1"}"#,
+            // The OpenAI type accepts any model and size string.
+            r#"{"prompt":"a cat","model":"black-forest-labs/FLUX.1-dev","size":"768x512"}"#,
+            r#"{"prompt":"a cat","model":null,"n":null}"#,
+            // Rejected: an unknown quality, an n above u8, no prompt.
+            r#"{"prompt":"a cat","quality":"ultra"}"#,
+            r#"{"prompt":"a cat","n":300}"#,
+            r#"{"model":"gpt-image-1"}"#,
+        ] {
+            assert_same_wire_format::<CreateImageRequest, NvCreateImageRequest>(json);
+        }
+    }
+
+    #[test]
+    fn image_request_enum_values_match_the_openai_type() {
+        let fields: [(&str, &[&str]); 6] = [
+            (
+                "quality",
+                &["standard", "hd", "high", "medium", "low", "auto"],
+            ),
+            ("response_format", &["url", "b64_json"]),
+            ("output_format", &["png", "jpeg", "webp"]),
+            ("moderation", &["auto", "low"]),
+            ("background", &["auto", "transparent", "opaque"]),
+            ("style", &["vivid", "natural"]),
+        ];
+        for (field, values) in fields {
+            for value in values {
+                let json = format!(r#"{{"prompt":"a cat","{field}":"{value}"}}"#);
+                assert_same_wire_format::<CreateImageRequest, NvCreateImageRequest>(&json);
+            }
+        }
+    }
+
+    #[test]
+    fn image_response_wire_format_matches_the_openai_type() {
+        for json in [
+            r#"{"created":1700000000,"data":[{"url":"http://x/1.png","revised_prompt":"a cat, photo"},{"b64_json":"aGVsbG8="}],"background":"opaque","output_format":"png","size":"1024x1024","quality":"high","usage":{"input_tokens":10,"total_tokens":30,"output_tokens":20,"output_token_details":{"text_tokens":0,"image_tokens":20},"input_tokens_details":{"text_tokens":10,"image_tokens":0}}}"#,
+            // The OpenAI type writes every absent optional field as null.
+            r#"{"created":1,"data":[]}"#,
+            r#"{"created":1,"data":[{"b64_json":"aGVsbG8=","url":null}],"size":"768x512"}"#,
+            // Rejected: an unknown background, a negative created, no data.
+            r#"{"created":1,"data":[],"background":"auto"}"#,
+            r#"{"created":-1,"data":[]}"#,
+            r#"{"created":1}"#,
+        ] {
+            assert_same_wire_format::<ImagesResponse, NvImagesResponse>(json);
+        }
+    }
+
+    #[test]
+    fn image_response_enum_values_match_the_openai_type() {
+        let fields: [(&str, &[&str]); 3] = [
+            ("background", &["transparent", "opaque"]),
+            ("output_format", &["png", "jpeg", "webp"]),
+            (
+                "quality",
+                &["standard", "hd", "high", "medium", "low", "auto"],
+            ),
+        ];
+        for (field, values) in fields {
+            for value in values {
+                let json = format!(r#"{{"created":1,"data":[],"{field}":"{value}"}}"#);
+                assert_same_wire_format::<ImagesResponse, NvImagesResponse>(&json);
+            }
+        }
+    }
 
     // --- NvCreateImageRequest ---
 
@@ -186,7 +332,7 @@ mod tests {
         // the body, so that is where backend knobs arrive.
         let json = r#"{"prompt":"a cat","think_mode":true,"size_override":{"h":512,"w":768}}"#;
         let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.inner.prompt, "a cat");
+        assert_eq!(req.prompt, "a cat");
         assert_eq!(req.passthrough["think_mode"], serde_json::json!(true));
         assert_eq!(
             req.passthrough["size_override"]["h"],
@@ -195,7 +341,7 @@ mod tests {
 
         let out = serde_json::to_string(&req).unwrap();
         let back: NvCreateImageRequest = serde_json::from_str(&out).unwrap();
-        assert_eq!(back.inner.prompt, "a cat");
+        assert_eq!(back.prompt, "a cat");
         assert_eq!(back.passthrough, req.passthrough);
     }
 
@@ -203,7 +349,7 @@ mod tests {
     fn image_request_typed_fields_stay_out_of_passthrough() {
         let json = r#"{"prompt":"a cat","n":2,"input_reference":"ref.png","nvext":{"seed":7},"custom_knob":1}"#;
         let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.inner.prompt, "a cat");
+        assert_eq!(req.prompt, "a cat");
         assert_eq!(req.input_reference.as_deref(), Some("ref.png"));
         assert_eq!(req.nvext.as_ref().and_then(|n| n.seed), Some(7));
         assert_eq!(req.passthrough["custom_knob"], serde_json::json!(1));

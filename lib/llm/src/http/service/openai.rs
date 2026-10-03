@@ -5102,8 +5102,6 @@ async fn images_with_request(
     mut request: NvCreateImageRequest,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model readiness check is deferred until after we resolve the
-    // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
     request.nest_passthrough();
@@ -5115,23 +5113,8 @@ async fn images_with_request(
     let streaming = false;
 
     // Get the model name from the request (diffusion model)
-    let model = request
-        .inner
-        .model
-        .as_ref()
-        .map(|m| match m {
-            dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
-            dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1 => "gpt-image-1".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1dot5 => "gpt-image-1.5".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage1Mini => "gpt-image-1-mini".to_string(),
-            dynamo_protocols::types::ImageModel::GptImage2 => "gpt-image-2".to_string(),
-            dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
-        })
-        .unwrap_or_else(|| "diffusion".to_string());
+    let model = request.model.as_deref().unwrap_or("diffusion").to_string();
 
-    // Per-model serving readiness gate (now that we have a resolved model
-    // name string).
     check_model_serving_ready(&state, &model)?;
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
