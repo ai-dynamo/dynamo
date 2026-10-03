@@ -481,3 +481,46 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
         }
     }
 }
+
+#[test]
+fn yaml_seed_reproduces_the_seeded_selector_on_ties() {
+    // Equal costs everywhere, so every zero-temperature pick is a tie-break.
+    let (workers, mut request) = fixture(8, 64);
+    request.worker_loads.clear();
+    request.overlap = Default::default();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        file.path(),
+        "worker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters: {seed: 42}\n",
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        router_policy_config: Some(file.path().display().to_string()),
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let mut registry = default_registry();
+    dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+    let factory = registry.resolve(&config).unwrap().unwrap();
+    let build = || {
+        factory(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        )
+    };
+    let (first, second) = (build(), build());
+    let reference = DefaultWorkerSelector::new_seeded(Some(config.clone()), "decode", 42);
+    let mut picks = std::collections::HashSet::new();
+    for _ in 0..64 {
+        let input = support::selection_input(&workers, &request, 16);
+        let expected = reference.select_worker(input).unwrap().worker;
+        assert_eq!(first.select_worker(input).unwrap().worker, expected);
+        assert_eq!(second.select_worker(input).unwrap().worker, expected);
+        picks.insert(expected);
+    }
+    assert!(
+        picks.len() > 1,
+        "equal costs must exercise the seeded tie-break"
+    );
+}

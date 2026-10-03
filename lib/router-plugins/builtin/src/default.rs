@@ -10,14 +10,37 @@ mod selector;
 
 use parameters::PolicyParameters;
 pub(super) use parameters::register;
+pub(crate) use picker::softmax_sample_index;
 pub use selector::DefaultWorkerSelector;
 
-use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+    WorkerScorer, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
 };
+use dynamo_kv_router::{KvRouterConfig, WorkerType};
 use parking_lot::Mutex;
 use std::sync::Arc;
+
+/// The default cost scorer for `role`, with score weights resolved from `weights` and the role's
+/// structure from the host's `config`, exactly as the default policy builds it. Policies that
+/// build on the default logit compose this scorer, so its CACHE, LOAD and PREFERRED_TAINT handling
+/// stays the default's own.
+pub(crate) fn cost_scorer(
+    config: &KvRouterConfig,
+    weights: &KvRouterConfig,
+    role: WorkerType,
+) -> Box<dyn WorkerScorer> {
+    let is_plain_decode = role == WorkerType::Decode && !config.conditional_disagg_enabled;
+    scorer::build(
+        &PolicyParameters::from(weights),
+        role.default_selector_label(),
+        is_plain_decode,
+    )
+}
+
+/// The default picker's temperature for `config`, range-normalized as `softmax_sample_index` uses it.
+pub(crate) fn router_temperature(config: &KvRouterConfig) -> f64 {
+    PolicyParameters::from(config).router_temperature
+}
 
 /// Construct the builtin default from configured policy parameters.
 /// Per-request score overrides are not used. Request load-tracking remains host-owned.
@@ -42,7 +65,7 @@ fn policy_with_rng(
 /// Factory installed by routing hosts, including hosts without a custom catalog.
 pub fn default_factory() -> WorkerSelectionPolicyFactory {
     Arc::new(|config, role, _partition| {
-        policy_for_role(config.clone(), role, PolicyParameters::from(config))
+        policy_for_role(config.clone(), role, PolicyParameters::from(config), None)
     })
 }
 
@@ -50,6 +73,7 @@ fn policy_for_role(
     config: KvRouterConfig,
     role: dynamo_kv_router::WorkerType,
     parameters: PolicyParameters,
+    rng: Option<Arc<Mutex<fastrand::Rng>>>,
 ) -> WorkerSelectionPolicy {
     let is_plain_decode =
         role == dynamo_kv_router::WorkerType::Decode && !config.conditional_disagg_enabled;
@@ -57,7 +81,7 @@ fn policy_for_role(
         config,
         parameters,
         role.default_selector_label(),
-        None,
+        rng,
         is_plain_decode,
     )
 }

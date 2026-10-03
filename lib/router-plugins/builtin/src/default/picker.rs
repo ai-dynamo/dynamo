@@ -9,7 +9,9 @@ use dynamo_kv_router::plugins::worker_selection::{
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-fn softmax_sample_index<T>(
+/// Sample one entry with probability ∝ exp(−normalized cost / temperature), where costs are
+/// range-normalized to [0, 1] before scaling. `sample` is a uniform draw in [0, 1).
+pub(crate) fn softmax_sample_index<T>(
     entries: &[T],
     cost: impl Fn(&T) -> f64,
     temperature: f64,

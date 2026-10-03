@@ -5,10 +5,13 @@
 
 use std::collections::HashMap;
 
-use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
+use dynamo_kv_router::plugins::worker_selection::{SessionContext, WorkerSelectionPolicy};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, SchedulingRequest};
-use dynamo_kv_router::{WorkerLoadProjection, WorkerSelectionInput, WorkerSelector};
+use dynamo_kv_router::{
+    KvRouterConfig, RoutingPartitionRef, WorkerLoadProjection, WorkerSelectionInput,
+    WorkerSelector, WorkerType,
+};
 
 pub(crate) const BLOCK_SIZE: u32 = 16;
 
@@ -106,12 +109,11 @@ pub(crate) fn request(prompt_blocks: usize, prefix: u64) -> SchedulingRequest {
     }
 }
 
-/// Select one worker for `request` given each worker's state.
-pub(crate) fn select(
-    policy: &WorkerSelectionPolicy,
-    mut request: SchedulingRequest,
+/// Enter each worker's state into `request` and return the host's worker table.
+pub(crate) fn populate(
+    request: &mut SchedulingRequest,
     workers: &[Worker],
-) -> u64 {
+) -> HashMap<u64, TestWorker> {
     for worker in workers {
         let rank = WorkerWithDpRank::from_worker_id(worker.id);
         request
@@ -132,7 +134,7 @@ pub(crate) fn select(
             request.modeled_prefill_backlog_ms.insert(rank, backlog_ms);
         }
     }
-    let configs: HashMap<u64, TestWorker> = workers
+    workers
         .iter()
         .map(|worker| {
             (
@@ -142,15 +144,100 @@ pub(crate) fn select(
                 },
             )
         })
-        .collect();
+        .collect()
+}
+
+/// Also enter the host's accounting overlap estimate the way offline replay does: the effective
+/// overlap equals the device overlap, and cached tokens are whole blocks.
+pub(crate) fn populate_replay(
+    request: &mut SchedulingRequest,
+    workers: &[Worker],
+) -> HashMap<u64, TestWorker> {
+    for worker in workers {
+        let rank = WorkerWithDpRank::from_worker_id(worker.id);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .insert(rank, worker.device_blocks as f64);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(rank, worker.device_blocks * BLOCK_SIZE as usize);
+    }
+    populate(request, workers)
+}
+
+/// Select one worker for a populated `request`.
+pub(crate) fn select_populated(
+    policy: &WorkerSelectionPolicy,
+    request: &SchedulingRequest,
+    configs: &HashMap<u64, TestWorker>,
+) -> u64 {
     policy
         .select_worker(WorkerSelectionInput::configured(
-            &configs,
-            &request,
+            configs,
+            request,
             request.eligibility(),
             BLOCK_SIZE,
         ))
         .unwrap()
         .worker
         .worker_id
+}
+
+/// Select one worker for `request` given each worker's state.
+pub(crate) fn select(
+    policy: &WorkerSelectionPolicy,
+    mut request: SchedulingRequest,
+    workers: &[Worker],
+) -> u64 {
+    let configs = populate(&mut request, workers);
+    select_populated(policy, &request, &configs)
+}
+
+/// Like `select`, with the replay-style accounting estimate.
+pub(crate) fn select_replay(
+    policy: &WorkerSelectionPolicy,
+    mut request: SchedulingRequest,
+    workers: &[Worker],
+) -> u64 {
+    let configs = populate_replay(&mut request, workers);
+    select_populated(policy, &request, &configs)
+}
+
+/// A request in session `session`.
+pub(crate) fn in_session(mut request: SchedulingRequest, session: &str) -> SchedulingRequest {
+    request.session_context = Some(SessionContext::new(session.to_owned(), None, None, None));
+    request
+}
+
+/// Resolve one `worker_selection` instance of `policy_type` with `parameters`, a YAML flow
+/// mapping, through the catalog registry exactly as the Python bindings do at startup.
+pub(crate) fn resolve_policy(
+    policy_type: &str,
+    parameters: &str,
+) -> Result<WorkerSelectionPolicy, String> {
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        policy_file.path(),
+        format!(
+            "worker_selection:\n  aggregated: candidate\n  instances:\n    - name: candidate\n      type: {policy_type}\n      parameters: {parameters}\n"
+        ),
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..Default::default()
+    };
+    let mut registry = crate::default_registry();
+    crate::register(&mut registry).unwrap();
+    let factory = registry
+        .resolve(&config)
+        .map_err(|error| error.to_string())?
+        .expect("a configured instance resolves to a factory");
+    Ok(factory(
+        &config,
+        WorkerType::Aggregated,
+        RoutingPartitionRef::new("model", "default"),
+    ))
 }

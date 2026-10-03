@@ -8,6 +8,7 @@ use dynamo_kv_router::config::SharedCacheType;
 use dynamo_kv_router::plugins::{
     RouterPluginRegistry, WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 use super::policy_for_role;
@@ -23,6 +24,9 @@ struct Parameters {
     disk_cache_hit_weight: Option<f64>,
     shared_cache_multiplier: Option<f64>,
     router_temperature: Option<f64>,
+    /// Seeds tie-breaks and softmax sampling, over candidates in worker order, so offline replay
+    /// is reproducible. Each policy instance starts its own stream. Omit it in production.
+    seed: Option<u64>,
 }
 
 /// Only the startup values consumed by the default scorer and picker.
@@ -107,9 +111,11 @@ pub(crate) fn register(
                     )));
                 }
             }
+            let seed = parameters.seed;
             Ok(Arc::new(
                 move |config: &KvRouterConfig, role, _partition| {
-                    policy_for_role(config.clone(), role, parameters.resolve(config))
+                    let rng = seed.map(|seed| Arc::new(Mutex::new(fastrand::Rng::with_seed(seed))));
+                    policy_for_role(config.clone(), role, parameters.resolve(config), rng)
                 },
             ))
         }),

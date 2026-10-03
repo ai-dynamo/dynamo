@@ -4,18 +4,22 @@
 //! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom
-//! catalog adds the named default, two-tier, ThunderAgent, and ported routing policies through
-//! `register`. The default itself uses the same public candidate inputs and scorer/picker
-//! dispatch as external policies.
+//! catalog adds the named default, two-tier, ThunderAgent, ported, `learned-choice`, and
+//! `sticky-session` routing policies through `register`. The default itself uses the same public
+//! candidate inputs and scorer/picker dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
+mod choice;
 mod chwbl;
 mod default;
 mod dualmap;
+mod learned_choice;
 mod llm_d;
 mod lmetric;
 mod ramjet;
+mod session_map;
 mod signals;
+mod sticky_session;
 #[cfg(test)]
 mod test_support;
 mod thunderagent;
@@ -43,6 +47,8 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     llm_d::register(registry)?;
     dualmap::register(registry)?;
     chwbl::register(registry)?;
+    learned_choice::register(registry)?;
+    sticky_session::register(registry)?;
     Ok(())
 }
 
@@ -124,6 +130,47 @@ worker_selection:
   instances:
     - name: ported
       type: {policy_type}
+"#
+            ));
+            let factory = resolved
+                .unwrap_or_else(|error| panic!("{policy_type}: {error}"))
+                .expect("a configured instance resolves to a factory");
+            let partition = RoutingPartitionRef::new("model", "default");
+            for worker_type in [
+                WorkerType::Aggregated,
+                WorkerType::Prefill,
+                WorkerType::Decode,
+            ] {
+                factory(&config, worker_type, partition);
+            }
+        }
+    }
+
+    /// The campaign policies resolve from their documented minimal parameters for every role.
+    #[test]
+    fn campaign_policies_resolve_for_every_role() {
+        let theta0 = "[-1, 0, 0, 0, 0, 0, 0, 0]";
+        for (policy_type, parameters) in [
+            (
+                learned_choice::POLICY_TYPE,
+                format!("{{feature_set: v1, theta: {theta0}, seed: 1}}"),
+            ),
+            (sticky_session::POLICY_TYPE, "{mode: hard}".to_owned()),
+            (
+                sticky_session::POLICY_TYPE,
+                "{mode: bounded, load_factor: 1.25}".to_owned(),
+            ),
+        ] {
+            let (config, resolved) = resolve(&format!(
+                r#"
+worker_selection:
+  aggregated: campaign
+  prefill: campaign
+  decode: campaign
+  instances:
+    - name: campaign
+      type: {policy_type}
+      parameters: {parameters}
 "#
             ));
             let factory = resolved
