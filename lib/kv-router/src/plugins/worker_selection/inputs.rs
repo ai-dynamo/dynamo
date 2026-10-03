@@ -4,6 +4,7 @@
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
 use crate::protocols::{SharedCacheHits, WorkerConfigLike, WorkerWithDpRank};
+use rustc_hash::FxHashMap;
 use std::num::NonZeroU64;
 use std::ops::BitOr;
 
@@ -21,19 +22,19 @@ pub(crate) struct CandidateData {
 pub struct WorkerCandidate<'a> {
     data: &'a CandidateData,
     inputs: WorkerInputs,
-    cache_snapshot: &'a CacheSnapshot<'a>,
+    request_snapshot: &'a RequestSnapshot<'a>,
 }
 
 impl<'a> WorkerCandidate<'a> {
     pub(crate) fn new(
         data: &'a CandidateData,
         inputs: WorkerInputs,
-        cache_snapshot: &'a CacheSnapshot<'a>,
+        request_snapshot: &'a RequestSnapshot<'a>,
     ) -> Self {
         Self {
             data,
             inputs,
-            cache_snapshot,
+            request_snapshot,
         }
     }
 
@@ -48,7 +49,7 @@ impl<'a> WorkerCandidate<'a> {
             .contains(WorkerInputs::CACHE)
             .then_some(WorkerCacheInput {
                 data: &self.data.cache,
-                snapshot: self.cache_snapshot,
+                snapshot: self.request_snapshot,
             })
     }
 
@@ -68,6 +69,18 @@ impl<'a> WorkerCandidate<'a> {
             None
         }
     }
+
+    /// Modeled prefill backlog in milliseconds, only when this component declared PREFILL_TIME.
+    /// See [`WorkerInputs::PREFILL_TIME`] for its source and when a worker has none.
+    pub fn modeled_prefill_backlog_ms(self) -> Option<u64> {
+        if !self.inputs.contains(WorkerInputs::PREFILL_TIME) {
+            return None;
+        }
+        self.request_snapshot
+            .modeled_prefill_backlog_ms
+            .get(&self.data.worker)
+            .copied()
+    }
 }
 
 /// Borrowed candidate batch restricted to one scorer's declared inputs.
@@ -77,19 +90,19 @@ impl<'a> WorkerCandidate<'a> {
 pub struct WorkerCandidates<'a> {
     rows: &'a [CandidateData],
     inputs: WorkerInputs,
-    cache_snapshot: &'a CacheSnapshot<'a>,
+    request_snapshot: &'a RequestSnapshot<'a>,
 }
 
 impl<'a> WorkerCandidates<'a> {
     pub(crate) fn new(
         rows: &'a [CandidateData],
         inputs: WorkerInputs,
-        cache_snapshot: &'a CacheSnapshot<'a>,
+        request_snapshot: &'a RequestSnapshot<'a>,
     ) -> Self {
         Self {
             rows,
             inputs,
-            cache_snapshot,
+            request_snapshot,
         }
     }
 
@@ -107,7 +120,7 @@ impl<'a> WorkerCandidates<'a> {
     pub fn get(self, row: usize) -> Option<WorkerCandidate<'a>> {
         self.rows
             .get(row)
-            .map(|data| WorkerCandidate::new(data, self.inputs, self.cache_snapshot))
+            .map(|data| WorkerCandidate::new(data, self.inputs, self.request_snapshot))
     }
 
     /// Iterate over the surviving workers without copying their data.
@@ -116,7 +129,7 @@ impl<'a> WorkerCandidates<'a> {
     ) -> impl ExactSizeIterator<Item = WorkerCandidate<'a>> + DoubleEndedIterator + Clone {
         self.rows
             .iter()
-            .map(move |data| WorkerCandidate::new(data, self.inputs, self.cache_snapshot))
+            .map(move |data| WorkerCandidate::new(data, self.inputs, self.request_snapshot))
     }
 }
 
@@ -141,6 +154,15 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    /// Request each worker's modeled prefill backlog in milliseconds: a derived estimate of the
+    /// time its active prefills still need, from the host's prefill-load model predictions,
+    /// excluding this request's own prefill. Read it through
+    /// [`WorkerCandidate::modeled_prefill_backlog_ms`] or
+    /// [`WorkerInputView::modeled_prefill_backlog_ms`]. A worker has none when the host runs
+    /// without a prefill-load model (`router_prefill_load_model: ais`), a prediction failed, or
+    /// any active prefill on the worker is unmodeled. Values synced from router replicas are
+    /// anchored at receive time, not at the producer's time.
+    pub const PREFILL_TIME: Self = Self(1 << 3);
     /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
     #[cfg(any(test, feature = "bench"))]
@@ -163,10 +185,11 @@ impl BitOr for WorkerInputs {
     }
 }
 
-/// Request-wide facts borrowed once for all cache views in a selection.
-pub(crate) struct CacheSnapshot<'a> {
+/// Request-wide facts borrowed once for all component views in a selection.
+pub(crate) struct RequestSnapshot<'a> {
     pub(crate) shared_hits: Option<&'a SharedCacheHits>,
     pub(crate) has_tier_matches: bool,
+    pub(crate) modeled_prefill_backlog_ms: &'a FxHashMap<WorkerWithDpRank, u64>,
 }
 
 /// Numeric cache row retained in host buffers between selections.
@@ -184,14 +207,14 @@ pub(crate) struct WorkerCacheData {
 #[derive(Clone, Copy)]
 pub struct WorkerCacheInput<'a> {
     data: &'a WorkerCacheData,
-    snapshot: &'a CacheSnapshot<'a>,
+    snapshot: &'a RequestSnapshot<'a>,
 }
 
 /// Borrowed cache rows in the same order as a picker's candidates.
 #[derive(Clone, Copy)]
 pub struct WorkerCacheInputs<'a> {
     pub(crate) rows: &'a [WorkerCacheData],
-    pub(crate) snapshot: &'a CacheSnapshot<'a>,
+    pub(crate) snapshot: &'a RequestSnapshot<'a>,
 }
 
 impl<'a> WorkerCacheInputs<'a> {
@@ -263,6 +286,7 @@ pub struct WorkerInputView<'a> {
     pub(crate) candidates: &'a [ScoredWorkerCandidate],
     pub(crate) cache: Option<WorkerCacheInputs<'a>>,
     pub(crate) load: Option<&'a [WorkerLoadInput]>,
+    pub(crate) modeled_prefill_backlog_ms: Option<&'a FxHashMap<WorkerWithDpRank, u64>>,
 }
 
 impl CandidateData {
@@ -393,5 +417,12 @@ impl<'a> WorkerInputView<'a> {
     /// Return index-aligned active-load inputs when the picker requested them.
     pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
         self.load
+    }
+
+    /// Return candidate `row`'s modeled prefill backlog in milliseconds when the picker requested
+    /// it. See [`WorkerInputs::PREFILL_TIME`] for its source and when a worker has none.
+    pub fn modeled_prefill_backlog_ms(self, row: usize) -> Option<u64> {
+        let worker = self.candidates.get(row)?.worker;
+        self.modeled_prefill_backlog_ms?.get(&worker).copied()
     }
 }

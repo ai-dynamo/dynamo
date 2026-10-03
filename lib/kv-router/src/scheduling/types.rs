@@ -454,6 +454,10 @@ pub struct SchedulingRequest {
 
     // Load state computed during admission.
     pub worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    /// Modeled remaining prefill time per worker, in milliseconds. Filled only for selectors
+    /// that declare `WorkerInputs::PREFILL_TIME`; a worker is absent unless every prefill active
+    /// on it carries a prefill-load model prediction.
+    pub modeled_prefill_backlog_ms: FxHashMap<WorkerWithDpRank, u64>,
 
     /// Sender half of the admission ownership handoff. For tracked requests,
     /// the actor must book before sending and undo the booking if delivery fails.
@@ -650,6 +654,7 @@ mod tests {
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
             worker_loads,
+            modeled_prefill_backlog_ms: Default::default(),
             resp_tx: None,
         }
     }

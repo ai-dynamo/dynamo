@@ -23,7 +23,7 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
-    SessionContext, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    SessionContext, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, WorkerInputs,
     WorkerLoadProjection, WorkerSelectionInput, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
@@ -321,6 +321,7 @@ impl PendingRequest {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             worker_loads,
+            modeled_prefill_backlog_ms: Default::default(),
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
             lora_name: None,
@@ -351,6 +352,8 @@ pub(crate) struct OfflineReplayRouter {
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
     slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
     selector: ReplaySelector,
+    /// Whether the selector declared `WorkerInputs::PREFILL_TIME`, read once at construction.
+    projects_prefill_time: bool,
     pending: PolicyQueue<PendingRequest>,
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -568,6 +571,10 @@ impl OfflineReplayRouter {
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
         let selector = replay_selector_with_seed(&config, selector_seed, replay_router_role(args))?;
+        // Without a prefill-load model, idle workers would still report a zero backlog.
+        let projects_prefill_time = prefill_load_estimator.is_some()
+            && WorkerSelector::<ReplayWorkerConfig>::required_worker_inputs(&selector)
+                .contains(WorkerInputs::PREFILL_TIME);
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
@@ -581,6 +588,7 @@ impl OfflineReplayRouter {
             workers_with_configs,
             slots,
             selector,
+            projects_prefill_time,
             pending: PolicyQueue::new(profile),
             indexer: SyncReplayIndexer::new(args.block_size as u32),
             prefill_load_estimator,
@@ -947,6 +955,12 @@ impl OfflineReplayRouter {
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
         let mut scheduling_request =
             request.scheduling_request(self.block_size as usize, worker_loads);
+        if self.projects_prefill_time {
+            self.slots.modeled_prefill_backlog_ms_into(
+                decay_now,
+                &mut scheduling_request.modeled_prefill_backlog_ms,
+            );
+        }
         let eligibility = scheduling_request.eligibility();
         let best_available_overlap_blocks = request
             .overlaps
