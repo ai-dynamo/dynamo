@@ -92,6 +92,24 @@ class Config:
         # SGLang chose the value or the user did.
         self.attention_backend_from_cli = attention_backend_from_cli
         self.serving_mode = self._set_serving_strategy()
+        if getattr(dynamo_args, "freeze_gc_after_init", False) and (
+            self.serving_mode == DisaggregationMode.PREFILL
+            or any(
+                getattr(dynamo_args, role, False)
+                for role in (
+                    "embedding_worker",
+                    "rerank_worker",
+                    "image_diffusion_worker",
+                    "video_generation_worker",
+                    "multimodal_encode_worker",
+                    "multimodal_worker",
+                    "diffusion_worker",
+                )
+            )
+        ):
+            raise ValueError(
+                "--freeze-gc-after-init is supported only for LLM decode or aggregated workers"
+            )
 
     def _set_serving_strategy(self):
         if self.server_args.disaggregation_mode == "null":

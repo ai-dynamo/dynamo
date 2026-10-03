@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import argparse
 import logging
 import os
 import re
@@ -39,7 +40,7 @@ from dynamo.sglang.args import (
     should_fetch_model,
     use_modelexpress_remote_instance,
 )
-from dynamo.sglang.backend_args import DynamoSGLangConfig
+from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
@@ -72,6 +73,48 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_freeze_gc_after_init_is_opt_in(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_FREEZE_GC_AFTER_INIT", raising=False)
+    parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(parser)
+
+    assert not DynamoSGLangConfig.from_cli_args(
+        parser.parse_args([])
+    ).freeze_gc_after_init
+    assert DynamoSGLangConfig.from_cli_args(
+        parser.parse_args(["--freeze-gc-after-init"])
+    ).freeze_gc_after_init
+
+    monkeypatch.setenv("DYN_SGL_FREEZE_GC_AFTER_INIT", "true")
+    env_parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(env_parser)
+    assert DynamoSGLangConfig.from_cli_args(
+        env_parser.parse_args([])
+    ).freeze_gc_after_init
+
+
+@pytest.mark.parametrize(
+    "mode, role_flags, supported",
+    [
+        ("null", {}, True),
+        ("decode", {}, True),
+        ("prefill", {}, False),
+        ("null", {"embedding_worker": True}, False),
+    ],
+)
+def test_freeze_gc_after_init_requires_decode_or_aggregated_mode(
+    mode, role_flags, supported
+):
+    server_args = SimpleNamespace(disaggregation_mode=mode)
+    dynamo_args = SimpleNamespace(freeze_gc_after_init=True, **role_flags)
+
+    if supported:
+        sglang_args.Config(server_args, dynamo_args)
+    else:
+        with pytest.raises(ValueError, match="--freeze-gc-after-init"):
+            sglang_args.Config(server_args, dynamo_args)
 
 
 def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
