@@ -2563,6 +2563,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
+ "bytes",
  "futures",
  "reqwest 0.12.28",
  "serde",
