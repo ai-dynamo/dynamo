@@ -2,23 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Install guard for PyNvVideoCodec, run beside the install in the runtime images.
 
-A requirements specifier constrains what pip installs. It cannot say "exactly one
-copy on disk" or "no libavcodec", and those are what the codec gate depends on.
-Checking here names the cause of a regression instead of leaving it to surface as
-an unattributed scan violation later.
-
-Run from a directory holding the ``compliance`` package:
-
     PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
 
-``--pinned`` is passed by each template rather than read from the requirements
-file: this stage must not parse the file it is checking, and
-tests/dependencies/test_pynvvideocodec_spec.py asserts the two agree.
-
-What counts as denied comes from policy/codec_policy.yaml, the same verdict the
-image-wide scan gives, so a library family added to the policy reaches this guard
-too. The PyNvVideoCodec waivers there for libavutil and libavformat are what let
-those two through.
+The pin is passed in, not read from the requirements file, and a test asserts the
+two agree. What counts as denied comes from policy/codec_policy.yaml.
 """
 
 from __future__ import annotations
@@ -37,8 +24,7 @@ from .scan_codecs import CodecPolicy
 
 DISTRIBUTION = "pynvvideocodec"
 PACKAGE = "PyNvVideoCodec"
-# The wheel demuxes with these two. A package directory that bundles neither
-# satisfies every negative check while shipping no demuxer at all.
+# An empty package directory passes the negative checks, so these must be present.
 REQUIRED = ("libavformat", "libavutil")
 DEFAULT_POLICY = Path(__file__).resolve().parent / "policy" / "codec_policy.yaml"
 
@@ -56,12 +42,7 @@ def check(pinned: str, policy: CodecPolicy, path: list[str] | None = None) -> No
 
     ``path`` replaces sys.path as the place distributions are looked up.
     """
-    # Enumerated over sys.path rather than one scheme directory: these images carry
-    # both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
-    # and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
-    # alone is guaranteed to be the install target or the only place a copy can hide.
-    # A surviving base copy beside the new one is the failure being looked for, which
-    # is also why this counts distributions instead of asking for one version.
+    # All of sys.path, so a surviving base-image copy is counted too.
     installed = [
         d
         for d in distributions(**({} if path is None else {"path": path}))
@@ -78,15 +59,13 @@ def check(pinned: str, policy: CodecPolicy, path: list[str] | None = None) -> No
 
     site = os.path.normpath(str(installed[0].locate_file("")))
     pkg = os.path.join(site, PACKAGE)
-    # Walked rather than globbed: ``**`` skips hidden directories, and auditwheel
-    # grafts libraries under ``.libs/``.
+    # Walked, not globbed: ``**`` skips hidden dirs such as auditwheel's ``.libs/``.
     bundled = sorted(
         os.path.relpath(os.path.join(d, f), pkg)
         for d, _, files in os.walk(pkg)
         for f in fnmatch.filter(files, "lib*.so*")
     )
     print(f"{PACKAGE} bundles:", bundled)
-    # Positive first: an empty package directory passes the policy check vacuously.
     for required in REQUIRED:
         if not any(os.path.basename(n).startswith(required) for n in bundled):
             raise GuardError(
@@ -97,9 +76,7 @@ def check(pinned: str, policy: CodecPolicy, path: list[str] | None = None) -> No
     if denied:
         raise GuardError(f"{PACKAGE} bundles libraries the codec gate denies: {denied}")
 
-    # The FFmpeg source tarball lands outside site-packages, so its directory is read
-    # from the wheel's own RECORD rather than guessed from a sysconfig path -- the
-    # RECORD is what the installer actually wrote, and it moves if the layout does.
+    # The tarball lands outside site-packages; its directory comes from the RECORD.
     record = installed[0].read_text("RECORD") or ""
     declared = [
         row[0]

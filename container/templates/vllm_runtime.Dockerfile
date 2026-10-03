@@ -456,14 +456,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         --no-deps --requirement /tmp/requirements.vllm.txt && \
     rm -rf /opt/uv/cache
 
-# Assert what the removal and install left. A requirements specifier constrains
-# what pip installs; it cannot say "exactly one copy on disk" or "no libavcodec",
-# and those are the properties the codec gate depends on. Checked beside the
-# install so a regression names its cause instead of surfacing as a scan
-# violation later. The guard is container/compliance/check_pynvvideocodec.py,
-# shared by every runtime image, and reads its deny list from codec_policy.yaml.
-# The pin is repeated here from the requirements file deliberately -- this stage
-# must not parse the file it is checking; a test asserts the two agree.
+# Assert what the removal and install left. The pin is repeated from the
+# requirements file on purpose; a test asserts the two agree.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
 {% else %}

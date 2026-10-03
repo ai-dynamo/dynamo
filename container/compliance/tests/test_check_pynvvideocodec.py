@@ -25,7 +25,7 @@ pytestmark = [
 ]
 
 PINNED = "2.2.3"
-# The real shipped policy, so a policy edit that changes the verdict fails here.
+# The shipped policy, so a policy edit that changes a verdict fails here.
 POLICY = CodecPolicy.load(DEFAULT_POLICY)
 GOOD_LIBS = ("libavformat.so.61", "libavutil.so.59")
 
