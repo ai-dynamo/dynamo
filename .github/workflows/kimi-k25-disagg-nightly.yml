@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Kimi K2.5 Aggregated Smoke
+name: Kimi K2.5 Disaggregated Smoke
 
 on:
   workflow_call:
@@ -37,10 +37,10 @@ concurrency:
 
 jobs:
   perf:
-    name: Kimi K2.5 aggregated
+    name: Kimi K2.5 disaggregated
     uses: ./.github/workflows/shared-recipe-perf.yml
     with:
-      recipe: kimi-k25-agg
+      recipe: kimi-k25-disagg
       source_ref: ${{ inputs.source_ref || github.sha }}
       image_tag: ${{ inputs.image_tag }}
       preflight_only: ${{ inputs.preflight_only || false }}

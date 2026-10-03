@@ -40,8 +40,6 @@ spec:
             - dynamo.frontend
             - --router-mode
             - kv
-            - --request-plane
-            - nats
           env:
             - name: POD_UID
               valueFrom:
@@ -72,8 +70,6 @@ spec:
             - --disaggregation-mode
             - prefill
             - --publish-events-and-metrics
-            - --request-plane
-            - nats
             - --kv-block-size
             - "32"
             - --dyn-tool-call-parser
@@ -158,8 +154,6 @@ spec:
             - --disaggregation-mode
             - decode
             - --publish-events-and-metrics
-            - --request-plane
-            - nats
             - --kv-block-size
             - "32"
             - --dyn-tool-call-parser
@@ -250,6 +244,7 @@ data:
   prefill.yaml: |
     cache_transceiver_config:
       backend: UCX
+      transceiver_runtime: CPP
       max_tokens_in_buffer: 0
       kv_transfer_sender_future_timeout_ms: 30000
     allreduce_strategy: MNNVL
@@ -259,7 +254,8 @@ data:
     max_seq_len: 200000
     tensor_parallel_size: 4
     moe_expert_parallel_size: 4
-    enable_attention_dp: true
+    # EAGLE3 currently allocates the same request slot twice with attention DP.
+    enable_attention_dp: false
     pipeline_parallel_size: 1
     print_iter_log: true
     stream_interval: 100
@@ -284,6 +280,7 @@ data:
     allreduce_strategy: MNNVL
     cache_transceiver_config:
       backend: UCX
+      transceiver_runtime: CPP
       max_tokens_in_buffer: 0
       kv_transfer_sender_future_timeout_ms: 30000
     max_num_tokens: 640
