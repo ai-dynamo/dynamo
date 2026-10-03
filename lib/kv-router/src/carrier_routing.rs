@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::carrier_feed::{CarrierFeedReplica, FeedHolder, FeedKind, ManifestKey};
+use crate::carrier_lookup::{CarrierLookup, CarrierLookupSource};
 use crate::protocols::{WorkerId, WorkerWithDpRank};
 
 pub const CARRIER_RUNTIME_DATA_KEY: &str = "kvbm_carrier";
@@ -50,8 +51,8 @@ struct WorkerBinding {
 }
 
 struct HubConnection {
-    replica: Arc<CarrierFeedReplica>,
-    cancel: CancellationToken,
+    lookup: Arc<dyn CarrierLookup>,
+    cancel: Option<CancellationToken>,
     ref_count: usize,
 }
 
@@ -61,7 +62,7 @@ struct MutableState {
 }
 
 struct CarrierGroup {
-    replica: Arc<CarrierFeedReplica>,
+    lookup: Arc<dyn CarrierLookup>,
     manifest: ManifestKey,
     holders: FxHashMap<FeedHolder, WorkerWithDpRank>,
 }
@@ -73,14 +74,19 @@ struct CarrierSnapshot {
 
 pub struct CarrierRouter {
     connector: Option<Arc<dyn CarrierFeedConnector>>,
+    lookup_source: Option<Arc<dyn CarrierLookupSource>>,
     state: Mutex<MutableState>,
     snapshot: ArcSwap<CarrierSnapshot>,
 }
 
 impl CarrierRouter {
-    pub fn new(connector: Option<Arc<dyn CarrierFeedConnector>>) -> Self {
+    pub fn new(
+        connector: Option<Arc<dyn CarrierFeedConnector>>,
+        lookup_source: Option<Arc<dyn CarrierLookupSource>>,
+    ) -> Self {
         Self {
             connector,
+            lookup_source,
             state: Mutex::new(MutableState {
                 workers: FxHashMap::default(),
                 hubs: HashMap::new(),
@@ -97,8 +103,8 @@ impl CarrierRouter {
     ///
     /// The manifest must be 64 hexadecimal characters, every instance ID must be a
     /// decimal `u128`, every configured rank must be in `dp_ranks`, and the block
-    /// size must match `partition_block_size`. A router without a connector is
-    /// disabled and ignores upserts.
+    /// size must match `partition_block_size`. A router without a connector or
+    /// lookup source is disabled and ignores upserts.
     pub fn upsert_worker(
         &self,
         worker_id: WorkerId,
@@ -106,9 +112,9 @@ impl CarrierRouter {
         config: Option<&CarrierWorkerConfig>,
         partition_block_size: u32,
     ) -> Result<(), String> {
-        let Some(connector) = self.connector.as_ref() else {
+        if self.connector.is_none() && self.lookup_source.is_none() {
             return Ok(());
-        };
+        }
 
         let Some(config) = config else {
             self.remove_worker(worker_id);
@@ -131,16 +137,37 @@ impl CarrierRouter {
             self.remove_worker_locked(&mut state, worker_id);
         }
 
-        let hub = state.hubs.entry(parsed.hub_url.clone()).or_insert_with(|| {
-            let replica = Arc::new(CarrierFeedReplica::new(4096));
-            let cancel = CancellationToken::new();
-            connector.connect(&parsed.hub_url, Arc::clone(&replica), cancel.clone());
-            HubConnection {
-                replica,
-                cancel,
-                ref_count: 0,
-            }
-        });
+        let hub_url = parsed.hub_url.clone();
+        if !state.hubs.contains_key(&hub_url) {
+            let hub = if let Some(lookup) = self
+                .lookup_source
+                .as_ref()
+                .and_then(|source| source.lookup(&hub_url))
+            {
+                HubConnection {
+                    lookup,
+                    cancel: None,
+                    ref_count: 0,
+                }
+            } else if let Some(connector) = self.connector.as_ref() {
+                let replica = Arc::new(CarrierFeedReplica::new(4096));
+                let cancel = CancellationToken::new();
+                connector.connect(&hub_url, Arc::clone(&replica), cancel.clone());
+                let lookup: Arc<dyn CarrierLookup> = replica;
+                HubConnection {
+                    lookup,
+                    cancel: Some(cancel),
+                    ref_count: 0,
+                }
+            } else {
+                self.rebuild_snapshot_locked(&state);
+                return Err(format!("no carrier lookup for hub {hub_url}"));
+            };
+            state.hubs.insert(hub_url.clone(), hub);
+        }
+        let Some(hub) = state.hubs.get_mut(&hub_url) else {
+            return Err(format!("no carrier lookup for hub {hub_url}"));
+        };
         if !same_hub {
             hub.ref_count += 1;
         }
@@ -172,11 +199,11 @@ impl CarrierRouter {
 
         let mut matches = CarrierMatchDetails::default();
         for group in &snapshot.groups {
-            let kind = group.replica.kind(&group.manifest);
+            let kind = group.lookup.kind(&group.manifest);
             for worker in group.holders.values() {
                 matches.bound.insert(*worker, kind);
             }
-            for (holder, hash) in group.replica.deepest_by_holder(&group.manifest, plhs) {
+            for (holder, hash) in group.lookup.deepest_by_holder(&group.manifest, plhs) {
                 if let Some(worker) = group.holders.get(&holder) {
                     let depth =
                         u32::try_from(hash.position().saturating_add(1)).unwrap_or(u32::MAX);
@@ -197,7 +224,9 @@ impl CarrierRouter {
             remove_hub = hub.ref_count == 0;
         }
         if remove_hub && let Some(hub) = state.hubs.remove(&binding.hub_url) {
-            hub.cancel.cancel();
+            if let Some(cancel) = hub.cancel {
+                cancel.cancel();
+            }
         }
         true
     }
@@ -219,7 +248,7 @@ impl CarrierRouter {
             .filter(|(_, holders)| !holders.is_empty())
             .filter_map(|((hub_url, manifest), holders)| {
                 state.hubs.get(&hub_url).map(|hub| CarrierGroup {
-                    replica: Arc::clone(&hub.replica),
+                    lookup: Arc::clone(&hub.lookup),
                     manifest,
                     holders,
                 })
@@ -303,6 +332,7 @@ mod tests {
 
     use super::*;
     use crate::carrier_feed::{CarrierFeedSnapshot, FeedApply, HolderSnapshot, ManifestSnapshot};
+    use crate::carrier_lookup::{CarrierLookup, CarrierLookupSource};
 
     const BLOCK_SIZE: u32 = 4;
 
@@ -331,6 +361,52 @@ mod tests {
                 replica,
                 cancel,
             });
+        }
+    }
+
+    struct TestLookup {
+        manifest: ManifestKey,
+        kind: FeedKind,
+        matches: Vec<(FeedHolder, PositionalLineageHash)>,
+    }
+
+    impl CarrierLookup for TestLookup {
+        fn kind(&self, manifest: &ManifestKey) -> Option<FeedKind> {
+            (*manifest == self.manifest).then_some(self.kind)
+        }
+
+        fn deepest_by_holder(
+            &self,
+            manifest: &ManifestKey,
+            _plhs: &[PositionalLineageHash],
+        ) -> Vec<(FeedHolder, PositionalLineageHash)> {
+            if *manifest == self.manifest {
+                self.matches.clone()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct TestLookupSource {
+        lookup: Option<(String, Arc<dyn CarrierLookup>)>,
+    }
+
+    impl TestLookupSource {
+        fn with_lookup(hub_url: &str, lookup: Arc<dyn CarrierLookup>) -> Self {
+            Self {
+                lookup: Some((hub_url.to_string(), lookup)),
+            }
+        }
+    }
+
+    impl CarrierLookupSource for TestLookupSource {
+        fn lookup(&self, hub_url: &str) -> Option<Arc<dyn CarrierLookup>> {
+            self.lookup
+                .as_ref()
+                .filter(|(source_hub_url, _)| source_hub_url == hub_url)
+                .map(|(_, lookup)| Arc::clone(lookup))
         }
     }
 
@@ -381,7 +457,7 @@ mod tests {
     #[test]
     fn carrier_matches_report_depth_and_kind() {
         let connector = TestConnector::default();
-        let router = CarrierRouter::new(Some(Arc::new(connector.clone())));
+        let router = CarrierRouter::new(Some(Arc::new(connector.clone())), None);
         router
             .upsert_worker(
                 7,
@@ -400,9 +476,93 @@ mod tests {
     }
 
     #[test]
+    fn local_lookup_bypasses_connector_and_reports_depth() {
+        let connector = TestConnector::default();
+        let lookup = Arc::new(TestLookup {
+            manifest: [1; 32],
+            kind: FeedKind::Carrier,
+            matches: vec![(5, plhs(3).pop().unwrap())],
+        });
+        let source = Arc::new(TestLookupSource::with_lookup("http://hub-a", lookup));
+        let router = CarrierRouter::new(Some(Arc::new(connector.clone())), Some(source));
+        router
+            .upsert_worker(
+                7,
+                0..1,
+                Some(&config("http://hub-a", 1, &[(0, 5)])),
+                BLOCK_SIZE,
+            )
+            .unwrap();
+
+        let matches = router.find_matches(&plhs(4)).unwrap();
+        let worker = WorkerWithDpRank::new(7, 0);
+        assert_eq!(matches.bound[&worker], Some(FeedKind::Carrier));
+        assert_eq!(matches.depth_blocks[&worker], 3);
+        assert_eq!(connector.connect_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn missing_local_lookup_falls_back_to_connector() {
+        let connector = TestConnector::default();
+        let source = Arc::new(TestLookupSource::default());
+        let router = CarrierRouter::new(Some(Arc::new(connector.clone())), Some(source));
+
+        router
+            .upsert_worker(
+                7,
+                0..1,
+                Some(&config("http://hub-b", 1, &[(0, 5)])),
+                BLOCK_SIZE,
+            )
+            .unwrap();
+
+        assert_eq!(connector.connect_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn missing_lookup_without_connector_does_not_bind_worker() {
+        let source = Arc::new(TestLookupSource::default());
+        let router = CarrierRouter::new(None, Some(source));
+
+        assert_eq!(
+            router.upsert_worker(
+                7,
+                0..1,
+                Some(&config("http://hub", 1, &[(0, 5)])),
+                BLOCK_SIZE,
+            ),
+            Err("no carrier lookup for hub http://hub".to_string())
+        );
+        assert!(router.is_empty());
+    }
+
+    #[test]
+    fn removing_last_source_backed_worker_empties_router() {
+        let lookup = Arc::new(TestLookup {
+            manifest: [1; 32],
+            kind: FeedKind::Carrier,
+            matches: Vec::new(),
+        });
+        let source = Arc::new(TestLookupSource::with_lookup("http://hub", lookup));
+        let router = CarrierRouter::new(None, Some(source));
+        router
+            .upsert_worker(
+                7,
+                0..1,
+                Some(&config("http://hub", 1, &[(0, 5)])),
+                BLOCK_SIZE,
+            )
+            .unwrap();
+
+        router.remove_worker(7);
+
+        assert!(router.is_empty());
+    }
+
+    #[test]
     fn multiple_hubs_and_manifests_are_grouped_independently() {
         let connector = TestConnector::default();
-        let router = CarrierRouter::new(Some(Arc::new(connector.clone())));
+        let router = CarrierRouter::new(Some(Arc::new(connector.clone())), None);
         router
             .upsert_worker(
                 7,
@@ -432,7 +592,7 @@ mod tests {
     #[test]
     fn multiple_manifests_share_one_hub_replica() {
         let connector = TestConnector::default();
-        let router = CarrierRouter::new(Some(Arc::new(connector.clone())));
+        let router = CarrierRouter::new(Some(Arc::new(connector.clone())), None);
         router
             .upsert_worker(
                 7,
@@ -489,7 +649,7 @@ mod tests {
     #[test]
     fn invalid_bindings_remove_existing_binding() {
         let connector = TestConnector::default();
-        let router = CarrierRouter::new(Some(Arc::new(connector)));
+        let router = CarrierRouter::new(Some(Arc::new(connector)), None);
         let valid = config("http://hub", 1, &[(0, 5)]);
         router
             .upsert_worker(7, 0..1, Some(&valid), BLOCK_SIZE)
@@ -508,7 +668,7 @@ mod tests {
 
     #[test]
     fn binding_validation_rejects_bad_instance_rank_id_and_block_size() {
-        let router = CarrierRouter::new(Some(Arc::new(TestConnector::default())));
+        let router = CarrierRouter::new(Some(Arc::new(TestConnector::default())), None);
         let mut invalid = config("http://hub", 1, &[(2, 5)]);
         assert!(
             router
@@ -534,7 +694,7 @@ mod tests {
     #[test]
     fn unknown_manifest_kind_is_reported_without_a_depth() {
         let connector = TestConnector::default();
-        let router = CarrierRouter::new(Some(Arc::new(connector.clone())));
+        let router = CarrierRouter::new(Some(Arc::new(connector.clone())), None);
         router
             .upsert_worker(
                 7,
@@ -565,7 +725,7 @@ mod tests {
     #[test]
     fn replacing_and_removing_workers_refcounts_hubs() {
         let connector = TestConnector::default();
-        let router = CarrierRouter::new(Some(Arc::new(connector.clone())));
+        let router = CarrierRouter::new(Some(Arc::new(connector.clone())), None);
         let first = config("http://hub", 1, &[(0, 5)]);
         let second = config("http://hub", 1, &[(0, 6)]);
         router
@@ -588,7 +748,7 @@ mod tests {
 
     #[test]
     fn disabled_router_ignores_upserts_and_empty_router_matches_nothing() {
-        let router = CarrierRouter::new(None);
+        let router = CarrierRouter::new(None, None);
         let config = config("http://hub", 1, &[(0, 5)]);
         assert!(
             router
@@ -602,7 +762,7 @@ mod tests {
     #[test]
     fn multi_rank_bindings_map_holders_to_each_rank() {
         let connector = TestConnector::default();
-        let router = CarrierRouter::new(Some(Arc::new(connector.clone())));
+        let router = CarrierRouter::new(Some(Arc::new(connector.clone())), None);
         let config = config("http://hub", 1, &[(2, 5), (3, 6)]);
         router
             .upsert_worker(7, 2..4, Some(&config), BLOCK_SIZE)
