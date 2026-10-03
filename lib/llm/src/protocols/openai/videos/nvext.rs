@@ -6,6 +6,7 @@ use utoipa::ToSchema;
 
 /// NVIDIA extensions to the OpenAI Videos API
 #[derive(ToSchema, Serialize, Deserialize, Default, Debug, Clone)]
+#[schema(as = VideoNvExt)]
 pub struct NvExt {
     /// Annotations
     /// User requests triggers which result in the request issue back out-of-band information in the SSE
