@@ -25,6 +25,7 @@ from typing import (
     Final,
     Generic,
     Iterator,
+    Literal,
     NoReturn,
     Optional,
     TypeVar,
@@ -44,6 +45,7 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
+from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
@@ -478,7 +480,7 @@ class VllmEnginePauseController:
 
 
 # Logprobs can be -inf (log of probability 0) for masked/disallowed tokens (e.g.
-# via bad_words_token_ids / allowed_token_ids) or full-vocab prompt logprobs.
+# via bad_words_token_ids / allowed_token_ids).
 # JSON has no inf/nan, so pythonize -> serde_json rewrites them to `null`, which
 # then fails typed deserialization on the Rust side and SILENTLY DROPS the whole
 # logprobs payload. Clamp non-finite logprobs to a large finite-negative
@@ -492,8 +494,25 @@ def _finite_logprob(value: Any) -> float:
     return lp if math.isfinite(lp) else _MIN_FINITE_LOGPROB
 
 
+def _json_safe_logprob(value: Any, *, kind: Literal["prompt", "generated"]) -> float:
+    """Preserve vLLM probabilities before crossing JSON transport.
+
+    Only negative infinity maps to -9999; finite internal values remain intact.
+    Generated-token HTTP projection separately floors finite values to -9999;
+    prompt projection must preserve them, including values below the sentinel.
+    NaN and positive infinity are malformed engine output, not tiny probabilities.
+    """
+    lp = float(value)
+    if lp == -math.inf:
+        return -9999.0
+    if not math.isfinite(lp):
+        raise ValueError(f"Invalid non-finite {kind} logprob")
+    return lp
+
+
 def _serialize_prompt_logprobs(
     raw_prompt_logprobs: list,
+    tokenizer: TokenizerLike | None = None,
 ) -> list:
     """Convert vLLM's ``RequestOutput.prompt_logprobs`` into the dict shape
     expected by Dynamo's Rust ``PromptLogprobEntry`` (serde deserialization).
@@ -514,11 +533,56 @@ def _serialize_prompt_logprobs(
     surfaces as ``"Stream ended before generation completed"`` on the
     frontend (worker emits cleanly, frontend never sees ``complete_final``).
     """
+    # Defer private-upstream imports until this path executes; metadata-only
+    # test collection does not provide a complete vLLM implementation.
+    from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+    from vllm.v1.engine.logprobs import LogprobsProcessor
+
+    # Token-only engine output omits decoded_token even though the worker has
+    # a tokenizer. Reuse the pinned vLLM 0.29/0.30 prompt-logprob algorithm:
+    # preserve leading spaces and correct byte-fallback tokens using sampled
+    # context, never the alternative tokens at the same position. Keep this
+    # private-upstream-method dependency here and cover it on version bumps.
+    decoder = (
+        LogprobsProcessor(
+            tokenizer=tokenizer,
+            logprobs=None,
+            prompt_logprobs=None,
+            cumulative_logprob=None,
+            num_logprobs=None,
+            num_prompt_logprobs=None,
+        )
+        if tokenizer is not None
+        else None
+    )
     result: list = []
-    for entry in raw_prompt_logprobs:
+    for position, entry in enumerate(raw_prompt_logprobs):
         if entry is None:
             result.append(None)
         else:
+            decoded_by_id = {}
+            if decoder is not None:
+                missing_ids = [
+                    token_id
+                    for token_id, value in entry.items()
+                    if value.decoded_token is None
+                ]
+                if missing_ids:
+                    context = [
+                        next(iter(previous))
+                        for previous in raw_prompt_logprobs[
+                            max(0, position - 4) : position
+                        ]
+                        if previous
+                    ]
+                    decoded = decoder._verify_tokens(
+                        decoded_tokens_list=convert_ids_list_to_tokens(
+                            tokenizer, missing_ids
+                        ),
+                        tokens=missing_ids,
+                        context_token_ids=context,
+                    )
+                    decoded_by_id = dict(zip(missing_ids, decoded))
             converted: Dict[str, Dict[str, Any]] = {}
             for token_id, logprob_obj in entry.items():
                 try:
@@ -528,12 +592,14 @@ def _serialize_prompt_logprobs(
                     # rather than aborting the whole prompt_logprobs payload.
                     continue
                 lp_dict: Dict[str, Any] = {
-                    "logprob": _finite_logprob(logprob_obj.logprob),
+                    "logprob": _json_safe_logprob(logprob_obj.logprob, kind="prompt"),
                 }
                 rank = getattr(logprob_obj, "rank", None)
                 if rank is not None:
                     lp_dict["rank"] = int(rank)
                 decoded = getattr(logprob_obj, "decoded_token", None)
+                if decoded is None:
+                    decoded = decoded_by_id.get(token_id)
                 if decoded is not None:
                     lp_dict["decoded_token"] = decoded
                 converted[key] = lp_dict
@@ -3358,13 +3424,26 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         # Emit whenever vLLM returns a dictionary.
-        return _shared_logprobs.extract_from_completion_output(
+        selected, alternatives = _shared_logprobs.extract_from_completion_output(
             output,
             num_output_tokens_so_far,
             tokenizer=tokenizer,
             fallback_to_first_on_missing=True,
             include_bytes=True,
         )
+        # Normalize before Python -> JSON -> Rust can turn infinity into null.
+        # The extractor owns these new containers; never mutate engine objects.
+        if selected is not None:
+            selected = [
+                _json_safe_logprob(value, kind="generated") for value in selected
+            ]
+        if alternatives is not None:
+            for position in alternatives:
+                for entry in position:
+                    entry["logprob"] = _json_safe_logprob(
+                        entry["logprob"], kind="generated"
+                    )
+        return selected, alternatives
 
     @staticmethod
     def _log_with_lora_context(
@@ -3458,8 +3537,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     prompt_logprobs_payload is None
                     and getattr(res, "prompt_logprobs", None) is not None
                 ):
+                    if self.engine_client.tokenizer is None:
+                        raise RuntimeError(
+                            "Prompt logprobs require an initialized vLLM tokenizer"
+                        )
                     prompt_logprobs_payload = _serialize_prompt_logprobs(
-                        res.prompt_logprobs
+                        res.prompt_logprobs, self.engine_client.tokenizer
                     )
 
                 if not res.outputs:

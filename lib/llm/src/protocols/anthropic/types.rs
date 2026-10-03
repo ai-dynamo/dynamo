@@ -137,6 +137,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .map(dynamo_protocols::types::Stop::StringArray);
 
         Ok(NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
@@ -1251,6 +1252,7 @@ mod tests {
     #[test]
     fn test_chat_completion_to_anthropic_response() {
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1309,6 +1311,7 @@ mod tests {
         // cached tokens (11). Anthropic input_tokens must report only the
         // uncached portion (12 - 11 = 1), with cache_read reported separately.
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-cache".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1382,6 +1385,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_emits_zero_cache_creation_when_backend_reports_no_usage() {
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-no-usage".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1421,6 +1425,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_does_not_emit_nvext() {
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -2531,6 +2536,7 @@ mod anthropic_types_tests {
             )
             .collect();
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-wiring".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {

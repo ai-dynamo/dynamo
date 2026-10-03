@@ -63,9 +63,86 @@ pub struct NvCreateCompletionRequest {
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
     #[schema(value_type = Object)]
-    pub inner: dynamo_protocols::types::CreateCompletionResponse,
+    pub inner: CompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+}
+
+/// Completion response envelope with endpoint-specific typed choices.
+/// The upstream OpenAI choice does not represent native prompt probabilities.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CompletionResponse {
+    pub id: String,
+    pub choices: Vec<CompletionChoice>,
+    pub created: u32,
+    pub model: String,
+    pub system_fingerprint: Option<String>,
+    pub object: String,
+    pub usage: Option<dynamo_protocols::types::CompletionUsage>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CompletionChoice {
+    #[serde(flatten)]
+    pub inner: dynamo_protocols::types::Choice,
+    /// Native completion prompt probabilities belong to each unary choice.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "common::llm_backend::deserialize_optional_prompt_logprobs"
+    )]
+    pub prompt_logprobs: Option<common::llm_backend::PromptLogprobs>,
+    /// Private aggregation payload. Never serialize into client-facing SSE.
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "common::llm_backend::deserialize_optional_prompt_logprobs"
+    )]
+    pub internal_prompt_logprobs: Option<common::llm_backend::PromptLogprobs>,
+}
+
+impl std::ops::Deref for CompletionChoice {
+    type Target = dynamo_protocols::types::Choice;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for CompletionChoice {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl From<dynamo_protocols::types::Choice> for CompletionChoice {
+    fn from(inner: dynamo_protocols::types::Choice) -> Self {
+        Self {
+            inner,
+            prompt_logprobs: None,
+            internal_prompt_logprobs: None,
+        }
+    }
+}
+
+impl From<dynamo_protocols::types::CreateCompletionResponse> for CompletionResponse {
+    fn from(response: dynamo_protocols::types::CreateCompletionResponse) -> Self {
+        Self {
+            id: response.id,
+            choices: response.choices.into_iter().map(Into::into).collect(),
+            created: response.created,
+            model: response.model,
+            system_fingerprint: response.system_fingerprint,
+            object: response.object,
+            usage: response.usage,
+        }
+    }
+}
+
+impl ContentProvider for CompletionChoice {
+    fn content(&self) -> String {
+        self.inner.content()
+    }
 }
 
 impl ContentProvider for dynamo_protocols::types::Choice {
@@ -328,7 +405,10 @@ impl ResponseFactory {
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
         };
-        NvCreateCompletionResponse { inner, nvext: None }
+        NvCreateCompletionResponse {
+            inner: inner.into(),
+            nvext: None,
+        }
     }
 }
 

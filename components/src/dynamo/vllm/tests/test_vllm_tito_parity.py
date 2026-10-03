@@ -274,11 +274,10 @@ class TestFlattenLogprobs:
 
 
 class TestNonFiniteLogprobs:
-    """Regression: -inf/nan logprobs (from bad_words/allowed_token_ids masking
-    or full-vocab prompt_logprobs) must be clamped to a finite sentinel. JSON
-    has no inf/nan, so pythonize -> serde_json would rewrite them to null and
-    the Rust typed deserialization would then silently drop the whole logprobs
-    payload."""
+    """Legacy generated-token normalization stays JSON-safe; prompt negative
+    infinity uses the native serving sentinel. The dedicated prompt tests also
+    require malformed NaN/positive infinity to fail, not become probabilities.
+    """
 
     def test_finite_logprob_clamps_non_finite(self):
         import math
@@ -306,12 +305,10 @@ class TestNonFiniteLogprobs:
         assert _flatten_logprobs([True, -0.5, False]) == [pytest.approx(-0.5)]
 
     def test_serialize_prompt_logprobs_clamps_inf(self):
-        from types import SimpleNamespace
-
-        from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB, _serialize_prompt_logprobs
-
-        out = _serialize_prompt_logprobs([{7: SimpleNamespace(logprob=float("-inf"))}])
-        assert out[0]["7"]["logprob"] == _MIN_FINITE_LOGPROB
+        out = TestSerializePromptLogprobs._import()(
+            [{7: SimpleNamespace(logprob=float("-inf"))}]
+        )
+        assert out[0]["7"]["logprob"] == -9999.0
 
     def test_sentinel_is_json_safe(self):
         import json

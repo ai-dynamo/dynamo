@@ -159,6 +159,7 @@ fn make_stream_delta(
     nvext: Option<serde_json::Value>,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
     Annotated::from_data(NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: if let Some(text) = content {
@@ -930,6 +931,7 @@ fn make_stream_delta_with_reasoning(
     reasoning_content: &str,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
     Annotated::from_data(NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![ChatChoiceStream {

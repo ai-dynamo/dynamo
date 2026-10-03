@@ -22,6 +22,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
     )];
 
     NvCreateChatCompletionRequest {
+        top_logprobs_explicit_null: false,
         add_generation_prompt: None,
         continue_final_message: None,
         inner: CreateChatCompletionRequest {
@@ -100,6 +101,7 @@ async fn apply_jail_transformation(
     tokio::pin!(output_stream);
     let out = output_stream.next().await.unwrap();
     NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: out.data.unwrap(),
         nvext: None,
         llm_metrics: None,

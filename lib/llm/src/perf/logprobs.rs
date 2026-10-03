@@ -950,6 +950,7 @@ mod tests {
         token_logprobs: Vec<ChatCompletionTokenLogprob>,
     ) -> NvCreateChatCompletionStreamResponse {
         NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -1009,6 +1010,7 @@ mod tests {
             .collect();
 
         NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices,
@@ -1340,6 +1342,7 @@ mod tests {
     fn test_logprob_extractor_with_missing_data() {
         // Test with choice that has no logprobs
         let response = NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -1572,6 +1575,7 @@ mod tests {
         // In practice, this would have real logprobs data
 
         NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![],

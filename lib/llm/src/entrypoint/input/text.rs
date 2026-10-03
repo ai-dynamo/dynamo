@@ -110,6 +110,7 @@ async fn main_loop(
             .build()?;
 
         let req = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner,

@@ -14,7 +14,6 @@ use crate::{
         openai::{
             convert_backend_top_logprobs,
             delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
-            token_to_utf8_bytes,
         },
     },
     types::TokenIdType,
@@ -30,7 +29,7 @@ impl NvCreateChatCompletionRequest {
 
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
         let enable_logprobs =
-            self.inner.logprobs.unwrap_or(false) || self.inner.top_logprobs.unwrap_or(0) > 0;
+            crate::protocols::openai::OpenAIOutputOptionsProvider::get_logprobs(self).is_some();
         let options = DeltaGeneratorOptions::new(
             self.inner.stream_options.as_ref(),
             self.return_tokens_as_token_ids,
@@ -38,7 +37,9 @@ impl NvCreateChatCompletionRequest {
             self.nvext(),
         );
         let mut generator = DeltaGenerator::new(self.inner.model.clone(), options, request_id);
-        generator.suppress_top_logprobs = self.inner.top_logprobs == Some(0);
+        // Omitted top_logprobs means zero alternatives.
+        generator.top_logprobs_limit = Some(usize::from(self.inner.top_logprobs.unwrap_or(0)));
+        generator.capture_prompt_logprobs = self.common.prompt_logprobs.is_some();
         generator
     }
 }
@@ -51,7 +52,8 @@ pub struct DeltaGenerator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Choice indices for which the assistant role has already been emitted.
     emitted_role_choices: HashSet<u32>,
-    suppress_top_logprobs: bool,
+    top_logprobs_limit: Option<usize>,
+    capture_prompt_logprobs: bool,
 }
 
 impl DeltaGenerator {
@@ -65,7 +67,8 @@ impl DeltaGenerator {
             ),
             service_tier: None,
             emitted_role_choices: HashSet::new(),
-            suppress_top_logprobs: false,
+            top_logprobs_limit: None,
+            capture_prompt_logprobs: false,
         }
     }
 
@@ -96,12 +99,15 @@ impl DeltaGenerator {
         let toks = tokens
             .into_iter()
             .zip(token_ids)
-            .map(|(token, token_id)| (token.unwrap_or_default(), *token_id))
-            .collect::<Vec<(String, TokenIdType)>>();
+            .map(|(token, token_id)| {
+                let bytes = token.as_ref().map(|text| text.as_bytes().to_vec());
+                (token.unwrap_or_default(), *token_id, bytes)
+            })
+            .collect::<Vec<_>>();
         let tok_lps = toks
             .iter()
             .zip(logprobs.unwrap())
-            .map(|(_, lp)| lp as f32)
+            .map(|(_, lp)| (lp as f32).max(-9999.0))
             .collect::<Vec<f32>>();
 
         let return_as_ids = self.state.options().return_tokens_as_token_ids;
@@ -109,7 +115,7 @@ impl DeltaGenerator {
             .iter()
             .zip(tok_lps)
             .enumerate()
-            .map(|(index, ((t, tid), lp))| {
+            .map(|(index, ((t, tid, bytes), lp))| {
                 let top_lps = top_logprobs
                     .as_ref()
                     .and_then(|positions| positions.get(index))
@@ -120,18 +126,29 @@ impl DeltaGenerator {
                 } else {
                     t.clone()
                 };
-                // Only explicit zero disables alternatives. Preserve the fallback
-                // for positive or omitted counts, even if backend data is missing.
-                let converted = if self.suppress_top_logprobs {
+                let converted = if self.top_logprobs_limit == Some(0) {
                     Vec::new()
                 } else {
-                    convert_backend_top_logprobs(top_lps, t, *tid, lp, return_as_ids)
+                    let mut converted =
+                        convert_backend_top_logprobs(top_lps, t, *tid, lp, return_as_ids);
+                    // Generated-token probabilities use the native serving
+                    // floor; prompt probabilities must not use this rule.
+                    for entry in &mut converted {
+                        entry.logprob = entry.logprob.max(-9999.0);
+                    }
+                    if let Some(limit) = self.top_logprobs_limit {
+                        converted.truncate(limit);
+                    }
+                    converted
                 };
                 dynamo_protocols::types::ChatCompletionTokenLogprob {
                     token: token_str.clone(),
                     logprob: lp,
                     token_id: Some(*tid),
-                    bytes: token_to_utf8_bytes(&token_str),
+                    // Native chat keeps decoded sampled-token bytes even when
+                    // token uses the token_id placeholder. Alternative bytes
+                    // instead describe their displayed token strings.
+                    bytes: bytes.clone(),
                     top_logprobs: converted,
                 }
             })
@@ -175,6 +192,7 @@ impl DeltaGenerator {
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
         NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: self.state.id().to_string(),
                 object: self.state.object().to_string(),
@@ -204,6 +222,7 @@ impl DeltaGenerator {
         let usage = self.get_usage();
 
         NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: self.state.id().to_string(),
                 object: self.state.object().to_string(),
@@ -289,8 +308,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
-        let prompt_logprobs_payload =
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+        let prompt_logprobs_payload = if self.capture_prompt_logprobs
+            || self.state.options().response_fields.prompt_logprobs
+        {
+            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+        } else {
+            None
+        };
+        if self.capture_prompt_logprobs {
+            stream_response.internal_prompt_logprobs = prompt_logprobs_payload.clone();
+        }
         let completion_token_ids_slice: &[u32] = &delta.token_ids;
         if let Some(nvext_response) =
             self.state
@@ -360,7 +387,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 mod tests {
     use super::*;
     use crate::protocols::common::{self, llm_backend::BackendOutput, timing::WORKER_TYPE_PREFILL};
-    use crate::protocols::openai::DeltaGeneratorExt;
+    use crate::protocols::openai::{DeltaGeneratorExt, token_to_utf8_bytes};
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CompletionTokensDetails, CompletionUsage,
@@ -376,6 +403,7 @@ mod tests {
         )];
 
         NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -597,6 +625,79 @@ mod tests {
     }
 
     #[test]
+    fn test_chat_generated_logprob_floor() {
+        for (value, expected) in [
+            (f64::NEG_INFINITY, -9999.0),
+            (-1e30, -9999.0),
+            (-10000.0, -9999.0),
+            (-9999.0, -9999.0),
+            (-0.25, -0.25),
+            (0.0, 0.0),
+        ] {
+            for return_as_ids in [false, true] {
+                for with_alternatives in [false, true] {
+                    let mut request = create_test_request();
+                    request.inner.logprobs = Some(true);
+                    request.inner.top_logprobs = Some(2);
+                    request.return_tokens_as_token_ids = Some(return_as_ids);
+                    let generator = request.response_generator("floor".into());
+                    let alternatives = with_alternatives.then(|| {
+                        vec![vec![common::llm_backend::TopLogprob {
+                            token_id: 2,
+                            token: Some("alternative".into()),
+                            logprob: value,
+                            rank: 2,
+                            bytes: None,
+                        }]]
+                    });
+                    let result = generator
+                        .create_logprobs(
+                            vec![Some("sampled".into())],
+                            &[1],
+                            Some(vec![value]),
+                            alternatives,
+                        )
+                        .unwrap();
+                    let content = result.content.unwrap();
+                    assert_eq!(content[0].logprob, expected, "sampled: {value}");
+                    assert!(!content[0].top_logprobs.is_empty());
+                    for entry in &content[0].top_logprobs {
+                        assert_eq!(entry.logprob, expected, "alternative: {value}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_chat_sampled_bytes_preserve_empty_unknown_and_unicode_tokens() {
+        for return_as_ids in [false, true] {
+            let mut request = create_test_request();
+            request.inner.logprobs = Some(true);
+            request.return_tokens_as_token_ids = Some(return_as_ids);
+            let generator = request.response_generator("req-byte-contract".into());
+            let content = generator
+                .create_logprobs(
+                    vec![Some("é🦀".into()), Some(String::new()), None],
+                    &[1, 2, 3],
+                    Some(vec![-0.5; 3]),
+                    None,
+                )
+                .unwrap()
+                .content
+                .unwrap();
+            assert_eq!(content[0].bytes, Some("é🦀".as_bytes().to_vec()));
+            assert_eq!(content[1].bytes, Some(vec![]));
+            assert_eq!(content[2].bytes, None);
+            if return_as_ids {
+                assert_eq!(content[0].token, "token_id:1");
+                assert_eq!(content[1].token, "token_id:2");
+                assert_eq!(content[2].token, "token_id:3");
+            }
+        }
+    }
+
+    #[test]
     fn test_chat_logprobs_zero_top_ignores_backend_alternatives() {
         for return_as_ids in [false, true] {
             let mut request = create_test_request();
@@ -633,13 +734,13 @@ mod tests {
                 assert_eq!(entry.token, expected_token);
                 assert_eq!(entry.token_id, Some(index as u32 + 1));
                 assert_eq!(entry.logprob, chosen_logprobs[index] as f32);
-                assert_eq!(entry.bytes, token_to_utf8_bytes(&expected_token));
+                assert_eq!(entry.bytes, token_to_utf8_bytes(tokens[index]));
                 assert!(entry.top_logprobs.is_empty());
             }
         }
     }
 
-    fn assert_chat_logprobs_missing_alternatives_keep_fallback(requested_top: Option<u8>) {
+    fn assert_chat_logprobs_missing_alternatives_respect_count(requested_top: Option<u8>) {
         let candidate = common::llm_backend::TopLogprob {
             rank: 1,
             token_id: 1,
@@ -681,12 +782,16 @@ mod tests {
                     assert_eq!(entry.token, expected_token);
                     assert_eq!(entry.token_id, Some(index as u32 + 1));
                     assert_eq!(entry.logprob, chosen_logprobs[index] as f32);
-                    assert_eq!(entry.bytes, token_to_utf8_bytes(&expected_token));
+                    assert_eq!(entry.bytes, token_to_utf8_bytes(tokens[index]));
+                    if requested_top.is_none() {
+                        assert!(entry.top_logprobs.is_empty());
+                        continue;
+                    }
                     assert_eq!(entry.top_logprobs.len(), 1);
                     let fallback = &entry.top_logprobs[0];
                     assert_eq!(fallback.token, entry.token);
                     assert_eq!(fallback.logprob, entry.logprob);
-                    assert_eq!(fallback.bytes, entry.bytes);
+                    assert_eq!(fallback.bytes, token_to_utf8_bytes(&expected_token));
                 }
             }
         }
@@ -694,16 +799,22 @@ mod tests {
 
     #[test]
     fn test_chat_logprobs_positive_top_missing_alternatives_keep_fallback() {
-        assert_chat_logprobs_missing_alternatives_keep_fallback(Some(1));
+        assert_chat_logprobs_missing_alternatives_respect_count(Some(1));
     }
 
     #[test]
-    fn test_chat_logprobs_omitted_top_missing_alternatives_keep_fallback() {
-        assert_chat_logprobs_missing_alternatives_keep_fallback(None);
+    fn test_chat_logprobs_omitted_top_returns_no_alternatives() {
+        assert_chat_logprobs_missing_alternatives_respect_count(None);
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        assert_eq!(
+            crate::protocols::openai::OpenAIOutputOptionsProvider::get_logprobs(&request),
+            Some(0)
+        );
     }
 
     #[test]
-    fn test_chat_logprobs_nonempty_alternatives_unchanged() {
+    fn test_chat_logprobs_nonempty_alternatives_respect_requested_count() {
         let mut request = create_test_request();
         request.inner.logprobs = Some(true);
         request.inner.top_logprobs = Some(1);
@@ -715,7 +826,8 @@ mod tests {
             logprob: -0.25,
             bytes: Some(b"hi".to_vec()),
         }];
-        let expected = convert_backend_top_logprobs(&candidates, "hello", 1, -0.5, false);
+        let mut expected = convert_backend_top_logprobs(&candidates, "hello", 1, -0.5, false);
+        expected.truncate(1);
         let logprobs = generator
             .create_logprobs(
                 vec![Some("hello".into())],
@@ -741,6 +853,7 @@ mod tests {
         )];
 
         NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {

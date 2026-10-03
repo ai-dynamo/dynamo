@@ -611,6 +611,7 @@ mod tests {
         });
 
         NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -647,6 +648,7 @@ mod tests {
         };
 
         Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "chatcmpl-test".to_string(),
                 object: "chat.completion.chunk".to_string(),

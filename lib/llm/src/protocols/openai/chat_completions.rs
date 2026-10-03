@@ -21,6 +21,7 @@ use crate::protocols::common::extensions::{
 
 pub mod aggregator;
 mod delta;
+mod request_serde;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
 
@@ -85,10 +86,17 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
 /// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
 ///   Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence.
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]
+#[serde(remote = "Self")]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateChatCompletionRequest,
+
+    /// Presence metadata for the nullable native top_logprobs control. This is
+    /// never a wire field; serialization preserves the original root null.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub top_logprobs_explicit_null: bool,
 
     #[serde(flatten, default)]
     pub common: CommonExt,
@@ -151,6 +159,10 @@ pub struct NvCreateChatCompletionRequest {
 }
 
 impl NvCreateChatCompletionRequest {
+    pub(crate) fn has_null_top_logprobs(&self) -> bool {
+        self.top_logprobs_explicit_null && self.inner.top_logprobs.is_none()
+    }
+
     /// Resolve the request's reasoning controls into `chat_template_args`.
     /// Runs once at the HTTP boundary, so every render path reads one answer.
     /// Model-specific overrides still apply later in the default preprocessor.
@@ -291,6 +303,13 @@ pub struct NvCreateChatCompletionResponse {
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// Prompt-token probabilities requested at the root, independent of nvext.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::protocols::common::llm_backend::deserialize_optional_prompt_logprobs"
+    )]
+    pub prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
 }
 
 /// A response structure for streamed chat completions, embedding OpenAI's
@@ -305,6 +324,14 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// client-facing OpenAI-compatible streams.
     #[serde(default, skip_serializing)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+    /// Internal payload for unary aggregation, including the Python bridge.
+    /// Never serialize this prompt-sized payload into client-facing SSE chunks.
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "crate::protocols::common::llm_backend::deserialize_optional_prompt_logprobs"
+    )]
+    pub internal_prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
 }
 
 /// Synthetic chunks reuse a real response envelope but consume no backend data.
@@ -318,6 +345,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     let data = response.data.as_mut()?;
     data.inner.usage = None;
     data.llm_metrics = None;
+    data.internal_prompt_logprobs = None;
     data.nvext = None;
     Some(())
 }
@@ -589,10 +617,13 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
 
 impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     fn get_logprobs(&self) -> Option<u32> {
+        if self.has_null_top_logprobs() {
+            return None;
+        }
         match self.inner.logprobs {
             Some(true) => match self.inner.top_logprobs {
                 Some(top_logprobs) => Some(top_logprobs as u32),
-                None => Some(1_u32),
+                None => Some(0_u32),
             },
             Some(false) => None,
             None => None,

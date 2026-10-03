@@ -78,6 +78,7 @@ impl AsyncEngineContext for MockContext {
 
 fn chat_request() -> NvCreateChatCompletionRequest {
     NvCreateChatCompletionRequest {
+        top_logprobs_explicit_null: false,
         add_generation_prompt: None,
         continue_final_message: None,
         inner: CreateChatCompletionRequest {

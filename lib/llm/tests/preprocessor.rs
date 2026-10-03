@@ -257,6 +257,7 @@ impl Request {
         let inner = inner.build().unwrap();
 
         NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner,
@@ -948,6 +949,7 @@ mod context_length_validation {
         }
         let inner = builder.build().unwrap();
         NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner,
@@ -1330,6 +1332,7 @@ mod embedding_without_chat_template {
             .build()
             .unwrap();
         NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner,

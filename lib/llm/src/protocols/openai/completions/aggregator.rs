@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use dynamo_runtime::error::DynamoError;
 use futures::{Stream, StreamExt, TryStreamExt};
 
-use super::NvCreateCompletionResponse;
+use super::{CompletionChoice, CompletionResponse, NvCreateCompletionResponse};
 use crate::protocols::{
     Annotated, DataStream,
     codec::{Message, SseCodecError},
@@ -31,6 +31,7 @@ struct DeltaChoice {
     text: String,
     finish_reason: Option<FinishReason>,
     logprobs: Option<dynamo_protocols::types::Logprobs>,
+    prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
 }
 
 impl Default for DeltaAggregator {
@@ -78,6 +79,9 @@ impl DeltaAggregator {
 
                     // handle the choices
                     for choice in delta.inner.choices {
+                        let prompt_logprobs =
+                            choice.internal_prompt_logprobs.or(choice.prompt_logprobs);
+                        let choice = choice.inner;
                         let state_choice =
                             aggregator
                                 .choices
@@ -87,7 +91,12 @@ impl DeltaAggregator {
                                     text: "".to_string(),
                                     finish_reason: None,
                                     logprobs: None,
+                                    prompt_logprobs: None,
                                 });
+
+                        if prompt_logprobs.is_some() {
+                            state_choice.prompt_logprobs = prompt_logprobs;
+                        }
 
                         state_choice.text.push_str(&choice.text);
 
@@ -134,12 +143,12 @@ impl DeltaAggregator {
         let mut choices: Vec<_> = aggregator
             .choices
             .into_values()
-            .map(dynamo_protocols::types::Choice::from)
+            .map(CompletionChoice::from)
             .collect();
 
         choices.sort_by_key(|a| a.index);
 
-        let inner = dynamo_protocols::types::CreateCompletionResponse {
+        let inner = CompletionResponse {
             id: aggregator.id,
             created: aggregator.created,
             usage: aggregator.usage,
@@ -158,15 +167,34 @@ impl DeltaAggregator {
     }
 }
 
-impl From<DeltaChoice> for dynamo_protocols::types::Choice {
+impl From<DeltaChoice> for CompletionChoice {
     fn from(delta: DeltaChoice) -> Self {
         let finish_reason = delta.finish_reason.map(Into::into);
+        let mut logprobs = delta.logprobs;
+        if let Some(logprobs) = logprobs.as_mut() {
+            // Unary offsets follow the returned token strings, not the internal
+            // streaming chunk boundaries. These differ for token-id placeholders.
+            let mut offset = 0;
+            logprobs.text_offset = logprobs
+                .tokens
+                .iter()
+                .map(|token| {
+                    let current = offset;
+                    offset += token.chars().count() as u32;
+                    current
+                })
+                .collect();
+        }
 
-        dynamo_protocols::types::Choice {
-            index: delta.index,
-            text: delta.text,
-            finish_reason,
-            logprobs: delta.logprobs,
+        Self {
+            inner: dynamo_protocols::types::Choice {
+                index: delta.index,
+                text: delta.text,
+                finish_reason,
+                logprobs,
+            },
+            prompt_logprobs: delta.prompt_logprobs,
+            internal_prompt_logprobs: None,
         }
     }
 }
@@ -239,7 +267,10 @@ mod tests {
             object: "text_completion".to_string(),
         };
 
-        let response = NvCreateCompletionResponse { inner, nvext: None };
+        let response = NvCreateCompletionResponse {
+            inner: inner.into(),
+            nvext: None,
+        };
 
         Annotated {
             data: Some(response),
@@ -398,7 +429,10 @@ mod tests {
             object: "text_completion".to_string(),
         };
 
-        let response = NvCreateCompletionResponse { inner, nvext: None };
+        let response = NvCreateCompletionResponse {
+            inner: inner.into(),
+            nvext: None,
+        };
 
         let annotated_delta = Annotated {
             data: Some(response),

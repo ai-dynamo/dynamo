@@ -38,6 +38,7 @@ fn create_mock_response_chunk(
     };
 
     let response = NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],

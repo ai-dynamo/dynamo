@@ -3338,8 +3338,12 @@ fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> boo
                 index: _,
                 logprobs,
                 finish_reason,
-            } = c;
-            text.is_empty() && finish_reason.is_none() && logprobs.is_none()
+            } = &c.inner;
+            text.is_empty()
+                && finish_reason.is_none()
+                && logprobs.is_none()
+                && c.prompt_logprobs.is_none()
+                && c.internal_prompt_logprobs.is_none()
         })
 }
 
@@ -8253,6 +8257,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_empty_messages() {
         let request = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -8285,6 +8290,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_with_messages() {
         let request = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -8535,6 +8541,7 @@ mod tests {
     fn test_bad_base_request_for_chatcompletion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -8570,6 +8577,7 @@ mod tests {
 
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -8604,6 +8612,7 @@ mod tests {
 
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -8638,6 +8647,7 @@ mod tests {
 
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -8672,6 +8682,7 @@ mod tests {
 
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -8708,6 +8719,7 @@ mod tests {
 
         // Top Logprobs: Should be a positive integer between 0 and 20
         let request = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -8816,6 +8828,7 @@ mod tests {
 
         let normal_event = Annotated {
             data: Some(NvCreateChatCompletionStreamResponse {
+                internal_prompt_logprobs: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -9466,6 +9479,7 @@ mod tests {
         .expect("annotation construction should succeed");
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: Some(NvCreateChatCompletionStreamResponse {
+                internal_prompt_logprobs: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -9556,6 +9570,7 @@ mod tests {
         // Create a normal data event
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: Some(NvCreateChatCompletionStreamResponse {
+                internal_prompt_logprobs: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -9967,6 +9982,7 @@ mod tests {
         choices: Vec<ChatChoiceStream>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let response = NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices,
@@ -10601,6 +10617,7 @@ mod tests {
             logprobs: None,
         };
         NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],
@@ -10922,7 +10939,8 @@ mod tests {
                 system_fingerprint: None,
                 object: "text_completion".to_string(),
                 usage,
-            },
+            }
+            .into(),
             nvext: None,
         }
     }
@@ -10978,7 +10996,8 @@ mod tests {
                 system_fingerprint: None,
                 object: "text_completion".to_string(),
                 usage: Some(usage),
-            },
+            }
+            .into(),
             nvext: None,
         }
     }

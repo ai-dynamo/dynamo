@@ -142,6 +142,7 @@ pub struct DeltaAggregator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
     nvext: Option<serde_json::Value>,
+    prompt_logprobs: Option<crate::protocols::common::llm_backend::PromptLogprobs>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -371,6 +372,7 @@ impl DeltaAggregator {
             choices: HashMap::new(),
             service_tier: None,
             nvext: None,
+            prompt_logprobs: None,
         }
     }
 
@@ -405,6 +407,9 @@ impl DeltaAggregator {
                     }
 
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
+                    if let Some(payload) = delta.internal_prompt_logprobs {
+                        aggregator.prompt_logprobs = Some(payload);
+                    }
 
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
@@ -869,6 +874,7 @@ impl DeltaAggregator {
                 service_tier: aggregator.service_tier,
             },
             nvext: aggregator.nvext,
+            prompt_logprobs: aggregator.prompt_logprobs,
         };
 
         Ok(response)
@@ -1045,6 +1051,7 @@ mod tests {
         };
 
         let data = NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "meta/llama-3.1-8b-instruct".to_string(),
@@ -1093,6 +1100,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "nvidia/nvidia-nemotron-3-ultra".to_string(),
@@ -1214,6 +1222,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "m".to_string(),
@@ -1272,6 +1281,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "meta/llama-3.1-8b-instruct".to_string(),
@@ -1870,6 +1880,7 @@ mod tests {
         // Create a delta with multiple choices
         // ALLOW: function_call is deprecated
         let data = NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "test_model".to_string(),
