@@ -177,6 +177,31 @@ trait ResponsePublisher {
     }
 }
 
+impl ResponsePublisher for super::super::velo_response::VeloResponseSender {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+        self.send(payload).await
+    }
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+        self.send_prologue(error.map(StreamPrologueError::from_message))
+            .await
+    }
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        self.send_prologue(error).await
+    }
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        self.finish().await
+    }
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        self.abort().await
+    }
+    fn strict_prologue(&self) -> bool {
+        true
+    }
+}
+
 impl ResponsePublisher for quic_response::QuicResponseSender {
     async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
         quic_response::QuicResponseSender::send(self, payload).await
@@ -915,6 +940,32 @@ where
                     publisher,
                 )
                 .await?;
+            }
+            ResponsePlaneMode::Velo => {
+                let service = self
+                    .velo_response_service
+                    .get_or_try_init(super::super::velo_response::VeloResponseService::shared)
+                    .await
+                    .map_err(|error| PipelineError::Generic(error.to_string()))?;
+                let context = request.context();
+                let publisher = service
+                    .sender(
+                        context.clone(),
+                        response_connection_info,
+                        cancellation_counter,
+                    )
+                    .await
+                    .map_err(|error| {
+                        PipelineError::Generic(format!(
+                            "Failed to create Velo response stream: {error}"
+                        ))
+                    })?;
+                drop(worker_admission);
+                tokio::select! {
+                    biased;
+                    _ = context.killed() => return Ok(()),
+                    result = self.generate_and_publish(request, payload_codec, start_time, response_modes, &lifecycle, publisher) => result?,
+                }
             }
             ResponsePlaneMode::Quic => {
                 tracing::trace!("creating QUIC response sender");

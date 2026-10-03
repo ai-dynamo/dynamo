@@ -1,0 +1,44 @@
+diff --git a/lib/bindings/python/Cargo.lock b/lib/bindings/python/Cargo.lock
+index e79a16a..c16ff81 100644
+--- a/lib/bindings/python/Cargo.lock
++++ b/lib/bindings/python/Cargo.lock
+@@ -10601,8 +10601,6 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+ [[package]]
+ name = "zmq"
+ version = "0.10.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "dd3091dd571fb84a9b3e5e5c6a807d186c411c812c8618786c3c30e5349234e7"
+ dependencies = [
+  "bitflags 1.3.2",
+  "libc",
+diff --git a/lib/bindings/python/Cargo.toml b/lib/bindings/python/Cargo.toml
+index cf7b6e5..2d881b7 100644
+--- a/lib/bindings/python/Cargo.toml
++++ b/lib/bindings/python/Cargo.toml
+@@ -138,3 +138,7 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
+ inherits = "release"
+ debug = true
+ strip = false
++
++# Benchmark-only ZMQ socket capacity; no other dependency changes.
++[patch.crates-io]
++zmq = { path = "../../../campaign/deps/zmq" }
+diff --git a/lib/runtime/src/transports/event_plane/zmq_transport.rs b/lib/runtime/src/transports/event_plane/zmq_transport.rs
+index e3c8ff5..bc1fd09 100644
+--- a/lib/runtime/src/transports/event_plane/zmq_transport.rs
++++ b/lib/runtime/src/transports/event_plane/zmq_transport.rs
+@@ -57,6 +57,14 @@ fn configured_zmq_context(value: Option<&OsStr>) -> Result<Context> {
+         "DYN_ZMQ_IO_THREADS must be a positive integer"
+     );
+     let context = Context::new();
++    // Campaign-only capacity setting for the 2,048-worker benchmark.
++    if let Ok(raw) = std::env::var("DYN_ZMQ_MAX_SOCKETS") {
++        let max_sockets: i32 = raw.parse().context("invalid DYN_ZMQ_MAX_SOCKETS")?;
++        anyhow::ensure!(max_sockets > 0, "DYN_ZMQ_MAX_SOCKETS must be positive");
++        context.set_max_sockets(max_sockets)?;
++        anyhow::ensure!(context.get_max_sockets()? == max_sockets);
++        tracing::warn!(max_sockets, "Campaign ZMQ socket capacity verified");
++    }
+     // Configure the process-wide context before creating any PUB/SUB sockets.
+     context
+         .set_io_threads(io_threads)

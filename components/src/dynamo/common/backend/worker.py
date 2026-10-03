@@ -245,8 +245,8 @@ class Worker:
                 stacklevel=2,
             )
 
-        if self.config.response_plane not in {"tcp", "quic"}:
-            raise ValueError("response_plane must be 'tcp' or 'quic'")
+        if self.config.response_plane not in {"tcp", "quic", "velo"}:
+            raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
         os.environ["DYN_RESPONSE_PLANE"] = self.config.response_plane
 
         runtime_cfg = _backend.RuntimeConfig(

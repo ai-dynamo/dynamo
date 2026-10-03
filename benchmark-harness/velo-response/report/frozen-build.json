@@ -1,0 +1,25 @@
+{
+  "frozen_at": "2026-09-23T20:12:27.439767+00:00",
+  "main": "7472c23abfbbc56387d4fd44631b06a3f487f78e",
+  "dynamo": "0c14c336c2547d2911d4cad5f530285fd91b10dd",
+  "velo": "da848eb78eec6331d670b8d80b5b0b8333b464cc",
+  "files": {
+    ".dynamo-native-rustflags": "591a2ed04badc23e4f55fe8c1edf877f449701d4e5e8b4dd8c50d0ddee81cd79",
+    "Cargo.lock": "915de3579065e8bcb95010b32339a906f2b8f4b9bfa43d16f701b8839f45b6aa",
+    "lib/bindings/kvbm/Cargo.lock": "32a63117e4d539a21f0db7716fc42e1018b6206ce8348b53493c30ff461bfb6f",
+    "lib/bindings/python/Cargo.lock": "52e157b1b407ed9642984f63f9ef1bc79c2e2f1a1e107497d7d8e35de86cf1be",
+    "lib/bindings/python/Cargo.toml": "67f0fdef266db5394336ec6f71a50f8fa1041976a119aa607d6f9a441c06221a",
+    "lib/bindings/python/src/dynamo/_core.so": "9d9d383ff77a12058373f01618a8eff3190e4b7671c5406d89a69a8ef18609b8",
+    "lib/runtime/src/transports/event_plane/zmq_transport.rs": "fda2d825c747d4b61851fb5b36a1103c45dc142c2bfbddca1ea0acaeded1520f"
+  },
+  "overlay": {
+    "lib/bindings/python/Cargo.lock": "52e157b1b407ed9642984f63f9ef1bc79c2e2f1a1e107497d7d8e35de86cf1be",
+    "lib/bindings/python/Cargo.toml": "67f0fdef266db5394336ec6f71a50f8fa1041976a119aa607d6f9a441c06221a",
+    "lib/runtime/src/transports/event_plane/zmq_transport.rs": "fda2d825c747d4b61851fb5b36a1103c45dc142c2bfbddca1ea0acaeded1520f"
+  },
+  "features": [
+    "tracing/release_max_level_warn",
+    "velo-ucx"
+  ],
+  "rustflags": "-C target-cpu=native -C force-frame-pointers=yes --cfg tokio_unstable"
+}

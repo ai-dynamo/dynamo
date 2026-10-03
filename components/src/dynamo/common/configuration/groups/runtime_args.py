@@ -222,7 +222,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_RESPONSE_PLANE",
             default="tcp",
             help="Select the response transport. Frontend and workers must match.",
-            choices=["tcp", "quic"],
+            choices=["tcp", "quic", "velo"],
         )
         add_argument(
             g,

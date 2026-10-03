@@ -1,0 +1,5454 @@
+{
+  "frozen_build": {
+    "frozen_at": "2026-09-23T20:12:27.439767+00:00",
+    "main": "7472c23abfbbc56387d4fd44631b06a3f487f78e",
+    "dynamo": "0c14c336c2547d2911d4cad5f530285fd91b10dd",
+    "velo": "da848eb78eec6331d670b8d80b5b0b8333b464cc",
+    "files": {
+      ".dynamo-native-rustflags": "591a2ed04badc23e4f55fe8c1edf877f449701d4e5e8b4dd8c50d0ddee81cd79",
+      "Cargo.lock": "915de3579065e8bcb95010b32339a906f2b8f4b9bfa43d16f701b8839f45b6aa",
+      "lib/bindings/kvbm/Cargo.lock": "32a63117e4d539a21f0db7716fc42e1018b6206ce8348b53493c30ff461bfb6f",
+      "lib/bindings/python/Cargo.lock": "52e157b1b407ed9642984f63f9ef1bc79c2e2f1a1e107497d7d8e35de86cf1be",
+      "lib/bindings/python/Cargo.toml": "67f0fdef266db5394336ec6f71a50f8fa1041976a119aa607d6f9a441c06221a",
+      "lib/bindings/python/src/dynamo/_core.so": "9d9d383ff77a12058373f01618a8eff3190e4b7671c5406d89a69a8ef18609b8",
+      "lib/runtime/src/transports/event_plane/zmq_transport.rs": "fda2d825c747d4b61851fb5b36a1103c45dc142c2bfbddca1ea0acaeded1520f"
+    },
+    "overlay": {
+      "lib/bindings/python/Cargo.lock": "52e157b1b407ed9642984f63f9ef1bc79c2e2f1a1e107497d7d8e35de86cf1be",
+      "lib/bindings/python/Cargo.toml": "67f0fdef266db5394336ec6f71a50f8fa1041976a119aa607d6f9a441c06221a",
+      "lib/runtime/src/transports/event_plane/zmq_transport.rs": "fda2d825c747d4b61851fb5b36a1103c45dc142c2bfbddca1ea0acaeded1520f"
+    },
+    "features": [
+      "tracing/release_max_level_warn",
+      "velo-ucx"
+    ],
+    "rustflags": "-C target-cpu=native -C force-frame-pointers=yes --cfg tokio_unstable"
+  },
+  "runs": {
+    "tcp": [
+      {
+        "label": "r1-tcp",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 2468.818712742369,
+          "output_tokens_per_second": 2332416.9713258995,
+          "frontend_cpu_ms_per_request": 40.87681713799351,
+          "frontend_cpu_us_per_output_token": 43.267328401515705,
+          "frontend_mean_cores": 100.91745106762635,
+          "frontend_system_cores": 52.70283496265867,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 22.952527317888528,
+          "host_softirq_cores": 33.66052705155708,
+          "ethernet_rx_host_packets_per_second": 3604049.3191184215,
+          "ethernet_tx_host_packets_per_second": 2115201.7409716533,
+          "time_to_first_token_p50_ms": 1547.4302874999998,
+          "time_to_first_token_p95_ms": 2549.0506184999995,
+          "time_to_first_token_p99_ms": 5458.57813147,
+          "inter_token_latency_p50_ms": 0.1124981607142857,
+          "inter_token_latency_p95_ms": 1.0973031988598678,
+          "inter_token_latency_p99_ms": 1.7490013950104095,
+          "request_latency_p50_ms": 1632.0398205,
+          "request_latency_p95_ms": 5351.699426349993,
+          "request_latency_p99_ms": 11568.58571706,
+          "ethernet_rx_wire_packets_per_second": 3603749.7840146874,
+          "ethernet_rx_wire_packets_per_request": 1459.706119940915,
+          "ethernet_rx_wire_packets_per_output_token": 1.5450709835840708,
+          "rdma_rx_wire_packets_per_second": 0.5980849727574561,
+          "rdma_rx_wire_packets_per_request": 0.00024225552474572021,
+          "rdma_rx_wire_packets_per_output_token": 2.56422835243505e-07,
+          "total_rx_wire_packets_per_second": 3603750.38209966,
+          "total_rx_wire_packets_per_request": 1459.7063621964396,
+          "total_rx_wire_packets_per_output_token": 1.545071240006906,
+          "ethernet_tx_wire_packets_per_second": 2115044.0681944545,
+          "ethernet_tx_wire_packets_per_request": 856.7028665482932,
+          "ethernet_tx_wire_packets_per_output_token": 0.9068035836628834,
+          "rdma_tx_wire_packets_per_second": 0.5980849727574561,
+          "rdma_tx_wire_packets_per_request": 0.00024225552474572021,
+          "rdma_tx_wire_packets_per_output_token": 2.56422835243505e-07,
+          "total_tx_wire_packets_per_second": 2115044.6662794272,
+          "total_tx_wire_packets_per_request": 856.7031088038179,
+          "total_tx_wire_packets_per_output_token": 0.9068038400857187,
+          "total_wire_packets_per_second": 5718795.048379088,
+          "total_wire_packets_per_request": 2316.4094710002573,
+          "total_wire_packets_per_output_token": 2.451875080092625,
+          "ethernet_mean_rx_wire_bytes": 438.31575970390804,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 12.617691741908631,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 13.982538652657759,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_64_bytes_phy_percent": 1.7151647109260964e-05,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 0.909210662911623,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 55.95783911551471,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 16.532777427859344,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 442.1947023314997,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 43.70709991455078,
+          "client_mean_cores": 79.97212287952581
+        },
+        "window": {
+          "epoch_start": 1790199202.259838,
+          "epoch_end": 1790199322.64407,
+          "seconds": 120.38423180580139,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 120,
+          "mean": 6458.428511624398,
+          "p50": 6428.458264859255,
+          "p95": 6680.585958337499,
+          "p99": 6696.541439099604,
+          "min": 5752.31384876383,
+          "max": 6704.624866941362
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 1589,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 391480,
+          "profiling_records": 391480,
+          "measurement_completions": 297685,
+          "measurement_arrivals": 294814,
+          "measurement_arrivals_completed": 294814,
+          "phase_cancelled_requests": 1589
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 3212
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 223678
+          },
+          "1": {
+            "1": 237788
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r2-tcp",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 2493.083067395088,
+          "output_tokens_per_second": 2360431.8719021785,
+          "frontend_cpu_ms_per_request": 40.764436696650876,
+          "frontend_cpu_us_per_output_token": 43.05531038200242,
+          "frontend_mean_cores": 101.62912688031928,
+          "frontend_system_cores": 53.02811258014823,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 23.226772492035156,
+          "host_softirq_cores": 33.46050817985597,
+          "ethernet_rx_host_packets_per_second": 3653151.1561267166,
+          "ethernet_tx_host_packets_per_second": 2155383.6930924947,
+          "time_to_first_token_p50_ms": 1545.260137,
+          "time_to_first_token_p95_ms": 2408.9797387999993,
+          "time_to_first_token_p99_ms": 5269.274180239999,
+          "inter_token_latency_p50_ms": 0.1120285231717687,
+          "inter_token_latency_p95_ms": 1.1131593430014604,
+          "inter_token_latency_p99_ms": 1.7467051491397236,
+          "request_latency_p50_ms": 1625.191347,
+          "request_latency_p95_ms": 5312.8376238,
+          "request_latency_p99_ms": 11353.585257719988,
+          "ethernet_rx_wire_packets_per_second": 3652902.240009727,
+          "ethernet_rx_wire_packets_per_request": 1465.2148128487681,
+          "ethernet_rx_wire_packets_per_output_token": 1.5475567346351742,
+          "rdma_rx_wire_packets_per_second": 0.9344883996709253,
+          "rdma_rx_wire_packets_per_request": 0.00037483243614795826,
+          "rdma_rx_wire_packets_per_output_token": 3.9589721304595767e-07,
+          "total_rx_wire_packets_per_second": 3652903.1744981264,
+          "total_rx_wire_packets_per_request": 1465.2151876812043,
+          "total_rx_wire_packets_per_output_token": 1.5475571305323872,
+          "ethernet_tx_wire_packets_per_second": 2155249.0024302322,
+          "ethernet_tx_wire_packets_per_request": 864.4914526182058,
+          "ethernet_tx_wire_packets_per_output_token": 0.9130740133132512,
+          "rdma_tx_wire_packets_per_second": 0.9344883996709253,
+          "rdma_tx_wire_packets_per_request": 0.00037483243614795826,
+          "rdma_tx_wire_packets_per_output_token": 3.9589721304595767e-07,
+          "total_tx_wire_packets_per_second": 2155249.9369186317,
+          "total_tx_wire_packets_per_request": 864.491827450642,
+          "total_tx_wire_packets_per_output_token": 0.9130744092104643,
+          "total_wire_packets_per_second": 5808153.111416758,
+          "total_wire_packets_per_request": 2329.707015131846,
+          "total_wire_packets_per_output_token": 2.4606315397428515,
+          "ethernet_mean_rx_wire_bytes": 436.9672102426732,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_64_bytes_phy_percent": 1.4618331840139988e-05,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 12.487271869842743,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 16.445752441304673,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 14.077613474515806,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 0.9236029553015918,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 56.06571360026806,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.4088386748560298,
+          "RetransSegs_per_second": 431.9264442685148,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 42.71123857257747,
+          "client_mean_cores": 82.68429284180831
+        },
+        "window": {
+          "epoch_start": 1790204397.574821,
+          "epoch_end": 1790204517.426496,
+          "seconds": 119.85167503356934,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6439.500124496205,
+          "p50": 6411.558168986963,
+          "p95": 6620.821229489865,
+          "p99": 6663.113964479171,
+          "min": 6292.984002192681,
+          "max": 6667.964903671182
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 1571,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 395172,
+          "profiling_records": 395172,
+          "measurement_completions": 298737,
+          "measurement_arrivals": 295989,
+          "measurement_arrivals_completed": 295989,
+          "phase_cancelled_requests": 1571
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 7448
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 222204
+          },
+          "1": {
+            "1": 230761
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r3-tcp",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 2435.0902077475757,
+          "output_tokens_per_second": 2301804.0667043994,
+          "frontend_cpu_ms_per_request": 41.50160904535051,
+          "frontend_cpu_us_per_output_token": 43.90476290051646,
+          "frontend_mean_cores": 101.06016179210124,
+          "frontend_system_cores": 53.584153560124335,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 22.85105240813158,
+          "host_softirq_cores": 34.40983700600644,
+          "ethernet_rx_host_packets_per_second": 3562502.438599275,
+          "ethernet_tx_host_packets_per_second": 2090572.8464244464,
+          "time_to_first_token_p50_ms": 1533.3912639999999,
+          "time_to_first_token_p95_ms": 2465.576866799989,
+          "time_to_first_token_p99_ms": 5322.870251319925,
+          "inter_token_latency_p50_ms": 0.11248940973201692,
+          "inter_token_latency_p95_ms": 1.114017871492333,
+          "inter_token_latency_p99_ms": 1.7488924313976035,
+          "request_latency_p50_ms": 1639.836535,
+          "request_latency_p95_ms": 5394.310968099982,
+          "request_latency_p99_ms": 11533.57282112,
+          "ethernet_rx_wire_packets_per_second": 3562564.413791194,
+          "ethernet_rx_wire_packets_per_request": 1463.011268517447,
+          "ethernet_rx_wire_packets_per_output_token": 1.547727048241723,
+          "rdma_rx_wire_packets_per_second": 1.2712837382046105,
+          "rdma_rx_wire_packets_per_request": 0.0005220684367913131,
+          "rdma_rx_wire_packets_per_output_token": 5.522988496691496e-07,
+          "total_rx_wire_packets_per_second": 3562565.6850749324,
+          "total_rx_wire_packets_per_request": 1463.0117905858838,
+          "total_rx_wire_packets_per_output_token": 1.5477276005405725,
+          "ethernet_tx_wire_packets_per_second": 2090648.976801204,
+          "ethernet_tx_wire_packets_per_request": 858.5509358747843,
+          "ethernet_tx_wire_packets_per_output_token": 0.9082653936720531,
+          "rdma_tx_wire_packets_per_second": 0.9367353860455024,
+          "rdma_tx_wire_packets_per_request": 0.00038468200605675694,
+          "rdma_tx_wire_packets_per_output_token": 4.069570471246366e-07,
+          "total_tx_wire_packets_per_second": 2090649.91353659,
+          "total_tx_wire_packets_per_request": 858.5513205567904,
+          "total_tx_wire_packets_per_output_token": 0.9082658006291001,
+          "total_wire_packets_per_second": 5653215.5986115225,
+          "total_wire_packets_per_request": 2321.563111142674,
+          "total_wire_packets_per_output_token": 2.4559934011696725,
+          "ethernet_mean_rx_wire_bytes": 437.58818655338825,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 55.926108454516275,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 14.174781598333382,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 12.46061343972043,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 0.9321831673628488,
+          "ethernet_rx_64_bytes_phy_percent": 1.566109347164553e-05,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 16.50631310049389,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 409.52169667460197,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 42.7558598836263,
+          "client_mean_cores": 80.02692370385883
+        },
+        "window": {
+          "epoch_start": 1790208698.529488,
+          "epoch_end": 1790208818.09367,
+          "seconds": 119.56418180465698,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6442.674170216605,
+          "p50": 6418.29870940979,
+          "p95": 6664.516332258253,
+          "p99": 6699.413687317263,
+          "min": 6310.4980942531065,
+          "max": 6711.136366105902
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 1647,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 386631,
+          "profiling_records": 386631,
+          "measurement_completions": 291202,
+          "measurement_arrivals": 290379,
+          "measurement_arrivals_completed": 290379,
+          "phase_cancelled_requests": 1647
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 4078
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 222500
+          },
+          "1": {
+            "1": 228308
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r4-tcp",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 2482.3845261330084,
+          "output_tokens_per_second": 2343782.6643587556,
+          "frontend_cpu_ms_per_request": 40.5804759787611,
+          "frontend_cpu_us_per_output_token": 42.980241796587244,
+          "frontend_mean_cores": 100.7363456327888,
+          "frontend_system_cores": 53.45265757504207,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 22.64033562503152,
+          "host_softirq_cores": 34.62399858126421,
+          "ethernet_rx_host_packets_per_second": 3612950.476283418,
+          "ethernet_tx_host_packets_per_second": 2096628.4508429498,
+          "time_to_first_token_p50_ms": 1580.796193,
+          "time_to_first_token_p95_ms": 2441.4067759,
+          "time_to_first_token_p99_ms": 5437.830508,
+          "inter_token_latency_p50_ms": 0.12125250233644859,
+          "inter_token_latency_p95_ms": 1.1215436781774284,
+          "inter_token_latency_p99_ms": 1.7438210342435976,
+          "request_latency_p50_ms": 1683.4926659999999,
+          "request_latency_p95_ms": 5426.098794199993,
+          "request_latency_p99_ms": 11681.704781939998,
+          "ethernet_rx_wire_packets_per_second": 3613055.958605806,
+          "ethernet_rx_wire_packets_per_request": 1455.4779570085893,
+          "ethernet_rx_wire_packets_per_output_token": 1.541549058088249,
+          "rdma_rx_wire_packets_per_second": 0.9484517609858976,
+          "rdma_rx_wire_packets_per_request": 0.00038207286220212226,
+          "rdma_rx_wire_packets_per_output_token": 4.0466711159218687e-07,
+          "total_rx_wire_packets_per_second": 3613056.907057567,
+          "total_rx_wire_packets_per_request": 1455.4783390814514,
+          "total_rx_wire_packets_per_output_token": 1.5415494627553605,
+          "ethernet_tx_wire_packets_per_second": 2096690.7381733328,
+          "ethernet_tx_wire_packets_per_request": 844.6277021551939,
+          "ethernet_tx_wire_packets_per_output_token": 0.8945755807725349,
+          "rdma_tx_wire_packets_per_second": 0.9409576155760184,
+          "rdma_tx_wire_packets_per_request": 0.00037905393208433215,
+          "rdma_tx_wire_packets_per_output_token": 4.0146965411294165e-07,
+          "total_tx_wire_packets_per_second": 2096691.6791309484,
+          "total_tx_wire_packets_per_request": 844.628081209126,
+          "total_tx_wire_packets_per_output_token": 0.8945759822421889,
+          "total_wire_packets_per_second": 5709748.586188516,
+          "total_wire_packets_per_request": 2300.1064202905773,
+          "total_wire_packets_per_output_token": 2.4361254449975496,
+          "ethernet_mean_rx_wire_bytes": 437.86003522229487,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 13.86661894026586,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 0.9424357811298693,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 12.490603383587475,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 16.483474346663122,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_64_bytes_phy_percent": 1.75664965180426e-05,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 56.216093513297615,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.7350812095412453,
+          "RetransSegs_per_second": 455.68685481989536,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 42.532660989200366,
+          "client_mean_cores": 82.92808855412194
+        },
+        "window": {
+          "epoch_start": 1790210205.606488,
+          "epoch_end": 1790210325.321152,
+          "seconds": 119.71466398239136,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6453.405941667809,
+          "p50": 6426.600736087377,
+          "p95": 6665.562523619902,
+          "p99": 6698.827543573649,
+          "min": 6326.851765918654,
+          "max": 6718.882174088054
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 1429,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 391647,
+          "profiling_records": 391647,
+          "measurement_completions": 297108,
+          "measurement_arrivals": 295595,
+          "measurement_arrivals_completed": 295595,
+          "phase_cancelled_requests": 1429
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 6664
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 221929
+          },
+          "1": {
+            "1": 231408
+          }
+        },
+        "error_examples": []
+      }
+    ],
+    "quic": [
+      {
+        "label": "r1-quic",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4536.943902111184,
+          "output_tokens_per_second": 4187467.1468149507,
+          "frontend_cpu_ms_per_request": 27.346047336095396,
+          "frontend_cpu_us_per_output_token": 29.62828802196319,
+          "frontend_mean_cores": 124.06748270834179,
+          "frontend_system_cores": 37.012095351739376,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 20.470112166910276,
+          "host_softirq_cores": 17.662541992067993,
+          "ethernet_rx_host_packets_per_second": 2956648.4174201027,
+          "ethernet_tx_host_packets_per_second": 2460002.2422824744,
+          "time_to_first_token_p50_ms": 90.903702,
+          "time_to_first_token_p95_ms": 867.2262826,
+          "time_to_first_token_p99_ms": 943.5880712000006,
+          "inter_token_latency_p50_ms": 0.6514262882352941,
+          "inter_token_latency_p95_ms": 2.0859225311575313,
+          "inter_token_latency_p99_ms": 2.943258857287667,
+          "request_latency_p50_ms": 795.933498,
+          "request_latency_p95_ms": 4893.7196835999985,
+          "request_latency_p99_ms": 12145.66993872004,
+          "ethernet_rx_wire_packets_per_second": 2956563.1957582342,
+          "ethernet_rx_wire_packets_per_request": 651.6640407174644,
+          "ethernet_rx_wire_packets_per_output_token": 0.7060504816156086,
+          "rdma_rx_wire_packets_per_second": 0.6019695696545478,
+          "rdma_rx_wire_packets_per_request": 0.00013268173083965892,
+          "rdma_rx_wire_packets_per_output_token": 1.4375505491724628e-07,
+          "total_rx_wire_packets_per_second": 2956563.797727804,
+          "total_rx_wire_packets_per_request": 651.6641733991953,
+          "total_rx_wire_packets_per_output_token": 0.7060506253706635,
+          "ethernet_tx_wire_packets_per_second": 2459985.1028380706,
+          "ethernet_tx_wire_packets_per_request": 542.2119285392446,
+          "ethernet_tx_wire_packets_per_output_token": 0.5874637380042901,
+          "rdma_tx_wire_packets_per_second": 0.6019695696545478,
+          "rdma_tx_wire_packets_per_request": 0.00013268173083965892,
+          "rdma_tx_wire_packets_per_output_token": 1.4375505491724628e-07,
+          "total_tx_wire_packets_per_second": 2459985.70480764,
+          "total_tx_wire_packets_per_request": 542.2120612209754,
+          "total_tx_wire_packets_per_output_token": 0.587463881759345,
+          "total_wire_packets_per_second": 5416549.502535444,
+          "total_wire_packets_per_request": 1193.8762346201706,
+          "total_wire_packets_per_output_token": 1.2935145071300087,
+          "ethernet_mean_rx_wire_bytes": 892.3911931627,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 2.8809324237640674,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.11083843659133846,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 24.033101431795433,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 21.65095234697353,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 51.324284028915734,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_64_bytes_phy_percent": 1.770844831847664e-05,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.08360688467424275,
+          "RetransSegs_per_second": 4389.628617364432,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 44.30640879398634,
+          "client_mean_cores": 129.55129815209872
+        },
+        "window": {
+          "epoch_start": 1790199784.327701,
+          "epoch_end": 1790199903.935076,
+          "seconds": 119.60737490653992,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6114.152004610603,
+          "p50": 6088.725851148365,
+          "p95": 6273.419273141316,
+          "p99": 6323.693271618045,
+          "min": 5948.676614578166,
+          "max": 6333.172824440448
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 720739,
+          "profiling_records": 720739,
+          "measurement_completions": 542672,
+          "measurement_arrivals": 542297,
+          "measurement_arrivals_completed": 542297,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 34086
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 252598
+          },
+          "1": {
+            "1": 237510
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r2-quic",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4626.291041298166,
+          "output_tokens_per_second": 4292053.602089398,
+          "frontend_cpu_ms_per_request": 27.028620182967625,
+          "frontend_cpu_us_per_output_token": 29.1334347153173,
+          "frontend_mean_cores": 125.04226341111394,
+          "frontend_system_cores": 36.64688482312379,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 20.86027345852425,
+          "host_softirq_cores": 17.47322413090917,
+          "ethernet_rx_host_packets_per_second": 3017094.0433307323,
+          "ethernet_tx_host_packets_per_second": 2484534.0280475966,
+          "time_to_first_token_p50_ms": 83.605338,
+          "time_to_first_token_p95_ms": 953.2231201999998,
+          "time_to_first_token_p99_ms": 1031.5143010000006,
+          "inter_token_latency_p50_ms": 0.6455081393442623,
+          "inter_token_latency_p95_ms": 1.9085055604377097,
+          "inter_token_latency_p99_ms": 2.7023502240576054,
+          "request_latency_p50_ms": 870.182998,
+          "request_latency_p95_ms": 4597.914945999998,
+          "request_latency_p99_ms": 11212.086633600007,
+          "ethernet_rx_wire_packets_per_second": 3016986.3618791257,
+          "ethernet_rx_wire_packets_per_request": 652.1393347169401,
+          "ethernet_rx_wire_packets_per_output_token": 0.7029237380470827,
+          "rdma_rx_wire_packets_per_second": 0.6152373352832485,
+          "rdma_rx_wire_packets_per_request": 0.0001329871661318154,
+          "rdma_rx_wire_packets_per_output_token": 1.4334334850425616e-07,
+          "total_rx_wire_packets_per_second": 3016986.9771164614,
+          "total_rx_wire_packets_per_request": 652.1394677041062,
+          "total_rx_wire_packets_per_output_token": 0.7029238813904313,
+          "ethernet_tx_wire_packets_per_second": 2484429.161918515,
+          "ethernet_tx_wire_packets_per_request": 537.0239657947177,
+          "ethernet_tx_wire_packets_per_output_token": 0.5788439269978082,
+          "rdma_tx_wire_packets_per_second": 0.6212812739975663,
+          "rdma_tx_wire_packets_per_request": 0.00013429359900868468,
+          "rdma_tx_wire_packets_per_output_token": 1.447515179435603e-07,
+          "total_tx_wire_packets_per_second": 2484429.783199789,
+          "total_tx_wire_packets_per_request": 537.0241000883167,
+          "total_tx_wire_packets_per_output_token": 0.5788440717493261,
+          "total_wire_packets_per_second": 5501416.760316251,
+          "total_wire_packets_per_request": 1189.1635677924228,
+          "total_wire_packets_per_output_token": 1.2817679531397572,
+          "ethernet_mean_rx_wire_bytes": 902.6277823816171,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 51.86369736642477,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 25.238833061948846,
+          "ethernet_rx_64_bytes_phy_percent": 1.878792005979518e-05,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 2.6770721693268387,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.10491505946277208,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 20.11552375374096,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 4668.155001863637,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 47.63900299072266,
+          "client_mean_cores": 130.02203639178458
+        },
+        "window": {
+          "epoch_start": 1790202548.559234,
+          "epoch_end": 1790202668.600261,
+          "seconds": 120.0410270690918,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 120,
+          "mean": 6082.300122697299,
+          "p50": 6074.363933356493,
+          "p95": 6254.625732254497,
+          "p99": 6308.633764193343,
+          "min": 4295.60460780535,
+          "max": 6350.413780824172
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 739413,
+          "profiling_records": 739413,
+          "measurement_completions": 555548,
+          "measurement_arrivals": 552185,
+          "measurement_arrivals_completed": 552185,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 36056
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 258040
+          },
+          "1": {
+            "1": 242167
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r3-quic",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4684.632243499535,
+          "output_tokens_per_second": 4326433.659183878,
+          "frontend_cpu_ms_per_request": 26.87245199739981,
+          "frontend_cpu_us_per_output_token": 29.097303924142363,
+          "frontend_mean_cores": 125.88755508891266,
+          "frontend_system_cores": 36.374436634058036,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 20.844144639657618,
+          "host_softirq_cores": 16.9234548084782,
+          "ethernet_rx_host_packets_per_second": 3032179.889875046,
+          "ethernet_tx_host_packets_per_second": 2489686.287314538,
+          "time_to_first_token_p50_ms": 89.96137099999999,
+          "time_to_first_token_p95_ms": 929.754225,
+          "time_to_first_token_p99_ms": 1007.73977101,
+          "inter_token_latency_p50_ms": 0.6404397713494647,
+          "inter_token_latency_p95_ms": 1.915878633476788,
+          "inter_token_latency_p99_ms": 2.6978872929017004,
+          "request_latency_p50_ms": 853.2138239999999,
+          "request_latency_p95_ms": 4559.415778850001,
+          "request_latency_p99_ms": 11101.479298240005,
+          "ethernet_rx_wire_packets_per_second": 3032015.771051094,
+          "ethernet_rx_wire_packets_per_request": 647.2259962899677,
+          "ethernet_rx_wire_packets_per_output_token": 0.7008118024911635,
+          "rdma_rx_wire_packets_per_second": 1.5257975122102454,
+          "rdma_rx_wire_packets_per_request": 0.0003257027303108935,
+          "rdma_rx_wire_packets_per_output_token": 3.526686486851311e-07,
+          "total_rx_wire_packets_per_second": 3032017.296848606,
+          "total_rx_wire_packets_per_request": 647.2263219926981,
+          "total_rx_wire_packets_per_output_token": 0.7008121551598122,
+          "ethernet_tx_wire_packets_per_second": 2489604.2720985436,
+          "ethernet_tx_wire_packets_per_request": 531.4407071234151,
+          "ethernet_tx_wire_packets_per_output_token": 0.5754402975332281,
+          "rdma_tx_wire_packets_per_second": 1.2915151229479167,
+          "rdma_tx_wire_packets_per_request": 0.0002756918912343743,
+          "rdma_tx_wire_packets_per_output_token": 2.985172603320452e-07,
+          "total_tx_wire_packets_per_second": 2489605.5636136667,
+          "total_tx_wire_packets_per_request": 531.4409828153064,
+          "total_tx_wire_packets_per_output_token": 0.5754405960504885,
+          "total_wire_packets_per_second": 5521622.860462273,
+          "total_wire_packets_per_request": 1178.6673048080045,
+          "total_wire_packets_per_output_token": 1.2762527512103006,
+          "ethernet_mean_rx_wire_bytes": 906.6809553167924,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 19.53299125498848,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 52.08133355810236,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 25.64547727659793,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 2.63602278154664,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_64_bytes_phy_percent": 1.9637111675567904e-05,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.10433197856033467,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.19288862225845507,
+          "RetransSegs_per_second": 4423.619715173906,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 49.77067209879557,
+          "client_mean_cores": 128.69144177517563
+        },
+        "window": {
+          "epoch_start": 1790207739.837139,
+          "epoch_end": 1790207859.076935,
+          "seconds": 119.23979616165161,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6076.831924238904,
+          "p50": 6063.415190457043,
+          "p95": 6235.019929915969,
+          "p99": 6305.171677628429,
+          "min": 5902.65518269247,
+          "max": 6328.7533470741
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 744957,
+          "profiling_records": 744957,
+          "measurement_completions": 558964,
+          "measurement_arrivals": 558088,
+          "measurement_arrivals_completed": 558088,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 40014
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 258783
+          },
+          "1": {
+            "1": 241403
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r4-quic",
+        "job": "2886188",
+        "metrics": {
+          "requests_per_second": 4532.697962935617,
+          "output_tokens_per_second": 4176272.7763453755,
+          "frontend_cpu_ms_per_request": 27.04125689930783,
+          "frontend_cpu_us_per_output_token": 29.349100651890666,
+          "frontend_mean_cores": 122.5698500627113,
+          "frontend_system_cores": 35.59805323048018,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 21.65219780614247,
+          "host_softirq_cores": 16.388372727612538,
+          "ethernet_rx_host_packets_per_second": 2941824.5218609623,
+          "ethernet_tx_host_packets_per_second": 2450960.256027847,
+          "time_to_first_token_p50_ms": 92.118478,
+          "time_to_first_token_p95_ms": 826.6366072999999,
+          "time_to_first_token_p99_ms": 910.29126014,
+          "inter_token_latency_p50_ms": 0.6519863791918539,
+          "inter_token_latency_p95_ms": 2.136063598227929,
+          "inter_token_latency_p99_ms": 2.9055212677943603,
+          "request_latency_p50_ms": 760.8134705,
+          "request_latency_p95_ms": 4890.366739049999,
+          "request_latency_p99_ms": 12187.724852320007,
+          "ethernet_rx_wire_packets_per_second": 2941685.1853222335,
+          "ethernet_rx_wire_packets_per_request": 648.9921034617187,
+          "ethernet_rx_wire_packets_per_output_token": 0.7043805189124834,
+          "rdma_rx_wire_packets_per_second": 0.9367211714668127,
+          "rdma_rx_wire_packets_per_request": 0.00020665863446593782,
+          "rdma_rx_wire_packets_per_output_token": 2.2429597433684163e-07,
+          "total_rx_wire_packets_per_second": 2941686.1220434047,
+          "total_rx_wire_packets_per_request": 648.9923101203532,
+          "total_rx_wire_packets_per_output_token": 0.7043807432084578,
+          "ethernet_tx_wire_packets_per_second": 2450860.394631563,
+          "ethernet_tx_wire_packets_per_request": 540.7067522858406,
+          "ethernet_tx_wire_packets_per_output_token": 0.5868535236762701,
+          "rdma_tx_wire_packets_per_second": 0.9367211714668127,
+          "rdma_tx_wire_packets_per_request": 0.00020665863446593782,
+          "rdma_tx_wire_packets_per_output_token": 2.2429597433684163e-07,
+          "total_tx_wire_packets_per_second": 2450861.3313527345,
+          "total_tx_wire_packets_per_request": 540.7069589444751,
+          "total_tx_wire_packets_per_output_token": 0.5868537479722444,
+          "total_wire_packets_per_second": 5392547.45339614,
+          "total_wire_packets_per_request": 1189.6992690648283,
+          "total_wire_packets_per_output_token": 1.291234491180702,
+          "ethernet_mean_rx_wire_bytes": 892.024041062425,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 21.726992877532812,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_64_bytes_phy_percent": 1.8072618293209074e-05,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.11058366571806942,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 23.926549159303928,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 51.299230944133605,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 2.9367428647041325,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 4151.0550700035,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 42.971965373063284,
+          "client_mean_cores": 130.10169732229363
+        },
+        "window": {
+          "epoch_start": 1790211920.690379,
+          "epoch_end": 1790212040.256375,
+          "seconds": 119.56599617004395,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6111.091571626213,
+          "p50": 6090.183623487667,
+          "p95": 6272.520860429194,
+          "p99": 6307.347852277579,
+          "min": 5954.4313204122,
+          "max": 6316.118632189518
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 1,
+          "error_fraction": 1.3864991036283295e-06,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 721241,
+          "profiling_records": 721241,
+          "measurement_completions": 542477,
+          "measurement_arrivals": 540011,
+          "measurement_arrivals_completed": 540010,
+          "measured_errors": 1,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 34504
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 247503
+          },
+          "1": {
+            "1": 233729
+          }
+        },
+        "error_examples": [
+          {
+            "session_num": 267254,
+            "x_request_id": "1f410215-8b81-48f7-ba2a-875c1c5f7cd8",
+            "x_correlation_id": "f5155146-b732-44c1-ae66-70bd0f73885f",
+            "conversation_id": "d4658b2f25092064e10cb5bbe11b34cc0ea7",
+            "turn_index": 51,
+            "agent_depth": 0,
+            "credit_issued_ns": 1790211938026309427,
+            "request_start_ns": 1790211938083975629,
+            "request_ack_ns": 1790211938468259850,
+            "request_end_ns": 1790211938831271681,
+            "worker_id": "worker_6ba0ab3e",
+            "record_processor_id": "record_processor_bd6c5c6f",
+            "benchmark_phase": "profiling",
+            "was_cancelled": false,
+            "context_overflow_skip": false,
+            "record_error": {
+              "type": "InvalidInferenceResultError",
+              "message": "InvalidInferenceResultError('Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)')",
+              "cause_chain": [
+                "InvalidInferenceResultError"
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "velo-tcp": [
+      {
+        "label": "r1-velo-tcp",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4247.525051175961,
+          "output_tokens_per_second": 3891112.441786047,
+          "frontend_cpu_ms_per_request": 32.22439386731897,
+          "frontend_cpu_us_per_output_token": 35.17603828163144,
+          "frontend_mean_cores": 136.87392021039838,
+          "frontend_system_cores": 39.07787338877834,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 22.474496768329725,
+          "host_softirq_cores": 18.267368718328424,
+          "ethernet_rx_host_packets_per_second": 3215387.024185594,
+          "ethernet_tx_host_packets_per_second": 2504242.9918512832,
+          "time_to_first_token_p50_ms": 73.527667,
+          "time_to_first_token_p95_ms": 1312.7695179999998,
+          "time_to_first_token_p99_ms": 1438.4487038799998,
+          "inter_token_latency_p50_ms": 0.6264361971830986,
+          "inter_token_latency_p95_ms": 2.0070061516697715,
+          "inter_token_latency_p99_ms": 2.761634064059791,
+          "request_latency_p50_ms": 1164.6647045,
+          "request_latency_p95_ms": 4821.310919049997,
+          "request_latency_p99_ms": 11911.486473059998,
+          "ethernet_rx_wire_packets_per_second": 3215378.29849117,
+          "ethernet_rx_wire_packets_per_request": 757.0004319576566,
+          "ethernet_rx_wire_packets_per_output_token": 0.8263390859543729,
+          "rdma_rx_wire_packets_per_second": 0.6003752335667084,
+          "rdma_rx_wire_packets_per_request": 0.0001413470730209089,
+          "rdma_rx_wire_packets_per_output_token": 1.542939821320435e-07,
+          "total_rx_wire_packets_per_second": 3215378.8988664034,
+          "total_rx_wire_packets_per_request": 757.0005733047295,
+          "total_rx_wire_packets_per_output_token": 0.826339240248355,
+          "ethernet_tx_wire_packets_per_second": 2504246.0049354127,
+          "ethernet_tx_wire_packets_per_request": 589.5776893045262,
+          "ethernet_tx_wire_packets_per_output_token": 0.6435809919144734,
+          "rdma_tx_wire_packets_per_second": 0.6003752335667084,
+          "rdma_tx_wire_packets_per_request": 0.0001413470730209089,
+          "rdma_tx_wire_packets_per_output_token": 1.542939821320435e-07,
+          "total_tx_wire_packets_per_second": 2504246.6053106464,
+          "total_tx_wire_packets_per_request": 589.5778306515992,
+          "total_tx_wire_packets_per_output_token": 0.6435811462084555,
+          "total_wire_packets_per_second": 5719625.50417705,
+          "total_wire_packets_per_request": 1346.5784039563287,
+          "total_wire_packets_per_output_token": 1.4699203864568107,
+          "ethernet_mean_rx_wire_bytes": 790.4727423639678,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 25.101141642217673,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 42.3045852398536,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 6.971787421833614,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 25.063304368840754,
+          "ethernet_rx_64_bytes_phy_percent": 1.7634660723753427e-05,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.5588434782760292,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.3168647066046517,
+          "RetransSegs_per_second": 853.6582495116011,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 39.01182235589548,
+          "client_mean_cores": 128.13222649422147
+        },
+        "window": {
+          "epoch_start": 1790201615.506677,
+          "epoch_end": 1790201735.431677,
+          "seconds": 119.92500019073486,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6218.260008987037,
+          "p50": 6201.179881834725,
+          "p95": 6403.540653790931,
+          "p99": 6468.143194392032,
+          "min": 6020.995696343929,
+          "max": 6475.037258692233
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 667712,
+          "profiling_records": 667712,
+          "measurement_completions": 509405,
+          "measurement_arrivals": 509152,
+          "measurement_arrivals_completed": 509152,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 28232
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 252261
+          },
+          "1": {
+            "1": 230315
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r2-velo-tcp",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4234.954774401749,
+          "output_tokens_per_second": 3895901.038208411,
+          "frontend_cpu_ms_per_request": 31.928549222481564,
+          "frontend_cpu_us_per_output_token": 34.70723733569235,
+          "frontend_mean_cores": 135.21596196946956,
+          "frontend_system_cores": 38.370234513197445,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 22.642317848868547,
+          "host_softirq_cores": 17.348401475653464,
+          "ethernet_rx_host_packets_per_second": 3214693.0338385855,
+          "ethernet_tx_host_packets_per_second": 2522719.967855396,
+          "time_to_first_token_p50_ms": 76.415618,
+          "time_to_first_token_p95_ms": 1273.8222226999999,
+          "time_to_first_token_p99_ms": 1422.3004496299998,
+          "inter_token_latency_p50_ms": 0.6232257730496453,
+          "inter_token_latency_p95_ms": 2.0128675992456895,
+          "inter_token_latency_p99_ms": 2.7926151469810456,
+          "request_latency_p50_ms": 1149.0523245,
+          "request_latency_p95_ms": 4880.948091299995,
+          "request_latency_p99_ms": 11772.505759279988,
+          "ethernet_rx_wire_packets_per_second": 3214653.4066946423,
+          "ethernet_rx_wire_packets_per_request": 759.0762069351166,
+          "ethernet_rx_wire_packets_per_output_token": 0.8251373366950175,
+          "rdma_rx_wire_packets_per_second": 0.9407778895089063,
+          "rdma_rx_wire_packets_per_request": 0.00022214591173333256,
+          "rdma_rx_wire_packets_per_output_token": 2.414788980218905e-07,
+          "total_rx_wire_packets_per_second": 3214654.3474725317,
+          "total_rx_wire_packets_per_request": 759.0764290810283,
+          "total_rx_wire_packets_per_output_token": 0.8251375781739155,
+          "ethernet_tx_wire_packets_per_second": 2522709.620179886,
+          "ethernet_tx_wire_packets_per_request": 595.6874995285532,
+          "ethernet_tx_wire_packets_per_output_token": 0.64752918399077,
+          "rdma_tx_wire_packets_per_second": 0.9407778895089063,
+          "rdma_tx_wire_packets_per_request": 0.00022214591173333256,
+          "rdma_tx_wire_packets_per_output_token": 2.414788980218905e-07,
+          "total_tx_wire_packets_per_second": 2522710.5609577755,
+          "total_tx_wire_packets_per_request": 595.6877216744649,
+          "total_tx_wire_packets_per_output_token": 0.6475294254696681,
+          "total_wire_packets_per_second": 5737364.908430307,
+          "total_wire_packets_per_request": 1354.7641507554931,
+          "total_wire_packets_per_output_token": 1.4726670036435836,
+          "ethernet_mean_rx_wire_bytes": 791.1527402504726,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 24.985177523751023,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 6.978675283763571,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.5608620232223307,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 42.34408019533207,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 25.13172462174573,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_64_bytes_phy_percent": 1.7905115720102546e-05,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 762.6084756479937,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 39.060403262867645,
+          "client_mean_cores": 126.95262712340292
+        },
+        "window": {
+          "epoch_start": 1790203492.075455,
+          "epoch_end": 1790203611.125872,
+          "seconds": 119.05041694641113,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6201.227425081125,
+          "p50": 6195.48959801496,
+          "p95": 6344.138487548128,
+          "p99": 6434.423005733721,
+          "min": 6038.62336595032,
+          "max": 6467.490171585224
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 668389,
+          "profiling_records": 668389,
+          "measurement_completions": 504327,
+          "measurement_arrivals": 503658,
+          "measurement_arrivals_completed": 503658,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 31494
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 248092
+          },
+          "1": {
+            "1": 231319
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r3-velo-tcp",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4233.877094148963,
+          "output_tokens_per_second": 3879799.368757777,
+          "frontend_cpu_ms_per_request": 32.090668660936984,
+          "frontend_cpu_us_per_output_token": 35.01932292518695,
+          "frontend_mean_cores": 135.86794697946507,
+          "frontend_system_cores": 38.698107173971955,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 22.490102535463112,
+          "host_softirq_cores": 17.78034143599134,
+          "ethernet_rx_host_packets_per_second": 3195178.144386102,
+          "ethernet_tx_host_packets_per_second": 2499771.4493995775,
+          "time_to_first_token_p50_ms": 74.536762,
+          "time_to_first_token_p95_ms": 1298.7290635999996,
+          "time_to_first_token_p99_ms": 1408.2993325699995,
+          "inter_token_latency_p50_ms": 0.6255317120044053,
+          "inter_token_latency_p95_ms": 1.9914651899860374,
+          "inter_token_latency_p99_ms": 2.7470287873893016,
+          "request_latency_p50_ms": 1156.4979024999998,
+          "request_latency_p95_ms": 4838.831481199997,
+          "request_latency_p99_ms": 11804.397233589876,
+          "ethernet_rx_wire_packets_per_second": 3194990.9707331536,
+          "ethernet_rx_wire_packets_per_request": 754.6253468596183,
+          "ethernet_rx_wire_packets_per_output_token": 0.8234938632293547,
+          "rdma_rx_wire_packets_per_second": 0.9503360620419234,
+          "rdma_rx_wire_packets_per_request": 0.0002244600022412666,
+          "rdma_rx_wire_packets_per_output_token": 2.449446406158366e-07,
+          "total_rx_wire_packets_per_second": 3194991.9210692155,
+          "total_rx_wire_packets_per_request": 754.6255713196206,
+          "total_rx_wire_packets_per_output_token": 0.8234941081739954,
+          "ethernet_tx_wire_packets_per_second": 2499642.5003348473,
+          "ethernet_tx_wire_packets_per_request": 590.390898165005,
+          "ethernet_tx_wire_packets_per_output_token": 0.6442710724846515,
+          "rdma_tx_wire_packets_per_second": 0.9336634995499599,
+          "rdma_tx_wire_packets_per_request": 0.00022052210746510402,
+          "rdma_tx_wire_packets_per_output_token": 2.4064736621906755e-07,
+          "total_tx_wire_packets_per_second": 2499643.433998347,
+          "total_tx_wire_packets_per_request": 590.3911186871125,
+          "total_tx_wire_packets_per_output_token": 0.6442713131320178,
+          "total_wire_packets_per_second": 5694635.355067562,
+          "total_wire_packets_per_request": 1345.016690006733,
+          "total_wire_packets_per_output_token": 1.4677654213060132,
+          "ethernet_mean_rx_wire_bytes": 793.9915645288878,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.5605892046255839,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 42.523440121138314,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 25.171930912096236,
+          "ethernet_rx_64_bytes_phy_percent": 1.8012760989277018e-05,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 24.73144979960739,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 7.012623528951523,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 857.7115069578585,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 39.325749206542966,
+          "client_mean_cores": 124.48592554253413
+        },
+        "window": {
+          "epoch_start": 1790205920.946903,
+          "epoch_end": 1790206040.904468,
+          "seconds": 119.95756506919861,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6202.996679351396,
+          "p50": 6186.243631119434,
+          "p95": 6362.223867120849,
+          "p99": 6416.8662789683085,
+          "min": 6039.218900982722,
+          "max": 6440.078126230147
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 668214,
+          "profiling_records": 668214,
+          "measurement_completions": 507973,
+          "measurement_arrivals": 504698,
+          "measurement_arrivals_completed": 504698,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 30538
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 250106
+          },
+          "1": {
+            "1": 231643
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r4-velo-tcp",
+        "job": "2886188",
+        "metrics": {
+          "requests_per_second": 4280.522684560378,
+          "output_tokens_per_second": 3901900.5163792656,
+          "frontend_cpu_ms_per_request": 31.922630367560863,
+          "frontend_cpu_us_per_output_token": 35.02025304478529,
+          "frontend_mean_cores": 136.64554343918027,
+          "frontend_system_cores": 39.704046459635144,
+          "frontend_ucx_progress_cores": 0.0,
+          "host_system_cores": 22.490548557127386,
+          "host_softirq_cores": 18.864697500998165,
+          "ethernet_rx_host_packets_per_second": 3239780.880194615,
+          "ethernet_tx_host_packets_per_second": 2536929.0558292633,
+          "time_to_first_token_p50_ms": 72.06001799999999,
+          "time_to_first_token_p95_ms": 1297.2939516499998,
+          "time_to_first_token_p99_ms": 1418.1585534600003,
+          "inter_token_latency_p50_ms": 0.6225795789473684,
+          "inter_token_latency_p95_ms": 2.0275522088596296,
+          "inter_token_latency_p99_ms": 2.7623704175319794,
+          "request_latency_p50_ms": 1174.4998405,
+          "request_latency_p95_ms": 4812.178910449999,
+          "request_latency_p99_ms": 11733.351956420027,
+          "ethernet_rx_wire_packets_per_second": 3239829.5231618737,
+          "ethernet_rx_wire_packets_per_request": 756.8770829898343,
+          "ethernet_rx_wire_packets_per_output_token": 0.8303208935137704,
+          "rdma_rx_wire_packets_per_second": 1.090618144470788,
+          "rdma_rx_wire_packets_per_request": 0.0002547862083302562,
+          "rdma_rx_wire_packets_per_output_token": 2.795094697808487e-07,
+          "total_rx_wire_packets_per_second": 3239830.6137800184,
+          "total_rx_wire_packets_per_request": 756.8773377760426,
+          "total_rx_wire_packets_per_output_token": 0.8303211730232402,
+          "ethernet_tx_wire_packets_per_second": 2536943.4267061288,
+          "ethernet_tx_wire_packets_per_request": 592.671412735821,
+          "ethernet_tx_wire_packets_per_output_token": 0.6501814733760212,
+          "rdma_tx_wire_packets_per_second": 0.9396094783132943,
+          "rdma_tx_wire_packets_per_request": 0.00021950811794606688,
+          "rdma_tx_wire_packets_per_output_token": 2.4080815858042344e-07,
+          "total_tx_wire_packets_per_second": 2536944.366315607,
+          "total_tx_wire_packets_per_request": 592.671632243939,
+          "total_tx_wire_packets_per_output_token": 0.6501817141841798,
+          "total_wire_packets_per_second": 5776774.980095625,
+          "total_wire_packets_per_request": 1349.5489700199817,
+          "total_wire_packets_per_output_token": 1.48050288720742,
+          "ethernet_mean_rx_wire_bytes": 790.5724909896591,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.5597218190368688,
+          "ethernet_rx_64_bytes_phy_percent": 1.8644026184454124e-05,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 25.157477301933596,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 42.30751481198229,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 6.948773767472707,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 25.02647379634072,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 861.1780560436792,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 39.83573849461659,
+          "client_mean_cores": 129.6281948134095
+        },
+        "window": {
+          "epoch_start": 1790211010.029072,
+          "epoch_end": 1790211129.227529,
+          "seconds": 119.19845700263977,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 119,
+          "mean": 6210.532953953321,
+          "p50": 6196.207563953292,
+          "p95": 6350.368986937307,
+          "p99": 6378.799730807044,
+          "min": 6102.423703429209,
+          "max": 6382.370075789763
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 674203,
+          "profiling_records": 674203,
+          "measurement_completions": 510409,
+          "measurement_arrivals": 509512,
+          "measurement_arrivals_completed": 509512,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 28392
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 254350
+          },
+          "1": {
+            "1": 234639
+          }
+        },
+        "error_examples": []
+      }
+    ],
+    "velo-rdma": [
+      {
+        "label": "r1-velo-rdma",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4250.535799736575,
+          "output_tokens_per_second": 3891144.7417697324,
+          "frontend_cpu_ms_per_request": 32.17251653103588,
+          "frontend_cpu_us_per_output_token": 35.144010916589366,
+          "frontend_mean_cores": 136.75043328278477,
+          "frontend_system_cores": 38.908782418154864,
+          "frontend_ucx_progress_cores": 1.790557182603493,
+          "host_system_cores": 21.710646190820057,
+          "host_softirq_cores": 18.876765167720475,
+          "ethernet_rx_host_packets_per_second": 2515981.467729177,
+          "ethernet_tx_host_packets_per_second": 2473136.1054552724,
+          "time_to_first_token_p50_ms": 73.8974805,
+          "time_to_first_token_p95_ms": 1279.1964996499999,
+          "time_to_first_token_p99_ms": 1389.9337015899998,
+          "inter_token_latency_p50_ms": 0.6231278514299365,
+          "inter_token_latency_p95_ms": 1.9981074157258245,
+          "inter_token_latency_p99_ms": 2.7197767439205953,
+          "request_latency_p50_ms": 1159.3651875,
+          "request_latency_p95_ms": 4849.242821299997,
+          "request_latency_p99_ms": 11855.934942419988,
+          "ethernet_rx_wire_packets_per_second": 2515875.739769784,
+          "ethernet_rx_wire_packets_per_request": 591.896141640709,
+          "ethernet_rx_wire_packets_per_output_token": 0.6465644191445671,
+          "rdma_rx_wire_packets_per_second": 876274.1630092103,
+          "rdma_rx_wire_packets_per_request": 206.15616578585622,
+          "rdma_rx_wire_packets_per_output_token": 0.22519701043314874,
+          "total_rx_wire_packets_per_second": 3392149.902778994,
+          "total_rx_wire_packets_per_request": 798.0523074265651,
+          "total_rx_wire_packets_per_output_token": 0.8717614295777159,
+          "ethernet_tx_wire_packets_per_second": 2473100.628967559,
+          "ethernet_tx_wire_packets_per_request": 581.8326783933518,
+          "ethernet_tx_wire_packets_per_output_token": 0.6355714816824746,
+          "rdma_tx_wire_packets_per_second": 831373.3861644836,
+          "rdma_tx_wire_packets_per_request": 195.5926088696883,
+          "rdma_tx_wire_packets_per_output_token": 0.21365779001743493,
+          "total_tx_wire_packets_per_second": 3304474.0151320426,
+          "total_tx_wire_packets_per_request": 777.4252872630401,
+          "total_tx_wire_packets_per_output_token": 0.8492292716999095,
+          "total_wire_packets_per_second": 6696623.917911036,
+          "total_wire_packets_per_request": 1575.4775946896052,
+          "total_wire_packets_per_output_token": 1.7209907012776253,
+          "ethernet_mean_rx_wire_bytes": 721.9393321263642,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 2.7178069822845816,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.016865041884258632,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 38.991312970309465,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 26.14814812437557,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 32.126022898761754,
+          "ethernet_rx_64_bytes_phy_percent": 2.3523279089441958e-05,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 723.489361958037,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.058295325747479323,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 38.47464165805785,
+          "client_mean_cores": 127.207235465374
+        },
+        "window": {
+          "epoch_start": 1790200713.292883,
+          "epoch_end": 1790200833.371121,
+          "seconds": 120.0782380104065,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 120,
+          "mean": 6205.179596907982,
+          "p50": 6195.9893603160535,
+          "p95": 6316.038757685813,
+          "p99": 6399.485351948444,
+          "min": 5999.447388123555,
+          "max": 6414.1989806304155
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 0,
+          "error_fraction": 0.0,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 668310,
+          "profiling_records": 668310,
+          "measurement_completions": 510429,
+          "measurement_arrivals": 509790,
+          "measurement_arrivals_completed": 509790,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 30244
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 250441
+          },
+          "1": {
+            "1": 231876
+          }
+        },
+        "error_examples": []
+      },
+      {
+        "label": "r2-velo-rdma",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4213.09408603168,
+          "output_tokens_per_second": 3870115.3683403484,
+          "frontend_cpu_ms_per_request": 32.5176357559093,
+          "frontend_cpu_us_per_output_token": 35.39942504445403,
+          "frontend_mean_cores": 136.99985889495375,
+          "frontend_system_cores": 37.77162518765071,
+          "frontend_ucx_progress_cores": 1.7920429532391633,
+          "host_system_cores": 22.302423543637843,
+          "host_softirq_cores": 17.162115662629866,
+          "ethernet_rx_host_packets_per_second": 2502421.26657023,
+          "ethernet_tx_host_packets_per_second": 2469053.8476565355,
+          "time_to_first_token_p50_ms": 76.1094555,
+          "time_to_first_token_p95_ms": 1313.7102957,
+          "time_to_first_token_p99_ms": 1378.8786987499998,
+          "inter_token_latency_p50_ms": 0.6216512549019608,
+          "inter_token_latency_p95_ms": 1.9709813273719077,
+          "inter_token_latency_p99_ms": 2.8091415092263894,
+          "request_latency_p50_ms": 1193.29036,
+          "request_latency_p95_ms": 4866.532033149995,
+          "request_latency_p99_ms": 11701.323602789991,
+          "ethernet_rx_wire_packets_per_second": 2502307.1039407253,
+          "ethernet_rx_wire_packets_per_request": 593.93572819487,
+          "ethernet_rx_wire_packets_per_output_token": 0.6465717080196007,
+          "rdma_rx_wire_packets_per_second": 896784.5221070033,
+          "rdma_rx_wire_packets_per_request": 212.85651442730682,
+          "rdma_rx_wire_packets_per_output_token": 0.23172035889244777,
+          "total_rx_wire_packets_per_second": 3399091.6260477286,
+          "total_rx_wire_packets_per_request": 806.7922426221768,
+          "total_rx_wire_packets_per_output_token": 0.8782920669120486,
+          "ethernet_tx_wire_packets_per_second": 2468988.3134854836,
+          "ethernet_tx_wire_packets_per_request": 586.0273383571712,
+          "ethernet_tx_wire_packets_per_output_token": 0.6379624580918577,
+          "rdma_tx_wire_packets_per_second": 855687.9272038199,
+          "rdma_tx_wire_packets_per_request": 203.10202187053312,
+          "rdma_tx_wire_packets_per_output_token": 0.22110140028481146,
+          "total_tx_wire_packets_per_second": 3324676.2406893033,
+          "total_tx_wire_packets_per_request": 789.1293602277043,
+          "total_tx_wire_packets_per_output_token": 0.8590638583766691,
+          "total_wire_packets_per_second": 6723767.866737032,
+          "total_wire_packets_per_request": 1595.921602849881,
+          "total_wire_packets_per_output_token": 1.7373559252887176,
+          "ethernet_mean_rx_wire_bytes": 718.6399709663572,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 32.22811030799953,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.016981972890761893,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 2.66326281819054,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 38.74560294346713,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 26.346064745954486,
+          "ethernet_rx_64_bytes_phy_percent": 2.265511241654611e-05,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 629.5762899306129,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 39.94296518961588,
+          "client_mean_cores": 127.74589119251753
+        },
+        "window": {
+          "epoch_start": 1790204976.480706,
+          "epoch_end": 1790205096.545478,
+          "seconds": 120.06477212905884,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 120,
+          "mean": 6191.407306397375,
+          "p50": 6198.79437393521,
+          "p95": 6303.835512666394,
+          "p99": 6341.557386642089,
+          "min": 5091.554718892139,
+          "max": 6348.742658594716
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 1,
+          "error_fraction": 1.5027154067399792e-06,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 665462,
+          "profiling_records": 665462,
+          "measurement_completions": 506109,
+          "measurement_arrivals": 503553,
+          "measurement_arrivals_completed": 503552,
+          "measured_errors": 1,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 30822
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 254424
+          },
+          "1": {
+            "1": 236216
+          }
+        },
+        "error_examples": [
+          {
+            "session_num": 372404,
+            "x_request_id": "da370c77-d748-4951-a903-af85d705c5bf",
+            "x_correlation_id": "5bcf6905-902f-47ce-b54b-7469018a01d4",
+            "conversation_id": "d4658b2f25092064e10cb5bbe11b34cc0ea7",
+            "turn_index": 56,
+            "agent_depth": 0,
+            "credit_issued_ns": 1790205024898372485,
+            "request_start_ns": 1790205024915102047,
+            "request_ack_ns": 1790205025496806064,
+            "request_end_ns": 1790205026032251454,
+            "worker_id": "worker_3dbfb6b7",
+            "record_processor_id": "record_processor_ddd47b03",
+            "benchmark_phase": "profiling",
+            "was_cancelled": false,
+            "context_overflow_skip": false,
+            "record_error": {
+              "type": "InvalidInferenceResultError",
+              "message": "InvalidInferenceResultError('Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)')",
+              "cause_chain": [
+                "InvalidInferenceResultError"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "label": "r3-velo-rdma",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4268.203413960582,
+          "output_tokens_per_second": 3910097.550704934,
+          "frontend_cpu_ms_per_request": 31.821620838860568,
+          "frontend_cpu_us_per_output_token": 34.73600055776033,
+          "frontend_mean_cores": 135.82115070218387,
+          "frontend_system_cores": 36.67826972432325,
+          "frontend_ucx_progress_cores": 1.8073701765971064,
+          "host_system_cores": 21.754591041744117,
+          "host_softirq_cores": 16.524137342885815,
+          "ethernet_rx_host_packets_per_second": 2463707.4166576224,
+          "ethernet_tx_host_packets_per_second": 2435312.2202420984,
+          "time_to_first_token_p50_ms": 85.154154,
+          "time_to_first_token_p95_ms": 1245.44699085,
+          "time_to_first_token_p99_ms": 1320.49936221,
+          "inter_token_latency_p50_ms": 0.620588483399929,
+          "inter_token_latency_p95_ms": 2.003078523088722,
+          "inter_token_latency_p99_ms": 2.7806001867130226,
+          "request_latency_p50_ms": 1129.6965999999998,
+          "request_latency_p95_ms": 4837.748159699995,
+          "request_latency_p99_ms": 11648.523300530003,
+          "ethernet_rx_wire_packets_per_second": 2463594.367591402,
+          "ethernet_rx_wire_packets_per_request": 577.1970378762632,
+          "ethernet_rx_wire_packets_per_output_token": 0.6300595664543591,
+          "rdma_rx_wire_packets_per_second": 879494.9765679466,
+          "rdma_rx_wire_packets_per_request": 206.05741837215749,
+          "rdma_rx_wire_packets_per_output_token": 0.22492916485149747,
+          "total_rx_wire_packets_per_second": 3343089.3441593484,
+          "total_rx_wire_packets_per_request": 783.2544562484208,
+          "total_rx_wire_packets_per_output_token": 0.8549887313058565,
+          "ethernet_tx_wire_packets_per_second": 2435247.424576144,
+          "ethernet_tx_wire_packets_per_request": 570.5556151824572,
+          "ethernet_tx_wire_packets_per_output_token": 0.6228098897780964,
+          "rdma_tx_wire_packets_per_second": 836425.7541621772,
+          "rdma_tx_wire_packets_per_request": 195.9667037954114,
+          "rdma_tx_wire_packets_per_output_token": 0.21391429326651498,
+          "total_tx_wire_packets_per_second": 3271673.1787383216,
+          "total_tx_wire_packets_per_request": 766.5223189778687,
+          "total_tx_wire_packets_per_output_token": 0.8367241830446114,
+          "total_wire_packets_per_second": 6614762.52289767,
+          "total_wire_packets_per_request": 1549.7767752262894,
+          "total_wire_packets_per_output_token": 1.691712914350468,
+          "ethernet_mean_rx_wire_bytes": 736.9744449154636,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 30.37384620553821,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 2.745415290727862,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 27.008658957583126,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 39.85516640028152,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_64_bytes_phy_percent": 2.1700398141703514e-05,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.016976219798510845,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 654.5439027299884,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 38.454709391948604,
+          "client_mean_cores": 124.35366504900658
+        },
+        "window": {
+          "epoch_start": 1790206814.245966,
+          "epoch_end": 1790206934.860594,
+          "seconds": 120.61462807655334,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 120,
+          "mean": 6152.613383480516,
+          "p50": 6147.282436996538,
+          "p95": 6272.82976537062,
+          "p99": 6295.723259127305,
+          "min": 5938.089480650013,
+          "max": 6301.782765046841
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 1,
+          "error_fraction": 1.4867213482778563e-06,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 672621,
+          "profiling_records": 672621,
+          "measurement_completions": 515057,
+          "measurement_arrivals": 512645,
+          "measurement_arrivals_completed": 512644,
+          "measured_errors": 1,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 35858
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 249395
+          },
+          "1": {
+            "1": 233996
+          }
+        },
+        "error_examples": [
+          {
+            "session_num": 310171,
+            "x_request_id": "bade3678-8a1b-4c07-b6e2-f40e2cb49c2e",
+            "x_correlation_id": "1736b1ee-5aa2-482b-bea1-005227d48af1",
+            "conversation_id": "d4658b2f25092064e10cb5bbe11b34cc0ea7",
+            "turn_index": 51,
+            "agent_depth": 0,
+            "credit_issued_ns": 1790206848303463940,
+            "request_start_ns": 1790206848372925001,
+            "request_ack_ns": 1790206848915632091,
+            "request_end_ns": 1790206849473093387,
+            "worker_id": "worker_da17af12",
+            "record_processor_id": "record_processor_2ef0ba93",
+            "benchmark_phase": "profiling",
+            "was_cancelled": false,
+            "context_overflow_skip": false,
+            "record_error": {
+              "type": "InvalidInferenceResultError",
+              "message": "InvalidInferenceResultError('Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)')",
+              "cause_chain": [
+                "InvalidInferenceResultError"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "label": "r4-velo-rdma",
+        "job": "2885802",
+        "metrics": {
+          "requests_per_second": 4308.324730584498,
+          "output_tokens_per_second": 3978944.4948762483,
+          "frontend_cpu_ms_per_request": 31.89033265588105,
+          "frontend_cpu_us_per_output_token": 34.53024012393818,
+          "frontend_mean_cores": 137.39390884789876,
+          "frontend_system_cores": 36.809372270290076,
+          "frontend_ucx_progress_cores": 1.771437360628027,
+          "host_system_cores": 22.06399309640909,
+          "host_softirq_cores": 16.331847626853655,
+          "ethernet_rx_host_packets_per_second": 2539243.282314724,
+          "ethernet_tx_host_packets_per_second": 2482522.635967149,
+          "time_to_first_token_p50_ms": 82.143202,
+          "time_to_first_token_p95_ms": 1399.50385525,
+          "time_to_first_token_p99_ms": 1461.8780229499998,
+          "inter_token_latency_p50_ms": 0.6114144176954732,
+          "inter_token_latency_p95_ms": 1.8240038548437532,
+          "inter_token_latency_p99_ms": 2.5716486654815696,
+          "request_latency_p50_ms": 1245.3889795,
+          "request_latency_p95_ms": 4557.19564875,
+          "request_latency_p99_ms": 10948.504906099994,
+          "ethernet_rx_wire_packets_per_second": 2539153.3021986606,
+          "ethernet_rx_wire_packets_per_request": 589.3597769391401,
+          "ethernet_rx_wire_packets_per_output_token": 0.6381474548007317,
+          "rdma_rx_wire_packets_per_second": 907240.0016094577,
+          "rdma_rx_wire_packets_per_request": 210.57837055991254,
+          "rdma_rx_wire_packets_per_output_token": 0.22801021798060403,
+          "total_rx_wire_packets_per_second": 3446393.303808118,
+          "total_rx_wire_packets_per_request": 799.9381474990527,
+          "total_rx_wire_packets_per_output_token": 0.8661576727813357,
+          "ethernet_tx_wire_packets_per_second": 2482457.987425917,
+          "ethernet_tx_wire_packets_per_request": 576.2002965568311,
+          "ethernet_tx_wire_packets_per_output_token": 0.6238986220146118,
+          "rdma_tx_wire_packets_per_second": 866464.9835485276,
+          "rdma_tx_wire_packets_per_request": 201.11413083548527,
+          "rdma_tx_wire_packets_per_output_token": 0.21776252085554063,
+          "total_tx_wire_packets_per_second": 3348922.9709744444,
+          "total_tx_wire_packets_per_request": 777.3144273923162,
+          "total_tx_wire_packets_per_output_token": 0.8416611428701524,
+          "total_wire_packets_per_second": 6795316.274782563,
+          "total_wire_packets_per_request": 1577.252574891369,
+          "total_wire_packets_per_output_token": 1.7078188156514882,
+          "ethernet_mean_rx_wire_bytes": 733.5603243203886,
+          "ethernet_rx_4096_to_8191_bytes_phy_percent": 0.0,
+          "ethernet_rx_128_to_255_bytes_phy_percent": 0.016589458763351567,
+          "ethernet_rx_8192_to_10239_bytes_phy_percent": 0.0,
+          "ethernet_rx_512_to_1023_bytes_phy_percent": 2.4766393674920733,
+          "ethernet_rx_2048_to_4095_bytes_phy_percent": 0.0,
+          "ethernet_rx_1024_to_1518_bytes_phy_percent": 39.5548837494716,
+          "ethernet_rx_256_to_511_bytes_phy_percent": 27.812120775683656,
+          "ethernet_rx_1519_to_2047_bytes_phy_percent": 0.0,
+          "ethernet_rx_64_bytes_phy_percent": 2.226922295316724e-05,
+          "ethernet_rx_65_to_127_bytes_phy_percent": 30.13986327514187,
+          "rx_discards_phy_per_second": 0.0,
+          "tx_discards_phy_per_second": 0.0,
+          "rx_out_of_buffer_per_second": 0.0,
+          "RetransSegs_per_second": 830.7591561837539,
+          "rdma_port_rcv_errors_per_second": 0.0,
+          "rdma_port_xmit_discards_per_second": 0.0,
+          "rdma_out_of_buffer_per_second": 0.0,
+          "rdma_packet_seq_err_per_second": 0.0,
+          "rdma_local_ack_timeout_err_per_second": 0.0,
+          "rdma_req_transport_retries_exceeded_per_second": 0.0,
+          "frontend_mean_rss_gib": 40.308712793775825,
+          "client_mean_cores": 130.4327990434511
+        },
+        "window": {
+          "epoch_start": 1790209289.171036,
+          "epoch_end": 1790209409.429299,
+          "seconds": 120.2582631111145,
+          "nominal_seconds": 120,
+          "end_source": "MEASUREMENT_ENDED"
+        },
+        "active_http_requests": {
+          "n": 120,
+          "mean": 6216.727373734312,
+          "p50": 6210.145458081855,
+          "p95": 6369.762158525297,
+          "p99": 6395.4127952247145,
+          "min": 5398.172043133147,
+          "max": 6426.373210934453
+        },
+        "quality": {
+          "complete": true,
+          "harness_accepted": true,
+          "invalid_client_records": {},
+          "error_count": 2,
+          "error_fraction": 2.9492652642910334e-06,
+          "phase_cancelled_requests": 0,
+          "small_error_count_accepted": true,
+          "kv_sources_complete": true,
+          "rdma_lanes_verified": true,
+          "accepted": true
+        },
+        "client_counts": {
+          "all_exported_records": 678135,
+          "profiling_records": 678135,
+          "outside_window_errors": 1,
+          "measurement_completions": 518427,
+          "measurement_arrivals": 515597,
+          "measurement_arrivals_completed": 515596,
+          "measured_errors": 1,
+          "phase_cancelled_requests": 0
+        },
+        "client_health": {
+          "client_health_accepted": false,
+          "event_loop_warning_count": 29330
+        },
+        "frontend_private_anonymous_pages_by_node": {
+          "0": {
+            "0": 255169
+          },
+          "1": {
+            "1": 238672
+          }
+        },
+        "error_examples": [
+          {
+            "session_num": 143635,
+            "x_request_id": "f74eef02-af59-4aea-aa1e-999aa20ea72e",
+            "x_correlation_id": "81d58b6e-8376-4d3e-b74b-6244e89c6bea",
+            "conversation_id": "d4658b2f25092064e10cb5bbe11b34cc0ea7",
+            "turn_index": 51,
+            "agent_depth": 0,
+            "credit_issued_ns": 1790209285318634847,
+            "request_start_ns": 1790209285320266724,
+            "request_ack_ns": 1790209285370716369,
+            "request_end_ns": 1790209285406313845,
+            "worker_id": "worker_9f20fcf4",
+            "record_processor_id": "record_processor_5bea2577",
+            "benchmark_phase": "profiling",
+            "was_cancelled": false,
+            "context_overflow_skip": false,
+            "record_error": {
+              "type": "InvalidInferenceResultError",
+              "message": "InvalidInferenceResultError('Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)')",
+              "cause_chain": [
+                "InvalidInferenceResultError"
+              ]
+            }
+          },
+          {
+            "session_num": 246358,
+            "x_request_id": "7738d2d3-95a6-4d83-9f80-c22e504d5196",
+            "x_correlation_id": "33e5a901-0e13-4e60-868e-3a93c71da4ef",
+            "conversation_id": "d4658b2f25092064e10cb5bbe11b34cc0ea7",
+            "turn_index": 46,
+            "agent_depth": 0,
+            "credit_issued_ns": 1790209306798368585,
+            "request_start_ns": 1790209306803671480,
+            "request_ack_ns": 1790209306823788754,
+            "request_end_ns": 1790209306828790977,
+            "worker_id": "worker_77c09852",
+            "record_processor_id": "record_processor_65a36cda",
+            "benchmark_phase": "profiling",
+            "was_cancelled": false,
+            "context_overflow_skip": false,
+            "record_error": {
+              "type": "InvalidInferenceResultError",
+              "message": "InvalidInferenceResultError('Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)')",
+              "cause_chain": [
+                "InvalidInferenceResultError"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "summary": {
+    "tcp": {
+      "requests_per_second": {
+        "median": 2475.601619437689,
+        "min": 2435.0902077475757,
+        "max": 2493.083067395088,
+        "values": [
+          2468.818712742369,
+          2493.083067395088,
+          2435.0902077475757,
+          2482.3845261330084
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -45.966645300996824
+      },
+      "output_tokens_per_second": {
+        "median": 2338099.8178423275,
+        "min": 2301804.0667043994,
+        "max": 2360431.8719021785,
+        "values": [
+          2332416.9713258995,
+          2360431.8719021785,
+          2301804.0667043994,
+          2343782.6643587556
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -44.85301971471826
+      },
+      "frontend_cpu_ms_per_request": {
+        "median": 40.820626917322194,
+        "min": 40.5804759787611,
+        "max": 41.50160904535051,
+        "values": [
+          40.87681713799351,
+          40.764436696650876,
+          41.50160904535051,
+          40.5804759787611
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 50.992120271357265
+      },
+      "frontend_cpu_us_per_output_token": {
+        "median": 43.161319391759065,
+        "min": 42.980241796587244,
+        "max": 43.90476290051646,
+        "values": [
+          43.267328401515705,
+          43.05531038200242,
+          43.90476290051646,
+          42.980241796587244
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 47.60413214219255
+      },
+      "frontend_mean_cores": {
+        "median": 100.98880642986379,
+        "min": 100.7363456327888,
+        "max": 101.62912688031928,
+        "values": [
+          100.91745106762635,
+          101.62912688031928,
+          101.06016179210124,
+          100.7363456327888
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -18.920228531374626
+      },
+      "frontend_system_cores": {
+        "median": 53.24038507759515,
+        "min": 52.70283496265867,
+        "max": 53.584153560124335,
+        "values": [
+          52.70283496265867,
+          53.02811258014823,
+          53.584153560124335,
+          53.45265757504207
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 45.821477933165575
+      },
+      "frontend_ucx_progress_cores": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "host_system_cores": {
+        "median": 22.901789863010052,
+        "min": 22.64033562503152,
+        "max": 23.226772492035156,
+        "values": [
+          22.952527317888528,
+          23.226772492035156,
+          22.85105240813158,
+          22.64033562503152
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 9.829082420447289
+      },
+      "host_softirq_cores": {
+        "median": 34.03518202878176,
+        "min": 33.46050817985597,
+        "max": 34.62399858126421,
+        "values": [
+          33.66052705155708,
+          33.46050817985597,
+          34.40983700600644,
+          34.62399858126421
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 97.8980708501386
+      },
+      "ethernet_rx_host_packets_per_second": {
+        "median": 3608499.89770092,
+        "min": 3562502.438599275,
+        "max": 3653151.1561267166,
+        "values": [
+          3604049.3191184215,
+          3653151.1561267166,
+          3562502.438599275,
+          3612950.476283418
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 20.812034379110813
+      },
+      "ethernet_tx_host_packets_per_second": {
+        "median": 2105915.0959073016,
+        "min": 2090572.8464244464,
+        "max": 2155383.6930924947,
+        "values": [
+          2115201.7409716533,
+          2155383.6930924947,
+          2090572.8464244464,
+          2096628.4508429498
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -14.818499419492714
+      },
+      "time_to_first_token_p50_ms": {
+        "median": 1546.3452122499998,
+        "min": 1533.3912639999999,
+        "max": 1580.796193,
+        "values": [
+          1547.4302874999998,
+          1545.260137,
+          1533.3912639999999,
+          1580.796193
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 1609.9434253400598
+      },
+      "time_to_first_token_p95_ms": {
+        "median": 2453.4918213499946,
+        "min": 2408.9797387999993,
+        "max": 2549.0506184999995,
+        "values": [
+          2549.0506184999995,
+          2408.9797387999993,
+          2465.576866799989,
+          2441.4067759
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 173.06827324763958
+      },
+      "time_to_first_token_p99_ms": {
+        "median": 5380.3503796599625,
+        "min": 5269.274180239999,
+        "max": 5458.57813147,
+        "values": [
+          5458.57813147,
+          5269.274180239999,
+          5322.870251319925,
+          5437.830508
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 451.455297595342
+      },
+      "inter_token_latency_p50_ms": {
+        "median": 0.11249378522315132,
+        "min": 0.1120285231717687,
+        "max": 0.12125250233644859,
+        "values": [
+          0.1124981607142857,
+          0.1120285231717687,
+          0.11248940973201692,
+          0.12125250233644859
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -82.65235576588151
+      },
+      "inter_token_latency_p95_ms": {
+        "median": 1.1135886072468968,
+        "min": 1.0973031988598678,
+        "max": 1.1215436781774284,
+        "values": [
+          1.0973031988598678,
+          1.1131593430014604,
+          1.114017871492333,
+          1.1215436781774284
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -44.34563030826369
+      },
+      "inter_token_latency_p99_ms": {
+        "median": 1.7477987902686636,
+        "min": 1.7438210342435976,
+        "max": 1.7490013950104095,
+        "values": [
+          1.7490013950104095,
+          1.7467051491397236,
+          1.7488924313976035,
+          1.7438210342435976
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -37.66623244458608
+      },
+      "request_latency_p50_ms": {
+        "median": 1635.9381777499998,
+        "min": 1625.191347,
+        "max": 1683.4926659999999,
+        "values": [
+          1632.0398205,
+          1625.191347,
+          1639.836535,
+          1683.4926659999999
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 98.39806376619154
+      },
+      "request_latency_p95_ms": {
+        "median": 5373.005197224988,
+        "min": 5312.8376238,
+        "max": 5426.098794199993,
+        "values": [
+          5351.699426349993,
+          5312.8376238,
+          5394.310968099982,
+          5426.098794199993
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 13.255600446408454
+      },
+      "request_latency_p99_ms": {
+        "median": 11551.07926909,
+        "min": 11353.585257719988,
+        "max": 11681.704781939998,
+        "values": [
+          11568.58571706,
+          11353.585257719988,
+          11533.57282112,
+          11681.704781939998
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -1.0942747577177059
+      },
+      "ethernet_rx_wire_packets_per_second": {
+        "median": 3608402.8713102466,
+        "min": 3562564.413791194,
+        "max": 3652902.240009727,
+        "values": [
+          3603749.7840146874,
+          3652902.240009727,
+          3562564.413791194,
+          3613055.958605806
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 20.81268721364491
+      },
+      "ethernet_rx_wire_packets_per_request": {
+        "median": 1461.3586942291809,
+        "min": 1455.4779570085893,
+        "max": 1465.2148128487681,
+        "values": [
+          1459.706119940915,
+          1465.2148128487681,
+          1463.011268517447,
+          1455.4779570085893
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 124.71099694860759
+      },
+      "ethernet_rx_wire_packets_per_output_token": {
+        "median": 1.5463138591096226,
+        "min": 1.541549058088249,
+        "max": 1.547727048241723,
+        "values": [
+          1.5450709835840708,
+          1.5475567346351742,
+          1.547727048241723,
+          1.541549058088249
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 119.75544399338092
+      },
+      "rdma_rx_wire_packets_per_second": {
+        "median": 0.9414700803284115,
+        "min": 0.5980849727574561,
+        "max": 1.2712837382046105,
+        "values": [
+          0.5980849727574561,
+          0.9344883996709253,
+          1.2712837382046105,
+          0.9484517609858976
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 21.32670767080409
+      },
+      "rdma_rx_wire_packets_per_request": {
+        "median": 0.00037845264917504026,
+        "min": 0.00024225552474572021,
+        "max": 0.0005220684367913131,
+        "values": [
+          0.00024225552474572021,
+          0.00037483243614795826,
+          0.0005220684367913131,
+          0.00038207286220212226
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 122.85136369063872
+      },
+      "rdma_rx_wire_packets_per_output_token": {
+        "median": 4.0028216231907227e-07,
+        "min": 2.56422835243505e-07,
+        "max": 5.522988496691496e-07,
+        "values": [
+          2.56422835243505e-07,
+          3.9589721304595767e-07,
+          5.522988496691496e-07,
+          4.0466711159218687e-07
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 117.51449147163409
+      },
+      "total_rx_wire_packets_per_second": {
+        "median": 3608403.6445786133,
+        "min": 3562565.6850749324,
+        "max": 3652903.1744981264,
+        "values": [
+          3603750.38209966,
+          3652903.1744981264,
+          3562565.6850749324,
+          3613056.907057567
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 20.812688485859134
+      },
+      "total_rx_wire_packets_per_request": {
+        "median": 1461.3590763911616,
+        "min": 1455.4783390814514,
+        "max": 1465.2151876812043,
+        "values": [
+          1459.7063621964396,
+          1465.2151876812043,
+          1463.0117905858838,
+          1455.4783390814514
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 124.71099708614149
+      },
+      "total_rx_wire_packets_per_output_token": {
+        "median": 1.5463141852696465,
+        "min": 1.5415494627553605,
+        "max": 1.5477276005405725,
+        "values": [
+          1.545071240006906,
+          1.5475571305323872,
+          1.5477276005405725,
+          1.5415494627553605
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 119.75543293768087
+      },
+      "ethernet_tx_wire_packets_per_second": {
+        "median": 2105867.4031838938,
+        "min": 2090648.976801204,
+        "max": 2155249.0024302322,
+        "values": [
+          2115044.0681944545,
+          2155249.0024302322,
+          2090648.976801204,
+          2096690.7381733328
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -14.818326684543448
+      },
+      "ethernet_tx_wire_packets_per_request": {
+        "median": 857.6269012115388,
+        "min": 844.6277021551939,
+        "max": 864.4914526182058,
+        "values": [
+          856.7028665482932,
+          864.4914526182058,
+          858.5509358747843,
+          844.6277021551939
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 59.15420927019226
+      },
+      "ethernet_tx_wire_packets_per_output_token": {
+        "median": 0.9075344886674682,
+        "min": 0.8945755807725349,
+        "max": 0.9130740133132512,
+        "values": [
+          0.9068035836628834,
+          0.9130740133132512,
+          0.9082653936720531,
+          0.8945755807725349
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 55.70669527374805
+      },
+      "rdma_tx_wire_packets_per_second": {
+        "median": 0.9356118928582139,
+        "min": 0.5980849727574561,
+        "max": 0.9409576155760184,
+        "values": [
+          0.5980849727574561,
+          0.9344883996709253,
+          0.9367353860455024,
+          0.9409576155760184
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 20.104033929079623
+      },
+      "rdma_tx_wire_packets_per_request": {
+        "median": 0.0003769431841161452,
+        "min": 0.00024225552474572021,
+        "max": 0.00038468200605675694,
+        "values": [
+          0.00024225552474572021,
+          0.00037483243614795826,
+          0.00038468200605675694,
+          0.00037905393208433215
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 121.11201928477855
+      },
+      "rdma_tx_wire_packets_per_output_token": {
+        "median": 3.9868343357944966e-07,
+        "min": 2.56422835243505e-07,
+        "max": 4.069570471246366e-07,
+        "values": [
+          2.56422835243505e-07,
+          3.9589721304595767e-07,
+          4.069570471246366e-07,
+          4.0146965411294165e-07
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 116.06077370471893
+      },
+      "total_tx_wire_packets_per_second": {
+        "median": 2105868.172705188,
+        "min": 2090649.91353659,
+        "max": 2155249.9369186317,
+        "values": [
+          2115044.6662794272,
+          2155249.9369186317,
+          2090649.91353659,
+          2096691.6791309484
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -14.818316631645345
+      },
+      "total_tx_wire_packets_per_request": {
+        "median": 857.6272146803042,
+        "min": 844.628081209126,
+        "max": 864.491827450642,
+        "values": [
+          856.7031088038179,
+          864.491827450642,
+          858.5513205567904,
+          844.628081209126
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 59.154217091967354
+      },
+      "total_tx_wire_packets_per_output_token": {
+        "median": 0.9075348203574094,
+        "min": 0.8945759822421889,
+        "max": 0.9130744092104643,
+        "values": [
+          0.9068038400857187,
+          0.9130744092104643,
+          0.9082658006291001,
+          0.8945759822421889
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 55.706702887061454
+      },
+      "total_wire_packets_per_second": {
+        "median": 5714271.817283802,
+        "min": 5653215.5986115225,
+        "max": 5808153.111416758,
+        "values": [
+          5718795.048379088,
+          5808153.111416758,
+          5653215.5986115225,
+          5709748.586188516
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 4.676487904648918
+      },
+      "total_wire_packets_per_request": {
+        "median": 2318.9862910714655,
+        "min": 2300.1064202905773,
+        "max": 2329.707015131846,
+        "values": [
+          2316.4094710002573,
+          2329.707015131846,
+          2321.563111142674,
+          2300.1064202905773
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 94.96595223078191
+      },
+      "total_wire_packets_per_output_token": {
+        "median": 2.4539342406311486,
+        "min": 2.4361254449975496,
+        "max": 2.4606315397428515,
+        "values": [
+          2.451875080092625,
+          2.4606315397428515,
+          2.4559934011696725,
+          2.4361254449975496
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 90.74480446358402
+      },
+      "ethernet_mean_rx_wire_bytes": {
+        "median": 437.72411088784156,
+        "min": 436.9672102426732,
+        "max": 438.31575970390804,
+        "values": [
+          438.31575970390804,
+          436.9672102426732,
+          437.58818655338825,
+          437.86003522229487
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -51.229026895929366
+      },
+      "ethernet_rx_256_to_511_bytes_phy_percent": {
+        "median": 12.48893762671511,
+        "min": 12.46061343972043,
+        "max": 12.617691741908631,
+        "values": [
+          12.617691741908631,
+          12.487271869842743,
+          12.46061343972043,
+          12.490603383587475
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -49.30607959668909
+      },
+      "ethernet_rx_8192_to_10239_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_65_to_127_bytes_phy_percent": {
+        "median": 14.030076063586783,
+        "min": 13.86661894026586,
+        "max": 14.174781598333382,
+        "values": [
+          13.982538652657759,
+          14.077613474515806,
+          14.174781598333382,
+          13.86661894026586
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -32.81656786291926
+      },
+      "ethernet_rx_2048_to_4095_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_64_bytes_phy_percent": {
+        "median": 1.6406370290453246e-05,
+        "min": 1.4618331840139988e-05,
+        "max": 1.75664965180426e-05,
+        "values": [
+          1.7151647109260964e-05,
+          1.4618331840139988e-05,
+          1.566109347164553e-05,
+          1.75664965180426e-05
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -10.981385386542664
+      },
+      "ethernet_rx_4096_to_8191_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_512_to_1023_bytes_phy_percent": {
+        "median": 0.9278930613322203,
+        "min": 0.909210662911623,
+        "max": 0.9424357811298693,
+        "values": [
+          0.909210662911623,
+          0.9236029553015918,
+          0.9321831673628488,
+          0.9424357811298693
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -66.61056874671627
+      },
+      "ethernet_rx_128_to_255_bytes_phy_percent": {
+        "median": 56.011776357891385,
+        "min": 55.926108454516275,
+        "max": 56.216093513297615,
+        "values": [
+          55.95783911551471,
+          56.06571360026806,
+          55.926108454516275,
+          56.216093513297615
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 51883.394621836036
+      },
+      "ethernet_rx_1519_to_2047_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_1024_to_1518_bytes_phy_percent": {
+        "median": 16.494893723578507,
+        "min": 16.445752441304673,
+        "max": 16.532777427859344,
+        "values": [
+          16.532777427859344,
+          16.445752441304673,
+          16.50631310049389,
+          16.483474346663122
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -68.0294284265874
+      },
+      "rx_discards_phy_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "tx_discards_phy_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rx_out_of_buffer_per_second": {
+        "median": 0.2044193374280149,
+        "min": 0.0,
+        "max": 0.7350812095412453,
+        "values": [
+          0.0,
+          0.4088386748560298,
+          0.0,
+          0.7350812095412453
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": 389.0012065979814
+      },
+      "RetransSegs_per_second": {
+        "median": 437.06057330000726,
+        "min": 409.52169667460197,
+        "max": 455.68685481989536,
+        "values": [
+          442.1947023314997,
+          431.9264442685148,
+          409.52169667460197,
+          455.68685481989536
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -90.08173702115285
+      },
+      "rdma_port_rcv_errors_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_port_xmit_discards_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_out_of_buffer_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_packet_seq_err_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_local_ack_timeout_err_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_req_transport_retries_exceeded_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "frontend_mean_rss_gib": {
+        "median": 42.733549228101886,
+        "min": 42.532660989200366,
+        "max": 43.70709991455078,
+        "values": [
+          43.70709991455078,
+          42.71123857257747,
+          42.7558598836263,
+          42.532660989200366
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -7.045825564057784
+      },
+      "client_mean_cores": {
+        "median": 81.35560827283356,
+        "min": 79.97212287952581,
+        "max": 82.92808855412194,
+        "values": [
+          79.97212287952581,
+          82.68429284180831,
+          80.02692370385883,
+          82.92808855412194
+        ],
+        "percent_vs_tcp": 0.0,
+        "percent_vs_quic": -37.31589693849726
+      }
+    },
+    "quic": {
+      "requests_per_second": {
+        "median": 4581.617471704675,
+        "min": 4532.697962935617,
+        "max": 4684.632243499535,
+        "values": [
+          4536.943902111184,
+          4626.291041298166,
+          4684.632243499535,
+          4532.697962935617
+        ],
+        "percent_vs_tcp": 85.0708706817436,
+        "percent_vs_quic": 0.0
+      },
+      "output_tokens_per_second": {
+        "median": 4239760.374452174,
+        "min": 4176272.7763453755,
+        "max": 4326433.659183878,
+        "values": [
+          4187467.1468149507,
+          4292053.602089398,
+          4326433.659183878,
+          4176272.7763453755
+        ],
+        "percent_vs_tcp": 81.33359158142181,
+        "percent_vs_quic": 0.0
+      },
+      "frontend_cpu_ms_per_request": {
+        "median": 27.034938541137727,
+        "min": 26.87245199739981,
+        "max": 27.346047336095396,
+        "values": [
+          27.346047336095396,
+          27.028620182967625,
+          26.87245199739981,
+          27.04125689930783
+        ],
+        "percent_vs_tcp": -33.771378386975535,
+        "percent_vs_quic": 0.0
+      },
+      "frontend_cpu_us_per_output_token": {
+        "median": 29.241267683603983,
+        "min": 29.097303924142363,
+        "max": 29.62828802196319,
+        "values": [
+          29.62828802196319,
+          29.1334347153173,
+          29.097303924142363,
+          29.349100651890666
+        ],
+        "percent_vs_tcp": -32.25121915715321,
+        "percent_vs_quic": 0.0
+      },
+      "frontend_mean_cores": {
+        "median": 124.55487305972787,
+        "min": 122.5698500627113,
+        "max": 125.88755508891266,
+        "values": [
+          124.06748270834179,
+          125.04226341111394,
+          125.88755508891266,
+          122.5698500627113
+        ],
+        "percent_vs_tcp": 23.33532543156711,
+        "percent_vs_quic": 0.0
+      },
+      "frontend_system_cores": {
+        "median": 36.51066072859091,
+        "min": 35.59805323048018,
+        "max": 37.012095351739376,
+        "values": [
+          37.012095351739376,
+          36.64688482312379,
+          36.374436634058036,
+          35.59805323048018
+        ],
+        "percent_vs_tcp": -31.422996517815406,
+        "percent_vs_quic": 0.0
+      },
+      "frontend_ucx_progress_cores": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "host_system_cores": {
+        "median": 20.852209049090934,
+        "min": 20.470112166910276,
+        "max": 21.65219780614247,
+        "values": [
+          20.470112166910276,
+          20.86027345852425,
+          20.844144639657618,
+          21.65219780614247
+        ],
+        "percent_vs_tcp": -8.949435071140488,
+        "percent_vs_quic": 0.0
+      },
+      "host_softirq_cores": {
+        "median": 17.198339469693686,
+        "min": 16.388372727612538,
+        "max": 17.662541992067993,
+        "values": [
+          17.662541992067993,
+          17.47322413090917,
+          16.9234548084782,
+          16.388372727612538
+        ],
+        "percent_vs_tcp": -49.468936422464395,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_host_packets_per_second": {
+        "median": 2986871.2303754175,
+        "min": 2941824.5218609623,
+        "max": 3032179.889875046,
+        "values": [
+          2956648.4174201027,
+          3017094.0433307323,
+          3032179.889875046,
+          2941824.5218609623
+        ],
+        "percent_vs_tcp": -17.226789107616714,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_tx_host_packets_per_second": {
+        "median": 2472268.1351650357,
+        "min": 2450960.256027847,
+        "max": 2489686.287314538,
+        "values": [
+          2460002.2422824744,
+          2484534.0280475966,
+          2489686.287314538,
+          2450960.256027847
+        ],
+        "percent_vs_tcp": 17.396382217389284,
+        "percent_vs_quic": 0.0
+      },
+      "time_to_first_token_p50_ms": {
+        "median": 90.4325365,
+        "min": 83.605338,
+        "max": 92.118478,
+        "values": [
+          90.903702,
+          83.605338,
+          89.96137099999999,
+          92.118478
+        ],
+        "percent_vs_tcp": -94.15185330005215,
+        "percent_vs_quic": 0.0
+      },
+      "time_to_first_token_p95_ms": {
+        "median": 898.4902538,
+        "min": 826.6366072999999,
+        "max": 953.2231201999998,
+        "values": [
+          867.2262826,
+          953.2231201999998,
+          929.754225,
+          826.6366072999999
+        ],
+        "percent_vs_tcp": -63.379121708030794,
+        "percent_vs_quic": 0.0
+      },
+      "time_to_first_token_p99_ms": {
+        "median": 975.6639211050003,
+        "min": 910.29126014,
+        "max": 1031.5143010000006,
+        "values": [
+          943.5880712000006,
+          1031.5143010000006,
+          1007.73977101,
+          910.29126014
+        ],
+        "percent_vs_tcp": -81.8661638693006,
+        "percent_vs_quic": 0.0
+      },
+      "inter_token_latency_p50_ms": {
+        "median": 0.6484672137897782,
+        "min": 0.6404397713494647,
+        "max": 0.6519863791918539,
+        "values": [
+          0.6514262882352941,
+          0.6455081393442623,
+          0.6404397713494647,
+          0.6519863791918539
+        ],
+        "percent_vs_tcp": 476.44714550535286,
+        "percent_vs_quic": 0.0
+      },
+      "inter_token_latency_p95_ms": {
+        "median": 2.0009005823171595,
+        "min": 1.9085055604377097,
+        "max": 2.136063598227929,
+        "values": [
+          2.0859225311575313,
+          1.9085055604377097,
+          1.915878633476788,
+          2.136063598227929
+        ],
+        "percent_vs_tcp": 79.68041063781595,
+        "percent_vs_quic": 0.0
+      },
+      "inter_token_latency_p99_ms": {
+        "median": 2.803935745925983,
+        "min": 2.6978872929017004,
+        "max": 2.943258857287667,
+        "values": [
+          2.943258857287667,
+          2.7023502240576054,
+          2.6978872929017004,
+          2.9055212677943603
+        ],
+        "percent_vs_tcp": 60.42668993351201,
+        "percent_vs_quic": 0.0
+      },
+      "request_latency_p50_ms": {
+        "median": 824.5736609999999,
+        "min": 760.8134705,
+        "max": 870.182998,
+        "values": [
+          795.933498,
+          870.182998,
+          853.2138239999999,
+          760.8134705
+        ],
+        "percent_vs_tcp": -49.596282291419854,
+        "percent_vs_quic": 0.0
+      },
+      "request_latency_p95_ms": {
+        "median": 4744.140842524998,
+        "min": 4559.415778850001,
+        "max": 4893.7196835999985,
+        "values": [
+          4893.7196835999985,
+          4597.914945999998,
+          4559.415778850001,
+          4890.366739049999
+        ],
+        "percent_vs_tcp": -11.70414566181288,
+        "percent_vs_quic": 0.0
+      },
+      "request_latency_p99_ms": {
+        "median": 11678.878286160023,
+        "min": 11101.479298240005,
+        "max": 12187.724852320007,
+        "values": [
+          12145.66993872004,
+          11212.086633600007,
+          11101.479298240005,
+          12187.724852320007
+        ],
+        "percent_vs_tcp": 1.1063816124265102,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_wire_packets_per_second": {
+        "median": 2986774.77881868,
+        "min": 2941685.1853222335,
+        "max": 3032015.771051094,
+        "values": [
+          2956563.1957582342,
+          3016986.3618791257,
+          3032015.771051094,
+          2941685.1853222335
+        ],
+        "percent_vs_tcp": -17.227236388542376,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_wire_packets_per_request": {
+        "median": 650.3280720895916,
+        "min": 647.2259962899677,
+        "max": 652.1393347169401,
+        "values": [
+          651.6640407174644,
+          652.1393347169401,
+          647.2259962899677,
+          648.9921034617187
+        ],
+        "percent_vs_tcp": -55.49839511287005,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_wire_packets_per_output_token": {
+        "median": 0.7036521284797831,
+        "min": 0.7008118024911635,
+        "max": 0.7060504816156086,
+        "values": [
+          0.7060504816156086,
+          0.7029237380470827,
+          0.7008118024911635,
+          0.7043805189124834
+        ],
+        "percent_vs_tcp": -54.49487021444983,
+        "percent_vs_quic": 0.0
+      },
+      "rdma_rx_wire_packets_per_second": {
+        "median": 0.7759792533750306,
+        "min": 0.6019695696545478,
+        "max": 1.5257975122102454,
+        "values": [
+          0.6019695696545478,
+          0.6152373352832485,
+          1.5257975122102454,
+          0.9367211714668127
+        ],
+        "percent_vs_tcp": -17.577916750753563,
+        "percent_vs_quic": 0.0
+      },
+      "rdma_rx_wire_packets_per_request": {
+        "median": 0.0001698229002988766,
+        "min": 0.00013268173083965892,
+        "max": 0.0003257027303108935,
+        "values": [
+          0.00013268173083965892,
+          0.0001329871661318154,
+          0.0003257027303108935,
+          0.00020665863446593782
+        ],
+        "percent_vs_tcp": -55.1270414755821,
+        "percent_vs_quic": 0.0
+      },
+      "rdma_rx_wire_packets_per_output_token": {
+        "median": 1.8402551462704395e-07,
+        "min": 1.4334334850425616e-07,
+        "max": 3.526686486851311e-07,
+        "values": [
+          1.4375505491724628e-07,
+          1.4334334850425616e-07,
+          3.526686486851311e-07,
+          2.2429597433684163e-07
+        ],
+        "percent_vs_tcp": -54.026051632959394,
+        "percent_vs_quic": 0.0
+      },
+      "total_rx_wire_packets_per_second": {
+        "median": 2986775.387422133,
+        "min": 2941686.1220434047,
+        "max": 3032017.296848606,
+        "values": [
+          2956563.797727804,
+          3016986.9771164614,
+          3032017.296848606,
+          2941686.1220434047
+        ],
+        "percent_vs_tcp": -17.227237260178352,
+        "percent_vs_quic": 0.0
+      },
+      "total_rx_wire_packets_per_request": {
+        "median": 650.3282417597743,
+        "min": 647.2263219926981,
+        "max": 652.1394677041062,
+        "values": [
+          651.6641733991953,
+          652.1394677041062,
+          647.2263219926981,
+          648.9923101203532
+        ],
+        "percent_vs_tcp": -55.49839514010716,
+        "percent_vs_quic": 0.0
+      },
+      "total_rx_wire_packets_per_output_token": {
+        "median": 0.7036523122994445,
+        "min": 0.7008121551598122,
+        "max": 0.7060506253706635,
+        "values": [
+          0.7060506253706635,
+          0.7029238813904313,
+          0.7008121551598122,
+          0.7043807432084578
+        ],
+        "percent_vs_tcp": -54.4948679251273,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_tx_wire_packets_per_second": {
+        "median": 2472207.1323782927,
+        "min": 2450860.394631563,
+        "max": 2489604.2720985436,
+        "values": [
+          2459985.1028380706,
+          2484429.161918515,
+          2489604.2720985436,
+          2450860.394631563
+        ],
+        "percent_vs_tcp": 17.396144156109926,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_tx_wire_packets_per_request": {
+        "median": 538.8653590402791,
+        "min": 531.4407071234151,
+        "max": 542.2119285392446,
+        "values": [
+          542.2119285392446,
+          537.0239657947177,
+          531.4407071234151,
+          540.7067522858406
+        ],
+        "percent_vs_tcp": -37.16785722567199,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_tx_wire_packets_per_output_token": {
+        "median": 0.5828487253370391,
+        "min": 0.5754402975332281,
+        "max": 0.5874637380042901,
+        "values": [
+          0.5874637380042901,
+          0.5788439269978082,
+          0.5754402975332281,
+          0.5868535236762701
+        ],
+        "percent_vs_tcp": -35.7766858874052,
+        "percent_vs_quic": 0.0
+      },
+      "rdma_tx_wire_packets_per_second": {
+        "median": 0.7790012227321894,
+        "min": 0.6019695696545478,
+        "max": 1.2915151229479167,
+        "values": [
+          0.6019695696545478,
+          0.6212812739975663,
+          1.2915151229479167,
+          0.9367211714668127
+        ],
+        "percent_vs_tcp": -16.738849871562913,
+        "percent_vs_quic": 0.0
+      },
+      "rdma_tx_wire_packets_per_request": {
+        "median": 0.00017047611673731125,
+        "min": 0.00013268173083965892,
+        "max": 0.0002756918912343743,
+        "values": [
+          0.00013268173083965892,
+          0.00013429359900868468,
+          0.0002756918912343743,
+          0.00020665863446593782
+        ],
+        "percent_vs_tcp": -54.774055104075444,
+        "percent_vs_quic": 0.0
+      },
+      "rdma_tx_wire_packets_per_output_token": {
+        "median": 1.8452374614020097e-07,
+        "min": 1.4375505491724628e-07,
+        "max": 2.985172603320452e-07,
+        "values": [
+          1.4375505491724628e-07,
+          1.447515179435603e-07,
+          2.985172603320452e-07,
+          2.2429597433684163e-07
+        ],
+        "percent_vs_tcp": -53.71672595384401,
+        "percent_vs_quic": 0.0
+      },
+      "total_tx_wire_packets_per_second": {
+        "median": 2472207.7440037145,
+        "min": 2450861.3313527345,
+        "max": 2489605.5636136667,
+        "values": [
+          2459985.70480764,
+          2484429.783199789,
+          2489605.5636136667,
+          2450861.3313527345
+        ],
+        "percent_vs_tcp": 17.396130301353494,
+        "percent_vs_quic": 0.0
+      },
+      "total_tx_wire_packets_per_request": {
+        "median": 538.8655295163959,
+        "min": 531.4409828153064,
+        "max": 542.2120612209754,
+        "values": [
+          542.2120612209754,
+          537.0241000883167,
+          531.4409828153064,
+          540.7069589444751
+        ],
+        "percent_vs_tcp": -37.167860313613346,
+        "percent_vs_quic": 0.0
+      },
+      "total_tx_wire_packets_per_output_token": {
+        "median": 0.5828489098607852,
+        "min": 0.5754405960504885,
+        "max": 0.587463881759345,
+        "values": [
+          0.587463881759345,
+          0.5788440717493261,
+          0.5754405960504885,
+          0.5868537479722444
+        ],
+        "percent_vs_tcp": -35.77668902761825,
+        "percent_vs_quic": 0.0
+      },
+      "total_wire_packets_per_second": {
+        "median": 5458983.131425847,
+        "min": 5392547.45339614,
+        "max": 5521622.860462273,
+        "values": [
+          5416549.502535444,
+          5501416.760316251,
+          5521622.860462273,
+          5392547.45339614
+        ],
+        "percent_vs_tcp": -4.4675628675169055,
+        "percent_vs_quic": 0.0
+      },
+      "total_wire_packets_per_request": {
+        "median": 1189.4314184286254,
+        "min": 1178.6673048080045,
+        "max": 1193.8762346201706,
+        "values": [
+          1193.8762346201706,
+          1189.1635677924228,
+          1178.6673048080045,
+          1189.6992690648283
+        ],
+        "percent_vs_tcp": -48.708993105816944,
+        "percent_vs_quic": 0.0
+      },
+      "total_wire_packets_per_output_token": {
+        "median": 1.2865012221602297,
+        "min": 1.2762527512103006,
+        "max": 1.2935145071300087,
+        "values": [
+          1.2935145071300087,
+          1.2817679531397572,
+          1.2762527512103006,
+          1.291234491180702
+        ],
+        "percent_vs_tcp": -47.57393246897508,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_mean_rx_wire_bytes": {
+        "median": 897.5094877721585,
+        "min": 892.024041062425,
+        "max": 906.6809553167924,
+        "values": [
+          892.3911931627,
+          902.6277823816171,
+          906.6809553167924,
+          892.024041062425
+        ],
+        "percent_vs_tcp": 105.03999333089702,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_512_to_1023_bytes_phy_percent": {
+        "median": 2.7790022965454533,
+        "min": 2.63602278154664,
+        "max": 2.9367428647041325,
+        "values": [
+          2.8809324237640674,
+          2.6770721693268387,
+          2.63602278154664,
+          2.9367428647041325
+        ],
+        "percent_vs_tcp": 199.49596697657245,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_1519_to_2047_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_8192_to_10239_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_128_to_255_bytes_phy_percent": {
+        "median": 0.10774936259042076,
+        "min": 0.10433197856033467,
+        "max": 0.11083843659133846,
+        "values": [
+          0.11083843659133846,
+          0.10491505946277208,
+          0.10433197856033467,
+          0.11058366571806942
+        ],
+        "percent_vs_tcp": -99.8076308776534,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_2048_to_4095_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_256_to_511_bytes_phy_percent": {
+        "median": 24.63596724687214,
+        "min": 23.926549159303928,
+        "max": 25.64547727659793,
+        "values": [
+          24.033101431795433,
+          25.238833061948846,
+          25.64547727659793,
+          23.926549159303928
+        ],
+        "percent_vs_tcp": 97.2623131224012,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_65_to_127_bytes_phy_percent": {
+        "median": 20.883238050357242,
+        "min": 19.53299125498848,
+        "max": 21.726992877532812,
+        "values": [
+          21.65095234697353,
+          20.11552375374096,
+          19.53299125498848,
+          21.726992877532812
+        ],
+        "percent_vs_tcp": 48.84622118733155,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_1024_to_1518_bytes_phy_percent": {
+        "median": 51.59399069767025,
+        "min": 51.299230944133605,
+        "max": 52.08133355810236,
+        "values": [
+          51.324284028915734,
+          51.86369736642477,
+          52.08133355810236,
+          51.299230944133605
+        ],
+        "percent_vs_tcp": 212.78765151375057,
+        "percent_vs_quic": 0.0
+      },
+      "ethernet_rx_4096_to_8191_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_64_bytes_phy_percent": {
+        "median": 1.8430269176502127e-05,
+        "min": 1.770844831847664e-05,
+        "max": 1.9637111675567904e-05,
+        "values": [
+          1.770844831847664e-05,
+          1.878792005979518e-05,
+          1.9637111675567904e-05,
+          1.8072618293209074e-05
+        ],
+        "percent_vs_tcp": 12.336055143327918,
+        "percent_vs_quic": 0.0
+      },
+      "rx_discards_phy_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "tx_discards_phy_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rx_out_of_buffer_per_second": {
+        "median": 0.041803442337121376,
+        "min": 0.0,
+        "max": 0.19288862225845507,
+        "values": [
+          0.08360688467424275,
+          0.0,
+          0.19288862225845507,
+          0.0
+        ],
+        "percent_vs_tcp": -79.55015270908888,
+        "percent_vs_quic": 0.0
+      },
+      "RetransSegs_per_second": {
+        "median": 4406.624166269169,
+        "min": 4151.0550700035,
+        "max": 4668.155001863637,
+        "values": [
+          4389.628617364432,
+          4668.155001863637,
+          4423.619715173906,
+          4151.0550700035
+        ],
+        "percent_vs_tcp": 908.2410621020197,
+        "percent_vs_quic": 0.0
+      },
+      "rdma_port_rcv_errors_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_port_xmit_discards_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_out_of_buffer_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_packet_seq_err_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_local_ack_timeout_err_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_req_transport_retries_exceeded_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "frontend_mean_rss_gib": {
+        "median": 45.9727058923545,
+        "min": 42.971965373063284,
+        "max": 49.77067209879557,
+        "values": [
+          44.30640879398634,
+          47.63900299072266,
+          49.77067209879557,
+          42.971965373063284
+        ],
+        "percent_vs_tcp": 7.57989149687226,
+        "percent_vs_quic": 0.0
+      },
+      "client_mean_cores": {
+        "median": 129.78666727194167,
+        "min": 128.69144177517563,
+        "max": 130.10169732229363,
+        "values": [
+          129.55129815209872,
+          130.02203639178458,
+          128.69144177517563,
+          130.10169732229363
+        ],
+        "percent_vs_tcp": 59.530080380801856,
+        "percent_vs_quic": 0.0
+      }
+    },
+    "velo-tcp": {
+      "requests_per_second": {
+        "median": 4241.239912788855,
+        "min": 4233.877094148963,
+        "max": 4280.522684560378,
+        "values": [
+          4247.525051175961,
+          4234.954774401749,
+          4233.877094148963,
+          4280.522684560378
+        ],
+        "percent_vs_tcp": 71.32158419544963,
+        "percent_vs_quic": -7.42920073572132
+      },
+      "output_tokens_per_second": {
+        "median": 3893506.739997229,
+        "min": 3879799.368757777,
+        "max": 3901900.5163792656,
+        "values": [
+          3891112.441786047,
+          3895901.038208411,
+          3879799.368757777,
+          3901900.5163792656
+        ],
+        "percent_vs_tcp": 66.52440200736511,
+        "percent_vs_quic": -8.166820854815048
+      },
+      "frontend_cpu_ms_per_request": {
+        "median": 32.009608941709274,
+        "min": 31.922630367560863,
+        "max": 32.22439386731897,
+        "values": [
+          32.22439386731897,
+          31.928549222481564,
+          32.090668660936984,
+          31.922630367560863
+        ],
+        "percent_vs_tcp": -21.584719885509585,
+        "percent_vs_quic": 18.400894061593064
+      },
+      "frontend_cpu_us_per_output_token": {
+        "median": 35.019787984986124,
+        "min": 34.70723733569235,
+        "max": 35.17603828163144,
+        "values": [
+          35.17603828163144,
+          34.70723733569235,
+          35.01932292518695,
+          35.02025304478529
+        ],
+        "percent_vs_tcp": -18.863027176892633,
+        "percent_vs_quic": 19.76152458199425
+      },
+      "frontend_mean_cores": {
+        "median": 136.25674520932267,
+        "min": 135.21596196946956,
+        "max": 136.87392021039838,
+        "values": [
+          136.87392021039838,
+          135.21596196946956,
+          135.86794697946507,
+          136.64554343918027
+        ],
+        "percent_vs_tcp": 34.92262165109585,
+        "percent_vs_quic": 9.394953294186582
+      },
+      "frontend_system_cores": {
+        "median": 38.88799028137515,
+        "min": 38.370234513197445,
+        "max": 39.704046459635144,
+        "values": [
+          39.07787338877834,
+          38.370234513197445,
+          38.698107173971955,
+          39.704046459635144
+        ],
+        "percent_vs_tcp": -26.957721615465612,
+        "percent_vs_quic": 6.511329856385184
+      },
+      "frontend_ucx_progress_cores": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "host_system_cores": {
+        "median": 22.49032554629525,
+        "min": 22.474496768329725,
+        "max": 22.642317848868547,
+        "values": [
+          22.474496768329725,
+          22.642317848868547,
+          22.490102535463112,
+          22.490548557127386
+        ],
+        "percent_vs_tcp": -1.7966469833843868,
+        "percent_vs_quic": 7.855841524261575
+      },
+      "host_softirq_cores": {
+        "median": 18.02385507715988,
+        "min": 17.348401475653464,
+        "max": 18.864697500998165,
+        "values": [
+          18.267368718328424,
+          17.348401475653464,
+          17.78034143599134,
+          18.864697500998165
+        ],
+        "percent_vs_tcp": -47.043459142019415,
+        "percent_vs_quic": 4.79997274690902
+      },
+      "ethernet_rx_host_packets_per_second": {
+        "median": 3215040.0290120896,
+        "min": 3195178.144386102,
+        "max": 3239780.880194615,
+        "values": [
+          3215387.024185594,
+          3214693.0338385855,
+          3195178.144386102,
+          3239780.880194615
+        ],
+        "percent_vs_tcp": -10.903696268344499,
+        "percent_vs_quic": 7.6390570948046355
+      },
+      "ethernet_tx_host_packets_per_second": {
+        "median": 2513481.4798533395,
+        "min": 2499771.4493995775,
+        "max": 2536929.0558292633,
+        "values": [
+          2504242.9918512832,
+          2522719.967855396,
+          2499771.4493995775,
+          2536929.0558292633
+        ],
+        "percent_vs_tcp": 19.353410056184828,
+        "percent_vs_quic": 1.6670256798643202
+      },
+      "time_to_first_token_p50_ms": {
+        "median": 74.0322145,
+        "min": 72.06001799999999,
+        "max": 76.415618,
+        "values": [
+          73.527667,
+          76.415618,
+          74.536762,
+          72.06001799999999
+        ],
+        "percent_vs_tcp": -95.21243937553375,
+        "percent_vs_quic": -18.135421867769907
+      },
+      "time_to_first_token_p95_ms": {
+        "median": 1298.0115076249997,
+        "min": 1273.8222226999999,
+        "max": 1312.7695179999998,
+        "values": [
+          1312.7695179999998,
+          1273.8222226999999,
+          1298.7290635999996,
+          1297.2939516499998
+        ],
+        "percent_vs_tcp": -47.09533994245027,
+        "percent_vs_quic": 44.465841686684705
+      },
+      "time_to_first_token_p99_ms": {
+        "median": 1420.229501545,
+        "min": 1408.2993325699995,
+        "max": 1438.4487038799998,
+        "values": [
+          1438.4487038799998,
+          1422.3004496299998,
+          1408.2993325699995,
+          1418.1585534600003
+        ],
+        "percent_vs_tcp": -73.60340124104039,
+        "percent_vs_quic": 45.56544224126904
+      },
+      "inter_token_latency_p50_ms": {
+        "median": 0.6243787425270253,
+        "min": 0.6225795789473684,
+        "max": 0.6264361971830986,
+        "values": [
+          0.6264361971830986,
+          0.6232257730496453,
+          0.6255317120044053,
+          0.6225795789473684
+        ],
+        "percent_vs_tcp": 455.03398813406415,
+        "percent_vs_quic": -3.714678360063084
+      },
+      "inter_token_latency_p95_ms": {
+        "median": 2.0099368754577305,
+        "min": 1.9914651899860374,
+        "max": 2.0275522088596296,
+        "values": [
+          2.0070061516697715,
+          2.0128675992456895,
+          1.9914651899860374,
+          2.0275522088596296
+        ],
+        "percent_vs_tcp": 80.49186767695637,
+        "percent_vs_quic": 0.4516113004528366
+      },
+      "inter_token_latency_p99_ms": {
+        "median": 2.7620022407958853,
+        "min": 2.7470287873893016,
+        "max": 2.7926151469810456,
+        "values": [
+          2.761634064059791,
+          2.7926151469810456,
+          2.7470287873893016,
+          2.7623704175319794
+        ],
+        "percent_vs_tcp": 58.02747182193227,
+        "percent_vs_quic": -1.495523040819513
+      },
+      "request_latency_p50_ms": {
+        "median": 1160.5813034999999,
+        "min": 1149.0523245,
+        "max": 1174.4998405,
+        "values": [
+          1164.6647045,
+          1149.0523245,
+          1156.4979024999998,
+          1174.4998405
+        ],
+        "percent_vs_tcp": -29.05714168880059,
+        "percent_vs_quic": 40.74925726981231
+      },
+      "request_latency_p95_ms": {
+        "median": 4830.071200124998,
+        "min": 4812.178910449999,
+        "max": 4880.948091299995,
+        "values": [
+          4821.310919049997,
+          4880.948091299995,
+          4838.831481199997,
+          4812.178910449999
+        ],
+        "percent_vs_tcp": -10.104847793194038,
+        "percent_vs_quic": 1.8112944040308943
+      },
+      "request_latency_p99_ms": {
+        "median": 11788.451496434933,
+        "min": 11733.351956420027,
+        "max": 11911.486473059998,
+        "values": [
+          11911.486473059998,
+          11772.505759279988,
+          11804.397233589876,
+          11733.351956420027
+        ],
+        "percent_vs_tcp": 2.0549787757073723,
+        "percent_vs_quic": 0.9382169039706456
+      },
+      "ethernet_rx_wire_packets_per_second": {
+        "median": 3215015.852592906,
+        "min": 3194990.9707331536,
+        "max": 3239829.5231618737,
+        "values": [
+          3215378.29849117,
+          3214653.4066946423,
+          3194990.9707331536,
+          3239829.5231618737
+        ],
+        "percent_vs_tcp": -10.90197056002502,
+        "percent_vs_quic": 7.641723620838237
+      },
+      "ethernet_rx_wire_packets_per_request": {
+        "median": 756.9387574737455,
+        "min": 754.6253468596183,
+        "max": 759.0762069351166,
+        "values": [
+          757.0004319576566,
+          759.0762069351166,
+          754.6253468596183,
+          756.8770829898343
+        ],
+        "percent_vs_tcp": -48.20308248324988,
+        "percent_vs_quic": 16.393369740537157
+      },
+      "ethernet_rx_wire_packets_per_output_token": {
+        "median": 0.8257382113246952,
+        "min": 0.8234938632293547,
+        "max": 0.8303208935137704,
+        "values": [
+          0.8263390859543729,
+          0.8251373366950175,
+          0.8234938632293547,
+          0.8303208935137704
+        ],
+        "percent_vs_tcp": -46.59957249557599,
+        "percent_vs_quic": 17.350346556710484
+      },
+      "rdma_rx_wire_packets_per_second": {
+        "median": 0.9455569757754149,
+        "min": 0.6003752335667084,
+        "max": 1.090618144470788,
+        "values": [
+          0.6003752335667084,
+          0.9407778895089063,
+          0.9503360620419234,
+          1.090618144470788
+        ],
+        "percent_vs_tcp": 0.43409722012384133,
+        "percent_vs_quic": 21.853383536070826
+      },
+      "rdma_rx_wire_packets_per_request": {
+        "median": 0.00022330295698729958,
+        "min": 0.0001413470730209089,
+        "max": 0.0002547862083302562,
+        "values": [
+          0.0001413470730209089,
+          0.00022214591173333256,
+          0.0002244600022412666,
+          0.0002547862083302562
+        ],
+        "percent_vs_tcp": -40.99580027407379,
+        "percent_vs_quic": 31.49166372397467
+      },
+      "rdma_rx_wire_packets_per_output_token": {
+        "median": 2.432117693188635e-07,
+        "min": 1.542939821320435e-07,
+        "max": 2.795094697808487e-07,
+        "values": [
+          1.542939821320435e-07,
+          2.414788980218905e-07,
+          2.449446406158366e-07,
+          2.795094697808487e-07
+        ],
+        "percent_vs_tcp": -39.23991818426449,
+        "percent_vs_quic": 32.161982979245906
+      },
+      "total_rx_wire_packets_per_second": {
+        "median": 3215016.623169468,
+        "min": 3194991.9210692155,
+        "max": 3239830.6137800184,
+        "values": [
+          3215378.8988664034,
+          3214654.3474725317,
+          3194991.9210692155,
+          3239830.6137800184
+        ],
+        "percent_vs_tcp": -10.901968298368825,
+        "percent_vs_quic": 7.641727486723693
+      },
+      "total_rx_wire_packets_per_request": {
+        "median": 756.9389555403861,
+        "min": 754.6255713196206,
+        "max": 759.0764290810283,
+        "values": [
+          757.0005733047295,
+          759.0764290810283,
+          754.6255713196206,
+          756.8773377760426
+        ],
+        "percent_vs_tcp": -48.20308247513998,
+        "percent_vs_quic": 16.393369829999305
+      },
+      "total_rx_wire_packets_per_output_token": {
+        "median": 0.8257384092111353,
+        "min": 0.8234941081739954,
+        "max": 0.8303211730232402,
+        "values": [
+          0.826339240248355,
+          0.8251375781739155,
+          0.8234941081739954,
+          0.8303211730232402
+        ],
+        "percent_vs_tcp": -46.59957096189071,
+        "percent_vs_quic": 17.350344023276108
+      },
+      "ethernet_tx_wire_packets_per_second": {
+        "median": 2513477.8125576493,
+        "min": 2499642.5003348473,
+        "max": 2536943.4267061288,
+        "values": [
+          2504246.0049354127,
+          2522709.620179886,
+          2499642.5003348473,
+          2536943.4267061288
+        ],
+        "percent_vs_tcp": 19.35593897115664,
+        "percent_vs_quic": 1.6693860170063468
+      },
+      "ethernet_tx_wire_packets_per_request": {
+        "median": 591.531155450413,
+        "min": 589.5776893045262,
+        "max": 595.6874995285532,
+        "values": [
+          589.5776893045262,
+          595.6874995285532,
+          590.390898165005,
+          592.671412735821
+        ],
+        "percent_vs_tcp": -31.026982174325667,
+        "percent_vs_quic": 9.773461130240735
+      },
+      "ethernet_tx_wire_packets_per_output_token": {
+        "median": 0.6459001282377108,
+        "min": 0.6435809919144734,
+        "max": 0.6501814733760212,
+        "values": [
+          0.6435809919144734,
+          0.64752918399077,
+          0.6442710724846515,
+          0.6501814733760212
+        ],
+        "percent_vs_tcp": -28.82913693053305,
+        "percent_vs_quic": 10.817798883271369
+      },
+      "rdma_tx_wire_packets_per_second": {
+        "median": 0.9366364889316271,
+        "min": 0.6003752335667084,
+        "max": 0.9407778895089063,
+        "values": [
+          0.6003752335667084,
+          0.9407778895089063,
+          0.9336634995499599,
+          0.9396094783132943
+        ],
+        "percent_vs_tcp": 0.10951080049690365,
+        "percent_vs_quic": 20.235560818064414
+      },
+      "rdma_tx_wire_packets_per_request": {
+        "median": 0.00022001511270558545,
+        "min": 0.0001413470730209089,
+        "max": 0.00022214591173333256,
+        "values": [
+          0.0001413470730209089,
+          0.00022214591173333256,
+          0.00022052210746510402,
+          0.00021950811794606688
+        ],
+        "percent_vs_tcp": -41.63175725766843,
+        "percent_vs_quic": 29.059200148610522
+      },
+      "rdma_tx_wire_packets_per_output_token": {
+        "median": 2.407277623997455e-07,
+        "min": 1.542939821320435e-07,
+        "max": 2.414788980218905e-07,
+        "values": [
+          1.542939821320435e-07,
+          2.414788980218905e-07,
+          2.4064736621906755e-07,
+          2.4080815858042344e-07
+        ],
+        "percent_vs_tcp": -39.61932146554234,
+        "percent_vs_quic": 30.458961209708345
+      },
+      "total_tx_wire_packets_per_second": {
+        "median": 2513478.5831342107,
+        "min": 2499643.433998347,
+        "max": 2536944.366315607,
+        "values": [
+          2504246.6053106464,
+          2522710.5609577755,
+          2499643.433998347,
+          2536944.366315607
+        ],
+        "percent_vs_tcp": 19.355931948266658,
+        "percent_vs_quic": 1.6693920335213663
+      },
+      "total_tx_wire_packets_per_request": {
+        "median": 591.5313754655258,
+        "min": 589.5778306515992,
+        "max": 595.6877216744649,
+        "values": [
+          589.5778306515992,
+          595.6877216744649,
+          590.3911186871125,
+          592.671632243939
+        ],
+        "percent_vs_tcp": -31.026981730514503,
+        "percent_vs_quic": 9.773467231499255
+      },
+      "total_tx_wire_packets_per_output_token": {
+        "median": 0.6459003693008429,
+        "min": 0.6435811462084555,
+        "max": 0.6501817141841798,
+        "values": [
+          0.6435811462084555,
+          0.6475294254696681,
+          0.6442713131320178,
+          0.6501817141841798
+        ],
+        "percent_vs_tcp": -28.829136379971455,
+        "percent_vs_quic": 10.817805158993554
+      },
+      "total_wire_packets_per_second": {
+        "median": 5728495.206303678,
+        "min": 5694635.355067562,
+        "max": 5776774.980095625,
+        "values": [
+          5719625.50417705,
+          5737364.908430307,
+          5694635.355067562,
+          5776774.980095625
+        ],
+        "percent_vs_tcp": 0.24890991319062028,
+        "percent_vs_quic": 4.937038059823351
+      },
+      "total_wire_packets_per_request": {
+        "median": 1348.063686988155,
+        "min": 1345.016690006733,
+        "max": 1354.7641507554931,
+        "values": [
+          1346.5784039563287,
+          1354.7641507554931,
+          1345.016690006733,
+          1349.5489700199817
+        ],
+        "percent_vs_tcp": -41.86840637314441,
+        "percent_vs_quic": 13.336815061527552
+      },
+      "total_wire_packets_per_output_token": {
+        "median": 1.4712936950501971,
+        "min": 1.4677654213060132,
+        "max": 1.48050288720742,
+        "values": [
+          1.4699203864568107,
+          1.4726670036435836,
+          1.4677654213060132,
+          1.48050288720742
+        ],
+        "percent_vs_tcp": -40.0434750577594,
+        "percent_vs_quic": 14.36395626423681
+      },
+      "ethernet_mean_rx_wire_bytes": {
+        "median": 790.8626156200658,
+        "min": 790.4727423639678,
+        "max": 793.9915645288878,
+        "values": [
+          790.4727423639678,
+          791.1527402504726,
+          793.9915645288878,
+          790.5724909896591
+        ],
+        "percent_vs_tcp": 80.67604592672511,
+        "percent_vs_quic": -11.88253423557859
+      },
+      "ethernet_rx_256_to_511_bytes_phy_percent": {
+        "median": 25.144600961839664,
+        "min": 25.101141642217673,
+        "max": 25.171930912096236,
+        "values": [
+          25.101141642217673,
+          25.13172462174573,
+          25.171930912096236,
+          25.157477301933596
+        ],
+        "percent_vs_tcp": 101.33498711734137,
+        "percent_vs_quic": 2.064598113281302
+      },
+      "ethernet_rx_2048_to_4095_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_4096_to_8191_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_1024_to_1518_bytes_phy_percent": {
+        "median": 42.32579750365718,
+        "min": 42.3045852398536,
+        "max": 42.523440121138314,
+        "values": [
+          42.3045852398536,
+          42.34408019533207,
+          42.523440121138314,
+          42.30751481198229
+        ],
+        "percent_vs_tcp": 156.59939501856184,
+        "percent_vs_quic": -17.963706758646957
+      },
+      "ethernet_rx_8192_to_10239_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_1519_to_2047_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_512_to_1023_bytes_phy_percent": {
+        "median": 6.975231352798593,
+        "min": 6.948773767472707,
+        "max": 7.012623528951523,
+        "values": [
+          6.971787421833614,
+          6.978675283763571,
+          7.012623528951523,
+          6.948773767472707
+        ],
+        "percent_vs_tcp": 651.7279354135832,
+        "percent_vs_quic": 150.99768220664754
+      },
+      "ethernet_rx_65_to_127_bytes_phy_percent": {
+        "median": 25.005825660045872,
+        "min": 24.73144979960739,
+        "max": 25.063304368840754,
+        "values": [
+          25.063304368840754,
+          24.985177523751023,
+          24.73144979960739,
+          25.02647379634072
+        ],
+        "percent_vs_tcp": 78.2301503335766,
+        "percent_vs_quic": 19.741132097175452
+      },
+      "ethernet_rx_64_bytes_phy_percent": {
+        "median": 1.795893835468978e-05,
+        "min": 1.7634660723753427e-05,
+        "max": 1.8644026184454124e-05,
+        "values": [
+          1.7634660723753427e-05,
+          1.7905115720102546e-05,
+          1.8012760989277018e-05,
+          1.8644026184454124e-05
+        ],
+        "percent_vs_tcp": 9.463202626481992,
+        "percent_vs_quic": -2.5573735103840756
+      },
+      "ethernet_rx_128_to_255_bytes_phy_percent": {
+        "median": 0.5601555118312264,
+        "min": 0.5588434782760292,
+        "max": 0.5608620232223307,
+        "values": [
+          0.5588434782760292,
+          0.5608620232223307,
+          0.5605892046255839,
+          0.5597218190368688
+        ],
+        "percent_vs_tcp": -98.9999326065789,
+        "percent_vs_quic": 419.86897960640545
+      },
+      "rx_discards_phy_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "tx_discards_phy_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rx_out_of_buffer_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.3168647066046517,
+        "values": [
+          0.3168647066046517,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": -100.0,
+        "percent_vs_quic": -100.0
+      },
+      "RetransSegs_per_second": {
+        "median": 855.6848782347298,
+        "min": 762.6084756479937,
+        "max": 861.1780560436792,
+        "values": [
+          853.6582495116011,
+          762.6084756479937,
+          857.7115069578585,
+          861.1780560436792
+        ],
+        "percent_vs_tcp": 95.78175898455392,
+        "percent_vs_quic": -80.58185027929922
+      },
+      "rdma_port_rcv_errors_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_port_xmit_discards_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_out_of_buffer_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_packet_seq_err_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_local_ack_timeout_err_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_req_transport_retries_exceeded_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "frontend_mean_rss_gib": {
+        "median": 39.1930762347053,
+        "min": 39.01182235589548,
+        "max": 39.83573849461659,
+        "values": [
+          39.01182235589548,
+          39.060403262867645,
+          39.325749206542966,
+          39.83573849461659
+        ],
+        "percent_vs_tcp": -8.284996349117534,
+        "percent_vs_quic": -14.747075522427933
+      },
+      "client_mean_cores": {
+        "median": 127.5424268088122,
+        "min": 124.48592554253413,
+        "max": 129.6281948134095,
+        "values": [
+          128.13222649422147,
+          126.95262712340292,
+          124.48592554253413,
+          129.6281948134095
+        ],
+        "percent_vs_tcp": 56.77152382794173,
+        "percent_vs_quic": -1.7291764326046843
+      }
+    },
+    "velo-rdma": {
+      "requests_per_second": {
+        "median": 4259.369606848579,
+        "min": 4213.09408603168,
+        "max": 4308.324730584498,
+        "values": [
+          4250.535799736575,
+          4213.09408603168,
+          4268.203413960582,
+          4308.324730584498
+        ],
+        "percent_vs_tcp": 72.05391907184394,
+        "percent_vs_quic": -7.033495634374686
+      },
+      "output_tokens_per_second": {
+        "median": 3900621.1462373333,
+        "min": 3870115.3683403484,
+        "max": 3978944.4948762483,
+        "values": [
+          3891144.7417697324,
+          3870115.3683403484,
+          3910097.550704934,
+          3978944.4948762483
+        ],
+        "percent_vs_tcp": 66.82868355196871,
+        "percent_vs_quic": -7.999018771400756
+      },
+      "frontend_cpu_ms_per_request": {
+        "median": 32.03142459345847,
+        "min": 31.821620838860568,
+        "max": 32.5176357559093,
+        "values": [
+          32.17251653103588,
+          32.5176357559093,
+          31.821620838860568,
+          31.89033265588105
+        ],
+        "percent_vs_tcp": -21.531277169420537,
+        "percent_vs_quic": 18.481588351746513
+      },
+      "frontend_cpu_us_per_output_token": {
+        "median": 34.94000573717484,
+        "min": 34.53024012393818,
+        "max": 35.39942504445403,
+        "values": [
+          35.144010916589366,
+          35.39942504445403,
+          34.73600055776033,
+          34.53024012393818
+        ],
+        "percent_vs_tcp": -19.047873814890714,
+        "percent_vs_quic": 19.488683306183162
+      },
+      "frontend_mean_cores": {
+        "median": 136.87514608886926,
+        "min": 135.82115070218387,
+        "max": 137.39390884789876,
+        "values": [
+          136.75043328278477,
+          136.99985889495375,
+          135.82115070218387,
+          137.39390884789876
+        ],
+        "percent_vs_tcp": 35.53496761438441,
+        "percent_vs_quic": 9.891442001818307
+      },
+      "frontend_system_cores": {
+        "median": 37.29049872897039,
+        "min": 36.67826972432325,
+        "max": 38.908782418154864,
+        "values": [
+          38.908782418154864,
+          37.77162518765071,
+          36.67826972432325,
+          36.809372270290076
+        ],
+        "percent_vs_tcp": -29.958247532166816,
+        "percent_vs_quic": 2.1359186188838253
+      },
+      "frontend_ucx_progress_cores": {
+        "median": 1.7913000679213282,
+        "min": 1.771437360628027,
+        "max": 1.8073701765971064,
+        "values": [
+          1.790557182603493,
+          1.7920429532391633,
+          1.8073701765971064,
+          1.771437360628027
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "host_system_cores": {
+        "median": 21.909292069076603,
+        "min": 21.710646190820057,
+        "max": 22.302423543637843,
+        "values": [
+          21.710646190820057,
+          22.302423543637843,
+          21.754591041744117,
+          22.06399309640909
+        ],
+        "percent_vs_tcp": -4.333712779089316,
+        "percent_vs_quic": 5.069405440435837
+      },
+      "host_softirq_cores": {
+        "median": 16.84312650275784,
+        "min": 16.331847626853655,
+        "max": 18.876765167720475,
+        "values": [
+          18.876765167720475,
+          17.162115662629866,
+          16.524137342885815,
+          16.331847626853655
+        ],
+        "percent_vs_tcp": -50.51260049523315,
+        "percent_vs_quic": -2.0653910661653674
+      },
+      "ethernet_rx_host_packets_per_second": {
+        "median": 2509201.367149703,
+        "min": 2463707.4166576224,
+        "max": 2539243.282314724,
+        "values": [
+          2515981.467729177,
+          2502421.26657023,
+          2463707.4166576224,
+          2539243.282314724
+        ],
+        "percent_vs_tcp": -30.464141934758302,
+        "percent_vs_quic": -15.992315248410504
+      },
+      "ethernet_tx_host_packets_per_second": {
+        "median": 2471094.976555904,
+        "min": 2435312.2202420984,
+        "max": 2482522.635967149,
+        "values": [
+          2473136.1054552724,
+          2469053.8476565355,
+          2435312.2202420984,
+          2482522.635967149
+        ],
+        "percent_vs_tcp": 17.340674434515613,
+        "percent_vs_quic": -0.047452725391916584
+      },
+      "time_to_first_token_p50_ms": {
+        "median": 79.12632875,
+        "min": 73.8974805,
+        "max": 85.154154,
+        "values": [
+          73.8974805,
+          76.1094555,
+          85.154154,
+          82.143202
+        ],
+        "percent_vs_tcp": -94.883010072837,
+        "percent_vs_quic": -12.502367165162953
+      },
+      "time_to_first_token_p95_ms": {
+        "median": 1296.453397675,
+        "min": 1245.44699085,
+        "max": 1399.50385525,
+        "values": [
+          1279.1964996499999,
+          1313.7102957,
+          1245.44699085,
+          1399.50385525
+        ],
+        "percent_vs_tcp": -47.15884575634545,
+        "percent_vs_quic": 44.29242745726931
+      },
+      "time_to_first_token_p99_ms": {
+        "median": 1384.40620017,
+        "min": 1320.49936221,
+        "max": 1461.8780229499998,
+        "values": [
+          1389.9337015899998,
+          1378.8786987499998,
+          1320.49936221,
+          1461.8780229499998
+        ],
+        "percent_vs_tcp": -74.26921849915853,
+        "percent_vs_quic": 41.893757699072594
+      },
+      "inter_token_latency_p50_ms": {
+        "median": 0.621119869150945,
+        "min": 0.6114144176954732,
+        "max": 0.6231278514299365,
+        "values": [
+          0.6231278514299365,
+          0.6216512549019608,
+          0.620588483399929,
+          0.6114144176954732
+        ],
+        "percent_vs_tcp": 452.13705176587655,
+        "percent_vs_quic": -4.217228574905063
+      },
+      "inter_token_latency_p95_ms": {
+        "median": 1.984544371548866,
+        "min": 1.8240038548437532,
+        "max": 2.003078523088722,
+        "values": [
+          1.9981074157258245,
+          1.9709813273719077,
+          2.003078523088722,
+          1.8240038548437532
+        ],
+        "percent_vs_tcp": 78.21162668458112,
+        "percent_vs_quic": -0.8174424513062051
+      },
+      "inter_token_latency_p99_ms": {
+        "median": 2.7501884653168087,
+        "min": 2.5716486654815696,
+        "max": 2.8091415092263894,
+        "values": [
+          2.7197767439205953,
+          2.8091415092263894,
+          2.7806001867130226,
+          2.5716486654815696
+        ],
+        "percent_vs_tcp": 57.35154873828825,
+        "percent_vs_quic": -1.9168513646315555
+      },
+      "request_latency_p50_ms": {
+        "median": 1176.32777375,
+        "min": 1129.6965999999998,
+        "max": 1245.3889795,
+        "values": [
+          1159.3651875,
+          1193.29036,
+          1129.6965999999998,
+          1245.3889795
+        ],
+        "percent_vs_tcp": -28.094607134367912,
+        "percent_vs_quic": 42.6589071888873
+      },
+      "request_latency_p95_ms": {
+        "median": 4843.495490499996,
+        "min": 4557.19564875,
+        "max": 4866.532033149995,
+        "values": [
+          4849.242821299997,
+          4866.532033149995,
+          4837.748159699995,
+          4557.19564875
+        ],
+        "percent_vs_tcp": -9.855000828930315,
+        "percent_vs_quic": 2.094260083604893
+      },
+      "request_latency_p99_ms": {
+        "median": 11674.923451659997,
+        "min": 10948.504906099994,
+        "max": 11855.934942419988,
+        "values": [
+          11855.934942419988,
+          11701.323602789991,
+          11648.523300530003,
+          10948.504906099994
+        ],
+        "percent_vs_tcp": 1.07214382037355,
+        "percent_vs_quic": -0.033863136536937954
+      },
+      "ethernet_rx_wire_packets_per_second": {
+        "median": 2509091.4218552546,
+        "min": 2463594.367591402,
+        "max": 2539153.3021986606,
+        "values": [
+          2515875.739769784,
+          2502307.1039407253,
+          2463594.367591402,
+          2539153.3021986606
+        ],
+        "percent_vs_tcp": -30.46531910822422,
+        "percent_vs_quic": -15.993283469212805
+      },
+      "ethernet_rx_wire_packets_per_request": {
+        "median": 590.6279592899245,
+        "min": 577.1970378762632,
+        "max": 593.93572819487,
+        "values": [
+          591.896141640709,
+          593.93572819487,
+          577.1970378762632,
+          589.3597769391401
+        ],
+        "percent_vs_tcp": -59.583642152862296,
+        "percent_vs_quic": -9.179999351380076
+      },
+      "ethernet_rx_wire_packets_per_output_token": {
+        "median": 0.6423559369726494,
+        "min": 0.6300595664543591,
+        "max": 0.6465717080196007,
+        "values": [
+          0.6465644191445671,
+          0.6465717080196007,
+          0.6300595664543591,
+          0.6381474548007317
+        ],
+        "percent_vs_tcp": -58.458890270664575,
+        "percent_vs_quic": -8.711149874521396
+      },
+      "rdma_rx_wire_packets_per_second": {
+        "median": 888139.7493374749,
+        "min": 876274.1630092103,
+        "max": 907240.0016094577,
+        "values": [
+          876274.1630092103,
+          896784.5221070033,
+          879494.9765679466,
+          907240.0016094577
+        ],
+        "percent_vs_tcp": 94335319.45673585,
+        "percent_vs_quic": 114453958.59430073
+      },
+      "rdma_rx_wire_packets_per_request": {
+        "median": 208.3672681728844,
+        "min": 206.05741837215749,
+        "max": 212.85651442730682,
+        "values": [
+          206.15616578585622,
+          212.85651442730682,
+          206.05741837215749,
+          210.57837055991254
+        ],
+        "percent_vs_tcp": 55057585.18917443,
+        "percent_vs_quic": 122696702.26057403
+      },
+      "rdma_rx_wire_packets_per_output_token": {
+        "median": 0.22660361420687639,
+        "min": 0.22492916485149747,
+        "max": 0.23172035889244777,
+        "values": [
+          0.22519701043314874,
+          0.23172035889244777,
+          0.22492916485149747,
+          0.22801021798060403
+        ],
+        "percent_vs_tcp": 56610869.84537784,
+        "percent_vs_quic": 123136963.17633374
+      },
+      "total_rx_wire_packets_per_second": {
+        "median": 3395620.7644133614,
+        "min": 3343089.3441593484,
+        "max": 3446393.303808118,
+        "values": [
+          3392149.902778994,
+          3399091.6260477286,
+          3343089.3441593484,
+          3446393.303808118
+        ],
+        "percent_vs_tcp": -5.896870226393435,
+        "percent_vs_quic": 13.688521028831047
+      },
+      "total_rx_wire_packets_per_request": {
+        "median": 798.9952274628089,
+        "min": 783.2544562484208,
+        "max": 806.7922426221768,
+        "values": [
+          798.0523074265651,
+          806.7922426221768,
+          783.2544562484208,
+          799.9381474990527
+        ],
+        "percent_vs_tcp": -45.32519485656227,
+        "percent_vs_quic": 22.860299792723882
+      },
+      "total_rx_wire_packets_per_output_token": {
+        "median": 0.8689595511795258,
+        "min": 0.8549887313058565,
+        "max": 0.8782920669120486,
+        "values": [
+          0.8717614295777159,
+          0.8782920669120486,
+          0.8549887313058565,
+          0.8661576727813357
+        ],
+        "percent_vs_tcp": -43.80446357814427,
+        "percent_vs_quic": 23.492744355501195
+      },
+      "ethernet_tx_wire_packets_per_second": {
+        "median": 2471044.4712265213,
+        "min": 2435247.424576144,
+        "max": 2482457.987425917,
+        "values": [
+          2473100.628967559,
+          2468988.3134854836,
+          2435247.424576144,
+          2482457.987425917
+        ],
+        "percent_vs_tcp": 17.34093359774269,
+        "percent_vs_quic": -0.04702927746401686
+      },
+      "ethernet_tx_wire_packets_per_request": {
+        "median": 579.0164874750915,
+        "min": 570.5556151824572,
+        "max": 586.0273383571712,
+        "values": [
+          581.8326783933518,
+          586.0273383571712,
+          570.5556151824572,
+          576.2002965568311
+        ],
+        "percent_vs_tcp": -32.48620272321966,
+        "percent_vs_quic": 7.4510502041403415
+      },
+      "ethernet_tx_wire_packets_per_output_token": {
+        "median": 0.6297350518485432,
+        "min": 0.6228098897780964,
+        "max": 0.6379624580918577,
+        "values": [
+          0.6355714816824746,
+          0.6379624580918577,
+          0.6228098897780964,
+          0.6238986220146118
+        ],
+        "percent_vs_tcp": -30.61034487260287,
+        "percent_vs_quic": 8.044338860720934
+      },
+      "rdma_tx_wire_packets_per_second": {
+        "median": 846056.8406829985,
+        "min": 831373.3861644836,
+        "max": 866464.9835485276,
+        "values": [
+          831373.3861644836,
+          855687.9272038199,
+          836425.7541621772,
+          866464.9835485276
+        ],
+        "percent_vs_tcp": 90428083.64550366,
+        "percent_vs_quic": 108607796.36704615
+      },
+      "rdma_tx_wire_packets_per_request": {
+        "median": 198.54041731544834,
+        "min": 195.5926088696883,
+        "max": 203.10202187053312,
+        "values": [
+          195.5926088696883,
+          203.10202187053312,
+          195.9667037954114,
+          201.11413083548527
+        ],
+        "percent_vs_tcp": 52671078.4909933,
+        "percent_vs_quic": 116462206.34252521
+      },
+      "rdma_tx_wire_packets_per_output_token": {
+        "median": 0.2158384070610278,
+        "min": 0.21365779001743493,
+        "max": 0.22110140028481146,
+        "values": [
+          0.21365779001743493,
+          0.22110140028481146,
+          0.21391429326651498,
+          0.21776252085554063
+        ],
+        "percent_vs_tcp": 54137691.7620486,
+        "percent_vs_quic": 116970431.7477318
+      },
+      "total_tx_wire_packets_per_second": {
+        "median": 3314575.1279106727,
+        "min": 3271673.1787383216,
+        "max": 3348922.9709744444,
+        "values": [
+          3304474.0151320426,
+          3324676.2406893033,
+          3271673.1787383216,
+          3348922.9709744444
+        ],
+        "percent_vs_tcp": 57.39708548103397,
+        "percent_vs_quic": 34.073486985472876
+      },
+      "total_tx_wire_packets_per_request": {
+        "median": 777.3698573276781,
+        "min": 766.5223189778687,
+        "max": 789.1293602277043,
+        "values": [
+          777.4252872630401,
+          789.1293602277043,
+          766.5223189778687,
+          777.3144273923162
+        ],
+        "percent_vs_tcp": -9.358070263960016,
+        "percent_vs_quic": 44.260453628445596
+      },
+      "total_tx_wire_packets_per_output_token": {
+        "median": 0.8454452072850309,
+        "min": 0.8367241830446114,
+        "max": 0.8590638583766691,
+        "values": [
+          0.8492292716999095,
+          0.8590638583766691,
+          0.8367241830446114,
+          0.8416611428701524
+        ],
+        "percent_vs_tcp": -6.841568133763298,
+        "percent_vs_quic": 45.053922720206764
+      },
+      "total_wire_packets_per_second": {
+        "median": 6710195.892324034,
+        "min": 6614762.52289767,
+        "max": 6795316.274782563,
+        "values": [
+          6696623.917911036,
+          6723767.866737032,
+          6614762.52289767,
+          6795316.274782563
+        ],
+        "percent_vs_tcp": 17.428713699405908,
+        "percent_vs_quic": 22.92025329214342
+      },
+      "total_wire_packets_per_request": {
+        "median": 1576.3650847904871,
+        "min": 1549.7767752262894,
+        "max": 1595.921602849881,
+        "values": [
+          1575.4775946896052,
+          1595.921602849881,
+          1549.7767752262894,
+          1577.252574891369
+        ],
+        "percent_vs_tcp": -32.02352722567659,
+        "percent_vs_quic": 32.53097743735787
+      },
+      "total_wire_packets_per_output_token": {
+        "median": 1.7144047584645568,
+        "min": 1.691712914350468,
+        "max": 1.7373559252887176,
+        "values": [
+          1.7209907012776253,
+          1.7373559252887176,
+          1.691712914350468,
+          1.7078188156514882
+        ],
+        "percent_vs_tcp": -30.13648328149111,
+        "percent_vs_quic": 33.26102835610312
+      },
+      "ethernet_mean_rx_wire_bytes": {
+        "median": 727.7498282233764,
+        "min": 718.6399709663572,
+        "max": 736.9744449154636,
+        "values": [
+          721.9393321263642,
+          718.6399709663572,
+          736.9744449154636,
+          733.5603243203886
+        ],
+        "percent_vs_tcp": 66.25765182257652,
+        "percent_vs_quic": -18.9145253461518
+      },
+      "ethernet_rx_8192_to_10239_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_512_to_1023_bytes_phy_percent": {
+        "median": 2.6905349002375605,
+        "min": 2.4766393674920733,
+        "max": 2.745415290727862,
+        "values": [
+          2.7178069822845816,
+          2.66326281819054,
+          2.745415290727862,
+          2.4766393674920733
+        ],
+        "percent_vs_tcp": 189.96174369216982,
+        "percent_vs_quic": -3.183422929080182
+      },
+      "ethernet_rx_128_to_255_bytes_phy_percent": {
+        "median": 0.01692063084138474,
+        "min": 0.016589458763351567,
+        "max": 0.016981972890761893,
+        "values": [
+          0.016865041884258632,
+          0.016981972890761893,
+          0.016976219798510845,
+          0.016589458763351567
+        ],
+        "percent_vs_tcp": -99.96979094050997,
+        "percent_vs_quic": -84.29630539374622
+      },
+      "ethernet_rx_4096_to_8191_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_1519_to_2047_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "ethernet_rx_1024_to_1518_bytes_phy_percent": {
+        "median": 39.27309835989053,
+        "min": 38.74560294346713,
+        "max": 39.85516640028152,
+        "values": [
+          38.991312970309465,
+          38.74560294346713,
+          39.85516640028152,
+          39.5548837494716
+        ],
+        "percent_vs_tcp": 138.09246072165888,
+        "percent_vs_quic": -23.88047943408276
+      },
+      "ethernet_rx_256_to_511_bytes_phy_percent": {
+        "median": 26.677361851768808,
+        "min": 26.14814812437557,
+        "max": 27.812120775683656,
+        "values": [
+          26.14814812437557,
+          26.346064745954486,
+          27.008658957583126,
+          27.812120775683656
+        ],
+        "percent_vs_tcp": 113.60793567183181,
+        "percent_vs_quic": 8.28623688463399
+      },
+      "ethernet_rx_65_to_127_bytes_phy_percent": {
+        "median": 31.24993455214998,
+        "min": 30.13986327514187,
+        "max": 32.22811030799953,
+        "values": [
+          32.126022898761754,
+          32.22811030799953,
+          30.37384620553821,
+          30.13986327514187
+        ],
+        "percent_vs_tcp": 122.73531811602271,
+        "percent_vs_quic": 49.641231291789055
+      },
+      "ethernet_rx_64_bytes_phy_percent": {
+        "median": 2.2462167684856675e-05,
+        "min": 2.1700398141703514e-05,
+        "max": 2.3523279089441958e-05,
+        "values": [
+          2.3523279089441958e-05,
+          2.265511241654611e-05,
+          2.1700398141703514e-05,
+          2.226922295316724e-05
+        ],
+        "percent_vs_tcp": 36.91125634246628,
+        "percent_vs_quic": 21.876503645942734
+      },
+      "ethernet_rx_2048_to_4095_bytes_phy_percent": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rx_discards_phy_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "tx_discards_phy_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rx_out_of_buffer_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": -100.0,
+        "percent_vs_quic": -100.0
+      },
+      "RetransSegs_per_second": {
+        "median": 689.0166323440127,
+        "min": 629.5762899306129,
+        "max": 830.7591561837539,
+        "values": [
+          723.489361958037,
+          629.5762899306129,
+          654.5439027299884,
+          830.7591561837539
+        ],
+        "percent_vs_tcp": 57.64785808557884,
+        "percent_vs_quic": -84.36407085455254
+      },
+      "rdma_port_rcv_errors_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_port_xmit_discards_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_out_of_buffer_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.058295325747479323,
+        "values": [
+          0.058295325747479323,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_packet_seq_err_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_local_ack_timeout_err_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "rdma_req_transport_retries_exceeded_per_second": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "percent_vs_tcp": null,
+        "percent_vs_quic": null
+      },
+      "frontend_mean_rss_gib": {
+        "median": 39.20880342383687,
+        "min": 38.454709391948604,
+        "max": 40.308712793775825,
+        "values": [
+          38.47464165805785,
+          39.94296518961588,
+          38.454709391948604,
+          40.308712793775825
+        ],
+        "percent_vs_tcp": -8.248193440359309,
+        "percent_vs_quic": -14.712865682423315
+      },
+      "client_mean_cores": {
+        "median": 127.47656332894576,
+        "min": 124.35366504900658,
+        "max": 130.4327990434511,
+        "values": [
+          127.207235465374,
+          127.74589119251753,
+          124.35366504900658,
+          130.4327990434511
+        ],
+        "percent_vs_tcp": 56.69056631159501,
+        "percent_vs_quic": -1.7799239255874788
+      }
+    }
+  },
+  "qualification": {
+    "tcp": {
+      "checks": {
+        "requests_per_second": true,
+        "output_tokens_per_second": true,
+        "time_to_first_token_p99_ms": true,
+        "inter_token_latency_p99_ms": true,
+        "request_latency_p99_ms": true,
+        "frontend_cpu_ms_per_request": true
+      },
+      "passes_provisional_limits": true
+    },
+    "quic": {
+      "checks": {
+        "requests_per_second": true,
+        "output_tokens_per_second": true,
+        "time_to_first_token_p99_ms": true,
+        "inter_token_latency_p99_ms": false,
+        "request_latency_p99_ms": true,
+        "frontend_cpu_ms_per_request": true
+      },
+      "passes_provisional_limits": false
+    },
+    "velo-tcp": {
+      "checks": {
+        "requests_per_second": true,
+        "output_tokens_per_second": true,
+        "time_to_first_token_p99_ms": true,
+        "inter_token_latency_p99_ms": false,
+        "request_latency_p99_ms": true,
+        "frontend_cpu_ms_per_request": true
+      },
+      "passes_provisional_limits": false
+    },
+    "velo-rdma": {
+      "checks": {
+        "requests_per_second": true,
+        "output_tokens_per_second": true,
+        "time_to_first_token_p99_ms": true,
+        "inter_token_latency_p99_ms": false,
+        "request_latency_p99_ms": true,
+        "frontend_cpu_ms_per_request": true
+      },
+      "passes_provisional_limits": false
+    }
+  }
+}

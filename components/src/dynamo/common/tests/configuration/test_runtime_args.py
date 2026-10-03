@@ -56,6 +56,8 @@ def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
 
     default_config, help_text = _parse_runtime_args([])
     quic_config, _ = _parse_runtime_args(["--response-plane", "quic"])
+    velo_config, _ = _parse_runtime_args(["--response-plane", "velo"])
+    assert velo_config.response_plane == "velo"
     monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
     env_config, _ = _parse_runtime_args([])
 

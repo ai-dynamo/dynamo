@@ -1238,7 +1238,7 @@ async fn tcp_listener(
 
         if connection
             .send(Ok(crate::pipeline::network::StreamReceiver {
-                rx: response_rx,
+                rx: response_rx.into(),
             }))
             .is_err()
         {

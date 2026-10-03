@@ -1,0 +1,1416 @@
+{
+  "nodes": [
+    "ptyche0128",
+    "ptyche0130",
+    "ptyche0133",
+    "ptyche0135",
+    "ptyche0136"
+  ],
+  "canonical_tcp_configuration": {
+    "schema_version": 1,
+    "root": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923",
+    "pins": {
+      "dynamo": "0c14c336c2547d2911d4cad5f530285fd91b10dd",
+      "dynamo_ref": "latest main plus Velo integration",
+      "aiperf": "8473e1545476c1d91932aa2402b642b416a23df6",
+      "aiperf_base": "8473e1545476c1d91932aa2402b642b416a23df6",
+      "aiperf_patch": "none",
+      "transformers": "18693fc6771c948cf762fde6327d3961c48f28f1",
+      "model_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "dataset_revision": "8a5df339ba3c31a48dd79a2f5ceb81e08679266b",
+      "rustflags": "-C target-cpu=native -C force-frame-pointers=yes --cfg tokio_unstable",
+      "dirty_source_files": {
+        "lib/bindings/python/Cargo.lock": "52e157b1b407ed9642984f63f9ef1bc79c2e2f1a1e107497d7d8e35de86cf1be",
+        "lib/bindings/python/Cargo.toml": "67f0fdef266db5394336ec6f71a50f8fa1041976a119aa607d6f9a441c06221a",
+        "lib/runtime/src/transports/event_plane/zmq_transport.rs": "fda2d825c747d4b61851fb5b36a1103c45dc142c2bfbddca1ea0acaeded1520f"
+      },
+      "velo": "da848eb78eec6331d670b8d80b5b0b8333b464cc",
+      "build_features": "velo-ucx,tracing/release_max_level_warn"
+    },
+    "paths": {
+      "dynamo_repo": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/src/dynamo",
+      "dynamo_python": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/src/dynamo/.venv/bin/python",
+      "aiperf": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-numa/env/aiperf/bin/aiperf",
+      "hf_home": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-numa/cache/huggingface",
+      "model": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-numa/cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+      "frontend_jemalloc": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-numa/env/services/jemalloc-5.3.0/lib/libjemalloc.so.2",
+      "flamegraph": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-numa/env/FlameGraph-v1.0/flamegraph.pl"
+    },
+    "model": {
+      "name": "Qwen/Qwen3-0.6B",
+      "agentx_dataset": "semianalysisai/cc-traces-weka-with-subagents-060526"
+    },
+    "campaign": {
+      "name": "main-r1-tcp",
+      "world_size": 5,
+      "fixed_concurrency": 6144,
+      "profile": false,
+      "smoke_only": false
+    },
+    "network": {
+      "interface": "enP6p3s0f1np1",
+      "primary": "primary",
+      "event_plane_host_override": true,
+      "response_stream_host_override": false,
+      "response_stream_interface": null,
+      "numa_interfaces": null,
+      "ucx_env": {
+        "UCX_TLS": "rc_mlx5,ud_mlx5,self",
+        "UCX_NET_DEVICES": "mlx5_0:1",
+        "UCX_LOG_LEVEL": "info"
+      },
+      "ucx_numa_devices": {
+        "0": "mlx5_0:1",
+        "1": "mlx5_4:1"
+      }
+    },
+    "ports": {
+      "frontend_http": 8000,
+      "etcd_client": 2379,
+      "etcd_peer": 2380
+    },
+    "topology": {
+      "logical_cpus": 144,
+      "node_cpus": {
+        "0": "0-71",
+        "1": "72-143"
+      },
+      "frontend": {
+        "cpus": "0-71",
+        "memory": "bind:0"
+      },
+      "frontend_control": {
+        "cpus": "72-143",
+        "memory": "bind:1"
+      },
+      "mocker_nodes": [
+        {
+          "rank": 1,
+          "name": "mocker-a",
+          "artifact_prefix": "mocker-a",
+          "manage_etcd": true,
+          "processes": [
+            {
+              "name": "mocker-a-pool0",
+              "cpus": "0-35",
+              "memory": "bind:0",
+              "workers": 171,
+              "network": null
+            },
+            {
+              "name": "mocker-a-pool1",
+              "cpus": "36-71",
+              "memory": "bind:0",
+              "workers": 171,
+              "network": null
+            },
+            {
+              "name": "mocker-a-pool2",
+              "cpus": "72-107",
+              "memory": "bind:1",
+              "workers": 171,
+              "network": null
+            },
+            {
+              "name": "mocker-a-pool3",
+              "cpus": "108-143",
+              "memory": "bind:1",
+              "workers": 171,
+              "network": null
+            }
+          ]
+        },
+        {
+          "rank": 2,
+          "name": "mocker-b",
+          "artifact_prefix": "mocker-b",
+          "manage_etcd": false,
+          "processes": [
+            {
+              "name": "mocker-b-pool0",
+              "cpus": "0-35",
+              "memory": "bind:0",
+              "workers": 171,
+              "network": null
+            },
+            {
+              "name": "mocker-b-pool1",
+              "cpus": "36-71",
+              "memory": "bind:0",
+              "workers": 171,
+              "network": null
+            },
+            {
+              "name": "mocker-b-pool2",
+              "cpus": "72-107",
+              "memory": "bind:1",
+              "workers": 171,
+              "network": null
+            },
+            {
+              "name": "mocker-b-pool3",
+              "cpus": "108-143",
+              "memory": "bind:1",
+              "workers": 171,
+              "network": null
+            }
+          ]
+        },
+        {
+          "rank": 3,
+          "name": "mocker-c",
+          "artifact_prefix": "mocker-c",
+          "manage_etcd": false,
+          "processes": [
+            {
+              "name": "mocker-c-pool0",
+              "cpus": "0-35",
+              "memory": "bind:0",
+              "workers": 170,
+              "network": null
+            },
+            {
+              "name": "mocker-c-pool1",
+              "cpus": "36-71",
+              "memory": "bind:0",
+              "workers": 170,
+              "network": null
+            },
+            {
+              "name": "mocker-c-pool2",
+              "cpus": "72-107",
+              "memory": "bind:1",
+              "workers": 170,
+              "network": null
+            },
+            {
+              "name": "mocker-c-pool3",
+              "cpus": "108-143",
+              "memory": "bind:1",
+              "workers": 170,
+              "network": null
+            }
+          ]
+        }
+      ],
+      "aiperf": {
+        "cpus": "0-143",
+        "memory": "default"
+      }
+    },
+    "runtime": {
+      "num_mockers": 2048,
+      "mocker_speedup_ratio": 10,
+      "mocker_num_gpu_blocks": 524288,
+      "tokenizer": "fastokens",
+      "tokenizer_cache": true,
+      "tokenizer_cache_bytes": 4294967296,
+      "request_plane_codec": "msgpack",
+      "event_plane_codec": "msgpack",
+      "request_plane": "tcp",
+      "event_plane": "zmq",
+      "zmq_broker_enabled": false,
+      "router_mode": "kv",
+      "router_replica_sync": true,
+      "frontend_dual_numa": true,
+      "frontend_jemalloc_enabled": true,
+      "aiperf_workers_max": 128,
+      "aiperf_record_processors": 16,
+      "aiperf_native": false,
+      "aiperf_compact_chat_result_batch": false,
+      "mocker_system_metrics_base_port": null,
+      "mocker_self_host_metadata": false,
+      "scratch_min_free_bytes": 21474836480,
+      "response_packet_metrics": false,
+      "router_zmq_endpoints_per_sub": 1,
+      "zmq_max_sockets": 16384,
+      "serialize_mocker_process_startup": true,
+      "response_plane": "tcp",
+      "velo_response_transport": "tcp"
+    },
+    "workload": {
+      "kind": "agentx",
+      "block_size": 16,
+      "dataset_entries": 336,
+      "warmup_request_count": 32,
+      "grace_period_seconds": 90,
+      "allowed_error_fraction": 0.0001,
+      "finalizer_timeout_seconds": 1200,
+      "aiperf_process_tree_timeout_seconds": 900,
+      "native_finalization_budget_seconds": 1200,
+      "mocker_registration_timeout_seconds": 1200,
+      "frontend_kv_source_ready_timeout_seconds": 600
+    },
+    "saturation": {
+      "initial_candidates": [
+        6144
+      ],
+      "seed_lower": null,
+      "settle_seconds": 30,
+      "measurement_seconds": 120,
+      "refinement_step": 256,
+      "frontend_mean_cores_min": 0,
+      "frontend_mean_cores_max": 144,
+      "frontend_p95_cores_min": 0
+    },
+    "profile": {
+      "duration_seconds": 150,
+      "perf_enabled": false,
+      "offcpu_enabled": false,
+      "aiperf_perf_enabled": false,
+      "require_saturation": false,
+      "start_delay_seconds": 40,
+      "record_seconds": 15,
+      "frequency_hz": 99,
+      "perf_mmap_pages": 16384,
+      "perf_processing_timeout_seconds": 1800,
+      "kernel_perf_enabled": true,
+      "capture_arms": [
+        "numa0",
+        "numa1"
+      ],
+      "mocker_process": "none"
+    },
+    "acceptance": {
+      "load_node_average_busy_max_percent": 99.9,
+      "load_node_p95_busy_max_percent": 100.1,
+      "bound_memory_min_fraction": 0.99,
+      "telemetry_min_coverage_fraction": 0.95,
+      "nic_max_utilization_percent": 70.0,
+      "tcp_retransmit_max_fraction": 0.05,
+      "unresolved_frame_max_fraction": 0.05,
+      "aiperf_repeated_overrun_max_count": 1000000,
+      "aiperf_hot_process_max_core_fraction": 1.0,
+      "aiperf_client_health_is_informational": true
+    }
+  },
+  "order": [
+    "discard-tcp",
+    "discard-quic",
+    "discard-velo-tcp",
+    "discard-velo-rdma",
+    "r1-tcp",
+    "r1-quic",
+    "r1-velo-rdma",
+    "r1-velo-tcp",
+    "r2-quic",
+    "r2-velo-tcp",
+    "r2-tcp",
+    "r2-velo-rdma",
+    "r3-velo-tcp",
+    "r3-velo-rdma",
+    "r3-quic",
+    "r3-tcp",
+    "r4-velo-rdma",
+    "r4-tcp",
+    "r4-velo-tcp",
+    "r4-quic"
+  ],
+  "runs": {
+    "r1-tcp": {
+      "job": "2885802",
+      "complete": "2026-09-23T14:41:25-07:00",
+      "config_sha256": "6febf5af465365a91889b23baeee9d6ab859265d6fa1141c01e322b2961330db",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r1-tcp/ablations/main-r1-tcp"
+    },
+    "r1-quic": {
+      "job": "2885802",
+      "complete": "2026-09-23T14:56:52-07:00",
+      "config_sha256": "44731d50179f9b1d9228b0f597bd2cb0e713d6842249f5822c5ea63d1f038143",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r1-quic/ablations/main-r1-quic"
+    },
+    "r1-velo-rdma": {
+      "job": "2885802",
+      "complete": "2026-09-23T15:11:56-07:00",
+      "config_sha256": "57f81671ad65fc13d5ee3d928f21ae9d48cd9ccb617f939f095aeaa23efa3728",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r1-velo-rdma/ablations/main-r1-velo-rdma"
+    },
+    "r1-velo-tcp": {
+      "job": "2885802",
+      "complete": "2026-09-23T15:27:28-07:00",
+      "config_sha256": "086d8d3d27466c558e186974e78130bed355b45aeca451fbee477c92bab9e047",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r1-velo-tcp/ablations/main-r1-velo-tcp"
+    },
+    "r2-quic": {
+      "job": "2885802",
+      "complete": "2026-09-23T15:43:08-07:00",
+      "config_sha256": "818bb51d6807785b35b895d9f095edb9d946e0767f368410f2f541d1c4cdb1bd",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r2-quic/ablations/main-r2-quic"
+    },
+    "r2-velo-tcp": {
+      "job": "2885802",
+      "complete": "2026-09-23T15:58:13-07:00",
+      "config_sha256": "575d01e152307615a4b1e89e41f6883241e0dc3260ff69ef5d46dace14073ff1",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r2-velo-tcp/ablations/main-r2-velo-tcp"
+    },
+    "r2-tcp": {
+      "job": "2885802",
+      "complete": "2026-09-23T16:07:58-07:00",
+      "config_sha256": "98cb749217c9ba9c0e76464e772dfa1614b394557ff193635b0a564dbd4a81ce",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r2-tcp/ablations/main-r2-tcp"
+    },
+    "r2-velo-rdma": {
+      "job": "2885802",
+      "complete": "2026-09-23T16:23:39-07:00",
+      "config_sha256": "025b219181363d00873ae4cd2e6a9f1f9e58bda639f088f3723e13ec12393b88",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r2-velo-rdma/ablations/main-r2-velo-rdma"
+    },
+    "r3-velo-tcp": {
+      "job": "2885802",
+      "complete": "2026-09-23T16:38:35-07:00",
+      "config_sha256": "855483949b3ee242958ce189c77f604d87015e6c59c91c984e050453f6fb0149",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r3-velo-tcp/ablations/main-r3-velo-tcp"
+    },
+    "r3-velo-rdma": {
+      "job": "2885802",
+      "complete": "2026-09-23T16:54:00-07:00",
+      "config_sha256": "984e26415edeaf8ef729cfbf086444718db1165586bdf0c3ef21ca9a0f2a61e2",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r3-velo-rdma/ablations/main-r3-velo-rdma"
+    },
+    "r3-quic": {
+      "job": "2885802",
+      "complete": "2026-09-23T17:09:59-07:00",
+      "config_sha256": "3ebe99e348c63f33e3635424a99f309358a4ccea5d3db58e1ca687a09e88ce35",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r3-quic/ablations/main-r3-quic"
+    },
+    "r3-tcp": {
+      "job": "2885802",
+      "complete": "2026-09-23T17:19:50-07:00",
+      "config_sha256": "699cef74c771275bae7207a8674e0a1077ae18e129d1398b1912dbe2ffa34a65",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r3-tcp/ablations/main-r3-tcp"
+    },
+    "r4-velo-rdma": {
+      "job": "2885802",
+      "complete": "2026-09-23T17:35:02-07:00",
+      "config_sha256": "a00bf3d325e0867fdab55f79e57919de4b5b2db58b945449279cee5181831ac8",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r4-velo-rdma/ablations/main-r4-velo-rdma"
+    },
+    "r4-tcp": {
+      "job": "2885802",
+      "complete": "2026-09-23T17:44:48-07:00",
+      "config_sha256": "3cf21d9af502697dd5a493c28077302226be589dc4685520008ad27a8c93e62e",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2885802-main-r4-tcp/ablations/main-r4-tcp"
+    },
+    "r4-velo-tcp": {
+      "job": "2886188",
+      "complete": "2026-09-23T18:03:38-07:00",
+      "config_sha256": "06c45cedb73e07657403c8dbaaebfc9119a6dd9af3242bcd6477e08b7d5ef4d7",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2886188-main-r4-velo-tcp/ablations/main-r4-velo-tcp"
+    },
+    "r4-quic": {
+      "job": "2886188",
+      "complete": "2026-09-23T18:18:55-07:00",
+      "config_sha256": "6dee1b4ab356606bf7bcf13334b4b016e5c363e9ddae33b6b3c9a8408115b517",
+      "nic_settings_sha256": "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2",
+      "result_directory": "/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/results/2886188-main-r4-quic/ablations/main-r4-quic"
+    }
+  },
+  "frontend_nic_settings": {
+    "1b6d688242408c95bd1455aafed93a9e90a8078af7d59626046cd3a87eaf11b2": {
+      "ethernet": {
+        "channels": "Channel parameters for enP6p3s0f1np1:\nPre-set maximums:\nRX:\t\tn/a\nTX:\t\tn/a\nOther:\t\tn/a\nCombined:\t63\nCurrent hardware settings:\nRX:\t\tn/a\nTX:\t\tn/a\nOther:\t\tn/a\nCombined:\t63\n",
+        "coalescing": "Coalesce parameters for enP6p3s0f1np1:\nAdaptive RX: on  TX: on\nstats-block-usecs:\tn/a\nsample-interval:\tn/a\npkt-rate-low:\t\tn/a\npkt-rate-high:\t\tn/a\n\nrx-usecs:\t8\nrx-frames:\t128\nrx-usecs-irq:\tn/a\nrx-frames-irq:\tn/a\n\ntx-usecs:\t8\ntx-frames:\t128\ntx-usecs-irq:\tn/a\ntx-frames-irq:\tn/a\n\nrx-usecs-low:\tn/a\nrx-frame-low:\tn/a\ntx-usecs-low:\tn/a\ntx-frame-low:\tn/a\n\nrx-usecs-high:\tn/a\nrx-frame-high:\tn/a\ntx-usecs-high:\tn/a\ntx-frame-high:\tn/a\n\nCQE mode RX: on  TX: off\n\ntx-aggr-max-bytes:\tn/a\ntx-aggr-max-frames:\tn/a\ntx-aggr-time-usecs\tn/a\n\n",
+        "driver": "driver: mlx5_core\nversion: 26.04-1.0.9\nfirmware-version: 32.49.1118 (MT_0000001188)\nexpansion-rom-version: \nbus-info: 0006:03:00.1\nsupports-statistics: yes\nsupports-test: yes\nsupports-eeprom-access: no\nsupports-register-dump: no\nsupports-priv-flags: yes\n",
+        "features": "Features for enP6p3s0f1np1:\nrx-checksumming: on\ntx-checksumming: on\n\ttx-checksum-ipv4: off [fixed]\n\ttx-checksum-ip-generic: on\n\ttx-checksum-ipv6: off [fixed]\n\ttx-checksum-fcoe-crc: off [fixed]\n\ttx-checksum-sctp: off [fixed]\nscatter-gather: on\n\ttx-scatter-gather: on\n\ttx-scatter-gather-fraglist: off [fixed]\ntcp-segmentation-offload: on\n\ttx-tcp-segmentation: on\n\ttx-tcp-ecn-segmentation: off [fixed]\n\ttx-tcp-mangleid-segmentation: off\n\ttx-tcp6-segmentation: on\ngeneric-segmentation-offload: on\ngeneric-receive-offload: on\nlarge-receive-offload: off\nrx-vlan-offload: on\ntx-vlan-offload: on\nntuple-filters: off\nreceive-hashing: on\nhighdma: on [fixed]\nrx-vlan-filter: on\nvlan-challenged: off [fixed]\ntx-gso-robust: off [fixed]\ntx-fcoe-segmentation: off [fixed]\ntx-gre-segmentation: on\ntx-gre-csum-segmentation: on\ntx-ipxip4-segmentation: on\ntx-ipxip6-segmentation: on\ntx-udp_tnl-segmentation: on\ntx-udp_tnl-csum-segmentation: on\ntx-gso-partial: on\ntx-tunnel-remcsum-segmentation: off [fixed]\ntx-sctp-segmentation: off [fixed]\ntx-esp-segmentation: on\ntx-udp-segmentation: on\ntx-gso-list: off [fixed]\ntx-nocache-copy: off\nloopback: off [fixed]\nrx-fcs: off\nrx-all: on\ntx-vlan-stag-hw-insert: on\nrx-vlan-stag-hw-parse: off [fixed]\nrx-vlan-stag-filter: on [fixed]\nl2-fwd-offload: off [fixed]\nhw-tc-offload: off\nesp-hw-offload: on [fixed]\nesp-tx-csum-hw-offload: on [fixed]\nrx-udp_tunnel-port-offload: on\ntls-hw-tx-offload: on\ntls-hw-rx-offload: off\nrx-gro-hw: off\ntls-hw-record: off [fixed]\nrx-gro-list: off\nmacsec-hw-offload: on\nrx-udp-gro-forwarding: off\nhsr-tag-ins-offload: off [fixed]\nhsr-tag-rm-offload: off [fixed]\nhsr-fwd-offload: off [fixed]\nhsr-dup-offload: off [fixed]\n",
+        "pause": "Pause parameters for enP6p3s0f1np1:\nAutonegotiate:\toff\nRX:\t\ton\nTX:\t\ton\n\n",
+        "rings": "Ring parameters for enP6p3s0f1np1:\nPre-set maximums:\nRX:\t\t\t8192\nRX Mini:\t\tn/a\nRX Jumbo:\t\tn/a\nTX:\t\t\t8192\nTX push buff len:\tn/a\nCurrent hardware settings:\nRX:\t\t\t1024\nRX Mini:\t\tn/a\nRX Jumbo:\t\tn/a\nTX:\t\t\t1024\nRX Buf Len:\t\tn/a\nCQE Size:\t\tn/a\nTX Push:\t\toff\nRX Push:\t\toff\nTX push buff len:\tn/a\nTCP data split:\t\tn/a\n",
+        "rss": "\nRX flow hash indirection table for enP6p3s0f1np1 with 63 RX ring(s):\n    0:      0     1     2     3     4     5     6     7\n    8:      8     9    10    11    12    13    14    15\n   16:     16    17    18    19    20    21    22    23\n   24:     24    25    26    27    28    29    30    31\n   32:     32    33    34    35    36    37    38    39\n   40:     40    41    42    43    44    45    46    47\n   48:     48    49    50    51    52    53    54    55\n   56:     56    57    58    59    60    61    62     0\n   64:      1     2     3     4     5     6     7     8\n   72:      9    10    11    12    13    14    15    16\n   80:     17    18    19    20    21    22    23    24\n   88:     25    26    27    28    29    30    31    32\n   96:     33    34    35    36    37    38    39    40\n  104:     41    42    43    44    45    46    47    48\n  112:     49    50    51    52    53    54    55    56\n  120:     57    58    59    60    61    62     0     1\n  128:      2     3     4     5     6     7     8     9\n  136:     10    11    12    13    14    15    16    17\n  144:     18    19    20    21    22    23    24    25\n  152:     26    27    28    29    30    31    32    33\n  160:     34    35    36    37    38    39    40    41\n  168:     42    43    44    45    46    47    48    49\n  176:     50    51    52    53    54    55    56    57\n  184:     58    59    60    61    62     0     1     2\n  192:      3     4     5     6     7     8     9    10\n  200:     11    12    13    14    15    16    17    18\n  208:     19    20    21    22    23    24    25    26\n  216:     27    28    29    30    31    32    33    34\n  224:     35    36    37    38    39    40    41    42\n  232:     43    44    45    46    47    48    49    50\n  240:     51    52    53    54    55    56    57    58\n  248:     59    60    61    62     0     1     2     3\nRSS hash key:\nb8:a8:6e:ee:5e:59:4d:5e:0b:df:83:6e:2c:65:84:cd:ec:e5:9b:3a:b2:5f:74:e9:07:60:17:8a:9c:58:34:50:47:da:b1:ae:52:8e:50:0f\nRSS hash function:\n    toeplitz: on\n    xor: off\n    crc32: off\n"
+      },
+      "ethernet_irq_affinity": {
+        "1507": {
+          "effective_affinity_list": "66",
+          "smp_affinity_list": "0-143"
+        },
+        "1508": {
+          "effective_affinity_list": "0",
+          "smp_affinity_list": "0"
+        },
+        "1509": {
+          "effective_affinity_list": "1",
+          "smp_affinity_list": "1"
+        },
+        "1510": {
+          "effective_affinity_list": "2",
+          "smp_affinity_list": "2"
+        },
+        "1511": {
+          "effective_affinity_list": "3",
+          "smp_affinity_list": "3"
+        },
+        "1512": {
+          "effective_affinity_list": "4",
+          "smp_affinity_list": "4"
+        },
+        "1513": {
+          "effective_affinity_list": "5",
+          "smp_affinity_list": "5"
+        },
+        "1514": {
+          "effective_affinity_list": "6",
+          "smp_affinity_list": "6"
+        },
+        "1515": {
+          "effective_affinity_list": "7",
+          "smp_affinity_list": "7"
+        },
+        "1516": {
+          "effective_affinity_list": "8",
+          "smp_affinity_list": "8"
+        },
+        "1517": {
+          "effective_affinity_list": "9",
+          "smp_affinity_list": "9"
+        },
+        "1518": {
+          "effective_affinity_list": "10",
+          "smp_affinity_list": "10"
+        },
+        "1519": {
+          "effective_affinity_list": "11",
+          "smp_affinity_list": "11"
+        },
+        "1520": {
+          "effective_affinity_list": "12",
+          "smp_affinity_list": "12"
+        },
+        "1521": {
+          "effective_affinity_list": "13",
+          "smp_affinity_list": "13"
+        },
+        "1522": {
+          "effective_affinity_list": "14",
+          "smp_affinity_list": "14"
+        },
+        "1523": {
+          "effective_affinity_list": "15",
+          "smp_affinity_list": "15"
+        },
+        "1524": {
+          "effective_affinity_list": "16",
+          "smp_affinity_list": "16"
+        },
+        "1525": {
+          "effective_affinity_list": "17",
+          "smp_affinity_list": "17"
+        },
+        "1526": {
+          "effective_affinity_list": "18",
+          "smp_affinity_list": "18"
+        },
+        "1527": {
+          "effective_affinity_list": "19",
+          "smp_affinity_list": "19"
+        },
+        "1528": {
+          "effective_affinity_list": "20",
+          "smp_affinity_list": "20"
+        },
+        "1529": {
+          "effective_affinity_list": "21",
+          "smp_affinity_list": "21"
+        },
+        "1530": {
+          "effective_affinity_list": "22",
+          "smp_affinity_list": "22"
+        },
+        "1531": {
+          "effective_affinity_list": "23",
+          "smp_affinity_list": "23"
+        },
+        "1532": {
+          "effective_affinity_list": "24",
+          "smp_affinity_list": "24"
+        },
+        "1533": {
+          "effective_affinity_list": "25",
+          "smp_affinity_list": "25"
+        },
+        "1534": {
+          "effective_affinity_list": "26",
+          "smp_affinity_list": "26"
+        },
+        "1535": {
+          "effective_affinity_list": "27",
+          "smp_affinity_list": "27"
+        },
+        "1536": {
+          "effective_affinity_list": "28",
+          "smp_affinity_list": "28"
+        },
+        "1537": {
+          "effective_affinity_list": "29",
+          "smp_affinity_list": "29"
+        },
+        "1538": {
+          "effective_affinity_list": "30",
+          "smp_affinity_list": "30"
+        },
+        "1539": {
+          "effective_affinity_list": "31",
+          "smp_affinity_list": "31"
+        },
+        "1540": {
+          "effective_affinity_list": "32",
+          "smp_affinity_list": "32"
+        },
+        "1541": {
+          "effective_affinity_list": "33",
+          "smp_affinity_list": "33"
+        },
+        "1542": {
+          "effective_affinity_list": "34",
+          "smp_affinity_list": "34"
+        },
+        "1543": {
+          "effective_affinity_list": "35",
+          "smp_affinity_list": "35"
+        },
+        "1544": {
+          "effective_affinity_list": "36",
+          "smp_affinity_list": "36"
+        },
+        "1545": {
+          "effective_affinity_list": "37",
+          "smp_affinity_list": "37"
+        },
+        "1546": {
+          "effective_affinity_list": "38",
+          "smp_affinity_list": "38"
+        },
+        "1547": {
+          "effective_affinity_list": "39",
+          "smp_affinity_list": "39"
+        },
+        "1548": {
+          "effective_affinity_list": "40",
+          "smp_affinity_list": "40"
+        },
+        "1549": {
+          "effective_affinity_list": "41",
+          "smp_affinity_list": "41"
+        },
+        "1550": {
+          "effective_affinity_list": "42",
+          "smp_affinity_list": "42"
+        },
+        "1551": {
+          "effective_affinity_list": "43",
+          "smp_affinity_list": "43"
+        },
+        "1552": {
+          "effective_affinity_list": "44",
+          "smp_affinity_list": "44"
+        },
+        "1553": {
+          "effective_affinity_list": "45",
+          "smp_affinity_list": "45"
+        },
+        "1554": {
+          "effective_affinity_list": "46",
+          "smp_affinity_list": "46"
+        },
+        "1555": {
+          "effective_affinity_list": "47",
+          "smp_affinity_list": "47"
+        },
+        "1556": {
+          "effective_affinity_list": "48",
+          "smp_affinity_list": "48"
+        },
+        "1557": {
+          "effective_affinity_list": "49",
+          "smp_affinity_list": "49"
+        },
+        "1558": {
+          "effective_affinity_list": "50",
+          "smp_affinity_list": "50"
+        },
+        "1559": {
+          "effective_affinity_list": "51",
+          "smp_affinity_list": "51"
+        },
+        "1560": {
+          "effective_affinity_list": "52",
+          "smp_affinity_list": "52"
+        },
+        "1561": {
+          "effective_affinity_list": "53",
+          "smp_affinity_list": "53"
+        },
+        "1562": {
+          "effective_affinity_list": "54",
+          "smp_affinity_list": "54"
+        },
+        "1563": {
+          "effective_affinity_list": "55",
+          "smp_affinity_list": "55"
+        },
+        "1564": {
+          "effective_affinity_list": "56",
+          "smp_affinity_list": "56"
+        },
+        "1565": {
+          "effective_affinity_list": "57",
+          "smp_affinity_list": "57"
+        },
+        "1566": {
+          "effective_affinity_list": "58",
+          "smp_affinity_list": "58"
+        },
+        "1567": {
+          "effective_affinity_list": "59",
+          "smp_affinity_list": "59"
+        },
+        "1568": {
+          "effective_affinity_list": "60",
+          "smp_affinity_list": "60"
+        },
+        "1569": {
+          "effective_affinity_list": "61",
+          "smp_affinity_list": "61"
+        },
+        "1570": {
+          "effective_affinity_list": "62",
+          "smp_affinity_list": "62"
+        }
+      },
+      "ethernet_queues": {
+        "rx-0": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-1": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-10": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-11": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-12": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-13": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-14": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-15": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-16": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-17": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-18": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-19": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-2": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-20": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-21": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-22": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-23": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-24": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-25": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-26": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-27": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-28": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-29": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-3": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-30": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-31": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-32": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-33": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-34": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-35": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-36": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-37": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-38": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-39": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-4": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-40": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-41": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-42": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-43": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-44": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-45": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-46": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-47": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-48": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-49": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-5": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-50": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-51": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-52": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-53": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-54": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-55": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-56": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-57": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-58": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-59": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-6": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-60": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-61": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-62": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-7": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-8": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "rx-9": {
+          "rps_cpus": "0000,00000000,00000000,00000000,00000000",
+          "rps_flow_cnt": "0"
+        },
+        "tx-0": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000001",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-1": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000002",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-10": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000400",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-11": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000800",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-12": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00001000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-13": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00002000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-14": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00004000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-15": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00008000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-16": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00010000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-17": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00020000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-18": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00040000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-19": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00080000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-2": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000004",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-20": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00100000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-21": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00200000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-22": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00400000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-23": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00800000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-24": {
+          "xps_cpus": "0000,00000000,00000000,00000000,01000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-25": {
+          "xps_cpus": "0000,00000000,00000000,00000000,02000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-26": {
+          "xps_cpus": "0000,00000000,00000000,00000000,04000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-27": {
+          "xps_cpus": "0000,00000000,00000000,00000000,08000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-28": {
+          "xps_cpus": "0000,00000000,00000000,00000000,10000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-29": {
+          "xps_cpus": "0000,00000000,00000000,00000000,20000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-3": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000008",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-30": {
+          "xps_cpus": "0000,00000000,00000000,00000000,40000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-31": {
+          "xps_cpus": "0000,00000000,00000000,00000000,80000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-32": {
+          "xps_cpus": "0000,00000000,00000000,00000001,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-33": {
+          "xps_cpus": "0000,00000000,00000000,00000002,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-34": {
+          "xps_cpus": "0000,00000000,00000000,00000004,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-35": {
+          "xps_cpus": "0000,00000000,00000000,00000008,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-36": {
+          "xps_cpus": "0000,00000000,00000000,00000010,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-37": {
+          "xps_cpus": "0000,00000000,00000000,00000020,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-38": {
+          "xps_cpus": "0000,00000000,00000000,00000040,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-39": {
+          "xps_cpus": "0000,00000000,00000000,00000080,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-4": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000010",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-40": {
+          "xps_cpus": "0000,00000000,00000000,00000100,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-41": {
+          "xps_cpus": "0000,00000000,00000000,00000200,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-42": {
+          "xps_cpus": "0000,00000000,00000000,00000400,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-43": {
+          "xps_cpus": "0000,00000000,00000000,00000800,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-44": {
+          "xps_cpus": "0000,00000000,00000000,00001000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-45": {
+          "xps_cpus": "0000,00000000,00000000,00002000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-46": {
+          "xps_cpus": "0000,00000000,00000000,00004000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-47": {
+          "xps_cpus": "0000,00000000,00000000,00008000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-48": {
+          "xps_cpus": "0000,00000000,00000000,00010000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-49": {
+          "xps_cpus": "0000,00000000,00000000,00020000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-5": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000020",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-50": {
+          "xps_cpus": "0000,00000000,00000000,00040000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-51": {
+          "xps_cpus": "0000,00000000,00000000,00080000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-52": {
+          "xps_cpus": "0000,00000000,00000000,00100000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-53": {
+          "xps_cpus": "0000,00000000,00000000,00200000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-54": {
+          "xps_cpus": "0000,00000000,00000000,00400000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-55": {
+          "xps_cpus": "0000,00000000,00000000,00800000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-56": {
+          "xps_cpus": "0000,00000000,00000000,01000000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-57": {
+          "xps_cpus": "0000,00000000,00000000,02000000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-58": {
+          "xps_cpus": "0000,00000000,00000000,04000000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-59": {
+          "xps_cpus": "0000,00000000,00000000,08000000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-6": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000040",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-60": {
+          "xps_cpus": "0000,00000000,00000000,10000000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-61": {
+          "xps_cpus": "0000,00000000,00000000,20000000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-62": {
+          "xps_cpus": "0000,00000000,00000000,40000000,00000000",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-7": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000080",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-8": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000100",
+          "xps_rxqs": "00000000,00000000"
+        },
+        "tx-9": {
+          "xps_cpus": "0000,00000000,00000000,00000000,00000200",
+          "xps_rxqs": "00000000,00000000"
+        }
+      }
+    }
+  },
+  "selected_rdma_active_mtu": {
+    "mlx5_0": "4096 (5)",
+    "mlx5_4": "4096 (5)"
+  },
+  "ethernet_numa_node": "0",
+  "ucx_version_log_line": "[1790200658.639866] [ptyche0128:1174026:0]     ucp_context.c:2725 UCX  INFO  Version 1.22.0 (loaded from /lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/src/dynamo/lib/bindings/python/src/dynamo/_core.so)",
+  "hardware": {
+    "hardware-2885802-ptyche0133.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0133.ptyche.clusters.nvidia.com",
+      "job": "2885802",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    },
+    "hardware-2886188-ptyche0130.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0130.ptyche.clusters.nvidia.com",
+      "job": "2886188",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    },
+    "hardware-2885802-ptyche0128.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0128.ptyche.clusters.nvidia.com",
+      "job": "2885802",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    },
+    "hardware-2885802-ptyche0130.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0130.ptyche.clusters.nvidia.com",
+      "job": "2885802",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    },
+    "hardware-2886188-ptyche0136.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0136.ptyche.clusters.nvidia.com",
+      "job": "2886188",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    },
+    "hardware-2885802-ptyche0136.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0136.ptyche.clusters.nvidia.com",
+      "job": "2885802",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    },
+    "hardware-2886188-ptyche0135.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0135.ptyche.clusters.nvidia.com",
+      "job": "2886188",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    },
+    "hardware-2885802-ptyche0135.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0135.ptyche.clusters.nvidia.com",
+      "job": "2885802",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    },
+    "hardware-2886188-ptyche0128.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0128.ptyche.clusters.nvidia.com",
+      "job": "2886188",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    },
+    "hardware-2886188-ptyche0133.ptyche.clusters.nvidia.com.json": {
+      "hostname": "ptyche0133.ptyche.clusters.nvidia.com",
+      "job": "2886188",
+      "ports": {
+        "mlx5_0:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 0
+        },
+        "mlx5_4:1": {
+          "state": "4: ACTIVE",
+          "rate": "400 Gb/sec (4X NDR)",
+          "link_layer": "InfiniBand",
+          "numa_node": 1
+        }
+      },
+      "ethernet": "Settings for enP6p3s0f1np1:\n\tSupported ports: [ FIBRE ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\t                        400000baseKR4/Full\n\t                        400000baseSR4/Full\n\t                        400000baseLR4_ER4_FR4/Full\n\t                        400000baseDR4/Full\n\t                        400000baseCR4/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: FIBRE\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+      "ethernet_mtu": 1500
+    }
+  },
+  "allocations": {
+    "allocation-2886188.txt": "JobId=2886188 JobName=coreai_comparch_trtllm-velo.continue UserId=jothomson(2001088611) GroupId=jothomson(2001088611) MCS_label=N/A Priority=79111 Nice=0 Account=coreai_comparch_trtllm QOS=user-restrictions JobState=RUNNING Reason=None Dependency=(null) Requeue=0 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0 RunTime=01:05:04 TimeLimit=02:00:00 TimeMin=N/A SubmitTime=2026-09-23T14:06:26 EligibleTime=2026-09-23T17:46:38 AccrueTime=Unknown StartTime=2026-09-23T17:46:38 EndTime=2026-09-23T19:46:38 Deadline=N/A SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-23T17:46:38 Scheduler=Main Partition=36x2-a01r AllocNode:Sid=login-ptyche02:1045771 ReqNodeList=ptyche[0128,0130,0133,0135-0136] ExcNodeList=(null) NodeList=ptyche[0128,0130,0133,0135-0136] BatchHost=ptyche0128 NumNodes=5 NumCPUs=720 NumTasks=5 CPUs/Task=1 ReqB:S:C:T=0:0:*:* ReqTRES=cpu=5,mem=4700000M,node=5,billing=5 AllocTRES=cpu=720,mem=4700000M,node=5,billing=5 Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=* MinCPUsNode=1 MinMemoryNode=0 MinTmpDiskNode=0 Features=36x2&a01r DelayBoot=00:00:00 OverSubscribe=NO Contiguous=0 Licenses=(null) LicensesAlloc=(null) Network=(null) Command=/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/src/dynamo/benchmark-harness/velo-response/keeper.sh SubmitLine=sbatch --parsable --account=coreai_comparch_trtllm --partition=36x2-a01r --constraint=36x2&a01r --nodes=5 --nodelist=ptyche[0128,0130,0133,0135-0136] --exclusive --time=02:00:00 --dependency=afterany:2885802 --job-name=coreai_comparch_trtllm-velo.continue --output=/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/logs/continuation-keeper-%j.log /lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/src/dynamo/benchmark-harness/velo-response/keeper.sh WorkDir=/home/jothomson StdErr= StdIn=/dev/null StdOut=/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/logs/continuation-keeper-2886188.log\n",
+    "allocation-2885802.txt": "JobId=2885802 JobName=coreai_comparch_trtllm-velo.matrix UserId=jothomson(2001088611) GroupId=jothomson(2001088611) MCS_label=N/A Priority=82204 Nice=0 Account=coreai_comparch_trtllm QOS=user-restrictions JobState=RUNNING Reason=None Dependency=(null) Requeue=0 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0 RunTime=04:36:38 TimeLimit=05:00:00 TimeMin=N/A SubmitTime=2026-09-23T12:50:07 EligibleTime=2026-09-23T12:50:07 AccrueTime=2026-09-23T12:50:07 StartTime=2026-09-23T13:09:40 EndTime=2026-09-23T18:09:41 Deadline=N/A SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-23T13:09:40 Scheduler=Main Partition=36x2-a01r AllocNode:Sid=login-ptyche02:4112871 ReqNodeList=(null) ExcNodeList=(null) NodeList=ptyche[0128,0130,0133,0135-0136] BatchHost=ptyche0128 NumNodes=5 NumCPUs=720 NumTasks=5 CPUs/Task=1 ReqB:S:C:T=0:0:*:* ReqTRES=cpu=5,mem=4700000M,node=5,billing=5 AllocTRES=cpu=720,mem=4700000M,node=5,billing=5 Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=* MinCPUsNode=1 MinMemoryNode=0 MinTmpDiskNode=0 Features=36x2&a01r DelayBoot=00:00:00 OverSubscribe=NO Contiguous=0 Licenses=(null) LicensesAlloc=(null) Network=(null) Command=/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/src/dynamo/benchmark-harness/velo-response/keeper.sh SubmitLine=sbatch --account=coreai_comparch_trtllm --partition=batch --constraint=36x2&a01r --nodes=5 --exclusive --time=05:00:00 --job-name=coreai_comparch_trtllm-velo.matrix --output=/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/logs/matrix-keeper-%j.log /lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/src/dynamo/benchmark-harness/velo-response/keeper.sh WorkDir=/home/jothomson StdErr= StdIn=/dev/null StdOut=/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923/logs/matrix-keeper-2885802.log\n",
+    "allocation-accounting.txt": "JobID|Partition|State|Start|End|Elapsed|NodeList|AllocCPUS\n2885802|36x2-a01r|CANCELLED by 2001088611|2026-09-23T13:09:40|2026-09-23T17:46:18|04:36:38|ptyche[0128,0130,0133,0135-0136]|720\n2886188|36x2-a01r|CANCELLED by 2001088611|2026-09-23T17:46:38|2026-09-23T18:51:42|01:05:04|ptyche[0128,0130,0133,0135-0136]|720\n"
+  },
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)\nbinary: rustc\ncommit-hash: 31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd\ncommit-date: 2026-06-26\nhost: aarch64-unknown-linux-gnu\nrelease: 1.96.1\nLLVM version: 22.1.2\n",
+  "packet_scope": "All traffic on enP6p3s0f1np1 and selected mlx5_0:1 and mlx5_4:1 ports; response traffic is not isolated.",
+  "memory_scope": "Private anonymous resident pages sampled after drain; full NUMA maps and process status remain with each run."
+}
