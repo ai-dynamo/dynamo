@@ -1552,7 +1552,7 @@ async fn test_request_id_annotation() {
 ///     model match wins), and
 ///   - an unknown model with a `/ready` suffix is a 404.
 #[tokio::test]
-async fn test_model_ready_endpoint() {
+async fn test_model_ready_and_compatibility_endpoints() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
@@ -1634,6 +1634,92 @@ async fn test_model_ready_endpoint() {
         "exact model match wins over the /ready sub-resource, got: {body}"
     );
     assert_eq!(body["id"], "shadow/ready");
+
+    // Embedded engines have no registered admission descriptor. Do not guess
+    // a native backend or advertise support from their placeholder model card.
+    let response = client
+        .get(format!("{base}/foo/compatibility"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let catalog: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(catalog["schema_version"], 1);
+    assert_eq!(catalog["scope"], "registered_pipeline_admission");
+    assert_eq!(catalog["coverage_complete"], false);
+    assert_eq!(catalog["end_to_end_conformance"], "unverified");
+    assert_eq!(catalog["profiles"].as_array().unwrap().len(), 1);
+    assert_eq!(catalog["profiles"][0]["endpoint"], "/v1/chat/completions");
+    assert!(catalog["profiles"][0]["admission"].is_null());
+    assert!(catalog.get("namespaces").is_none());
+
+    let shadow = ModelDeploymentCard::with_name_only("foo/compatibility");
+    manager
+        .add_chat_completions_model(
+            "foo/compatibility",
+            shadow.mdcsum(),
+            Arc::new(CounterEngine {}),
+        )
+        .unwrap();
+    let response = client
+        .get(format!("{base}/foo/compatibility"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["object"], "model",
+        "literal model suffix takes precedence"
+    );
+    let response = client
+        .get(format!("{base}/foo/compatibility/compatibility"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["model"], "foo/compatibility");
+    assert!(body["profiles"].is_array());
+    let response = client
+        .get(format!("{base}/ghost/compatibility"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let spec: serde_json::Value = client
+        .get(format!("http://localhost:{port}/openapi.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        spec["paths"]["/v1/models/{model_id}/compatibility"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ModelCompatibilityCatalog"
+    );
+    assert!(
+        spec["components"]["schemas"]["ModelCompatibilityCatalog"]["properties"]
+            .get("profiles")
+            .is_some()
+    );
+    assert!(
+        spec["components"]["schemas"]
+            .get("PipelineAdmissionCatalog")
+            .is_some()
+    );
+    assert!(spec["paths"].get("/v1/models/{*model_id}").is_none());
+    for suffix in ["", "/ready", "/compatibility"] {
+        let path = format!("/v1/models/{{model_id}}{suffix}");
+        let parameter = &spec["paths"][&path]["get"]["parameters"][0];
+        assert_eq!(parameter["name"], "model_id", "{path}");
+        assert_eq!(parameter["in"], "path", "{path}");
+        assert_eq!(parameter["required"], true, "{path}");
+        assert_eq!(parameter["schema"]["type"], "string", "{path}");
+    }
 
     // 4. Unknown model with a `/ready` suffix is a 404 (no base model to gate).
     let resp = client

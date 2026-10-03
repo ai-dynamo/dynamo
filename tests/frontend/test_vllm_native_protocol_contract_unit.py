@@ -11,7 +11,9 @@ import pytest
 from tests.frontend import test_vllm_mixed_release_http as mixed_release
 from tests.frontend.test_vllm_mixed_release_http import assert_full_vocab_boundary
 from tests.frontend.test_vllm_native_protocol_http import (
+    MODEL,
     _assert_native_prompt_count,
+    _assert_registered_catalog,
     _generated_logprobs,
     _matches_native,
 )
@@ -130,6 +132,93 @@ def test_prompt_count_oracle_requires_pre_stream_error(endpoint, stream, max_log
         # A default-limit rejection cannot satisfy a full-vocab positive control.
         with pytest.raises(AssertionError):
             _assert_native_prompt_count(record, endpoint, max_logprobs=-1, vocab_size=3)
+
+
+def _catalog(processor):
+    profiles = []
+    for endpoint in ("/v1/chat/completions", "/v1/completions"):
+        profiles.append(
+            {
+                "endpoint": endpoint,
+                "full_vocab_prompt_logprobs_unary_admitted": False,
+                "admission": {
+                    "descriptor_version": 1,
+                    "target": "vllm/0.30.0",
+                    "upstream_commit": "a" * 40,
+                    "endpoint": endpoint,
+                    "pipeline": {
+                        "processor": processor
+                        if endpoint == "/v1/chat/completions"
+                        else "rust",
+                        "transport": "preprocessed_rpc",
+                        "transport_protocol_version": None,
+                        "deployment": "aggregated",
+                    },
+                    "prompt_logprobs_admission": "reject_positive_streaming",
+                },
+                "sampling_fields": [
+                    {
+                        "field": name,
+                        "request_location": "root",
+                        "transport": "v1_with_legacy_copy",
+                    }
+                    for name in (
+                        "allowed_token_ids",
+                        "bad_words_token_ids",
+                        "logprob_token_ids",
+                    )
+                ],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "scope": "registered_pipeline_admission",
+        "model": MODEL,
+        "coverage_complete": False,
+        "unlisted_fields": "not_catalogued",
+        "end_to_end_conformance": "unverified",
+        "profiles": profiles,
+    }
+
+
+@pytest.mark.parametrize("processor", ["dynamo", "vllm"])
+def test_catalog_oracle_keeps_endpoint_processor_and_unknown_wire_distinct(processor):
+    catalog = _catalog("rust" if processor == "dynamo" else "vllm")
+    _assert_registered_catalog(catalog, processor, "0.30.0", "a" * 40)
+    for path, value in (
+        (("coverage_complete",), True),
+        (("end_to_end_conformance",), "compatible"),
+        (("profiles", 0, "admission", "upstream_commit"), "b" * 40),
+        (("profiles", 0, "admission", "target"), "vllm/0.29.0"),
+        (("profiles", 0, "full_vocab_prompt_logprobs_unary_admitted"), True),
+        (("profiles", 1, "admission", "pipeline", "processor"), "vllm"),
+        (("profiles", 0, "admission", "pipeline", "transport_protocol_version"), 1),
+        (("profiles", 0, "admission", "pipeline", "deployment"), "disaggregated"),
+        (("profiles", 0, "sampling_fields", 0, "transport"), "legacy_only"),
+        (("profiles", 0, "sampling_fields", 0, "request_location"), "nvext"),
+        (("profiles", 0, "endpoint"), "/v1/completions"),
+    ):
+        invalid = copy.deepcopy(catalog)
+        parent = invalid
+        for key in path[:-1]:
+            parent = parent[key]
+        parent[path[-1]] = value
+        with pytest.raises(AssertionError):
+            _assert_registered_catalog(invalid, processor, "0.30.0", "a" * 40)
+
+
+def test_catalog_oracle_does_not_assign_source_pin_to_unverified_engine():
+    catalog = _catalog("rust")
+    for entry in catalog["profiles"]:
+        entry["admission"].update(
+            target="vllm/unverified",
+            upstream_commit=None,
+            prompt_logprobs_admission="unverified_target",
+        )
+    _assert_registered_catalog(catalog, "dynamo", "0.30.0+local", None)
+    catalog["profiles"][0]["admission"]["upstream_commit"] = "a" * 40
+    with pytest.raises(AssertionError):
+        _assert_registered_catalog(catalog, "dynamo", "0.30.0+local", None)
 
 
 def _chunk(text, tokens, offsets, index=0):

@@ -4894,7 +4894,9 @@ pub fn completions_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/completions".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = RouteDoc::new(axum::http::Method::POST, &path).with_completion_endpoint(
+        crate::protocols::openai::compatibility::profile::Endpoint::Completion,
+    );
     let router = Router::new()
         .route(&path, post(handler_completions))
         .layer(middleware::from_fn(smart_json_error_middleware))
@@ -4911,7 +4913,8 @@ pub fn chat_completions_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/chat/completions".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let doc = RouteDoc::new(axum::http::Method::POST, &path)
+        .with_completion_endpoint(crate::protocols::openai::compatibility::profile::Endpoint::Chat);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
         .layer(middleware::from_fn(smart_json_error_middleware))
@@ -5062,13 +5065,21 @@ pub fn list_models_router(
     let openai_path = path.unwrap_or("/v1/models".to_string());
     let retrieve_path = format!("{}/{{*model_id}}", openai_path);
     let doc_for_openai = RouteDoc::new(axum::http::Method::GET, &openai_path);
-    let doc_for_retrieve = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    // OpenAPI uses a named path parameter, not Axum's wildcard syntax.
+    let doc_for_retrieve = RouteDoc::new(
+        axum::http::Method::GET,
+        format!("{}/{{model_id}}", openai_path),
+    );
     // Doc-only: the readiness sub-resource is served by `get_model_openai` via
     // the catch-all retrieve route above (a wildcard must be the terminal
     // segment, so it can't be its own axum route). Advertised for discovery.
     let doc_for_readiness = RouteDoc::new(
         axum::http::Method::GET,
         format!("{}/{{model_id}}/ready", openai_path),
+    );
+    let doc_for_compatibility = RouteDoc::new(
+        axum::http::Method::GET,
+        format!("{}/{{model_id}}/compatibility", openai_path),
     );
 
     let router = Router::new()
@@ -5077,7 +5088,12 @@ pub fn list_models_router(
         .with_state(state);
 
     (
-        vec![doc_for_openai, doc_for_retrieve, doc_for_readiness],
+        vec![
+            doc_for_openai,
+            doc_for_retrieve,
+            doc_for_readiness,
+            doc_for_compatibility,
+        ],
         router,
     )
 }
@@ -5117,6 +5133,14 @@ async fn get_model_openai(
         && state.manager().get_committed_model(base).is_some()
     {
         return get_model_readiness(&state, base);
+    }
+
+    // Same exact-model precedence as /ready, including model IDs with slashes.
+    // Snapshot only published membership; rejected/pending cards are not rules.
+    if let Some(base) = model_id.strip_suffix("/compatibility")
+        && let Some(model) = state.manager().get_committed_model(base)
+    {
+        return Ok(Json(model.protocol_compatibility()).into_response());
     }
 
     Err(ErrorMessage::model_not_found())
@@ -6468,6 +6492,145 @@ mod tests {
                 assert!(body.get("details").is_none());
             }
         }
+    }
+
+    /// The diagnostic route uses the configured prefix and committed membership,
+    /// not model readiness. It still obeys the frontend's global drain gate.
+    #[tokio::test]
+    async fn test_model_compatibility_custom_prefix_unready_alias_and_drain() {
+        use crate::discovery::WorkerSet;
+        use crate::http::service::service_v2::HttpService;
+        use crate::http::service::{
+            openai::list_models_router, openapi_docs::generate_openapi_spec,
+        };
+        use crate::model_card::ModelDeploymentCard;
+        use crate::protocols::openai::compatibility::{
+            admission::TargetAdmission,
+            catalog::PipelineAdmissionCatalog,
+            profile::{CompatibilityProfile, Endpoint, PipelineContext},
+        };
+        use crate::worker_type::WorkerType;
+        use dynamo_runtime::CancellationToken;
+
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let manager = state.manager();
+        let name = "organization/unready-model";
+        let mut card = ModelDeploymentCard::with_name_only(name);
+        card.worker_type = Some(WorkerType::Decode);
+        card.needs = vec![vec![WorkerType::Prefill]];
+        let mut worker_set =
+            WorkerSet::new("private-namespace".into(), card.mdcsum().to_string(), card);
+        let profile = CompatibilityProfile::new(
+            TargetAdmission::Vllm030,
+            Endpoint::Chat,
+            PipelineContext::from_pipeline(
+                Endpoint::Chat,
+                crate::model_type::ModelInput::Tokens,
+                Some(WorkerType::Decode),
+                Some(crate::entrypoint::ChatProcessorIdentity::Vllm),
+            ),
+        );
+        worker_set
+            .protocol_profiles
+            .push(PipelineAdmissionCatalog::new(
+                profile,
+                &worker_set.card().runtime_config,
+                None,
+            ));
+        let engine: crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine =
+            Arc::new(crate::engines::StreamingEngineAdapter::new(
+                crate::engines::make_echo_engine(),
+            ));
+        worker_set.chat_engine =
+            Some(profile.wrap(engine, &worker_set.card().runtime_config, None));
+        let worker_set = Arc::new(worker_set);
+        manager.add_worker_set_arc(name, "private-namespace", worker_set.clone());
+        assert!(manager.register_alias("public-alias", name));
+        manager.add_worker_set_arc("public-alias", "private-namespace", worker_set);
+
+        // No process-global environment mutation: exercise the same router factory
+        // to which HttpService passes DYN_HTTP_SVC_MODELS_PATH.
+        let prefix = "/custom/models";
+        let (docs, router) = list_models_router(state.clone(), Some(prefix.into()));
+        let spec = serde_json::to_value(generate_openapi_spec(&docs)).unwrap();
+        assert!(
+            spec["paths"]
+                .get("/v1/models/{model_id}/compatibility")
+                .is_none()
+        );
+        let operation = &spec["paths"]["/custom/models/{model_id}/compatibility"]["get"];
+        assert_eq!(operation["parameters"][0]["name"], "model_id");
+        assert_eq!(operation["parameters"][0]["required"], true);
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ModelCompatibilityCatalog"
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(stop.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let base = format!("http://127.0.0.1:{port}{prefix}");
+        for model in [name, "public-alias"] {
+            let retrieve = client.get(format!("{base}/{model}")).send().await.unwrap();
+            assert_eq!(retrieve.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let response = client
+                .get(format!("{base}/{model}/compatibility"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(body["model"], model);
+            assert_eq!(body["profiles"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                body["profiles"][0]["admission"],
+                serde_json::to_value(&profile).unwrap()
+            );
+            assert!(!body.to_string().contains("private-namespace"));
+        }
+        // An unready literal name still wins over a sibling's diagnostic suffix.
+        let shadow_name = format!("{name}/compatibility");
+        let mut card = ModelDeploymentCard::with_name_only(&shadow_name);
+        card.worker_type = Some(WorkerType::Decode);
+        card.needs = vec![vec![WorkerType::Prefill]];
+        manager.add_worker_set(
+            &shadow_name,
+            "shadow",
+            WorkerSet::new("shadow".into(), card.mdcsum().to_string(), card),
+        );
+        let response = client
+            .get(format!("{base}/{shadow_name}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        manager.remove_worker_set(&shadow_name, "shadow");
+        manager.remove_worker_set("public-alias", "private-namespace");
+        manager.unregister_alias_if_empty("public-alias", name);
+        let response = client
+            .get(format!("{base}/public-alias/compatibility"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        state.service_observer().start_draining();
+        let response = client
+            .get(format!("{base}/{name}/compatibility"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        cancel.cancel();
+        task.await.unwrap();
     }
 
     #[test]
